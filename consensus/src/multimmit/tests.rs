@@ -34,28 +34,17 @@ use std::{
     time::Duration,
 };
 
-const fn options(seed: u64, n: u32) -> ClusterOptions {
-    ClusterOptions {
-        n,
-        seed,
-        extras: 0,
-        leaders: None,
-        quota: None,
-        latency: None,
-        jitter: None,
-        production: None,
-        view_retention: None,
-    }
-}
-
 #[test_traced]
 fn producer_subset_progresses_with_validator_only_nodes() {
     let executor = DeterministicRunner::timed(Duration::from_secs(300));
     executor.start(|context| async move {
         let producers = vec![Participant::new(4), Participant::new(1)];
-        let mut cluster =
-            Cluster::<MinPk>::new_with_producers(&context, options(898, 6), producers.clone())
-                .await;
+        let mut cluster = Cluster::<MinPk>::new_with_producers(
+            &context,
+            ClusterOptions::new(898, 6),
+            producers.clone(),
+        )
+        .await;
         let all = [0usize, 1, 2, 3, 4, 5];
         let chains = [0u32, 1];
         cluster.start_all().await;
@@ -142,7 +131,7 @@ fn assert_profile_resource_bounds(
 fn storage_sync_releaser_stops_across_restart() {
     let executor = DeterministicRunner::timed(Duration::from_secs(60));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<MinPk>::new(&context, options(899, 6)).await;
+        let mut cluster = Cluster::<MinPk>::new(&context, ClusterOptions::new(899, 6)).await;
         cluster.set_storage_sync_interval(Duration::from_millis(20));
         cluster.start_one(0).await;
         cluster.await_ready(&[0]).await;
@@ -171,15 +160,11 @@ fn checkpoint_compaction_soak_survives_a_bounded_restart() {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: NODES as u32,
-                seed: 900,
-                extras: 0,
-                leaders: None,
-                quota: None,
                 latency: Some(Duration::from_millis(15)),
                 jitter: Some(Duration::from_millis(12)),
                 production: Some(Duration::from_millis(100)),
                 view_retention: Some(ViewDelta::new(RETENTION)),
+                ..ClusterOptions::new(900, NODES as u32)
             },
         )
         .await;
@@ -343,15 +328,10 @@ fn retained_artifacts_plateau_across_retention_windows() {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: NODES as u32,
-                seed: 91,
-                extras: 0,
-                leaders: None,
-                quota: None,
                 latency: Some(Duration::from_millis(10)),
-                jitter: None,
                 production: Some(Duration::from_millis(100)),
                 view_retention: Some(ViewDelta::new(RETENTION)),
+                ..ClusterOptions::new(91, NODES as u32)
             },
         )
         .await;
@@ -421,7 +401,7 @@ fn retained_artifacts_plateau_across_retention_windows() {
 fn n7_f1_cluster_survives_crash_and_recovery() {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<MinPk>::new(&context, options(81, 7)).await;
+        let mut cluster = Cluster::<MinPk>::new(&context, ClusterOptions::new(81, 7)).await;
         cluster.start_all().await;
         // Keep production poll-driven so the prefix checker observes every bounded diagnostic
         // tail even when persistence becomes fast enough to order hundreds of blocks per tick.
@@ -459,15 +439,11 @@ fn run_hailstorm(seed: u64) -> String {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: NODES as u32,
-                seed: 200 + seed,
-                extras: 0,
-                leaders: None,
-                quota: None,
                 latency: Some(Duration::from_millis(15)),
                 jitter: Some(Duration::from_millis(12)),
                 production: Some(Duration::from_millis(100)),
                 view_retention: Some(ViewDelta::new(RETENTION)),
+                ..ClusterOptions::new(200 + seed, NODES as u32)
             },
         )
         .await;
@@ -537,15 +513,11 @@ fn staggered_startup_recovers_after_initial_asynchrony() {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: NODES as u32,
-                seed: 201,
-                extras: 0,
-                leaders: None,
-                quota: None,
                 latency: Some(Duration::from_millis(40)),
                 jitter: Some(Duration::from_millis(35)),
                 production: Some(Duration::from_millis(100)),
                 view_retention: Some(ViewDelta::new(4)),
+                ..ClusterOptions::new(201, NODES as u32)
             },
         )
         .await;
@@ -581,7 +553,7 @@ fn n11_f2_finalizes_under_partition_and_heal() {
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(64)),
-                ..options(82, 11)
+                ..ClusterOptions::new(82, 11)
             },
         )
         .await;
@@ -611,7 +583,7 @@ fn n11_f2_finalizes_under_partition_and_heal() {
 fn stalled_producer_does_not_block_other_chains() {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<MinPk>::new(&context, options(92, 6)).await;
+        let mut cluster = Cluster::<MinPk>::new(&context, ClusterOptions::new(92, 6)).await;
         let fixture = cluster.fixture();
         let bounds = Profile::new(
             fixture.config.clone(),
@@ -662,7 +634,7 @@ fn stalled_producer_does_not_block_other_chains() {
 fn lossy_jittered_network_converges_after_healing() {
     let executor = DeterministicRunner::timed(Duration::from_secs(900));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<MinPk>::new(&context, options(93, 6)).await;
+        let mut cluster = Cluster::<MinPk>::new(&context, ClusterOptions::new(93, 6)).await;
         cluster.start_all().await;
         cluster.produce_every(5);
 
@@ -719,7 +691,7 @@ fn duplicated_reordered_certificates_converge_after_healing() {
                 extras: 1,
                 latency: Some(Duration::from_millis(200)),
                 jitter: Some(Duration::from_millis(150)),
-                ..options(102, 6)
+                ..ClusterOptions::new(102, 6)
             },
         )
         .await;
@@ -859,7 +831,7 @@ fn validator_recovers_durable_state_within_retention_window() {
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(RETENTION)),
-                ..options(94, 6)
+                ..ClusterOptions::new(94, 6)
             },
         )
         .await;
@@ -931,7 +903,7 @@ fn all_validators_recover_durable_timeout_batch_before_certificate() {
             &context,
             ClusterOptions {
                 extras: 1,
-                ..options(103, NODES as u32)
+                ..ClusterOptions::new(103, NODES as u32)
             },
         )
         .await;
@@ -1086,7 +1058,7 @@ fn validator_beyond_retention_resumes_from_covering_lqc_before_new_epoch_bootstr
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(RETENTION)),
-                ..options(98, NODES as u32)
+                ..ClusterOptions::new(98, NODES as u32)
             },
         )
         .await;
@@ -1200,7 +1172,7 @@ fn validator_beyond_retention_resumes_from_covering_lqc_before_new_epoch_bootstr
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(RETENTION)),
-                ..options(99, NODES as u32)
+                ..ClusterOptions::new(99, NODES as u32)
             },
         )
         .await;
@@ -1241,7 +1213,7 @@ fn resolver_recovers_exact_view_proof_after_rearmed_restart() {
             ClusterOptions {
                 extras: 1,
                 view_retention: Some(ViewDelta::new(128)),
-                ..options(96, 6)
+                ..ClusterOptions::new(96, 6)
             },
         )
         .await;
@@ -1323,7 +1295,7 @@ fn authenticated_flood_services_engine_control_and_every_da_chain() {
             ClusterOptions {
                 extras: 1,
                 view_retention: Some(ViewDelta::new(64)),
-                ..options(100, 6)
+                ..ClusterOptions::new(100, 6)
             },
         )
         .await;
@@ -1430,10 +1402,6 @@ fn finality_keeps_pace_with_production() {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: NODES as u32,
-                seed: 88,
-                extras: 0,
-                leaders: None,
                 quota: Some(Quota::per_second(
                     NonZeroU32::new(1024).expect("quota is non-zero"),
                 )),
@@ -1441,6 +1409,7 @@ fn finality_keeps_pace_with_production() {
                 jitter: Some(Duration::from_millis(25)),
                 production: Some(Duration::from_millis(250)),
                 view_retention: Some(ViewDelta::new(64)),
+                ..ClusterOptions::new(88, NODES as u32)
             },
         )
         .await;
@@ -1549,15 +1518,10 @@ fn seed_swept_jittered_cluster_stays_live() {
             let mut cluster = Cluster::<MinPk>::new(
                 &context,
                 ClusterOptions {
-                    n: 6,
-                    seed: 900,
-                    extras: 0,
-                    leaders: None,
-                    quota: None,
                     latency: Some(Duration::from_millis(200)),
                     jitter: Some(Duration::from_millis(150)),
                     production: Some(Duration::from_millis(100)),
-                    view_retention: None,
+                    ..ClusterOptions::new(900, 6)
                 },
             )
             .await;
@@ -1591,7 +1555,7 @@ fn seed_swept_jittered_cluster_stays_live() {
 fn minsig_cluster_smoke() {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<MinSig>::new(&context, options(83, 6)).await;
+        let mut cluster = Cluster::<MinSig>::new(&context, ClusterOptions::new(83, 6)).await;
         cluster.start_all().await;
         cluster.produce();
         cluster
@@ -1604,7 +1568,7 @@ fn minsig_cluster_smoke() {
 fn larger_smoke_topology_reaches_finality() {
     let executor = DeterministicRunner::timed(Duration::from_secs(1200));
     executor.start(|context| async move {
-        let mut cluster = Cluster::<MinPk>::new(&context, options(84, 16)).await;
+        let mut cluster = Cluster::<MinPk>::new(&context, ClusterOptions::new(84, 16)).await;
         cluster.start_all().await;
         cluster.produce_once();
         let all = (0..16usize).collect::<Vec<_>>();
@@ -1622,17 +1586,7 @@ fn three_sequential_committees_rotate() {
         // before the next one starts.
         for epoch_index in 0..3u64 {
             let seed = 86 + epoch_index;
-            let options = ClusterOptions {
-                n: 6,
-                seed,
-                extras: 0,
-                leaders: None,
-                quota: None,
-                latency: None,
-                jitter: None,
-                production: None,
-                view_retention: None,
-            };
+            let options = ClusterOptions::new(seed, 6);
             let mut cluster = Cluster::<MinPk>::new(&context, options).await;
             cluster.start_all().await;
             cluster.produce();
@@ -1661,7 +1615,7 @@ fn node_with_hung_verifications_keeps_following_finality() {
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(16)),
-                ..options(4242, 6)
+                ..ClusterOptions::new(4242, 6)
             },
         )
         .await;
@@ -1736,7 +1690,7 @@ fn late_first_start_catches_up_beyond_retention() {
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(16)),
-                ..options(4260, 7)
+                ..ClusterOptions::new(4260, 7)
             },
             producers,
         )
@@ -1783,7 +1737,7 @@ fn early_crash_long_gap_restart_catches_up() {
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(16)),
-                ..options(4261, 7)
+                ..ClusterOptions::new(4261, 7)
             },
             producers,
         )
@@ -1830,7 +1784,7 @@ fn stranded_follower_with_hung_verifications_rejoins() {
             &context,
             ClusterOptions {
                 view_retention: Some(ViewDelta::new(16)),
-                ..options(4262, 7)
+                ..ClusterOptions::new(4262, 7)
             },
             producers,
         )
