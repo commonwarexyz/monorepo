@@ -957,19 +957,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             return None;
         }
 
-        let mut transcript = Vec::with_capacity(self.codec.view_quorum());
-        for signer in certificate.tally().signers().iter() {
-            let body = certificate
-                .tally()
-                .vote::<V, H>(certificate.leader(), signer, self.codec)
-                .ok()?;
-            let subject = Subject::vote(&body);
-            transcript.push((
-                signer,
-                subject.namespace(&self.namespace),
-                subject.message(),
-            ));
-        }
+        let transcript =
+            lqc_transcript::<V, D, H>(certificate, self.codec, &self.namespace).ok()?;
         let signature = certificate.signature()?;
         self.verify_aggregate(rng, &transcript, signature, strategy)
             .then(|| certificate.id::<H>())
@@ -1140,19 +1129,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 {
                     return None;
                 }
-                let mut transcript = Vec::with_capacity(self.codec.view_quorum());
-                for signer in certificate.tally().signers().iter() {
-                    let body = certificate
-                        .tally()
-                        .vote::<V, H>(certificate.leader(), signer, self.codec)
-                        .ok()?;
-                    let subject = Subject::vote(&body);
-                    transcript.push((
-                        signer,
-                        subject.namespace(&self.namespace),
-                        subject.message(),
-                    ));
-                }
+                let transcript =
+                    lqc_transcript::<V, D, H>(certificate, self.codec, &self.namespace).ok()?;
                 self.reduced_aggregate_claim(&transcript, certificate.signature()?, known)
             }
         }
@@ -1663,6 +1641,30 @@ fn verify_recovered<V: Variant>(
             signature,
         )
         .is_ok()
+}
+
+fn lqc_transcript<'a, V, D, H>(
+    certificate: &Lqc<V, D>,
+    config: CodecConfig,
+    namespace: &'a Namespace,
+) -> Result<Vec<TranscriptEntry<'a>>, Error>
+where
+    V: Variant,
+    D: Digest,
+    H: Hasher<Digest = D>,
+{
+    let leader = certificate.leader();
+    let leader_digest = leader.digest::<H>();
+    let mut transcript = Vec::with_capacity(config.view_quorum());
+    for signer in certificate.tally().signers().iter() {
+        let body = certificate
+            .tally()
+            .vote_with_leader_digest(leader, leader_digest, signer, config)
+            .map_err(|_| Error::Transcript)?;
+        let subject = Subject::vote(&body);
+        transcript.push((signer, subject.namespace(namespace), subject.message()));
+    }
+    Ok(transcript)
 }
 
 fn vqc_transcript<'a, V, D, H>(
