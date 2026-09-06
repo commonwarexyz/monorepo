@@ -288,7 +288,7 @@ impl<D: Digest> EncodeSize for VoteBody<D> {
 }
 
 /// One attributed vote over a complete vote body.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Vote<V: Variant, D: Digest> {
     body: VoteBody<D>,
     attestation: Attestation<V>,
@@ -308,21 +308,6 @@ impl<V: Variant, D: Digest> Vote<V, D> {
     /// Returns the vote attestation.
     pub const fn attestation(&self) -> &Attestation<V> {
         &self.attestation
-    }
-}
-
-impl<V: Variant, D: Digest> PartialEq for Vote<V, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.body == other.body && self.attestation == other.attestation
-    }
-}
-
-impl<V: Variant, D: Digest> Eq for Vote<V, D> {}
-
-impl<V: Variant, D: Digest> Hash for Vote<V, D> {
-    fn hash<H: CoreHasher>(&self, state: &mut H) {
-        self.body.hash(state);
-        self.attestation.hash(state);
     }
 }
 
@@ -369,7 +354,7 @@ impl<V: Variant, D: Digest> EncodeSize for Vote<V, D> {
 }
 
 /// A signed abstention used to complete a V-QC's accounted-message quorum.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NoVote<V: Variant> {
     round: Round,
     attestation: Attestation<V>,
@@ -395,21 +380,6 @@ impl<V: Variant> NoVote<V> {
     /// Returns the abstention attestation.
     pub const fn attestation(&self) -> &Attestation<V> {
         &self.attestation
-    }
-}
-
-impl<V: Variant> PartialEq for NoVote<V> {
-    fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.attestation == other.attestation
-    }
-}
-
-impl<V: Variant> Eq for NoVote<V> {}
-
-impl<V: Variant> Hash for NoVote<V> {
-    fn hash<H: CoreHasher>(&self, state: &mut H) {
-        self.round.hash(state);
-        self.attestation.hash(state);
     }
 }
 
@@ -460,7 +430,7 @@ impl<V: Variant> EncodeSize for NoVote<V> {
 }
 
 /// A signed request to nullify a live round.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nullify<V: Variant> {
     round: Round,
     share: ThresholdShare<V>,
@@ -486,21 +456,6 @@ impl<V: Variant> Nullify<V> {
     /// Returns the nullification threshold share.
     pub const fn share(&self) -> &ThresholdShare<V> {
         &self.share
-    }
-}
-
-impl<V: Variant> PartialEq for Nullify<V> {
-    fn eq(&self, other: &Self) -> bool {
-        self.round == other.round && self.share == other.share
-    }
-}
-
-impl<V: Variant> Eq for Nullify<V> {}
-
-impl<V: Variant> Hash for Nullify<V> {
-    fn hash<H: CoreHasher>(&self, state: &mut H) {
-        self.round.hash(state);
-        self.share.hash(state);
     }
 }
 
