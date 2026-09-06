@@ -34,8 +34,8 @@ use crate::{
             cluster::{QUOTA, start_network},
         },
         types::{
-            Activity, ChainId, Context, DaVote, SignedTransactionBlock, TransactionBlockHeader,
-            ViewMessage,
+            Activity, ChainId, Context, DaCertificate, DaVote, SignedTransactionBlock,
+            TransactionBlockHeader, ViewMessage,
         },
     },
     types::{Attributable as _, Epoch, Height, Participant, Round, View},
@@ -199,6 +199,19 @@ impl Default for Attachments {
             checkpoint_syncs,
         }
     }
+}
+
+fn da_certificate(
+    committee: &Committee<MinPk>,
+    header: &TransactionBlockHeader<Sha256Digest>,
+) -> DaCertificate<MinPk, Sha256Digest> {
+    let votes = (0..committee.codec().da_quorum())
+        .map(|signer| committee.da_vote(signer, header.clone()))
+        .collect::<Vec<_>>();
+    committee
+        .verifier
+        .assemble_da_certificate(&votes, &Sequential)
+        .expect("a quorum of shares recovers the supplied header certificate")
 }
 
 fn profile(committee: &Committee<MinPk>, role: Role) -> Profile<Sha256, MinPk> {
@@ -916,13 +929,7 @@ fn checkpoint_io_keeps_control_live_and_bounds_authority_suffix() {
                         continue;
                     };
                     let header = block.header().clone();
-                    let votes = (0..feeder_committee.codec().da_quorum())
-                        .map(|signer| feeder_committee.da_vote(signer, header.clone()))
-                        .collect::<Vec<_>>();
-                    let certificate = feeder_committee
-                        .verifier
-                        .assemble_da_certificate(&votes, &Sequential)
-                        .expect("a quorum of shares recovers the certificate");
+                    let certificate = da_certificate(&feeder_committee, &header);
                     data_tx.send(
                         Recipients::One(feeder_me.clone()),
                         Envelope::new(
@@ -1762,14 +1769,7 @@ fn application_eventual_validity_restores_correct_chain_liveness() {
             }
         }
 
-        let votes = (0..node.committee.codec().da_quorum())
-            .map(|signer| node.committee.da_vote(signer, remote_header.clone()))
-            .collect::<Vec<_>>();
-        let certificate = node
-            .committee
-            .verifier
-            .assemble_da_certificate(&votes, &Sequential)
-            .expect("a quorum of shares recovers the remote certificate");
+        let certificate = da_certificate(&node.committee, &remote_header);
         data_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(DataMessage::DaCertificate(certificate))
@@ -1988,14 +1988,7 @@ fn da_certificate_cancels_superseded_local_custody() {
         let sibling = node
             .committee
             .transaction_header(0, Sha256::hash(&[b"certified sibling"]));
-        let votes = (0..node.committee.codec().da_quorum())
-            .map(|signer| node.committee.da_vote(signer, sibling.clone()))
-            .collect::<Vec<_>>();
-        let certificate = node
-            .committee
-            .verifier
-            .assemble_da_certificate(&votes, &Sequential)
-            .expect("a quorum of shares recovers the sibling certificate");
+        let certificate = da_certificate(&node.committee, &sibling);
         data_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(DataMessage::DaCertificate(certificate))
@@ -2080,14 +2073,7 @@ fn da_certificate_cancels_all_obsolete_pipelined_validations() {
         second_validation.wait_started().await;
         assert_eq!(application_log.lock().verifications.len(), 2);
 
-        let votes = (0..node.committee.codec().da_quorum())
-            .map(|signer| node.committee.da_vote(signer, second_header.clone()))
-            .collect::<Vec<_>>();
-        let certificate = node
-            .committee
-            .verifier
-            .assemble_da_certificate(&votes, &Sequential)
-            .expect("a quorum of shares recovers the child certificate");
+        let certificate = da_certificate(&node.committee, &second_header);
         data_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(DataMessage::DaCertificate(certificate))
@@ -3033,14 +3019,7 @@ fn successor_barrier_retains_installs_then_retires() {
             );
             let generation = attempt.generation;
             let predecessor = **predecessor;
-            let votes = (0..node.committee.codec().da_quorum())
-                .map(|signer| node.committee.da_vote(signer, header.clone()))
-                .collect::<Vec<_>>();
-            let certificate = node
-                .committee
-                .verifier
-                .assemble_da_certificate(&votes, &Sequential)
-                .expect("a quorum of shares recovers the DA successor");
+            let certificate = da_certificate(&node.committee, &header);
             data_tx.send(
                 Recipients::One(node.me.clone()),
                 node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
@@ -3339,14 +3318,7 @@ async fn prepare_actor_discharge(
                 };
             }
 
-            let votes = (0..node.committee.codec().da_quorum())
-                .map(|signer| node.committee.da_vote(signer, header.clone()))
-                .collect::<Vec<_>>();
-            let certificate = node
-                .committee
-                .verifier
-                .assemble_da_certificate(&votes, &Sequential)
-                .expect("a quorum recovers the same-height certificate predecessor");
+            let certificate = da_certificate(&node.committee, &header);
             data_tx.send(
                 Recipients::One(node.me.clone()),
                 node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
@@ -3472,14 +3444,7 @@ async fn submit_actor_discharge_successor(node: &Node, successor: &ActorDischarg
     match successor {
         ActorDischargeSuccessor::DaCertificate(header) => {
             let (mut data_tx, _) = node.peer(2, 0).await;
-            let votes = (0..node.committee.codec().da_quorum())
-                .map(|signer| node.committee.da_vote(signer, header.clone()))
-                .collect::<Vec<_>>();
-            let certificate = node
-                .committee
-                .verifier
-                .assemble_da_certificate(&votes, &Sequential)
-                .expect("a quorum recovers the DA discharge successor");
+            let certificate = da_certificate(&node.committee, header);
             data_tx.send(
                 Recipients::One(node.me.clone()),
                 node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
@@ -4192,14 +4157,7 @@ fn publication_retries_until_semantic_supersession() {
         );
 
         // An admitted DA certificate for the exact header supersedes the block publication.
-        let votes = (0..node.committee.codec().da_quorum())
-            .map(|signer| node.committee.da_vote(signer, header.clone()))
-            .collect::<Vec<_>>();
-        let certificate = node
-            .committee
-            .verifier
-            .assemble_da_certificate(&votes, &Sequential)
-            .expect("quorum of shares recovers");
+        let certificate = da_certificate(&node.committee, &header);
         data_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(DataMessage::<MinPk, Sha256Digest>::DaCertificate(
