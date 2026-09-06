@@ -1853,7 +1853,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .min(encodable);
         let blocks = self
             .chain
-            .ready_da_votes(&self.profile, available.max(1), DA_VOTE_RUN)?;
+            .ready_da_votes(&self.profile, available.max(1), DA_VOTE_RUN);
         if blocks.is_empty() {
             return Ok((WorkStatus::Complete, Capabilities::None));
         }
@@ -2287,7 +2287,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .chain
             .selected_da_chain(&self.profile, |chain, height| {
                 !self.da_vote_extends_durable_safety(chain, height)
-            })?;
+            });
         let Some(artifact) = self.next_durable_da_certificate(preferred) else {
             return Ok(false);
         };
