@@ -23,7 +23,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     sync::Arc,
 };
-use tracing::{Instrument as _, debug_span, info_span};
+use tracing::{Instrument as _, Span, debug_span, info_span};
 
 /// Bounds resident segment readers independently of active read jobs.
 ///
@@ -46,6 +46,7 @@ where
     remaining: usize,
     materialized: usize,
     reply: Reply<H, B>,
+    span: Span,
 }
 
 enum SegmentReader<E, H, B>
@@ -283,6 +284,7 @@ where
                 remaining,
                 materialized: 0,
                 reply,
+                span: Span::current(),
             },
         );
         for group in groups {
@@ -417,6 +419,7 @@ where
                     .checked_add(bytes)
                     .ok_or(Error::Invalid("active body read bytes overflow"))?;
                 let span = debug_span!(
+                    parent: &self.requests[&request].span,
                     "multimmit.marshal.materializer.read",
                     request = request,
                     segment = segment,
@@ -439,14 +442,14 @@ where
                 continue;
             }
 
-            let Some(segment) = self
-                .queued
-                .iter()
-                .map(|queued| queued.read.segment())
-                .find(|segment| matches!(self.readers.get(segment), Some(SegmentReader::Cold(_))))
+            let Some(queued) = self.queued.iter().find(|queued| {
+                matches!(self.readers.get(&queued.read.segment()), Some(SegmentReader::Cold(_)))
+            })
             else {
                 break;
             };
+            let segment = queued.read.segment();
+            let request = queued.request;
             if self.resident() >= self.max_readers {
                 let evictable = self
                     .readers
@@ -477,7 +480,8 @@ where
             else {
                 unreachable!("the selected body segment is cold")
             };
-            let span = info_span!("multimmit.marshal.materializer.open", segment = segment);
+            let span = info_span!(parent: &self.requests[&request].span,
+                "multimmit.marshal.materializer.open", segment = segment);
             let handle = self.context.child("open").shared(true).spawn(move |_| {
                 async move { source.open().await.map_err(Error::storage) }.instrument(span)
             });

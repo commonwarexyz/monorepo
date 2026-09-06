@@ -533,6 +533,7 @@ where
     values: BodyValues<H, B>,
     groups: Vec<BodyReadGroup<E, H, B>>,
     reply: Reply<BodyValues<H, B>>,
+    span: Span,
 }
 type BodyCandidate<H, B> = (
     BlockRef<<H as Hasher>::Digest>,
@@ -2020,6 +2021,7 @@ where
             values,
             groups,
             reply,
+            span: Span::current(),
         })
     }
 
@@ -2033,10 +2035,10 @@ where
             if self.body_waiters.len() < self.body_waiter_capacity {
                 self.body_waiters.push_back(waiter);
             } else {
-                self.deferred = Some(TracedCommand::new(Command::Bodies(
-                    waiter.references,
-                    waiter.reply,
-                )));
+                self.deferred = Some(TracedCommand::with_span(
+                    Command::Bodies(waiter.references, waiter.reply),
+                    waiter.span,
+                ));
             }
             self.update_materialization_metrics();
             return Ok(());
@@ -2044,10 +2046,11 @@ where
         self.metrics
             .materialization_groups
             .inc_by(u64::try_from(waiter.groups.len()).unwrap_or(u64::MAX));
-        if let Some(completed) =
+        let completed = waiter.span.in_scope(|| {
             self.materializer
-                .enqueue(waiter.values, waiter.groups, waiter.reply)?
-        {
+                .enqueue(waiter.values, waiter.groups, waiter.reply)
+        })?;
+        if let Some(completed) = completed {
             self.complete_materialization(completed)?;
         }
         self.update_materialization_metrics();
@@ -3947,6 +3950,26 @@ mod tests {
         Acknowledgement as _, NZU16, NZU32, NZU64, NZUsize, acknowledgement::Exact, sync::Mutex,
     };
     use std::num::NonZeroU64;
+    use tracing_subscriber::{
+        Layer, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
+    };
+
+    #[derive(Clone, Default)]
+    struct SpanPaths(Arc<Mutex<Vec<Vec<&'static str>>>>);
+
+    impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanPaths {
+        fn on_new_span(
+            &self,
+            _: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            context: LayerContext<'_, S>,
+        ) {
+            let span = context.span(id).unwrap();
+            self.0
+                .lock()
+                .push(span.scope().map(|span| span.metadata().name()).collect());
+        }
+    }
 
     type TestBody = EmptyBlock<Sha256>;
     type Client = CatalogClient<Sha256, MinPk, TestBody>;
@@ -4835,7 +4858,54 @@ mod tests {
     }
 
     #[test]
+    fn immediate_body_reads_keep_request_trace() {
+        let paths = SpanPaths::default();
+        let subscriber = tracing_subscriber::registry().with(paths.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                44,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_TRACE",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let first = producer_block(&committee, 0, 44);
+            let second = producer_block(&committee, 1, 45);
+            let mut config = config(&context, &committee);
+            config.pending_segment_items = NZU64!(16);
+            config.max_hot_block_bytes = NonZeroUsize::new(first.encode_size()).unwrap();
+            let (client, handle, _delivery) = spawn_catalog(config, context.child("catalog")).await;
+            for block in [&first, &second] {
+                client
+                    .admit_block(block.reference(), Arc::clone(block))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                client
+                    .block(first.reference())
+                    .instrument(info_span!("immediate_request"))
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(first.as_ref()),
+            );
+            drop(client);
+            assert!(handle.await.is_ok());
+        });
+        let paths = paths.0.lock();
+        assert!(paths.iter().any(|path| {
+            path[0] == "multimmit.marshal.materializer.read" && path.contains(&"immediate_request")
+        }));
+        assert!(!paths.iter().any(|path| path[0] == "multimmit.marshal.materializer.open"));
+    }
+
+    #[test]
     fn body_reads_wait_for_materialization_capacity() {
+        let paths = SpanPaths::default();
+        let subscriber = tracing_subscriber::registry().with(paths.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 44,
@@ -4873,13 +4943,17 @@ mod tests {
                 spawn_catalog(reopened, delayed.child("catalog")).await;
 
             let gate = reads.arm();
-            let mut first_read = Box::pin(client.block(first.reference()));
+            let mut first_read = Box::pin(
+                client.block(first.reference()).instrument(info_span!("first_request")),
+            );
             let mut blocked = Box::pin(gate.blocked);
             commonware_macros::select! {
                 result = &mut blocked => result.unwrap(),
                 result = &mut first_read => panic!("cold body read completed before reaching storage: {result:?}"),
             }
-            let mut second_read = Box::pin(client.block(second.reference()));
+            let mut second_read = Box::pin(
+                client.block(second.reference()).instrument(info_span!("second_request")),
+            );
             commonware_macros::select! {
                 result = &mut second_read => panic!("body request bypassed materialization backpressure: {result:?}"),
                 _ = context.sleep(std::time::Duration::from_millis(1)) => {},
@@ -4899,6 +4973,18 @@ mod tests {
             drop(client);
             assert!(handle.await.is_ok());
         });
+        let paths = paths.0.lock();
+        for request in ["first_request", "second_request"] {
+            for operation in [
+                "multimmit.marshal.materializer.open",
+                "multimmit.marshal.materializer.read",
+            ] {
+                assert!(
+                    paths.iter().any(|path| path[0] == operation && path.contains(&request)),
+                    "missing {operation} under {request}: {paths:?}",
+                );
+            }
+        }
     }
 
     #[test]
