@@ -686,6 +686,23 @@ fn lossy_jittered_network_converges_after_healing() {
     });
 }
 
+async fn wait_served(
+    context: &impl commonware_runtime::Clock,
+    cluster: &Cluster<MinPk>,
+    node: usize,
+    view: View,
+    rounds: usize,
+    accepts: impl Fn(&Served<MinPk, Sha256Digest>) -> bool,
+) -> bool {
+    for _ in 0..rounds {
+        if cluster.serve(node, view).await.as_ref().is_some_and(&accepts) {
+            return true;
+        }
+        context.sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
 #[test_traced]
 fn duplicated_reordered_certificates_converge_after_healing() {
     let executor = DeterministicRunner::new(
@@ -740,36 +757,36 @@ fn duplicated_reordered_certificates_converge_after_healing() {
                 true,
             );
         }
-        let mut served = false;
-        for _ in 0..400 {
-            if matches!(
-                cluster.serve(TARGET, View::new(target_view + 2)).await,
-                Some(Served::Vqc(proof)) if proof.as_ref() == &later
-            ) {
-                served = true;
-                break;
-            }
-            context.sleep(Duration::from_millis(25)).await;
-        }
-        assert!(served, "target retained the later future V-QC");
+        assert!(
+            wait_served(
+                &context,
+                &cluster,
+                TARGET,
+                View::new(target_view + 2),
+                400,
+                |proof| matches!(proof, Served::Vqc(proof) if proof.as_ref() == &later),
+            )
+            .await,
+            "target retained the later future V-QC"
+        );
 
         let _ = sender.send(
             recipient.clone(),
             Envelope::new(epoch, CertificateMessage::Vqc(earlier.clone())).encode(),
             true,
         );
-        served = false;
-        for _ in 0..400 {
-            if matches!(
-                cluster.serve(TARGET, View::new(target_view + 1)).await,
-                Some(Served::Vqc(proof)) if proof.as_ref() == &earlier
-            ) {
-                served = true;
-                break;
-            }
-            context.sleep(Duration::from_millis(25)).await;
-        }
-        assert!(served, "target retained the earlier future V-QC");
+        assert!(
+            wait_served(
+                &context,
+                &cluster,
+                TARGET,
+                View::new(target_view + 1),
+                400,
+                |proof| matches!(proof, Served::Vqc(proof) if proof.as_ref() == &earlier),
+            )
+            .await,
+            "target retained the earlier future V-QC"
+        );
 
         let mut durable = false;
         for _ in 0..400 {
@@ -784,37 +801,27 @@ fn duplicated_reordered_certificates_converge_after_healing() {
 
         cluster.crash(TARGET).await;
         cluster.restart(TARGET).await;
-        served = false;
-        for _ in 0..400 {
-            if matches!(
-                cluster.serve(TARGET, View::new(target_view + 2)).await,
-                Some(Served::Vqc(proof)) if proof.as_ref() == &later
-            ) {
-                served = true;
-                break;
-            }
-            context.sleep(Duration::from_millis(25)).await;
-        }
-        assert!(served, "recovery serves the later future V-QC");
-
-        served = false;
-        for _ in 0..400 {
-            let requested = View::new(target_view + 1);
-            match cluster.serve(TARGET, requested).await {
-                Some(Served::Vqc(proof)) if proof.as_ref() == &earlier => {
-                    served = true;
-                    break;
-                }
-                Some(Served::Lqc(proof)) if proof.view() >= requested => {
-                    served = true;
-                    break;
-                }
-                _ => {}
-            }
-            context.sleep(Duration::from_millis(25)).await;
-        }
         assert!(
-            served,
+            wait_served(
+                &context,
+                &cluster,
+                TARGET,
+                View::new(target_view + 2),
+                400,
+                |proof| matches!(proof, Served::Vqc(proof) if proof.as_ref() == &later),
+            )
+            .await,
+            "recovery serves the later future V-QC"
+        );
+
+        let requested = View::new(target_view + 1);
+        assert!(
+            wait_served(&context, &cluster, TARGET, requested, 400, |proof| match proof {
+                Served::Vqc(proof) => proof.as_ref() == &earlier,
+                Served::Lqc(proof) => proof.view() >= requested,
+                _ => false,
+            })
+            .await,
             "recovery serves the earlier future V-QC or a covering L-QC"
         );
         let _ = sender.send(
@@ -822,18 +829,18 @@ fn duplicated_reordered_certificates_converge_after_healing() {
             Envelope::new(epoch, CertificateMessage::Vqc(current.clone())).encode(),
             true,
         );
-        served = false;
-        for _ in 0..400 {
-            if matches!(
-                cluster.serve(TARGET, View::new(target_view)).await,
-                Some(Served::Vqc(proof)) if proof.as_ref() == &current
-            ) {
-                served = true;
-                break;
-            }
-            context.sleep(Duration::from_millis(25)).await;
-        }
-        assert!(served, "target retained the current V-QC after recovery");
+        assert!(
+            wait_served(
+                &context,
+                &cluster,
+                TARGET,
+                View::new(target_view),
+                400,
+                |proof| matches!(proof, Served::Vqc(proof) if proof.as_ref() == &current),
+            )
+            .await,
+            "target retained the current V-QC after recovery"
+        );
         cluster.observe_finality_progress(&all, 20).await;
 
         cluster.heal().await;
@@ -1117,21 +1124,15 @@ fn validator_beyond_retention_resumes_from_covering_lqc_before_new_epoch_bootstr
         old.crash(OFFLINE).await;
         let view = stopped_view;
         for peer in peers {
-            let mut retained = false;
-            for _ in 0..200 {
-                if let Some(proof) = old.serve(peer, view).await {
-                    retained = match proof {
-                        Served::Nullification(proof) => proof.view() == stopped_view,
-                        Served::Vqc(proof) => proof.view() == stopped_view,
-                        Served::Lqc(proof) => proof.view() >= stopped_view,
-                    };
-                    if retained {
-                        break;
-                    }
-                }
-                context.sleep(Duration::from_millis(25)).await;
-            }
-            assert!(retained, "peer {peer} initially serves the stopped view");
+            assert!(
+                wait_served(&context, &old, peer, view, 200, |proof| match proof {
+                    Served::Nullification(proof) => proof.view() == stopped_view,
+                    Served::Vqc(proof) => proof.view() == stopped_view,
+                    Served::Lqc(proof) => proof.view() >= stopped_view,
+                })
+                .await,
+                "peer {peer} initially serves the stopped view"
+            );
         }
 
         let beyond_retention = View::new(stopped_view.get() + RETENTION + CHECKPOINT_INTERVAL);
@@ -1142,19 +1143,11 @@ fn validator_beyond_retention_resumes_from_covering_lqc_before_new_epoch_bootstr
         }
 
         for peer in peers {
-            let mut covering_lqc = false;
-            for _ in 0..400 {
-                if matches!(
-                    old.serve(peer, view).await,
-                    Some(Served::Lqc(proof)) if proof.view() >= stopped_view
-                ) {
-                    covering_lqc = true;
-                    break;
-                }
-                context.sleep(Duration::from_millis(25)).await;
-            }
             assert!(
-                covering_lqc,
+                wait_served(&context, &old, peer, view, 400, |proof| {
+                    matches!(proof, Served::Lqc(proof) if proof.view() >= stopped_view)
+                })
+                .await,
                 "peer {peer} does not serve an L-QC covering the retired view"
             );
             old.block_certificates(peer, OFFLINE);
@@ -1271,19 +1264,11 @@ fn resolver_recovers_exact_view_proof_after_rearmed_restart() {
             Envelope::new(epoch, CertificateMessage::Vqc(certificate.clone())).encode(),
             true,
         );
-        let mut server_retained = false;
-        for _ in 0..200 {
-            if matches!(
-                cluster.serve(SERVER, key).await,
-                Some(Served::Vqc(proof)) if proof.as_ref() == &certificate
-            ) {
-                server_retained = true;
-                break;
-            }
-            context.sleep(Duration::from_millis(25)).await;
-        }
         assert!(
-            server_retained,
+            wait_served(&context, &cluster, SERVER, key, 200, |proof| {
+                matches!(proof, Served::Vqc(proof) if proof.as_ref() == &certificate)
+            })
+            .await,
             "serving engine retained the exact view proof"
         );
 
@@ -1303,17 +1288,13 @@ fn resolver_recovers_exact_view_proof_after_rearmed_restart() {
         }
 
         cluster.heal_node(TARGET).await;
-        let mut recovered = false;
-        for _ in 0..800 {
-            if let Some(Served::Vqc(proof)) = cluster.serve(TARGET, key).await
-                && proof.as_ref() == &certificate
-            {
-                recovered = true;
-                break;
-            }
-            context.sleep(Duration::from_millis(25)).await;
-        }
-        assert!(recovered, "restart recovers the exact requested view proof");
+        assert!(
+            wait_served(&context, &cluster, TARGET, key, 800, |proof| {
+                matches!(proof, Served::Vqc(proof) if proof.as_ref() == &certificate)
+            })
+            .await,
+            "restart recovers the exact requested view proof"
+        );
         for _ in 0..400 {
             let recovered = cluster
                 .inspect(TARGET)
