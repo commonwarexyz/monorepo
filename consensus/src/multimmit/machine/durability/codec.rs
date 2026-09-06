@@ -240,7 +240,7 @@ impl<V: Variant, D: Digest> Write for Change<V, D> {
                 5u8.write(buf);
                 sign.0.write(buf);
                 publication.0.write(buf);
-                write_artifacts(artifacts, buf);
+                artifacts.as_ref().write(buf);
             }
             Self::ArtifactCreated {
                 publication,
@@ -367,7 +367,11 @@ impl<V: Variant, D: Digest> EncodeSize for Change<V, D> {
                 sign,
                 publication,
                 artifacts,
-            } => sign.0.encode_size() + publication.0.encode_size() + artifacts_size(artifacts),
+            } => {
+                sign.0.encode_size()
+                    + publication.0.encode_size()
+                    + artifacts.as_ref().encode_size()
+            }
             Self::ArtifactCreated {
                 publication,
                 artifact,
@@ -607,7 +611,7 @@ impl<V: Variant, D: Digest> Write for DurableEffect<V, D> {
             }
             Self::BroadcastBatch(artifacts) => {
                 3u8.write(buf);
-                write_artifacts(artifacts, buf);
+                artifacts.as_ref().write(buf);
             }
             Self::Propose(publication) => {
                 4u8.write(buf);
@@ -688,7 +692,7 @@ impl<V: Variant, D: Digest> EncodeSize for DurableEffect<V, D> {
                     + requests.iter().map(EncodeSize::encode_size).sum::<usize>()
             }
             Self::Broadcast(artifact) => artifact.encode_size(),
-            Self::BroadcastBatch(artifacts) => artifacts_size(artifacts),
+            Self::BroadcastBatch(artifacts) => artifacts.as_ref().encode_size(),
             Self::Propose(publication) => {
                 publication.block.encode_size()
                     + publication.parent.encode_size()
@@ -819,13 +823,6 @@ impl<V: Variant, D: Digest> EncodeSize for ProposalParent<Arc<Vqc<V, D>>> {
     }
 }
 
-fn write_artifacts<V: Variant, D: Digest>(artifacts: &ArtifactBatch<V, D>, buf: &mut impl BufMut) {
-    artifacts.len().write(buf);
-    for artifact in artifacts.iter() {
-        artifact.write(buf);
-    }
-}
-
 fn read_artifacts<V: Variant, D: Digest>(
     buf: &mut impl Buf,
     max: usize,
@@ -835,14 +832,6 @@ fn read_artifacts<V: Variant, D: Digest>(
         Artifact::read_cfg(buf, config).map(Arc::new)
     })?;
     Ok(artifacts.into())
-}
-
-fn artifacts_size<V: Variant, D: Digest>(artifacts: &ArtifactBatch<V, D>) -> usize {
-    artifacts.len().encode_size()
-        + artifacts
-            .iter()
-            .map(|item| item.encode_size())
-            .sum::<usize>()
 }
 
 impl<V: Variant, D: Digest> Write for Artifact<V, D> {
@@ -1096,22 +1085,13 @@ impl Read for ComponentPayload {
 
 impl<V: Variant, D: Digest> Write for ViewSnapshot<V, D> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.slots.len().write(buf);
-        for (view, slot) in &self.slots {
-            view.write(buf);
-            slot.write(buf);
-        }
+        self.slots.write(buf);
     }
 }
 
 impl<V: Variant, D: Digest> EncodeSize for ViewSnapshot<V, D> {
     fn encode_size(&self) -> usize {
-        self.slots.len().encode_size()
-            + self
-                .slots
-                .iter()
-                .map(|(view, slot)| view.encode_size() + slot.encode_size())
-                .sum::<usize>()
+        self.slots.encode_size()
     }
 }
 
@@ -1147,10 +1127,7 @@ impl<V: Variant, D: Digest> Write for ViewSlotSnapshot<V, D> {
             ViewNullification::Unsigned => 0u8.write(buf),
             ViewNullification::Signed => 1u8.write(buf),
         }
-        self.proposal.is_some().write(buf);
-        if let Some(proposal) = &self.proposal {
-            proposal.write(buf);
-        }
+        self.proposal.write(buf);
     }
 }
 
@@ -1164,11 +1141,7 @@ impl<V: Variant, D: Digest> EncodeSize for ViewSlotSnapshot<V, D> {
             ViewStance::Unchosen | ViewStance::NoVoted => 1,
             ViewStance::Voted(body) => 1 + body.encode_size(),
         };
-        transition
-            + stance
-            + 1
-            + self.proposal.is_some().encode_size()
-            + self.proposal.as_ref().map_or(0, EncodeSize::encode_size)
+        transition + stance + 1 + self.proposal.encode_size()
     }
 }
 
@@ -1192,11 +1165,7 @@ impl<V: Variant, D: Digest> Read for ViewSlotSnapshot<V, D> {
             1 => ViewNullification::Signed,
             tag => return Err(Error::InvalidEnum(tag)),
         };
-        let proposal = if bool::read(buf)? {
-            Some(LeaderBlock::read_cfg(buf, protocol)?)
-        } else {
-            None
-        };
+        let proposal = Option::<LeaderBlock<V, D>>::read_cfg(buf, protocol)?;
         Ok(Self {
             transition,
             stance,
