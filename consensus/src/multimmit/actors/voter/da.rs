@@ -446,25 +446,16 @@ mod tests {
     use crate::{
         multimmit::{
             config::{Config, Limits},
-            scheme::bls12381_threshold::{Roster, Scheme},
+            mocks::schemes,
+            scheme::bls12381_threshold::Scheme,
             types::{CertificateId, EpochGenesis},
         },
         types::{Epoch, Participant},
     };
-    use bytes::BytesMut;
-    use commonware_codec::{Read as _, Write as _};
     use commonware_cryptography::{
-        Sha256, Signer as _,
-        bls12381::primitives::{
-            group::{Private, Scalar, Share},
-            ops,
-            sharing::{Mode, ModeVersion, Sharing},
-            variant::MinPk,
-        },
-        ed25519::PrivateKey as Ed25519PrivateKey,
-        sha256::Digest,
+        Sha256, Signer as _, bls12381::primitives::variant::MinPk,
+        ed25519::PrivateKey as Ed25519PrivateKey, sha256::Digest,
     };
-    use commonware_math::poly::Poly;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _,
@@ -472,34 +463,13 @@ mod tests {
         telemetry::metrics::{MetricsExt as _, histogram},
     };
     use commonware_utils::{TestRng, ordered::Set};
-    use std::num::{NonZeroU32, NonZeroUsize};
+    use std::num::NonZeroUsize;
 
     const PARTICIPANTS: u32 = 6;
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_DA_TASK_TEST";
 
     fn digest(label: &[u8]) -> Digest {
         Sha256::hash(&[label])
-    }
-
-    fn sharing(rng: &mut TestRng, total: u32, required: u32) -> (Sharing<MinPk>, Vec<Share>) {
-        let private = Poly::<Scalar>::new(rng, required - 1);
-        let shares = (0..total)
-            .map(|index| {
-                let point = Scalar::from_u64(u64::from(index) + 1);
-                Share::new(Participant::new(index), Private::new(private.eval(&point)))
-            })
-            .collect();
-        let public = Poly::<
-            <MinPk as commonware_cryptography::bls12381::primitives::variant::Variant>::Public,
-        >::commit(private);
-        let mut encoded = BytesMut::new();
-        Mode::NonZeroCounter.write(&mut encoded);
-        total.write(&mut encoded);
-        public.write(&mut encoded);
-        let mut encoded = encoded.freeze();
-        let total = NonZeroU32::new(total).unwrap();
-        let sharing = Sharing::read_cfg(&mut encoded, &(total, ModeVersion::v0())).unwrap();
-        (sharing, shares)
     }
 
     fn config() -> Config<Digest> {
@@ -532,7 +502,6 @@ mod tests {
         Scheme<Ed25519PublicKey, MinPk>,
     ) {
         let protocol = config();
-        let codec = protocol.codec_config();
         let identities = Set::try_from(
             (0..PARTICIPANTS)
                 .map(|index| Ed25519PrivateKey::from_seed(u64::from(index) + 100).public_key())
@@ -540,55 +509,7 @@ mod tests {
         )
         .unwrap();
         let mut rng = TestRng::new(7);
-        let mut ordinary = Vec::with_capacity(PARTICIPANTS as usize);
-        let participants = identities
-            .iter()
-            .map(|identity| {
-                let (private, public) = ops::keypair::<_, MinPk>(&mut rng);
-                let proof = Roster::<Ed25519PublicKey, MinPk>::proof_of_possession(
-                    protocol.namespace(),
-                    &private,
-                );
-                ordinary.push(private);
-                (identity.clone(), public, proof)
-            })
-            .collect();
-        let roster = Roster::verify(
-            protocol.namespace(),
-            codec.participants(),
-            participants,
-            &Sequential,
-        )
-        .unwrap();
-        let (da, da_shares) = sharing(
-            &mut rng,
-            PARTICIPANTS,
-            u32::try_from(codec.da_quorum()).unwrap(),
-        );
-        let (nullification, nullification_shares) = sharing(
-            &mut rng,
-            PARTICIPANTS,
-            u32::try_from(codec.nullification_quorum()).unwrap(),
-        );
-        let signers = ordinary
-            .into_iter()
-            .zip(da_shares)
-            .zip(nullification_shares)
-            .map(|((ordinary, da_share), nullification_share)| {
-                Scheme::signer(
-                    &protocol,
-                    roster.clone(),
-                    ordinary,
-                    da.clone(),
-                    da_share,
-                    nullification.clone(),
-                    nullification_share,
-                )
-                .unwrap()
-            })
-            .collect();
-        let verifier = Scheme::verifier(&protocol, roster, da, nullification).unwrap();
-        (signers, verifier)
+        schemes(&mut rng, &protocol, &identities)
     }
 
     type Ed25519PublicKey = commonware_cryptography::ed25519::PublicKey;
