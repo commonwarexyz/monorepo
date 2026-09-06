@@ -341,28 +341,19 @@ impl Node {
         seed: u64,
         instance: &'static str,
     ) -> (Self, MockBuildGate) {
-        let committee = Committee::<MinPk>::new(seed, 6, Limits::new(2, 1).unwrap());
         let role = Role::Validator(Participant::new(0));
-        let profile = profile(&committee, role);
         let (application, gate) = MockApplication::with_gated_build();
-        let me = committee.identities[0].clone();
-        let oracle = start_network(context, committee.identities.clone(), 1024 * 1024).await;
-        let node = Box::pin(Self::attach(
+        let node = Self::start_with_limits(
             context,
-            committee,
-            profile,
-            role,
-            oracle,
-            me,
             seed,
+            role,
             instance,
-            false,
             Attachments {
                 application,
                 ..Attachments::default()
             },
             voter_limits(),
-        ))
+        )
         .await;
         (node, gate)
     }
@@ -373,32 +364,23 @@ impl Node {
         seed: u64,
         instance: &'static str,
     ) -> (Self, MockBuildGate) {
-        let committee = Committee::<MinPk>::new(seed, 6, Limits::new(2, 1).unwrap());
         let role = Role::Validator(Participant::new(0));
-        let profile = profile(&committee, role);
         let (application, gate) = MockApplication::with_gated_verify_chain(ChainId::new(1));
-        let me = committee.identities[0].clone();
-        let oracle = start_network(context, committee.identities.clone(), 1024 * 1024).await;
         let limits = VoterLimits {
             inflight_application: NonZeroUsize::new(1).unwrap(),
             ..voter_limits()
         };
-        let node = Box::pin(Self::attach(
+        let node = Self::start_with_limits(
             context,
-            committee,
-            profile,
-            role,
-            oracle,
-            me,
             seed,
+            role,
             instance,
-            false,
             Attachments {
                 application,
                 ..Attachments::default()
             },
             limits,
-        ))
+        )
         .await;
         (node, gate)
     }
@@ -409,28 +391,19 @@ impl Node {
         seed: u64,
         instance: &'static str,
     ) -> Self {
-        let committee = Committee::<MinPk>::new(seed, 6, Limits::new(2, 1).unwrap());
         let role = Role::Validator(Participant::new(0));
-        let profile = profile(&committee, role);
-        let me = committee.identities[0].clone();
-        let oracle = start_network(context, committee.identities.clone(), 1024 * 1024).await;
         let limits = VoterLimits {
             checkpoint_interval: NZU64!(1),
             ..voter_limits()
         };
-        Box::pin(Self::attach(
+        Self::start_with_limits(
             context,
-            committee,
-            profile,
-            role,
-            oracle,
-            me,
             seed,
+            role,
             instance,
-            false,
             Attachments::default(),
             limits,
-        ))
+        )
         .await
     }
 
