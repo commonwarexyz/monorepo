@@ -4078,6 +4078,44 @@ mod tests {
         (client, handle, receiver)
     }
 
+    async fn spawn_catalog_delivery<E>(
+        config: Config<TwoCap, MinPk, TestBody>,
+        context: &E,
+        delivery_client: delivery::DeliveryClient<Sha256, TestBody>,
+        delivery_commands: DeliveryReceiver,
+    ) -> (
+        Client,
+        Handle<Result<(), Error>>,
+        TestReporter,
+        Handle<Result<(), delivery::Error>>,
+    )
+    where
+        E: Context + Spawner,
+    {
+        let delivery_bounds = delivery::Bounds {
+            pending_acks: config.max_pending_acks,
+            delivery_bytes: config.max_delivery_bytes,
+            hot_block_bytes: config.max_hot_block_bytes,
+        };
+        let (client, catalog_handle, promoter, promoter_handle, delivery_store) = config
+            .spawn::<_, Sha256>(context.child("catalog"), delivery_client)
+            .await
+            .unwrap();
+        assert!(promoter.is_none());
+        assert!(promoter_handle.is_none());
+        let reporter = TestReporter::default();
+        let delivery_handle = delivery::spawn(
+            context.child("delivery"),
+            delivery_store,
+            client.clone(),
+            promoter::Bodies::new(client.clone(), None),
+            reporter.clone(),
+            delivery_commands,
+            delivery_bounds,
+        );
+        (client, catalog_handle, reporter, delivery_handle)
+    }
+
     async fn open(
         context: &DeterministicContext,
         label: &'static str,
@@ -7287,29 +7325,10 @@ mod tests {
                 pending: syncs.clone(),
             };
             let config = config(&context, &committee);
-            let delivery_bounds = delivery::Bounds {
-                pending_acks: config.max_pending_acks,
-                delivery_bytes: config.max_delivery_bytes,
-                hot_block_bytes: config.max_hot_block_bytes,
-            };
             let (delivery_client, delivery_commands) =
                 delivery::channel(delayed.child("delivery_mailbox"));
-            let (client, catalog_handle, promoter, promoter_handle, delivery_store) = config
-                .spawn::<_, Sha256>(delayed.child("catalog"), delivery_client)
-                .await
-                .unwrap();
-            assert!(promoter.is_none());
-            assert!(promoter_handle.is_none());
-            let reporter = TestReporter::default();
-            let delivery_handle = delivery::spawn(
-                delayed.child("delivery"),
-                delivery_store,
-                client.clone(),
-                promoter::Bodies::new(client.clone(), None),
-                reporter.clone(),
-                delivery_commands,
-                delivery_bounds,
-            );
+            let (client, catalog_handle, reporter, delivery_handle) =
+                spawn_catalog_delivery(config, &delayed, delivery_client, delivery_commands).await;
 
             let current = client.checkpoint().await.unwrap();
             let first = producer_block(&committee, 0, 62);
@@ -7455,29 +7474,10 @@ mod tests {
             let mut config = config(&context, &committee);
             config.max_commit_outputs = NZUsize!(4);
             config.max_pending_acks = NZUsize!(1);
-            let delivery_bounds = delivery::Bounds {
-                pending_acks: config.max_pending_acks,
-                delivery_bytes: config.max_delivery_bytes,
-                hot_block_bytes: config.max_hot_block_bytes,
-            };
             let (delivery_client, delivery_commands) =
                 delivery::channel(delayed.child("delivery_mailbox"));
-            let (client, catalog_handle, promoter, promoter_handle, delivery_store) = config
-                .spawn::<_, Sha256>(delayed.child("catalog"), delivery_client)
-                .await
-                .unwrap();
-            assert!(promoter.is_none());
-            assert!(promoter_handle.is_none());
-            let reporter = TestReporter::default();
-            let delivery_handle = delivery::spawn(
-                delayed.child("delivery"),
-                delivery_store,
-                client.clone(),
-                promoter::Bodies::new(client.clone(), None),
-                reporter.clone(),
-                delivery_commands,
-                delivery_bounds,
-            );
+            let (client, catalog_handle, reporter, delivery_handle) =
+                spawn_catalog_delivery(config, &delayed, delivery_client, delivery_commands).await;
 
             let blocks = (0..4)
                 .map(|chain| producer_block(&committee, chain, 63 + u64::from(chain)))
@@ -7769,30 +7769,11 @@ mod tests {
             let mut config = config(&context, &committee);
             config.max_commit_outputs = NZUsize!(2);
             config.max_pending_acks = NZUsize!(1);
-            let delivery_bounds = delivery::Bounds {
-                pending_acks: config.max_pending_acks,
-                delivery_bytes: config.max_delivery_bytes,
-                hot_block_bytes: config.max_hot_block_bytes,
-            };
             let (delivery_client, delivery_commands) =
                 delivery::channel(context.child("delivery_mailbox"));
             let delivery_control = delivery_client.clone();
-            let (client, catalog_handle, promoter, promoter_handle, delivery_store) = config
-                .spawn::<_, Sha256>(context.child("catalog"), delivery_client)
-                .await
-                .unwrap();
-            assert!(promoter.is_none());
-            assert!(promoter_handle.is_none());
-            let reporter = TestReporter::default();
-            let delivery_handle = delivery::spawn(
-                context.child("delivery"),
-                delivery_store,
-                client.clone(),
-                promoter::Bodies::new(client.clone(), None),
-                reporter.clone(),
-                delivery_commands,
-                delivery_bounds,
-            );
+            let (client, catalog_handle, reporter, delivery_handle) =
+                spawn_catalog_delivery(config, &context, delivery_client, delivery_commands).await;
 
             let blocks = (0..2)
                 .map(|chain| producer_block(&committee, chain, 64 + u64::from(chain)))
