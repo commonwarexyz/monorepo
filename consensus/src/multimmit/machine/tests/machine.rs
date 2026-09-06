@@ -5422,14 +5422,18 @@ fn future_lqc_durably_advances_consensus_floors() {
 fn future_lqc_advances_signing_and_proposal_floors_without_resolution_and_restores() {
     let profile = profile_for(Role::Observer, 6, 2);
     let (mut machine, _) = start_profile(profile);
-    let finalized = leader(&machine, 5);
+    assert_lqc_floors_restore(&mut machine);
+}
+
+fn assert_lqc_floors_restore(machine: &mut TestMachine) {
+    let finalized = leader(machine, 5);
     let votes = (0..5)
-        .map(|signer| view_vote(&machine, &finalized, signer))
+        .map(|signer| view_vote(machine, &finalized, signer))
         .collect::<Vec<_>>();
-    let certificate = lqc(&machine, finalized, &votes);
-    let verification = observe(&mut machine, Artifact::Lqc(certificate.clone()));
-    let admitted = complete_with_step(&mut machine, &verification, true);
-    let (effects, _) = drive_poll_and_persist(&mut machine, admitted);
+    let certificate = lqc(machine, finalized, &votes);
+    let verification = observe(machine, Artifact::Lqc(certificate.clone()));
+    let admitted = complete_with_step(machine, &verification, true);
+    let (effects, _) = drive_poll_and_persist(machine, admitted);
 
     assert_eq!(machine.inspect().view(), View::new(6));
     assert!(
@@ -5464,35 +5468,7 @@ fn late_lqc_advances_signing_and_proposal_floors_without_resolution_and_restores
         drive_poll_and_persist(&mut machine, admitted);
     }
 
-    let finalized = leader(&machine, 5);
-    let votes = (0..5)
-        .map(|signer| view_vote(&machine, &finalized, signer))
-        .collect::<Vec<_>>();
-    let certificate = lqc(&machine, finalized, &votes);
-    let verification = observe(&mut machine, Artifact::Lqc(certificate.clone()));
-    let admitted = complete_with_step(&mut machine, &verification, true);
-    let (effects, _) = drive_poll_and_persist(&mut machine, admitted);
-
-    assert_eq!(machine.inspect().view(), View::new(6));
-    assert!(
-        effects
-            .iter()
-            .all(|effect| !matches!(effect, Capability::Resolver(ResolverCapability::Resolve(_))))
-    );
-    assert_eq!(machine.inspect().finality_floor(), certificate.view());
-    assert!(matches!(machine.durable.signing_floor.as_deref(),
-        Some(Artifact::Lqc(actual)) if actual == &certificate));
-    assert!(matches!(machine.durable.proposal_anchor.as_deref(),
-        Some(Artifact::Vqc(anchor)) if certificate.equivalent_vqc(anchor)));
-
-    let restored =
-        Machine::restore(machine.profile().clone(), machine.live_snapshot_for_test()).unwrap();
-    assert_eq!(restored.inspect().view(), View::new(6));
-    assert_eq!(restored.inspect().finality_floor(), certificate.view());
-    assert!(matches!(restored.durable.signing_floor.as_deref(),
-        Some(Artifact::Lqc(actual)) if actual == &certificate));
-    assert!(matches!(restored.durable.proposal_anchor.as_deref(),
-        Some(Artifact::Vqc(anchor)) if certificate.equivalent_vqc(anchor)));
+    assert_lqc_floors_restore(&mut machine);
 }
 
 #[test]
