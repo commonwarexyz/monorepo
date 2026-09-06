@@ -239,7 +239,7 @@ impl ProtocolSizes {
         let e = config.extension_bound();
         let digest = D::SIZE;
         let signature = V::Signature::SIZE;
-        let participant = max_participant_width(n)?;
+        let participant = max_index_width(n)?;
         let chain = max_index_width(k)?;
 
         let header = checked_sum(&[
@@ -384,10 +384,6 @@ fn encoded_len(value: usize) -> Result<usize, BoundsError> {
 
 fn encoded_vec(count: usize, item_size: usize) -> Result<usize, BoundsError> {
     checked_sum(&[encoded_len(count)?, checked_product(count, item_size)?])
-}
-
-fn max_participant_width(participants: usize) -> Result<usize, BoundsError> {
-    max_index_width(participants)
 }
 
 fn max_index_width(count: usize) -> Result<usize, BoundsError> {
