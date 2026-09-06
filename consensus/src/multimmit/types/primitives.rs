@@ -9,15 +9,12 @@ use commonware_codec::{
     EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy, varint::UInt,
 };
 use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
-use core::{
-    fmt::{self, Display, Formatter},
-    hash::{Hash, Hasher},
-};
+use core::fmt::{self, Display, Formatter};
 
 macro_rules! define_attributed_signature {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Debug)]
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
         pub struct $name<V: Variant> {
             signer: Participant,
             signature: Lazy<V::Signature>,
@@ -37,21 +34,6 @@ macro_rules! define_attributed_signature {
             /// Returns the encoded signature without decoding its group element.
             pub const fn lazy_signature(&self) -> &Lazy<V::Signature> {
                 &self.signature
-            }
-        }
-
-        impl<V: Variant> PartialEq for $name<V> {
-            fn eq(&self, other: &Self) -> bool {
-                self.signer == other.signer && self.signature == other.signature
-            }
-        }
-
-        impl<V: Variant> Eq for $name<V> {}
-
-        impl<V: Variant> Hash for $name<V> {
-            fn hash<H: Hasher>(&self, state: &mut H) {
-                self.signer.hash(state);
-                self.signature.hash(state);
             }
         }
 

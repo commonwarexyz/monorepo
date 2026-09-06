@@ -14,11 +14,7 @@ use commonware_codec::{
     Codec, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, Digestible, Hasher, bls12381::primitives::variant::Variant};
-use core::{
-    fmt,
-    hash::{Hash, Hasher as CoreHasher},
-    marker::PhantomData,
-};
+use core::{fmt, marker::PhantomData};
 use std::sync::Arc;
 
 /// The certificate attached to a leader proposal.
@@ -443,7 +439,7 @@ where
 }
 
 /// A producer-authenticated application-block header.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignedTransactionBlock<V: Variant, D: Digest> {
     header: TransactionBlockHeader<D>,
     attestation: Attestation<V>,
@@ -468,21 +464,6 @@ impl<V: Variant, D: Digest> SignedTransactionBlock<V, D> {
     /// Returns the producer attestation.
     pub const fn attestation(&self) -> &Attestation<V> {
         &self.attestation
-    }
-}
-
-impl<V: Variant, D: Digest> PartialEq for SignedTransactionBlock<V, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.header == other.header && self.attestation == other.attestation
-    }
-}
-
-impl<V: Variant, D: Digest> Eq for SignedTransactionBlock<V, D> {}
-
-impl<V: Variant, D: Digest> Hash for SignedTransactionBlock<V, D> {
-    fn hash<H: CoreHasher>(&self, state: &mut H) {
-        self.header.hash(state);
-        self.attestation.hash(state);
     }
 }
 
@@ -529,7 +510,7 @@ impl<V: Variant, D: Digest> EncodeSize for SignedTransactionBlock<V, D> {
 }
 
 /// One attributed data-availability vote over a complete transaction-block header.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DaVote<V: Variant, D: Digest> {
     header: TransactionBlockHeader<D>,
     share: ThresholdShare<V>,
@@ -551,21 +532,6 @@ impl<V: Variant, D: Digest> DaVote<V, D> {
     /// Returns the voter's threshold share.
     pub const fn share(&self) -> &ThresholdShare<V> {
         &self.share
-    }
-}
-
-impl<V: Variant, D: Digest> PartialEq for DaVote<V, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.header == other.header && self.share == other.share
-    }
-}
-
-impl<V: Variant, D: Digest> Eq for DaVote<V, D> {}
-
-impl<V: Variant, D: Digest> Hash for DaVote<V, D> {
-    fn hash<H: CoreHasher>(&self, state: &mut H) {
-        self.header.hash(state);
-        self.share.hash(state);
     }
 }
 
@@ -925,7 +891,7 @@ impl<V: Variant, D: Digest> EncodeSize for LeaderBlock<V, D> {
 }
 
 /// A leader-authenticated leader block used during proposal ingress.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SignedLeaderBlock<V: Variant, D: Digest> {
     block: LeaderBlock<V, D>,
     attestation: Attestation<V>,
@@ -947,21 +913,6 @@ impl<V: Variant, D: Digest> SignedLeaderBlock<V, D> {
     /// Returns the leader attestation.
     pub const fn attestation(&self) -> &Attestation<V> {
         &self.attestation
-    }
-}
-
-impl<V: Variant, D: Digest> PartialEq for SignedLeaderBlock<V, D> {
-    fn eq(&self, other: &Self) -> bool {
-        self.block == other.block && self.attestation == other.attestation
-    }
-}
-
-impl<V: Variant, D: Digest> Eq for SignedLeaderBlock<V, D> {}
-
-impl<V: Variant, D: Digest> Hash for SignedLeaderBlock<V, D> {
-    fn hash<H: CoreHasher>(&self, state: &mut H) {
-        self.block.hash(state);
-        self.attestation.hash(state);
     }
 }
 
