@@ -33,6 +33,7 @@ use std::{
     num::NonZeroUsize,
     sync::Arc,
 };
+use tracing::{Instrument as _, Span};
 
 /// Immutable promotion or lookup failed.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -75,6 +76,14 @@ where
         through: Option<OutputIndex>,
         frontiers: Vec<BlockRef<H::Digest>>,
     },
+    Lookup(Span, Lookup<H, B>),
+}
+
+pub(in crate::multimmit::marshal) enum Lookup<H, B>
+where
+    H: Hasher,
+    B: Codec + Digestible<Digest = H::Digest>,
+{
     Block(
         BlockRef<H::Digest>,
         Reply<Option<Arc<TransactionBlock<H, B>>>>,
@@ -174,9 +183,13 @@ where
         })
     }
 
-    async fn request<T>(&self, make: impl FnOnce(Reply<T>) -> Command<H, B>) -> Result<T, Error> {
+    async fn request<T>(&self, make: impl FnOnce(Reply<T>) -> Lookup<H, B>) -> Result<T, Error> {
         let (reply, receiver) = oneshot::channel();
-        if self.commands.enqueue(make(reply)) == Feedback::Closed {
+        if self
+            .commands
+            .enqueue(Command::Lookup(Span::current(), make(reply)))
+            == Feedback::Closed
+        {
             return Err(Error::Closed);
         }
         receiver.await.unwrap_or(Err(Error::Closed))
@@ -186,14 +199,14 @@ where
         &self,
         reference: BlockRef<H::Digest>,
     ) -> Result<Option<Arc<TransactionBlock<H, B>>>, Error> {
-        self.request(|reply| Command::Block(reference, reply)).await
+        self.request(|reply| Lookup::Block(reference, reply)).await
     }
 
     pub(in crate::multimmit::marshal) async fn block_by_digest(
         &self,
         digest: H::Digest,
     ) -> Result<Option<Arc<TransactionBlock<H, B>>>, Error> {
-        self.request(|reply| Command::BlockByDigest(digest, reply))
+        self.request(|reply| Lookup::BlockByDigest(digest, reply))
             .await
     }
 
@@ -201,7 +214,7 @@ where
         &self,
         references: Vec<BlockRef<H::Digest>>,
     ) -> Result<BodyValues<H, B>, Error> {
-        self.request(|reply| Command::Blocks(references, reply))
+        self.request(|reply| Lookup::Blocks(references, reply))
             .await
     }
 }
@@ -367,7 +380,19 @@ where
                 }
                 hot.clear();
             }
-            Command::Block(reference, reply) => {
+            Command::Lookup(span, lookup) => self.lookup(lookup).instrument(span).await,
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        name = "multimmit.marshal.promoter.lookup.process",
+        level = "debug",
+        skip_all
+    )]
+    async fn lookup(&self, lookup: Lookup<H, B>) {
+        match lookup {
+            Lookup::Block(reference, reply) => {
                 let result = self
                     .store
                     .block(reference)
@@ -375,7 +400,7 @@ where
                     .map_err(|error| Error::Storage(Arc::from(error)));
                 drop(reply.send(result));
             }
-            Command::Blocks(references, reply) => {
+            Lookup::Blocks(references, reply) => {
                 let store = &self.store;
                 let result = try_join_all(references.into_iter().map(|reference| async move {
                     store
@@ -386,7 +411,7 @@ where
                 .await;
                 drop(reply.send(result));
             }
-            Command::BlockByDigest(digest, reply) => {
+            Lookup::BlockByDigest(digest, reply) => {
                 let result = self
                     .store
                     .block_by_digest(digest)
@@ -395,7 +420,6 @@ where
                 drop(reply.send(result));
             }
         }
-        Ok(())
     }
 
     async fn run(mut self) -> Result<(), Error> {
@@ -620,10 +644,139 @@ mod tests {
     use super::*;
     use crate::{
         marshal::mocks::block::EmptyBlock,
-        multimmit::types::TransactionBlockHeader,
+        multimmit::{
+            config::Limits,
+            marshal::{
+                actors::delivery,
+                config::{ArchiveConfig, Config, Start},
+            },
+            mocks::Committee,
+            types::TransactionBlockHeader,
+        },
         types::{Epoch, Height},
     };
-    use commonware_cryptography::Sha256;
+    use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk};
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    };
+    use commonware_storage::translator::TwoCap;
+    use commonware_utils::{NZU16, NZUsize, sync::Mutex};
+    use futures::poll;
+    use std::num::NonZeroU32;
+    use tracing::{Subscriber, span};
+    use tracing_subscriber::{
+        Layer, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
+    };
+
+    struct RecordedSpan {
+        id: u64,
+        name: &'static str,
+        parent: Option<u64>,
+    }
+
+    #[derive(Clone, Default)]
+    struct Spans(Arc<Mutex<Vec<RecordedSpan>>>);
+
+    impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Spans {
+        fn on_new_span(
+            &self,
+            attrs: &span::Attributes<'_>,
+            id: &span::Id,
+            ctx: LayerContext<'_, S>,
+        ) {
+            let parent = ctx
+                .span(id)
+                .unwrap()
+                .parent()
+                .map(|parent| parent.id().into_u64());
+            self.0.lock().push(RecordedSpan {
+                id: id.into_u64(),
+                name: attrs.metadata().name(),
+                parent,
+            });
+        }
+    }
+
+    #[test]
+    fn lookup_dequeue_preserves_each_caller() {
+        let spans = Spans::default();
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(spans.clone()),
+            || {
+                deterministic::Runner::default().start(|context| async move {
+                    let committee = Committee::<MinPk>::new(41, 6, Limits::new(1, 0).unwrap());
+                    let config = Config::<_, MinPk, EmptyBlock<Sha256>>::new(
+                        committee.config.epoch(),
+                        NonZeroU32::new(committee.codec().chains() as u32).unwrap(),
+                        Start::Genesis(committee.config.genesis().clone()),
+                        "promoter_tracing".into(),
+                        committee.codec(),
+                        (),
+                        ArchiveConfig::new(
+                            TwoCap,
+                            CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8)),
+                        ),
+                    )
+                    .unwrap();
+                    let (delivery, _receiver) = delivery::channel(context.child("delivery"));
+                    let (catalog, catalog_handle, client, promoter_handle, _) = config
+                        .spawn::<_, Sha256>(context.child("catalog"), delivery)
+                        .await
+                        .unwrap();
+                    let client = client.unwrap();
+                    let reference = committee.config.genesis().tips()[0];
+                    let callers = [
+                        tracing::info_span!("first_lookup"),
+                        tracing::info_span!("second_lookup"),
+                    ];
+                    let first = client.block(reference).instrument(callers[0].clone());
+                    let second = client
+                        .blocks(vec![reference])
+                        .instrument(callers[1].clone());
+                    futures::pin_mut!(first, second);
+                    assert!(poll!(&mut first).is_pending());
+                    assert!(poll!(&mut second).is_pending());
+                    assert!(
+                        !spans
+                            .0
+                            .lock()
+                            .iter()
+                            .any(|span| span.name.ends_with("lookup.process"))
+                    );
+                    assert!(first.await.unwrap().is_none());
+                    assert_eq!(second.await.unwrap().len(), 1);
+                    for caller in &callers {
+                        assert!(
+                            spans.0.lock().iter().any(|span| span.name
+                                == "multimmit.marshal.promoter.lookup.process"
+                                && span.parent == caller.id().map(|id| id.into_u64())),
+                            "each dequeued lookup needs its own processing child"
+                        );
+                    }
+                    let bodies = Bodies::new(catalog, Some(client.clone()));
+                    assert!(
+                        bodies
+                            .block_by_digest(reference.chain(), reference.digest())
+                            .await
+                            .unwrap()
+                            .is_none()
+                    );
+                    let recorded = spans.0.lock();
+                    let rpc = recorded
+                        .iter()
+                        .find(|span| span.name == "multimmit.marshal.bodies.block_by_digest")
+                        .unwrap()
+                        .id;
+                    assert!(recorded.iter().any(|span| span.name
+                        == "multimmit.marshal.promoter.lookup.process"
+                        && span.parent == Some(rpc)));
+                    drop(recorded);
+                    catalog_handle.abort();
+                    promoter_handle.unwrap().abort();
+                });
+            },
+        );
+    }
 
     #[test]
     fn publication_overflow_drops_bodies_and_preserves_install_order() {
