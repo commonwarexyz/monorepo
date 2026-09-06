@@ -1,0 +1,194 @@
+[package]
+name = "commonware-consensus-fuzz-simplex"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = [ "mocks" ]
+mocks = [
+	"commonware-consensus-fuzz-core/mocks",
+	"commonware-consensus/mocks",
+	"commonware-cryptography/mocks",
+	"commonware-p2p/mocks",
+	"commonware-resolver/mocks",
+]
+
+[package.metadata]
+cargo-fuzz = true
+
+# `cargo fuzz` sets `--cfg fuzzing`; declare it so non-fuzz builds don't warn.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
+commonware-consensus-fuzz-core = { path = "../core" }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-macros.workspace = true
+commonware-p2p = { workspace = true, features = ["mocks"] }
+commonware-parallel.workspace = true
+commonware-resolver.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
+commonware-utils = { workspace = true, features = ["arbitrary"] }
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+sancov.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[[bin]]
+name = "simplex_cert_mock_shuffled_twins_mutator"
+path = "fuzz_targets/simplex_cert_mock_shuffled_twins_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_mutator"
+path = "fuzz_targets/simplex_cert_mock_twins_mutator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_campaign"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_audit_notarize_omission"
+path = "fuzz_targets/simplex_cert_mock_audit_notarize_omission.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_mutator_audit"
+path = "fuzz_targets/simplex_cert_mock_twins_mutator_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_campaign_audit"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock"
+path = "fuzz_targets/simplex_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_audit"
+path = "fuzz_targets/simplex_cert_mock_audit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_faulty_net"
+path = "fuzz_targets/simplex_cert_mock_faulty_net.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_byzzfuzz"
+path = "fuzz_targets/simplex_cert_mock_byzzfuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_byzantine_first_leader"
+path = "fuzz_targets/simplex_cert_mock_byzantine_first_leader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_hb"
+path = "fuzz_targets/simplex_cert_mock_hb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_hb_state_cov"
+path = "fuzz_targets/simplex_cert_mock_hb_state_cov.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_mutator_hb"
+path = "fuzz_targets/simplex_cert_mock_twins_mutator_hb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_campaign_hb"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign_hb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_state_cov"
+path = "fuzz_targets/simplex_cert_mock_state_cov.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_campaign_state_cov"
+path = "fuzz_targets/simplex_cert_mock_twins_campaign_state_cov.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_twins_mutator_state_cov"
+path = "fuzz_targets/simplex_cert_mock_twins_mutator_state_cov.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_mallory"
+path = "fuzz_targets/simplex_cert_mock_mallory.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_chaos"
+path = "fuzz_targets/simplex_cert_mock_chaos.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_cert_mock_chaos_twins"
+path = "fuzz_targets/simplex_cert_mock_chaos_twins.rs"
+test = false
+doc = false
+bench = false

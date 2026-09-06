@@ -9,6 +9,9 @@ examples/flood/assets
 */fuzz/corpus
 */fuzz/coverage
 */fuzz/target
+*/fuzz/*/artifacts
+*/fuzz/*/corpus
+*/fuzz/*/coverage
 */fuzz_html
 **/quint/_apalache-out/
 **/quint/out*/

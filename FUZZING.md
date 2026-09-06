@@ -20,6 +20,20 @@ $ nohup cargo +nightly fuzz run roundtrip corpus/roundtrip/ -j 25 -a -- -max_len
 $ cargo +nightly fuzz run roundtrip --help 
 ```
 
+`cargo-fuzz` finds the fuzz package by walking up from the working directory looking for
+`fuzz/Cargo.toml`. Where the package directory is named something other than `fuzz`, or is
+not directly under its crate, `--fuzz-dir` is required instead. It is accepted by every
+subcommand (`run`, `list`, `build`, `coverage`, `cmin`, `tmin`) and is resolved relative to
+the working directory, so these can be run from the repository root:
+
+```bash
+# The consensus fuzzers are five packages under `consensus/fuzz/`, which has no manifest
+$ cargo +nightly fuzz list --fuzz-dir consensus/fuzz/simplex
+$ cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock
+```
+
+See [`consensus/fuzz/README.md`](./consensus/fuzz/README.md) for that layout.
+
 > [!NOTE]
 > If using the [`justfile`](./justfile), all fuzz tests for a given directory can be ran using 
 > `just fuzz <dir> <max_time>`.

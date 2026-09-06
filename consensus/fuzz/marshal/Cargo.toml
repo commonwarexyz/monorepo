@@ -1,0 +1,130 @@
+[package]
+name = "commonware-consensus-fuzz-marshal"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = [ "mocks" ]
+mocks = [
+	"commonware-consensus-fuzz-core/mocks",
+	"commonware-consensus/mocks",
+	"commonware-cryptography/mocks",
+	"commonware-p2p/mocks",
+	"commonware-resolver/mocks",
+]
+
+[package.metadata]
+cargo-fuzz = true
+
+# `cargo fuzz` sets `--cfg fuzzing`; declare it so non-fuzz builds don't warn.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
+commonware-actor.workspace = true
+commonware-broadcast.workspace = true
+commonware-codec.workspace = true
+commonware-coding.workspace = true
+commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
+commonware-consensus-fuzz-core = { path = "../core" }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-macros.workspace = true
+commonware-p2p = { workspace = true, features = ["mocks"] }
+commonware-parallel.workspace = true
+commonware-resolver.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
+commonware-storage.workspace = true
+commonware-utils = { workspace = true, features = ["arbitrary"] }
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "marshal_scenario_standard_deferred_cert_mock"
+path = "fuzz_targets/marshal_scenario_standard_deferred_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_scenario_standard_inline_cert_mock"
+path = "fuzz_targets/marshal_scenario_standard_inline_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_actor_standard_store_cert_mock"
+path = "fuzz_targets/marshal_actor_standard_store_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_disrupter"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_disrupter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_block_dissemination"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_block_dissemination.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_poison"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_poison.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_scenarios"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_scenarios.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_app_cert_mock_twins"
+path = "fuzz_targets/marshal_e2e_standard_app_cert_mock_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_coding_app_cert_mock_twins"
+path = "fuzz_targets/marshal_e2e_coding_app_cert_mock_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_deferred_cert_mock_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_deferred_cert_mock_twins_split_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_standard_inline_cert_mock_twins_split_header"
+path = "fuzz_targets/marshal_e2e_standard_inline_cert_mock_twins_split_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal_e2e_coding_cert_mock_disrupter"
+path = "fuzz_targets/marshal_e2e_coding_cert_mock_disrupter.rs"
+test = false
+doc = false
+bench = false

@@ -1,14 +1,109 @@
-# commonware-consensus-fuzz
+# commonware-consensus fuzzing
 
-This is a fuzzer for the `commonware-consensus` crate protocols and data structures,
+Fuzzers for the `commonware-consensus` crate protocols and data structures,
 designed to test protocol correctness under adversarial conditions.
 
-## Data Structures Fuzzing
+## Layout
 
-Implemented using `cargo-fuzz`. The following fuzz targets are available:
+`consensus/fuzz/` is a plain directory. The fuzzers live in five packages under it:
+
+| Package | Crate | Contents |
+| ------- | ----- | -------- |
+| [`core/`](./core) | `commonware-consensus-fuzz-core` | Shared harness library: simulated network, Disrupter, twins network, fuzz input types, and mutation strategies. Library only, no fuzz targets. |
+| [`simplex/`](./simplex) | `commonware-consensus-fuzz-simplex` | Simplex consensus harnesses: mode dispatch, invariants, happens-before and state coverage, ByzzFuzz, Mallory, and chaos. |
+| [`marshal/`](./marshal) | `commonware-consensus-fuzz-marshal` | Marshal store, end-to-end, and scenario harnesses. |
+| [`structures/`](./structures) | `commonware-consensus-fuzz-structures` | Data-structure and message targets. Self-contained, no library. |
+| [`aggregation/`](./aggregation) | `commonware-consensus-fuzz-aggregation` | Aggregation engine and decode harnesses. |
+
+`simplex`, `marshal`, and `aggregation` depend on `core`. `structures` depends only on
+the published crates.
+
+## Running
+
+Every target-bearing package is its own `cargo-fuzz` project, and none of them is
+named `fuzz`.
+`cargo fuzz` resolves `<cwd-or-ancestor>/fuzz/Cargo.toml` when it is not told otherwise,
+and `consensus/fuzz/` holds no manifest, so a bare `cargo fuzz run <target>` does not work
+from `consensus/` or from a package directory. Pass `--fuzz-dir`:
+
+```bash
+cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock
+cargo +nightly fuzz list --fuzz-dir consensus/fuzz/marshal
+```
+
+The sanitizer build needs nightly, and the repository root is pinned to stable. Prefer the
+nightly CI pins in `NIGHTLY_VERSION` ([`.github/workflows/slow.yml`](../../.github/workflows/slow.yml)):
+a newer nightly can fail to build the workspace on a lint that does not fire on the pinned
+version.
+
+Or use `just`, which builds every target in the package once and then runs each for
+`max_time` seconds. It takes its toolchain from the same `NIGHTLY_VERSION` variable,
+defaulting to `nightly`:
+
+```bash
+NIGHTLY_VERSION=<pinned> just fuzz consensus/fuzz/simplex 60
+```
+
+Reproduce a failure from a crash file. Artifacts are written under the package that owns
+the target:
+
+```bash
+cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock \
+    consensus/fuzz/simplex/artifacts/simplex_cert_mock/<crash_file>
+```
+
+## Targets
+
+### `simplex` (`--fuzz-dir consensus/fuzz/simplex`)
+
+- `simplex_cert_mock`
+- `simplex_cert_mock_audit`
+- `simplex_cert_mock_audit_notarize_omission`
+- `simplex_cert_mock_byzantine_first_leader`
+- `simplex_cert_mock_byzzfuzz`
+- `simplex_cert_mock_chaos`
+- `simplex_cert_mock_chaos_twins`
+- `simplex_cert_mock_faulty_net`
+- `simplex_cert_mock_hb`
+- `simplex_cert_mock_hb_state_cov`
+- `simplex_cert_mock_mallory`
+- `simplex_cert_mock_shuffled_twins_mutator`
+- `simplex_cert_mock_state_cov`
+- `simplex_cert_mock_twins_campaign`
+- `simplex_cert_mock_twins_campaign_audit`
+- `simplex_cert_mock_twins_campaign_hb`
+- `simplex_cert_mock_twins_campaign_state_cov`
+- `simplex_cert_mock_twins_mutator`
+- `simplex_cert_mock_twins_mutator_audit`
+- `simplex_cert_mock_twins_mutator_hb`
+- `simplex_cert_mock_twins_mutator_state_cov`
+
+### `marshal` (`--fuzz-dir consensus/fuzz/marshal`)
+
+- `marshal_actor_standard_store_cert_mock`
+- `marshal_e2e_coding_app_cert_mock_twins`
+- `marshal_e2e_coding_cert_mock_disrupter`
+- `marshal_e2e_standard_app_cert_mock_twins`
+- `marshal_e2e_standard_deferred_cert_mock_block_dissemination`
+- `marshal_e2e_standard_deferred_cert_mock_disrupter`
+- `marshal_e2e_standard_deferred_cert_mock_poison`
+- `marshal_e2e_standard_deferred_cert_mock_scenarios`
+- `marshal_e2e_standard_deferred_cert_mock_twins_split_header`
+- `marshal_e2e_standard_inline_cert_mock_twins_split_header`
+- `marshal_scenario_standard_deferred_cert_mock`
+- `marshal_scenario_standard_inline_cert_mock`
+
+### `structures` (`--fuzz-dir consensus/fuzz/structures`)
+
+- `attributable_map`
 - `simplex_elector`
 - `simplex_messages`
-- `attributable_map`
+- `simplex_reporter_filtering`
+
+### `aggregation` (`--fuzz-dir consensus/fuzz/aggregation`)
+
+- `aggregation_cert_mock`
+- `aggregation_decode`
 
 ## Simplex Fuzzing
 
@@ -31,63 +126,8 @@ if possible in the current configuration, demonstrating the protocol's resilienc
 ### Invariant Checking
 
 After test completion, the framework verifies that all invariants defined
-in the `invariants` [module](./src/invariants.rs) hold true for correct nodes at each view.
+in the `invariants` [module](./simplex/src/invariants.rs) hold true for correct nodes at each view.
 This ensures protocol safety properties are maintained despite a byzantine node.
-
-### Running Tests
-
-#### Unit Tests
-
-Run deterministic tests with a fixed seed:
-```bash
-cargo test -p commonware-consensus-fuzz test_
-```
-
-#### Property-Based Tests
-
-Run proptest-based tests that explore many seeds:
-```bash
-cargo test -p commonware-consensus-fuzz property_test
-```
-
-Reproduce a failure with a specific seed:
-```bash
-PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p commonware-consensus-fuzz property_test_ed25519 -- --nocapture
-```
-
-#### Continuous Fuzzing
-
-Run continuous fuzzing for a specific target:
-```bash
-cargo fuzz run simplex_cert_mock
-```
-
-Available fuzz targets (standard mode):
-- `simplex_cert_mock`
-- `simplex_cert_mock_audit_notarize_omission`
-
-Available fuzz targets (faulty network):
-- `simplex_cert_mock_faulty_net`
-
-Available fuzz targets (twins mutator):
-- `simplex_cert_mock_twins_mutator`
-- `simplex_cert_mock_shuffled_twins_mutator`
-
-Available fuzz targets (twins campaign):
-- `simplex_cert_mock_twins_campaign`
-
-Available fuzz targets (node driver):
-- `simplex_cert_mock_node`
-- `simplex_cert_mock_node_recovery`
-- `simplex_cert_mock_node_recovery_stable_term`
-
-Available fuzz targets (ByzzFuzz):
-- `simplex_cert_mock_byzzfuzz`
-
-Reproduce a failure from a crash file:
-```bash
-cargo fuzz run simplex_cert_mock fuzz/artifacts/simplex_cert_mock/<crash_file>
-```
 
 ## Marshal Fuzzing
 
@@ -95,14 +135,7 @@ The marshal end-to-end targets exercise proposal, verification, certification,
 broadcast, and application-result transitions through real Simplex stacks:
 
 ```bash
-cargo fuzz run marshal_e2e_standard_deferred_cert_mock_disrupter
-cargo fuzz run marshal_e2e_coding_cert_mock_disrupter
-cargo fuzz run marshal_e2e_standard_app_cert_mock_twins
-cargo fuzz run marshal_e2e_coding_app_cert_mock_twins
-cargo fuzz run marshal_e2e_standard_deferred_cert_mock_twins_split_header
-cargo fuzz run marshal_e2e_standard_inline_cert_mock_twins_split_header
-cargo fuzz run marshal_e2e_standard_deferred_cert_mock_poison
-cargo fuzz run marshal_e2e_standard_deferred_cert_mock_scenarios
+cargo +nightly fuzz run --fuzz-dir consensus/fuzz/marshal marshal_e2e_standard_deferred_cert_mock_disrupter
 ```
 
 The disrupter targets check post-prefix liveness over the standard deferred and
@@ -134,3 +167,29 @@ The Marshal Twins observation wrappers forward automaton completions through
 spawned tasks. Changes to that forwarding can alter deterministic scheduling,
 so saved artifacts from these targets must be re-triaged against the new
 execution before a non-reproduction is classified as fixed.
+
+## Running Tests
+
+### Unit Tests
+
+Run deterministic tests with a fixed seed:
+```bash
+cargo test -p commonware-consensus-fuzz-core
+cargo test -p commonware-consensus-fuzz-simplex test_
+cargo test -p commonware-consensus-fuzz-marshal
+```
+
+### Property-Based Tests
+
+Run proptest-based tests that explore many seeds:
+```bash
+cargo test -p commonware-consensus-fuzz-simplex property_test
+```
+
+Reproduce a failure with a specific seed:
+```bash
+PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p commonware-consensus-fuzz-simplex property_test_certificate_mock_connected -- --nocapture
+```
+
+Proptest keys its regression file to the source file holding the tests, so saved seeds
+live at [`simplex/proptest-regressions/lib.txt`](./simplex/proptest-regressions/lib.txt).

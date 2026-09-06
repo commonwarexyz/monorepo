@@ -58,7 +58,7 @@ after a restart.
 
 The entire Commonware stack, glue included, must work in a byzantine environment.
 
-Consensus-layer fuzzing does not cover this. The end-to-end marshal targets in `consensus/fuzz`
+Consensus-layer fuzzing does not cover this. The end-to-end marshal targets in `consensus/fuzz/marshal`
 assert that honest nodes agree on finalized block digests; they never assert anything about the
 database state those blocks produce, because at that layer there is none. A defect in which two
 correct nodes finalize the same chain and arrive at different database state is invisible to every
@@ -137,7 +137,7 @@ produces, and on whether a block verifies.
   executable as ordinary `#[test]`s in the fuzz crate, driven by fixed inputs instead of libFuzzer
   and checking the same invariants. This suite is the primary regression gate; the fuzz target
   extends it, it does not replace it.
-- **R16 — Self-contained.** The feature MUST NOT depend on `commonware-consensus-fuzz`. The twins
+- **R16 — Self-contained.** The feature MUST NOT depend on `commonware-consensus-fuzz-*`. The twins
   driver and channel-splitting logic are re-derived in `glue/fuzz` from the published crates. The
   corresponding code in `consensus/fuzz` is a reference to model on, not a dependency, and this
   duplication is deliberate.

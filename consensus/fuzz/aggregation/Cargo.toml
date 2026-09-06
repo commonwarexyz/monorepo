@@ -1,0 +1,51 @@
+[package]
+name = "commonware-consensus-fuzz-aggregation"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = [ "mocks" ]
+mocks = [
+	"commonware-consensus-fuzz-core/mocks",
+	"commonware-consensus/mocks",
+	"commonware-cryptography/mocks",
+	"commonware-p2p/mocks",
+]
+
+[package.metadata]
+cargo-fuzz = true
+
+# `cargo fuzz` sets `--cfg fuzzing`; declare it so non-fuzz builds don't warn.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+commonware-codec.workspace = true
+commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
+commonware-consensus-fuzz-core = { path = "../core" }
+commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-macros.workspace = true
+commonware-p2p = { workspace = true, features = ["mocks"] }
+commonware-parallel.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
+commonware-utils = { workspace = true, features = ["arbitrary"] }
+futures.workspace = true
+libfuzzer-sys.workspace = true
+rand_core.workspace = true
+
+[[bin]]
+name = "aggregation_cert_mock"
+path = "fuzz_targets/aggregation_cert_mock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aggregation_decode"
+path = "fuzz_targets/aggregation_decode.rs"
+test = false
+doc = false
+bench = false
