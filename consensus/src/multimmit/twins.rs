@@ -971,32 +971,25 @@ where
 {
     let primary_slot = cluster.reserve_slot("primary");
     let secondary_slot = cluster.reserve_slot("secondary");
-    let mut primary = primary.into_iter();
-    let mut secondary = secondary.into_iter();
-    cluster
-        .launch_with(
-            primary_slot,
-            byzantine,
-            Some(labels[0]),
-            primary.next().expect("primary data plane"),
-            primary.next().expect("primary consensus plane"),
-            primary.next().expect("primary certificate plane"),
-            primary.next().expect("primary resolver plane"),
-        )
-        .await;
-    cluster
-        .launch_with(
-            secondary_slot,
-            byzantine,
-            Some(labels[1]),
-            secondary.next().expect("secondary data plane"),
-            secondary.next().expect("secondary consensus plane"),
-            secondary.next().expect("secondary certificate plane"),
-            secondary.next().expect("secondary resolver plane"),
-        )
-        .await;
-    assert!(primary.next().is_none(), "exactly four primary planes");
-    assert!(secondary.next().is_none(), "exactly four secondary planes");
+    for (slot, planes, label) in [
+        (primary_slot, primary, labels[0]),
+        (secondary_slot, secondary, labels[1]),
+    ] {
+        let [data, consensus, certificates, resolver]: [(S, R); 4] = planes
+            .try_into()
+            .unwrap_or_else(|_| panic!("exactly four twin planes"));
+        cluster
+            .launch_with(
+                slot,
+                byzantine,
+                Some(label),
+                data,
+                consensus,
+                certificates,
+                resolver,
+            )
+            .await;
+    }
     (primary_slot, secondary_slot)
 }
 
