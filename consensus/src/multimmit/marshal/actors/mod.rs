@@ -1,6 +1,5 @@
 //! Runtime actors and actor-facing adapters.
 
-pub(super) mod broadcast;
 pub(super) mod catalog;
 pub(super) mod delivery;
 mod materializer;

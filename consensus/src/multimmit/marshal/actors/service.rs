@@ -1,7 +1,6 @@
 //! Actor composition and public routing for Multimmit marshal.
 
 use super::{
-    broadcast,
     catalog::{self, CatalogClient},
     delivery, metrics, promoter, resolver,
     subscriptions::{Completion as SubscriptionCompletion, Subscriptions},
@@ -107,7 +106,7 @@ where
     resolver_config: resolver::Config<B::Cfg>,
     history_scratch: HistoryScratch<E, H>,
     block_scratch: BlockScratch<E, H::Digest>,
-    broadcast: broadcast::Mailbox<P, TransactionBlock<H, B>>,
+    broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
     router_capacity: NonZeroUsize,
     resolver_capacity: NonZeroUsize,
     max_block_bytes: NonZeroUsize,
@@ -198,7 +197,7 @@ where
             resolver_config,
             history_scratch,
             block_scratch,
-            broadcast: broadcast::Mailbox::new(buffer),
+            broadcast: buffer,
             router_capacity,
             resolver_capacity,
             max_block_bytes,
