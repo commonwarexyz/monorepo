@@ -3949,6 +3949,7 @@ mod tests {
             DelayedReadContext, DelayedSyncContext, PendingReads, PendingSyncs,
             drive_pending_syncs, release_next_pending_syncs,
         },
+        telemetry::traces::collector::TraceStorage,
     };
     use commonware_storage::translator::TwoCap;
     use commonware_utils::{
@@ -4006,51 +4007,16 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct SyncSpanEntries {
-        syncs: PendingSyncs,
-        entries: Arc<Mutex<Vec<SyncSpanEntry>>>,
-    }
-
-    type SyncSpanEntry = (&'static str, u64, usize);
-
-    impl SyncSpanEntries {
-        async fn release_phase(&self, operation: &str) -> usize {
-            let gates = std::mem::take(&mut *self.syncs.lock());
-            assert!(!gates.is_empty(), "phase started syncs");
-            let mut releases = Vec::new();
-            for gate in gates {
-                gate.blocked.await.unwrap();
-                releases.push(gate.release);
-            }
-            let entries = self
-                .entries
-                .lock()
-                .iter()
-                .filter(|entry| entry.0 == operation)
-                .count();
-            for release in releases {
-                release.send(Ok(())).unwrap();
-            }
-            entries
+    async fn release_sync_phase(syncs: &PendingSyncs) {
+        let gates = std::mem::take(&mut *syncs.lock());
+        assert!(!gates.is_empty(), "phase started syncs");
+        let mut releases = Vec::new();
+        for gate in gates {
+            gate.blocked.await.unwrap();
+            releases.push(gate.release);
         }
-    }
-
-    impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SyncSpanEntries {
-        fn on_enter(&self, id: &tracing::span::Id, context: LayerContext<'_, S>) {
-            let span = context.span(id).unwrap();
-            let name = span.metadata().name();
-            if matches!(
-                name,
-                "multimmit.marshal.catalog.admission_cut"
-                    | "multimmit.marshal.catalog.seal_pending"
-                    | "multimmit.marshal.catalog.sync_finalized_archives"
-                    | "multimmit.marshal.catalog.publish_checkpoint"
-            ) {
-                self.entries
-                    .lock()
-                    .push((name, id.into_u64(), self.syncs.starts()));
-            }
+        for release in releases {
+            release.send(Ok(())).unwrap();
         }
     }
 
@@ -6317,16 +6283,9 @@ mod tests {
         )
     }
 
-    #[test]
-    fn durability_spans_include_initiation() {
+    #[commonware_macros::test_collect_traces]
+    fn durability_spans_include_initiation(traces: TraceStorage) {
         let syncs = PendingSyncs::default();
-        let entries = Arc::new(Mutex::new(Vec::new()));
-        let spans = SyncSpanEntries {
-            syncs: syncs.clone(),
-            entries: Arc::clone(&entries),
-        };
-        let subscriber = tracing_subscriber::registry().with(spans.clone());
-        let _guard = tracing::subscriber::set_default(subscriber);
         deterministic::Runner::timed(std::time::Duration::from_secs(30)).start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 7,
@@ -6349,42 +6308,61 @@ mod tests {
             client.progress().await.unwrap();
             let seal_starts = syncs.starts();
             assert!(seal_starts > admission_starts);
-            let admission_entries = spans.release_phase("multimmit.marshal.catalog.admission_cut").await;
+            release_sync_phase(&syncs).await;
             token.wait().await.unwrap();
 
             let current = client.checkpoint().await.unwrap();
             let archive_starts = syncs.starts();
             assert!(archive_starts > seal_starts, "admission started a seal");
-            let seal_entries = spans.release_phase("multimmit.marshal.catalog.seal_pending").await;
+            release_sync_phase(&syncs).await;
             let token = client.start_commit(output_commit(&current, [&block]), Vec::new()).await.unwrap();
             client.progress().await.unwrap();
             let checkpoint_starts = syncs.starts();
             assert!(checkpoint_starts > archive_starts);
-            let archive_entries = spans.release_phase("multimmit.marshal.catalog.sync_finalized_archives").await;
+            release_sync_phase(&syncs).await;
             while syncs.starts() == checkpoint_starts {
                 client.progress().await.unwrap();
             }
-            let checkpoint_entries = spans.release_phase("multimmit.marshal.catalog.publish_checkpoint").await;
+            release_sync_phase(&syncs).await;
             token.wait().await.unwrap();
             drop(client);
             assert!(handle.await.is_ok());
 
-            let entries = entries.lock();
-            let mut boundaries = Vec::new();
-            for (operation, before, blocked_entries) in [
-                ("multimmit.marshal.catalog.admission_cut", admission_starts, admission_entries),
-                ("multimmit.marshal.catalog.seal_pending", seal_starts, seal_entries),
-                ("multimmit.marshal.catalog.sync_finalized_archives", archive_starts, archive_entries),
-                ("multimmit.marshal.catalog.publish_checkpoint", checkpoint_starts, checkpoint_entries),
+            let events = traces.get_all();
+            let mut errors = Vec::new();
+            for (operation, range) in [
+                ("multimmit.marshal.catalog.admission_cut", admission_starts..seal_starts),
+                ("multimmit.marshal.catalog.seal_pending", seal_starts..archive_starts),
+                ("multimmit.marshal.catalog.sync_finalized_archives", archive_starts..checkpoint_starts),
+                ("multimmit.marshal.catalog.publish_checkpoint", checkpoint_starts..syncs.starts()),
             ] {
-                let matching = entries.iter().filter(|entry| entry.0 == operation).collect::<Vec<_>>();
-                let first = matching.first().expect("operation was entered");
-                boundaries.push((operation, first.2, before));
-                assert!(matching.iter().all(|entry| entry.1 == first.1), "initiation and completion must use one span");
-                assert!(matching.len() > blocked_entries, "the span covers polling after its completion gate is released");
+                let mut span_id = None;
+                for sync in range {
+                    for message in ["delayed sync started", "delayed sync resumed"] {
+                        let matching = events.iter().filter(|event| {
+                            event.metadata.content == message
+                                && event.metadata.expect_field_exact("sync", &sync.to_string()).is_ok()
+                        }).collect::<Vec<_>>();
+                        assert_eq!(matching.len(), 1, "one {message} event per sync");
+                        let event = matching[0];
+                        if let Err(error) = event.expect_span_at_index(0, |span| span.expect_content_exact(operation)) {
+                            errors.push(format!("{operation} sync {sync} {message}: {error}"));
+                        }
+                        let id = &event.metadata.fields.iter().find(|(name, _)| name == "span_id").unwrap().1;
+                        if id == "0" {
+                            errors.push(format!("{operation} sync {sync} {message}: no active operation span"));
+                        }
+                        if let Some(expected) = span_id {
+                            if id != expected {
+                                errors.push(format!("{operation} sync {sync}: initiation and continuation span IDs differ"));
+                            }
+                        } else {
+                            span_id = Some(id);
+                        }
+                    }
+                }
             }
-            assert!(boundaries.iter().all(|(_, entered, before)| entered == before),
-                "operations must enter before starting syncs (operation, entered, before): {boundaries:?}");
+            assert!(errors.is_empty(), "{}", errors.join("\n"));
         });
     }
 

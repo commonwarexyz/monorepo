@@ -22,6 +22,7 @@ use std::{
     sync::Arc,
     task::Poll,
 };
+use tracing::{Span, debug};
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
@@ -983,15 +984,22 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
     async fn start_sync(&self) -> Handle<()> {
         let pending = self.pending.clone();
         let inner = self.inner.clone();
-        let (waiter, completion_delayed) = {
+        let (sync, waiter, completion_delayed) = {
             let mut state = pending.state.lock();
+            let sync = state.starts;
             state.starts += 1;
             // An armed gate takes precedence over parking.
             (
+                sync,
                 state.observe().or_else(|| state.park()),
                 state.completion_delayed,
             )
         };
+        debug!(
+            sync,
+            span_id = Span::current().id().map_or(0, |id| id.into_u64()),
+            "delayed sync started"
+        );
         let started = if completion_delayed {
             Some(self.inner.start_sync().await)
         } else {
@@ -1008,6 +1016,11 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
                 None if fail => return Err(injected_sync_failure()),
                 None => {}
             }
+            debug!(
+                sync,
+                span_id = Span::current().id().map_or(0, |id| id.into_u64()),
+                "delayed sync resumed"
+            );
             match started {
                 Some(started) => started.await?,
                 None => inner.sync().await?,
