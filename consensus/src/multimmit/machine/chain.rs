@@ -1820,19 +1820,37 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         }
 
         let proposal = &pass.leader.proposals()[pass.chain];
-        let votes = &self
-            .chains
-            .get(pass.chain)
-            .ok_or(ChainError::Context)?
-            .local_da_votes;
         let frontier = *pass
             .da_frontiers
             .get(pass.chain)
             .ok_or(ChainError::Context)?;
+        let (position, extension) =
+            self.chain_vote_body::<H, true>(proposal, pass.chain, pass.extension_bound, frontier)?;
+        pass.positions.push(position);
+        pass.extensions.push(extension);
+        pass.chain += 1;
+        Ok(VoteBodyProgress::Pending)
+    }
+
+    /// Projects one chain against contiguous DA choices. `FROZEN` applies the snapshot frontier
+    /// only to incremental passes; synchronous construction specializes it away.
+    fn chain_vote_body<H: Hasher<Digest = D>, const FROZEN: bool>(
+        &self,
+        proposal: &ChainProposal<V, D>,
+        chain: usize,
+        extension_bound: usize,
+        frontier: Height,
+    ) -> Result<(Position, Extension<D>), ChainError> {
+        let votes = &self
+            .chains
+            .get(chain)
+            .ok_or(ChainError::Context)?
+            .local_da_votes;
         let mut parent = proposal.anchor().block_ref::<H>();
         let mut position = 0usize;
         for payload in proposal.payloads() {
-            let Some(choice) = Self::next_da_choice(votes, parent, frontier, pass.chain) else {
+            let Some(choice) = Self::next_da_choice::<FROZEN>(votes, parent, frontier, chain)
+            else {
                 break;
             };
             if choice.header.body_digest() != *payload {
@@ -1841,34 +1859,32 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             position += 1;
             parent = choice.block_ref;
         }
-        let mut extension_payloads = Vec::with_capacity(pass.extension_bound);
-        while extension_payloads.len() < pass.extension_bound {
-            let Some(choice) = Self::next_da_choice(votes, parent, frontier, pass.chain) else {
+        let mut extension_payloads = Vec::with_capacity(extension_bound);
+        while extension_payloads.len() < extension_bound {
+            let Some(choice) = Self::next_da_choice::<FROZEN>(votes, parent, frontier, chain)
+            else {
                 break;
             };
             extension_payloads.push(choice.header.body_digest());
             parent = choice.block_ref;
         }
         let position = u32::try_from(position).map_err(|_| ChainError::Context)?;
-        pass.positions.push(Position::new(position));
-        pass.extensions.push(
-            Extension::new(extension_payloads, pass.extension_bound)
-                .map_err(|_| ChainError::Context)?,
-        );
-        pass.chain += 1;
-        Ok(VoteBodyProgress::Pending)
+        Ok((
+            Position::new(position),
+            Extension::new(extension_payloads, extension_bound).map_err(|_| ChainError::Context)?,
+        ))
     }
 
-    /// Returns this node's DA choice for the block above `parent`, when it lies within the frozen
-    /// frontier and extends `parent` on `chain`.
-    fn next_da_choice(
+    /// Returns this node's DA choice above `parent` on `chain`, bounded by the frontier for a
+    /// frozen pass.
+    fn next_da_choice<const FROZEN: bool>(
         votes: &BTreeMap<Height, DaChoice<D>>,
         parent: BlockRef<D>,
         frontier: Height,
         chain: usize,
     ) -> Option<&DaChoice<D>> {
         let height = Height::new(parent.height().get().checked_add(1)?);
-        if height > frontier {
+        if FROZEN && height > frontier {
             return None;
         }
         let choice = votes.get(&height)?;
@@ -1886,55 +1902,14 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let mut extensions = Vec::with_capacity(config.chains());
 
         for (index, proposal) in leader.proposals().iter().enumerate() {
-            let chain = ChainId::new(index as u32);
-            let votes = &self
-                .chains
-                .get(index)
-                .ok_or(ChainError::Context)?
-                .local_da_votes;
-            let mut parent = proposal.anchor().block_ref::<H>();
-            let mut position = 0usize;
-
-            for payload in proposal.payloads() {
-                let Some(height) = parent.height().get().checked_add(1).map(Height::new) else {
-                    break;
-                };
-                let Some(choice) = votes.get(&height) else {
-                    break;
-                };
-                let header = &choice.header;
-                if header.chain() != chain
-                    || header.parent() != parent.digest()
-                    || header.body_digest() != *payload
-                {
-                    break;
-                }
-                position += 1;
-                parent = choice.block_ref;
-            }
-
-            let mut payloads = Vec::with_capacity(config.extension_bound());
-            for _ in 0..config.extension_bound() {
-                let Some(height) = parent.height().get().checked_add(1).map(Height::new) else {
-                    break;
-                };
-                let Some(choice) = votes.get(&height) else {
-                    break;
-                };
-                let header = &choice.header;
-                if header.chain() != chain || header.parent() != parent.digest() {
-                    break;
-                }
-                payloads.push(header.body_digest());
-                parent = choice.block_ref;
-            }
-
-            let position = u32::try_from(position).map_err(|_| ChainError::Context)?;
-            positions.push(Position::new(position));
-            extensions.push(
-                Extension::new(payloads, config.extension_bound())
-                    .map_err(|_| ChainError::Context)?,
-            );
+            let (position, extension) = self.chain_vote_body::<H, false>(
+                proposal,
+                index,
+                config.extension_bound(),
+                Height::zero(),
+            )?;
+            positions.push(position);
+            extensions.push(extension);
         }
 
         VoteBody::for_leader::<H, V>(leader, positions, extensions, config)
