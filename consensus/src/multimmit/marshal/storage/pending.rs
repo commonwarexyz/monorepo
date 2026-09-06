@@ -438,8 +438,8 @@ where
     }
 }
 
-/// One owned, single-segment materialization job. Entries remain in requested output order while
-/// storage positions are deduplicated into one batched journal read.
+/// One owned, single-segment materialization job. Entries retain their requested output indexes
+/// and are sorted by storage position for one deduplicated batched journal read.
 pub(in crate::multimmit::marshal) struct BodyReadGroup<E, H, B>
 where
     E: Context,
@@ -553,21 +553,20 @@ where
         E: Context,
         B: Codec + Digestible<Digest = H::Digest>,
     {
-        let mut by_local = BTreeMap::<u64, Vec<_>>::new();
-        for (output, locator) in self.entries {
-            by_local
-                .entry(reader.local_position(locator.position)?)
-                .or_default()
-                .push((output, locator));
-        }
-        let positions = by_local.keys().copied().collect::<Vec<_>>();
+        let requests = self
+            .entries
+            .chunk_by(|(_, left), (_, right)| left.position == right.position);
+        let positions = requests
+            .clone()
+            .map(|requests| reader.local_position(requests[0].1.position))
+            .collect::<Result<Vec<_>, _>>()?;
         let stored = reader.reader.read_many(&positions).await?;
         let mut results = Vec::new();
-        for ((_, requests), stored) in by_local.into_iter().zip(stored) {
+        for (requests, stored) in requests.zip(stored) {
             let block = stored.into_inner();
             for (output, locator) in requests {
-                validate_body(&block, locator)?;
-                results.push((output, Arc::clone(&block)));
+                validate_body(&block, *locator)?;
+                results.push((*output, Arc::clone(&block)));
             }
         }
         results.sort_unstable_by_key(|(output, _)| *output);
@@ -2083,6 +2082,55 @@ mod tests {
                 .unwrap();
             assert_eq!(reclaimed, vec![0]);
             assert!(!store.segments.contains(&0));
+        });
+    }
+
+    #[test]
+    fn body_reads_fan_out_duplicate_positions_and_validate_each_locator() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut store = open(&context, "store", "pending_duplicate_reads").await;
+            let first = block(0, 1, 1);
+            let second = block(0, 2, 2);
+            for block in [&first, &second] {
+                store
+                    .put(block.reference(), Arc::clone(block))
+                    .await
+                    .unwrap();
+            }
+            sync(&mut store).await;
+
+            let mut groups = store
+                .body_read_groups(
+                    [
+                        (2, first.reference()),
+                        (0, second.reference()),
+                        (1, first.reference()),
+                    ],
+                    u64::MAX,
+                    1,
+                )
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(
+                groups.pop().unwrap().read().await.unwrap(),
+                vec![
+                    (0, second),
+                    (1, Arc::clone(&first)),
+                    (2, Arc::clone(&first))
+                ],
+            );
+
+            let mut group = store
+                .body_read_groups(
+                    [(0, first.reference()), (1, first.reference())],
+                    u64::MAX,
+                    1,
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+            group.entries[1].1.encoded_len += 1;
+            assert!(matches!(group.read().await, Err(Error::Inconsistent(_))));
         });
     }
 
