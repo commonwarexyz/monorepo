@@ -1,18 +1,16 @@
 //! Bounded data-availability component contracts.
 
-use super::contracts::{SigningCapability, SigningReservation, SigningSlot, SigningSlotError};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
-struct ReservationEntry<S: Clone + Eq> {
+struct ReservationEntry<S> {
     subject: S,
-    slot: SigningSlot<S>,
-    capability: Option<SigningCapability<S>>,
+    issued_generation: Option<u64>,
 }
 
 /// Bounded active durable signing reservations and their volatile capabilities.
 #[derive(Clone, Debug)]
-pub(crate) struct ReservationBook<S: Clone + Eq> {
+pub(crate) struct ReservationBook<S> {
     capacity: usize,
     entries: BTreeMap<u64, ReservationEntry<S>>,
 }
@@ -28,18 +26,15 @@ pub(crate) enum ReservationError {
     /// The reservation does not exist.
     #[error("DA signing reservation is missing")]
     Missing,
-    /// The slot lifecycle rejected the operation.
-    #[error("DA signing slot lifecycle rejected the operation")]
-    Slot(SigningSlotError),
+    /// The reservation has no issued capability.
+    #[error("DA signing reservation has no issued capability")]
+    NoLiveCapability,
+    /// The completion does not match the issued generation.
+    #[error("DA signing completion generation is stale")]
+    StaleGeneration,
 }
 
-impl From<SigningSlotError> for ReservationError {
-    fn from(error: SigningSlotError) -> Self {
-        Self::Slot(error)
-    }
-}
-
-impl<S: Clone + Eq> ReservationBook<S> {
+impl<S: Eq> ReservationBook<S> {
     pub(crate) const fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -59,14 +54,11 @@ impl<S: Clone + Eq> ReservationBook<S> {
         if self.entries.len() >= self.capacity {
             return Err(ReservationError::Full);
         }
-        let mut slot = SigningSlot::new();
-        slot.reserve(SigningReservation { id }, subject.clone())?;
         self.entries.insert(
             id,
             ReservationEntry {
                 subject,
-                slot,
-                capability: None,
+                issued_generation: None,
             },
         );
         Ok(())
@@ -75,10 +67,7 @@ impl<S: Clone + Eq> ReservationBook<S> {
     /// Issues the current process's volatile capability for the exact durable reservation.
     pub(crate) fn issue(&mut self, id: u64, generation: u64) -> Result<(), ReservationError> {
         let entry = self.entries.get_mut(&id).ok_or(ReservationError::Missing)?;
-        if entry.capability.is_some() {
-            return Ok(());
-        }
-        entry.capability = Some(entry.slot.issue(generation)?);
+        entry.issued_generation.get_or_insert(generation);
         Ok(())
     }
 
@@ -89,19 +78,16 @@ impl<S: Clone + Eq> ReservationBook<S> {
         generation: u64,
         subject: &S,
     ) -> Result<(), ReservationError> {
-        let entry = self.entries.get_mut(&id).ok_or(ReservationError::Missing)?;
+        let entry = self.entries.get(&id).ok_or(ReservationError::Missing)?;
         if &entry.subject != subject {
             return Err(ReservationError::Conflict);
         }
-        let capability = entry
-            .capability
-            .take()
-            .ok_or(SigningSlotError::NoLiveCapability)?;
-        if capability.generation() != generation {
-            entry.capability = Some(capability);
-            return Err(SigningSlotError::StaleGeneration.into());
+        let issued = entry
+            .issued_generation
+            .ok_or(ReservationError::NoLiveCapability)?;
+        if issued != generation {
+            return Err(ReservationError::StaleGeneration);
         }
-        entry.slot.complete(capability)?;
         self.entries.remove(&id);
         Ok(())
     }
@@ -118,22 +104,14 @@ impl<S: Clone + Eq> ReservationBook<S> {
 
     pub(crate) fn is_issued(&self, id: u64, generation: u64, subject: &S) -> bool {
         self.entries.get(&id).is_some_and(|entry| {
-            &entry.subject == subject
-                && entry
-                    .capability
-                    .as_ref()
-                    .is_some_and(|capability| capability.generation() == generation)
+            &entry.subject == subject && entry.issued_generation == Some(generation)
         })
     }
 
     /// Returns the reserved subject when its volatile capability belongs to `generation`.
     pub(crate) fn issued_subject(&self, id: u64, generation: u64) -> Option<&S> {
         self.entries.get(&id).and_then(|entry| {
-            entry
-                .capability
-                .as_ref()
-                .is_some_and(|capability| capability.generation() == generation)
-                .then_some(&entry.subject)
+            (entry.issued_generation == Some(generation)).then_some(&entry.subject)
         })
     }
 
@@ -146,6 +124,51 @@ impl<S: Clone + Eq> ReservationBook<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_completions_preserve_the_exact_issued_reservation() {
+        let mut book = ReservationBook::new(1);
+        assert_eq!(book.issue(7, 3), Err(ReservationError::Missing));
+        book.reserve(7, "subject").unwrap();
+        book.reserve(7, "subject").unwrap();
+        assert_eq!(
+            book.complete(7, 3, &"subject"),
+            Err(ReservationError::NoLiveCapability)
+        );
+        assert_eq!(book.len(), 1);
+        assert_eq!(book.issued_subject(7, 3), None);
+        book.issue(7, 3).unwrap();
+        for generation in [2, 3, 4] {
+            book.issue(7, generation).unwrap();
+            assert!(book.is_issued(7, 3, &"subject"));
+        }
+        assert_eq!(
+            book.complete(7, 3, &"other"),
+            Err(ReservationError::Conflict)
+        );
+        assert_eq!(
+            book.complete(7, 4, &"subject"),
+            Err(ReservationError::StaleGeneration)
+        );
+        assert_eq!(book.issued_subject(7, 3), Some(&"subject"));
+        assert_eq!(book.issued_subject(7, 4), None);
+        assert!(!book.is_issued(7, 3, &"other"));
+        book.complete(7, 3, &"subject").unwrap();
+        assert_eq!(book.len(), 0);
+        assert_eq!(
+            book.complete(7, 3, &"subject"),
+            Err(ReservationError::Missing)
+        );
+
+        book.reserve(8, "replayed").unwrap();
+        assert_eq!(
+            book.replay_complete(8, &"other"),
+            Err(ReservationError::Conflict)
+        );
+        assert_eq!(book.len(), 1);
+        book.replay_complete(8, &"replayed").unwrap();
+        assert_eq!(book.len(), 0);
+    }
 
     #[test]
     fn reservations_replay_restart_and_saturate_exactly() {
