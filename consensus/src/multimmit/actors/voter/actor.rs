@@ -2608,10 +2608,10 @@ where
         self.attempt_publication(due)
     }
 
-    /// Attempts every due publication and reports first local acceptance to the machine.
     /// Ingests one authenticated verification cohort from the batcher.
     fn ingest_completed(&mut self, completed: Completed<H::Digest>) -> Result<(), Fatal> {
         let Completed { span, completion } = completed;
+        let _process = info_span!(parent: &span, "multimmit.voter.verify.process").entered();
         if completion.generation() != self.core().task_generation() {
             self.metrics.stale.inc();
             return Ok(());
@@ -2625,10 +2625,8 @@ where
         }
         self.schedule_pending_verifications()?;
         span.record("verdicts", completion.verdicts().len().traced());
-        span.in_scope(|| {
-            self.track_transition(|core| core.verification_completed(completion))?;
-            Ok(())
-        })
+        self.track_transition(|core| core.verification_completed(completion))?;
+        Ok(())
     }
 
     /// Assigns authenticated network sources to the machine's exact observation sequence.

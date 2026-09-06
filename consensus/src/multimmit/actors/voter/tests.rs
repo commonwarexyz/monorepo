@@ -1341,6 +1341,17 @@ fn round_spans_track_ingress_and_publication_boundaries(traces: TraceStorage) {
                 event.metadata.content == "test reporter received activity"
                     && event
                         .expect_span_at_index(0, |span| {
+                            if span.content == "multimmit.voter.verify.process" {
+                                Ok(())
+                            } else {
+                                Err("verification dequeue processing span is missing"
+                                    .to_string()
+                                    .into())
+                            }
+                        })
+                        .is_ok()
+                    && event
+                        .expect_span_at_index(1, |span| {
                             if span.content == "multimmit.voter.verify"
                                 && span.expect_field_exact("epoch", "76").is_ok()
                                 && span.expect_field_exact("view", "1").is_ok()
@@ -1352,7 +1363,7 @@ fn round_spans_track_ingress_and_publication_boundaries(traces: TraceStorage) {
                         })
                         .is_ok()
                     && event
-                        .expect_span_at_index(1, |span| {
+                        .expect_span_at_index(2, |span| {
                             if span.content == "multimmit.voter.observe"
                                 && span.expect_field_exact("epoch", "76").is_ok()
                                 && span.expect_field_exact("view", "1").is_ok()
