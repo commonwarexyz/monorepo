@@ -31,12 +31,6 @@ struct ProposalRecord<V: Variant, D: Digest> {
     artifact: Arc<Artifact<V, D>>,
 }
 
-#[derive(Clone, Debug)]
-struct TransitionLeader<V: Variant, D: Digest> {
-    observation: Observation,
-    artifact: Arc<Artifact<V, D>>,
-}
-
 enum RegularSignPass<V: Variant, D: Digest> {
     Vote {
         view: View,
@@ -59,7 +53,8 @@ pub(crate) struct RegularSignDrive<V: Variant, D: Digest> {
 }
 
 pub(super) struct LeaderRecord<V: Variant, D: Digest> {
-    transition: Option<TransitionLeader<V, D>>,
+    observation: Observation,
+    artifact: Arc<Artifact<V, D>>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,11 +122,7 @@ enum VqcEligibility {
 
 impl<V: Variant, D: Digest> LeaderRecord<V, D> {
     fn block(&self) -> &LeaderBlock<V, D> {
-        let transition = self
-            .transition
-            .as_ref()
-            .expect("view rules only inspect retained transition leaders");
-        match transition.artifact.as_ref() {
+        match self.artifact.as_ref() {
             Artifact::LeaderBlock(block) => block.block(),
             Artifact::Vqc(certificate) => certificate.leader(),
             _ => unreachable!("leader records contain proposals or V-QCs"),
@@ -139,29 +130,7 @@ impl<V: Variant, D: Digest> LeaderRecord<V, D> {
     }
 
     const fn observation(&self) -> Observation {
-        self.transition
-            .as_ref()
-            .expect("view rules only inspect retained transition leaders")
-            .observation
-    }
-
-    fn set_transition(&mut self, observation: Observation, artifact: &Arc<Artifact<V, D>>) {
-        let Some(transition) = self.transition.as_mut() else {
-            self.transition = Some(TransitionLeader {
-                observation,
-                artifact: Arc::clone(artifact),
-            });
-            return;
-        };
-        if transition.observation <= observation {
-            return;
-        }
-        transition.observation = observation;
-        transition.artifact = Arc::clone(artifact);
-    }
-
-    const fn retain_transition(&self) -> bool {
-        self.transition.is_some()
+        self.observation
     }
 }
 
@@ -1783,10 +1752,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                     };
                 };
                 let usable = *support >= self.config.designation_quorum()
-                    && self
-                        .leaders
-                        .get(&(scan.view, target))
-                        .is_some_and(LeaderRecord::retain_transition);
+                    && self.leaders.contains_key(&(scan.view, target));
                 if usable {
                     CertificateScanPhase::EvaluateTarget {
                         target,
@@ -2502,11 +2468,18 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         digest: D,
     ) {
         let key = (view, digest);
-        let record = self
-            .leaders
+        self.leaders
             .entry(key)
-            .or_insert(LeaderRecord { transition: None });
-        record.set_transition(observation, artifact);
+            .and_modify(|record| {
+                if observation < record.observation {
+                    record.observation = observation;
+                    record.artifact = Arc::clone(artifact);
+                }
+            })
+            .or_insert_with(|| LeaderRecord {
+                observation,
+                artifact: Arc::clone(artifact),
+            });
     }
 
     fn observe_message(
