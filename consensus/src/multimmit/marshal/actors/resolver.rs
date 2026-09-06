@@ -2428,6 +2428,29 @@ mod tests {
         .await
     }
 
+    fn catalog_config(
+        context: &deterministic::Context,
+        committee: &Committee<MinPk>,
+        partition: &str,
+    ) -> MarshalConfig<TwoCap, MinPk, TestBody> {
+        let archive = ArchiveConfig::new(
+            TwoCap,
+            CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
+        );
+        let mut catalog_config = MarshalConfig::new(
+            committee.config.epoch(),
+            NonZeroU32::new(committee.codec().chains() as u32).unwrap(),
+            Start::Genesis(committee.config.genesis().clone()),
+            partition.into(),
+            committee.codec(),
+            (),
+            archive,
+        )
+        .unwrap();
+        catalog_config.finalized_blocks = ArchiveMode::Prunable;
+        catalog_config
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn open_test_actor_with_catalog<R, E>(
         context: &deterministic::Context,
@@ -2446,21 +2469,7 @@ mod tests {
         R: Resolver<Key = Key<Sha256Digest>, Subscriber = Subscriber>,
         E: StorageContext + Spawner,
     {
-        let archive = ArchiveConfig::new(
-            TwoCap,
-            CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
-        );
-        let mut catalog_config = MarshalConfig::new(
-            committee.config.epoch(),
-            NonZeroU32::new(committee.codec().chains() as u32).unwrap(),
-            Start::Genesis(committee.config.genesis().clone()),
-            partition.into(),
-            committee.codec(),
-            (),
-            archive,
-        )
-        .unwrap();
-        catalog_config.finalized_blocks = ArchiveMode::Prunable;
+        let mut catalog_config = catalog_config(context, committee, partition);
         catalog_config.max_hot_block_bytes = max_hot_block_bytes;
         catalog_config.catalog_mailbox_size = catalog_mailbox_size;
         catalog_config.admission_cut_capacity = catalog_mailbox_size;
@@ -3282,21 +3291,7 @@ mod tests {
     fn canceled_waiters_are_reclaimed_at_capacity() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(7, 6, Limits::new(2, 1).unwrap());
-            let archive = ArchiveConfig::new(
-                TwoCap,
-                CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8)),
-            );
-            let mut catalog_config = MarshalConfig::new(
-                committee.config.epoch(),
-                NonZeroU32::new(committee.codec().chains() as u32).unwrap(),
-                Start::Genesis(committee.config.genesis().clone()),
-                "resolver_capacity_test".into(),
-                committee.codec(),
-                (),
-                archive,
-            )
-            .unwrap();
-            catalog_config.finalized_blocks = ArchiveMode::Prunable;
+            let catalog_config = catalog_config(&context, &committee, "resolver_capacity_test");
             let (delivery, _delivery_commands) = delivery::channel(context.child("delivery"));
             let (catalog, catalog_handle, promoter, _, _) = catalog_config
                 .spawn::<_, Sha256>(context.child("catalog"), delivery)
@@ -3430,21 +3425,7 @@ mod tests {
     fn local_custody_completes_before_peer_fetch() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(7, 6, Limits::new(2, 1).unwrap());
-            let archive = ArchiveConfig::new(
-                TwoCap,
-                CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8)),
-            );
-            let mut catalog_config = MarshalConfig::new(
-                committee.config.epoch(),
-                NonZeroU32::new(committee.codec().chains() as u32).unwrap(),
-                Start::Genesis(committee.config.genesis().clone()),
-                "resolver_local_first_test".into(),
-                committee.codec(),
-                (),
-                archive,
-            )
-            .unwrap();
-            catalog_config.finalized_blocks = ArchiveMode::Prunable;
+            let catalog_config = catalog_config(&context, &committee, "resolver_local_first_test");
             let (delivery, _delivery_commands) = delivery::channel(context.child("delivery"));
             let (catalog, catalog_handle, promoter, _, _) = catalog_config
                 .spawn::<_, Sha256>(context.child("catalog"), delivery)
