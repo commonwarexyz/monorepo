@@ -938,8 +938,6 @@ where
     V: Variant,
     B: Codec + Digestible<Digest = H::Digest>,
 {
-    let mut refresh = false;
-    let mut reset = None;
     match command {
         Command::Committed(batch) => {
             if batch.generation == progress.generation {
@@ -948,7 +946,15 @@ where
                     cache.insert(batch, next);
                 }
             } else {
-                refresh = true;
+                drop(batch);
+                let next = catalog.progress().await?;
+                if next.generation != progress.generation {
+                    pending.clear();
+                    cache.clear();
+                    metrics.in_flight(0);
+                    metrics.pending_durability(0);
+                }
+                *progress = next;
             }
         }
         Command::Reset {
@@ -972,22 +978,9 @@ where
                 )));
             }
             *progress = next;
-            reset = Some(waiters);
-        }
-    }
-    if refresh {
-        let next = catalog.progress().await?;
-        if next.generation != progress.generation {
-            pending.clear();
-            cache.clear();
-            metrics.in_flight(0);
-            metrics.pending_durability(0);
-        }
-        *progress = next;
-    }
-    if let Some(waiters) = reset {
-        for acknowledgement in waiters {
-            let _ = acknowledgement.send(());
+            for acknowledgement in waiters {
+                let _ = acknowledgement.send(());
+            }
         }
     }
     Ok(())
