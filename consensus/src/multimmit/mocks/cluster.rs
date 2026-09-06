@@ -1177,21 +1177,8 @@ impl<V: Variant> Cluster<V> {
     ///
     /// This lets topology tests stop synthetic work before waiting for consensus, keeping their
     /// message volume bounded without relying on a wall-clock delay.
-    pub async fn wait_produced(&mut self, nodes: &[usize], blocks: u64, rounds: usize) {
-        self.wait_produced_inner(nodes, blocks, rounds).await;
-    }
-
-    /// Waits for production and returns engine time without finality-observation time.
-    pub async fn measure_wait_produced(
-        &mut self,
-        nodes: &[usize],
-        blocks: u64,
-        rounds: usize,
-    ) -> Duration {
-        self.wait_produced_inner(nodes, blocks, rounds).await
-    }
-
-    async fn wait_produced_inner(
+    /// Returns engine time excluding finality observation.
+    pub async fn wait_produced(
         &mut self,
         nodes: &[usize],
         blocks: u64,
@@ -1222,30 +1209,9 @@ impl<V: Variant> Cluster<V> {
     }
 
     /// Waits until every listed node finalizes `height` on every listed chain.
+    ///
+    /// Returns engine time excluding finality observation.
     pub async fn wait_finalized(
-        &mut self,
-        nodes: &[usize],
-        chains: &[u32],
-        height: u64,
-        rounds: usize,
-    ) {
-        self.wait_finalized_inner(nodes, chains, height, rounds)
-            .await;
-    }
-
-    /// Waits for finality and returns engine time without observation time.
-    pub async fn measure_wait_finalized(
-        &mut self,
-        nodes: &[usize],
-        chains: &[u32],
-        height: u64,
-        rounds: usize,
-    ) -> Duration {
-        self.wait_finalized_inner(nodes, chains, height, rounds)
-            .await
-    }
-
-    async fn wait_finalized_inner(
         &mut self,
         nodes: &[usize],
         chains: &[u32],
@@ -1288,21 +1254,9 @@ impl<V: Variant> Cluster<V> {
     }
 
     /// Waits until every listed node reaches `view` and observes finality while it advances.
-    pub async fn wait_view(&mut self, nodes: &[usize], view: View, rounds: usize) {
-        self.wait_view_inner(nodes, view, rounds).await;
-    }
-
-    /// Waits for a view and returns engine time plus the terminal per-node views.
-    pub async fn measure_wait_view(
-        &mut self,
-        nodes: &[usize],
-        view: View,
-        rounds: usize,
-    ) -> (Duration, Vec<u64>) {
-        self.wait_view_inner(nodes, view, rounds).await
-    }
-
-    async fn wait_view_inner(
+    ///
+    /// Returns engine time excluding finality observation, plus the terminal per-node views.
+    pub async fn wait_view(
         &mut self,
         nodes: &[usize],
         view: View,
