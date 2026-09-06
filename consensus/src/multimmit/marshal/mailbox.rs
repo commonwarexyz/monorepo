@@ -1,6 +1,6 @@
 //! Public ingress for the Multimmit marshal service.
 
-use super::{actors::broadcast, types::OutputIndex};
+use super::types::OutputIndex;
 use crate::{
     Reporter, Viewable as _,
     multimmit::{
@@ -13,6 +13,7 @@ use commonware_actor::{
     Feedback, Unreliable,
     mailbox::{self as actor_mailbox, UnreliablePolicy},
 };
+use commonware_broadcast::buffered;
 use commonware_codec::Codec;
 use commonware_cryptography::{
     Digest, Digestible, Hasher, PublicKey, bls12381::primitives::variant::Variant,
@@ -272,7 +273,7 @@ where
     P: PublicKey,
 {
     sender: actor_mailbox::UnreliableSender<Command<H, V, B>>,
-    broadcast: broadcast::Mailbox<P, TransactionBlock<H, B>>,
+    broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
 }
 
 impl<H, V, B, P> Clone for Mailbox<H, V, B, P>
@@ -299,7 +300,7 @@ where
 {
     pub(super) const fn new(
         sender: actor_mailbox::UnreliableSender<Command<H, V, B>>,
-        broadcast: broadcast::Mailbox<P, TransactionBlock<H, B>>,
+        broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
     ) -> Self {
         Self { sender, broadcast }
     }
@@ -361,7 +362,7 @@ where
         recipients: Recipients<P>,
         block: impl Into<Arc<TransactionBlock<H, B>>>,
     ) -> Feedback {
-        self.broadcast.broadcast(recipients, block.into())
+        self.broadcast.broadcast_shared(recipients, block.into())
     }
 
     /// Gets an exact locally admitted LQC without initiating network work.
@@ -480,6 +481,7 @@ where
         async move {
             receiver
                 .await
+                .ok()
                 .filter(|block| block.reference() == reference)
         }
     }
@@ -511,7 +513,7 @@ where
 pub(super) fn channel<H, V, B, P>(
     metrics: impl RuntimeMetrics,
     capacity: NonZeroUsize,
-    broadcast: broadcast::Mailbox<P, TransactionBlock<H, B>>,
+    broadcast: buffered::Mailbox<P, TransactionBlock<H, B>>,
 ) -> Channel<H, V, B, P>
 where
     H: Hasher,
