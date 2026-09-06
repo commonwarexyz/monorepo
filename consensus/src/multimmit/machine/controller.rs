@@ -238,8 +238,6 @@ struct QueuedInput<V: Variant, D: Digest> {
     ticket: InputTicket,
     payload: QueuedPayload<V, D>,
     bytes: usize,
-    cost: TransitionCost,
-    cost_remaining: usize,
 }
 
 enum QueuedPayload<V: Variant, D: Digest> {
@@ -584,7 +582,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     ) -> Result<InputTicket, CoreError> {
         let lane = input_lane(&input);
         let cost = input_cost(&input);
-        let cost_remaining = usize::try_from(cost.credits().ok_or(CoreError::CostOverflow)?)
+        usize::try_from(cost.credits().ok_or(CoreError::CostOverflow)?)
             .map_err(|_| CoreError::CostOverflow)?;
 
         let index = lane_index(lane);
@@ -634,8 +632,6 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
             ticket,
             payload,
             bytes,
-            cost,
-            cost_remaining,
         });
         Ok(ticket)
     }
@@ -728,20 +724,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
                     items == remaining,
                 )
             }
-            _ => {
-                let available = usize::try_from(self.service.remaining_core())
-                    .map_err(|_| CoreError::CostOverflow)?;
-                if available == 0 {
-                    self.yield_required = true;
-                    return Ok(CoreTurn::YieldRequired);
-                }
-                let items = queued.cost_remaining.min(available);
-                (
-                    cost_prefix(queued.cost, items),
-                    0,
-                    items == queued.cost_remaining,
-                )
-            }
+            _ => (TransitionCost::Constant, 0, true),
         };
         match self.service.charge(lane, cost) {
             Ok(()) => {}
@@ -753,19 +736,6 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
                 return Err(CoreError::SchedulerInvariant);
             }
             Err(ServiceError::CostOverflow) => return Err(CoreError::CostOverflow),
-        }
-
-        if !final_chunk && !matches!(&queued.payload, QueuedPayload::Observe(_)) {
-            let queued = self.queues[index]
-                .front_mut()
-                .expect("a selected core lane is non-empty");
-            let charged = cost.credits().ok_or(CoreError::CostOverflow)? as usize;
-            queued.cost_remaining = queued
-                .cost_remaining
-                .checked_sub(charged)
-                .ok_or(CoreError::SchedulerInvariant)?;
-            self.yield_required = true;
-            return Ok(CoreTurn::YieldRequired);
         }
 
         let (ticket, step) = if final_chunk {
@@ -1099,14 +1069,6 @@ fn input_cost<V: Variant, D: Digest>(input: &Input<V, D>) -> TransitionCost {
         | Input::VqcAggregated(_)
         | Input::LqcAggregated(_) => TransitionCost::Constant,
         _ => TransitionCost::Constant,
-    }
-}
-
-const fn cost_prefix(cost: TransitionCost, items: usize) -> TransitionCost {
-    match cost {
-        TransitionCost::Constant => TransitionCost::Constant,
-        TransitionCost::ArtifactItems(_) => TransitionCost::ArtifactItems(items),
-        TransitionCost::CommitteePass(_) => TransitionCost::CommitteePass(items),
     }
 }
 
@@ -1802,48 +1764,32 @@ mod tests {
     }
 
     #[test]
-    fn oversized_non_observe_cost_yields_to_due_timer() {
-        let mut remaining = CORE_BUDGET as usize + 17;
-        let mut timer_pending = true;
-        let mut timer_cycle = None;
-        let mut cycle = 0_u64;
-        let mut credits = ServiceCycle::new();
-        let mut cursor = FairCursor::new();
-
-        while remaining > 0 || timer_pending {
-            let ready = [false, remaining > 0, timer_pending, false, false];
-            let index = cursor.select(&ready).expect("completion or timer is ready");
-            if index == lane_index(Lane::Timer) {
-                credits
-                    .charge(Lane::Timer, TransitionCost::Constant)
-                    .unwrap();
-                timer_pending = false;
-                timer_cycle = Some(cycle);
-                continue;
-            }
-
-            let available = credits.remaining_core() as usize;
-            if available == 0 {
-                cycle += 1;
-                credits = ServiceCycle::new();
-                continue;
-            }
-            let processed = remaining.min(available);
-            credits
-                .charge(
-                    Lane::LocalCompletion,
-                    cost_prefix(TransitionCost::ArtifactItems(remaining), processed),
-                )
-                .unwrap();
-            remaining -= processed;
-            if credits.remaining_core() == 0 {
-                cycle += 1;
-                credits = ServiceCycle::new();
-            }
-        }
-
-        assert_eq!(timer_cycle, Some(1));
-        assert_eq!(remaining, 0);
+    fn ordinary_input_waits_for_one_credit_then_completes() {
+        let mut core = observer_core(77);
+        let ticket = core.start_fresh().unwrap();
+        core.service
+            .charge(
+                Lane::PeerObservation,
+                TransitionCost::ArtifactItems(CORE_BUDGET as usize),
+            )
+            .unwrap();
+        assert!(matches!(
+            core.service_input(false).unwrap(),
+            CoreTurn::YieldRequired
+        ));
+        assert!(matches!(
+            queued_input(&core, Lane::LocalCompletion, ticket),
+            Input::Start
+        ));
+        core.resume_after_yield().unwrap();
+        let CoreTurn::Input(serviced) = core.service_input(false).unwrap() else {
+            panic!("the admitted input must consume the replenished credit");
+        };
+        assert_eq!(serviced.ticket, ticket);
+        assert!(serviced.final_chunk);
+        assert_eq!(serviced.observed_items, 0);
+        assert_eq!(core.service.remaining_core(), CORE_BUDGET - 1);
+        assert!(!core.has_pending_inputs());
     }
 
     #[test]
