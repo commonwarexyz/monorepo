@@ -154,7 +154,11 @@ fn da_certificate(header: TransactionBlockHeader<Digest>) -> DaCertificate<MinPk
     DaCertificate::read_cfg(&mut encoded.freeze(), &()).unwrap()
 }
 
-fn drain_validator(machine: &mut fabric::BenchMachine, effects: fabric::BenchCapabilities) {
+fn drain_validator(
+    machine: &mut fabric::BenchMachine,
+    effects: fabric::BenchCapabilities,
+    mut signed: impl FnMut(EffectCompletion<MinPk, Digest>) -> Option<EffectCompletion<MinPk, Digest>>,
+) {
     let mut queue = VecDeque::new();
     queue.extend(effects);
     let mut effects = queue;
@@ -186,16 +190,20 @@ fn drain_validator(machine: &mut fabric::BenchMachine, effects: fabric::BenchCap
                 ) => continue,
                 Capability::Durability(DurabilityCapability::Released(job)) => {
                     match job.request() {
-                        DurableEffect::Sign(SignRequest::DaVote(request)) => machine
-                            .step(Input::EffectCompleted(EffectCompletion::Signed {
+                        DurableEffect::Sign(SignRequest::DaVote(request)) => {
+                            let completion = EffectCompletion::Signed {
                                 id: job.id(),
                                 generation: job.generation(),
                                 artifact: Arc::new(Artifact::DaVote(DaVote::new(
                                     request.header().clone(),
                                     threshold_share(0),
                                 ))),
-                            }))
-                            .unwrap(),
+                            };
+                            let Some(completion) = signed(completion) else {
+                                continue;
+                            };
+                            machine.step(Input::EffectCompleted(completion)).unwrap()
+                        }
                         DurableEffect::Sign(_) | DurableEffect::SignBatch(_) => {
                             panic!("unexpected signing request in discharge setup")
                         }
@@ -244,7 +252,7 @@ fn add_vote_obligation(machine: &mut fabric::BenchMachine, header: TransactionBl
         fabric::attestation(producer),
     ));
     let effects = fabric::absorb(machine, vec![artifact]);
-    drain_validator(machine, effects);
+    drain_validator(machine, effects, Some);
 }
 
 #[cfg(test)]
@@ -268,96 +276,17 @@ fn local_sign_completion_fixture() -> (fabric::BenchMachine, EffectCompletion<Mi
     .unwrap();
     let artifact =
         Artifact::TransactionBlock(SignedTransactionBlock::new(header, fabric::attestation(1)));
-    let mut effects = VecDeque::new();
-    effects.extend(fabric::absorb(&mut machine, vec![artifact]));
+    let effects = fabric::absorb(&mut machine, vec![artifact]);
     let mut completion = None;
-
-    loop {
-        while let Some(effect) = effects.pop_front() {
-            let step = match effect {
-                Capability::Durability(DurabilityCapability::Persist(job)) => machine
-                    .step(Input::Persisted(BarrierAck::new(
-                        job.id(),
-                        job.generation(),
-                        job.last_cursor(),
-                    )))
-                    .unwrap(),
-                Capability::Verification(VerificationCapability::Verify(job)) => {
-                    effects.extend(fabric::verify_all_true(&mut machine, &job));
-                    continue;
-                }
-                // Drive the chain's validator plane inline: the routed block is valid, so offer it
-                // as the chain's eligible run for central to reserve, exactly as a task would.
-                Capability::Producer(ProducerCapability::ObserveBlock { block, .. }) => {
-                    let chain = block.header().chain();
-                    let height = block.header().height();
-                    machine.note_da_vote_ready(chain, vec![block], height);
-                    continue;
-                }
-                Capability::Producer(
-                    ProducerCapability::ValidatorAnchor(_)
-                    | ProducerCapability::ValidatorChosen { .. },
-                ) => continue,
-                Capability::Durability(DurabilityCapability::Released(job)) => {
-                    match job.request() {
-                        DurableEffect::Sign(SignRequest::DaVote(request)) => {
-                            assert!(completion.is_none(), "fixture issued one DA-vote signature");
-                            completion = Some(EffectCompletion::Signed {
-                                id: job.id(),
-                                generation: job.generation(),
-                                artifact: Arc::new(Artifact::DaVote(DaVote::new(
-                                    request.header().clone(),
-                                    threshold_share(0),
-                                ))),
-                            });
-                            continue;
-                        }
-                        DurableEffect::Sign(_) | DurableEffect::SignBatch(_) => {
-                            panic!("unexpected signing request in allocation corpus")
-                        }
-                        _ => machine
-                            .step(Input::EffectCompleted(EffectCompletion::Delivered {
-                                id: job.id(),
-                                generation: job.generation(),
-                            }))
-                            .unwrap(),
-                    }
-                }
-                Capability::Leader(LeaderCapability::ArmTimer(_))
-                | Capability::Producer(ProducerCapability::ArmTimer(_))
-                | Capability::Producer(
-                    ProducerCapability::ForwardShare(_) | ProducerCapability::AnchorAdvanced(_),
-                )
-                | Capability::Leader(LeaderCapability::RecoverNullification(_))
-                | Capability::Leader(LeaderCapability::AggregateVqc(_))
-                | Capability::Leader(LeaderCapability::AggregateLqc(_))
-                | Capability::Durability(DurabilityCapability::Acknowledged { .. })
-                | Capability::Durability(DurabilityCapability::Retire(_))
-                | Capability::Resolver(
-                    ResolverCapability::Resolve(_)
-                    | ResolverCapability::Cancel(_)
-                    | ResolverCapability::Reject(_)
-                    | ResolverCapability::Prune(_),
-                ) => continue,
-                other => panic!("unexpected allocation-corpus effect: {other:?}"),
-            };
-            effects.extend(step.into_capabilities());
-        }
-
-        let polled = machine.poll(NonZeroUsize::new(1_024).unwrap()).unwrap();
-        let work_remaining = polled.work_remaining();
-        effects.extend(polled.into_capabilities());
-        if effects.is_empty() && !work_remaining {
-            return (
-                machine,
-                completion.expect("fixture reaches one DA-vote signing request"),
-            );
-        }
-        assert!(
-            work_remaining || !effects.is_empty(),
-            "sign request disappeared"
-        );
-    }
+    drain_validator(&mut machine, effects, |signed| {
+        assert!(completion.is_none(), "fixture issued one DA-vote signature");
+        completion = Some(signed);
+        None
+    });
+    (
+        machine,
+        completion.expect("fixture reaches one DA-vote signing request"),
+    )
 }
 
 #[cfg(test)]
@@ -471,7 +400,7 @@ fn stage_discharge(
 ) -> (fabric::BenchMachine, Capabilities<MinPk, Digest>, Duration) {
     let mut machine = Machine::restore(fixture.profile.clone(), fixture.snapshot.clone()).unwrap();
     let recovery = machine.step(Input::RecoveryComplete).unwrap();
-    drain_validator(&mut machine, recovery.into_capabilities());
+    drain_validator(&mut machine, recovery.into_capabilities(), Some);
 
     let artifact = fixture.certificate.clone();
     let id = artifact.id::<Sha256>();
@@ -736,7 +665,7 @@ fn run_poll(artifacts: usize, budget: usize) -> Duration {
 fn run_obligation_discharge(obligations: usize) -> Duration {
     let fixture = discharge_fixture(obligations);
     let (mut machine, effects, elapsed) = stage_discharge(&fixture);
-    drain_validator(&mut machine, effects);
+    drain_validator(&mut machine, effects, Some);
     assert!(
         !machine
             .live_snapshot_for_test()
