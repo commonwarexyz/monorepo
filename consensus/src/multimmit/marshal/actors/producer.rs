@@ -266,10 +266,7 @@ where
             let values = catalog
                 .history_segment(commitment, MAX_SEGMENT_ITEMS, max_value_bytes)
                 .await
-                .map_err(storage_error)?
-                .into_iter()
-                .map(|value| value.as_ref().clone())
-                .collect::<Vec<_>>();
+                .map_err(storage_error)?;
             (!values.is_empty()).then(|| values.encode())
         }
         Key::ProducerBlock { chain, digest } => bodies
