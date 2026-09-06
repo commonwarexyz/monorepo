@@ -2166,15 +2166,20 @@ where
                 // proofs so later readers open them from index metadata alone. Seals are an
                 // optimization with no ordering needs, so they never gate commit barriers; the
                 // store keeps sealing segments readable and unreclaimed until the proof lands.
-                let (sealed, handles) = self.stores.start_pending_seals().await?;
+                let seal_span = info_span!(
+                    parent: &span,
+                    "multimmit.marshal.catalog.seal_pending",
+                    segments = tracing::field::Empty,
+                );
+                let (sealed, handles) = self
+                    .stores
+                    .start_pending_seals()
+                    .instrument(seal_span.clone())
+                    .await?;
+                seal_span.record("segments", sealed.len());
                 if !handles.is_empty() {
-                    let span = info_span!(
-                        parent: &span,
-                        "multimmit.marshal.catalog.seal_pending",
-                        segments = sealed.len(),
-                    );
                     self.seals
-                        .push(async move { (sealed, drain(handles).await) }.instrument(span));
+                        .push(async move { (sealed, drain(handles).await) }.instrument(seal_span));
                 }
                 self.complete_custody_waiters().await?;
                 self.start_admission_sync().await.map(|_| ())
@@ -2216,7 +2221,12 @@ where
         );
         let completion_span = span.clone();
         let timer = self.metrics.admission_durability.timer(&self.clock);
-        let handles = match self.stores.start_admission_sync(cut.footprint).await {
+        let handles = match self
+            .stores
+            .start_admission_sync(cut.footprint)
+            .instrument(span.clone())
+            .await
+        {
             Ok(handles) => handles,
             Err(error) => {
                 for reply in cut.replies {
@@ -2309,14 +2319,15 @@ where
 
     async fn start_commit_archives(&mut self, pending: &PendingCommit<H, B>) -> Result<(), Error> {
         let timer = self.metrics.finalized_archive_durability.timer(&self.clock);
-        let handles = self
-            .stores
-            .start_finalized_sync(&pending.publication)
-            .await?;
         let span = info_span!(
             parent: &pending.span,
             "multimmit.marshal.catalog.sync_finalized_archives"
         );
+        let handles = self
+            .stores
+            .start_finalized_sync(&pending.publication)
+            .instrument(span.clone())
+            .await?;
         self.durability.push(
             async move { DurabilityCompletion::CommitArchives(timer, drain(handles).await) }
                 .instrument(span),
@@ -2329,14 +2340,15 @@ where
         pending: &mut PendingCommit<H, B>,
     ) -> Result<(), Error> {
         let timer = self.metrics.checkpoint_publication.timer(&self.clock);
-        let sync = self
-            .stores
-            .start_sync_publication(&mut pending.publication)
-            .await?;
         let span = info_span!(
             parent: &pending.span,
             "multimmit.marshal.catalog.publish_checkpoint"
         );
+        let sync = self
+            .stores
+            .start_sync_publication(&mut pending.publication)
+            .instrument(span.clone())
+            .await?;
         self.durability.push(
             async move {
                 DurabilityCompletion::CommitCheckpoint(timer, sync.await.map_err(Error::storage))
@@ -3968,6 +3980,44 @@ mod tests {
             self.0
                 .lock()
                 .push(span.scope().map(|span| span.metadata().name()).collect());
+        }
+    }
+
+    #[derive(Clone)]
+    struct SyncSpanEntries {
+        syncs: PendingSyncs,
+        entries: Arc<Mutex<Vec<(&'static str, u64, usize)>>>,
+    }
+
+    impl SyncSpanEntries {
+        async fn release_phase(&self, operation: &str) -> usize {
+            let gates = std::mem::take(&mut *self.syncs.lock());
+            assert!(!gates.is_empty(), "phase started syncs");
+            let mut releases = Vec::new();
+            for gate in gates {
+                gate.blocked.await.unwrap();
+                releases.push(gate.release);
+            }
+            let entries = self.entries.lock().iter().filter(|entry| entry.0 == operation).count();
+            for release in releases {
+                release.send(Ok(())).unwrap();
+            }
+            entries
+        }
+    }
+
+    impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SyncSpanEntries {
+        fn on_enter(&self, id: &tracing::span::Id, context: LayerContext<'_, S>) {
+            let span = context.span(id).unwrap();
+            let name = span.metadata().name();
+            if matches!(name,
+                "multimmit.marshal.catalog.admission_cut"
+                    | "multimmit.marshal.catalog.seal_pending"
+                    | "multimmit.marshal.catalog.sync_finalized_archives"
+                    | "multimmit.marshal.catalog.publish_checkpoint"
+            ) {
+                self.entries.lock().push((name, id.into_u64(), self.syncs.starts()));
+            }
         }
     }
 
@@ -6214,6 +6264,77 @@ mod tests {
                 .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn durability_spans_include_initiation() {
+        let syncs = PendingSyncs::default();
+        let entries = Arc::new(Mutex::new(Vec::new()));
+        let spans = SyncSpanEntries {
+            syncs: syncs.clone(),
+            entries: Arc::clone(&entries),
+        };
+        let subscriber = tracing_subscriber::registry().with(spans.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        deterministic::Runner::timed(std::time::Duration::from_secs(30)).start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                7,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_DURABILITY_TRACE",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let delayed = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: syncs.clone(),
+            };
+            let mut config = config(&context, &committee);
+            set_capacity(&mut config, 1);
+            let (client, handle, _delivery) =
+                spawn_catalog(config, delayed.child("catalog")).await;
+            let block = producer_block(&committee, 0, 9);
+            let admission_starts = syncs.starts();
+            let token = client.stage_block(Arc::clone(&block)).await.unwrap();
+            client.progress().await.unwrap();
+            let seal_starts = syncs.starts();
+            assert!(seal_starts > admission_starts);
+            let admission_entries = spans.release_phase("multimmit.marshal.catalog.admission_cut").await;
+            token.wait().await.unwrap();
+
+            let current = client.checkpoint().await.unwrap();
+            let archive_starts = syncs.starts();
+            assert!(archive_starts > seal_starts, "admission started a seal");
+            let seal_entries = spans.release_phase("multimmit.marshal.catalog.seal_pending").await;
+            let token = client.start_commit(output_commit(&current, [&block]), Vec::new()).await.unwrap();
+            client.progress().await.unwrap();
+            let checkpoint_starts = syncs.starts();
+            assert!(checkpoint_starts > archive_starts);
+            let archive_entries = spans.release_phase("multimmit.marshal.catalog.sync_finalized_archives").await;
+            while syncs.starts() == checkpoint_starts {
+                client.progress().await.unwrap();
+            }
+            let checkpoint_entries = spans.release_phase("multimmit.marshal.catalog.publish_checkpoint").await;
+            token.wait().await.unwrap();
+            drop(client);
+            assert!(handle.await.is_ok());
+
+            let entries = entries.lock();
+            let mut boundaries = Vec::new();
+            for (operation, before, blocked_entries) in [
+                ("multimmit.marshal.catalog.admission_cut", admission_starts, admission_entries),
+                ("multimmit.marshal.catalog.seal_pending", seal_starts, seal_entries),
+                ("multimmit.marshal.catalog.sync_finalized_archives", archive_starts, archive_entries),
+                ("multimmit.marshal.catalog.publish_checkpoint", checkpoint_starts, checkpoint_entries),
+            ] {
+                let matching = entries.iter().filter(|entry| entry.0 == operation).collect::<Vec<_>>();
+                let first = matching.first().expect("operation was entered");
+                boundaries.push((operation, first.2, before));
+                assert!(matching.iter().all(|entry| entry.1 == first.1), "initiation and completion must use one span");
+                assert!(matching.len() > blocked_entries, "the span covers polling after its completion gate is released");
+            }
+            assert!(boundaries.iter().all(|(_, entered, before)| entered == before),
+                "operations must enter before starting syncs (operation, entered, before): {boundaries:?}");
+        });
     }
 
     #[test]
