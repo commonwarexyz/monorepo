@@ -1551,23 +1551,10 @@ impl<'a> World<'a> {
             expected.keys().copied().collect::<BTreeSet<_>>()
         );
 
-        let known_durable = self.replicas[replica]
-            .publications
-            .iter()
-            .filter(|(id, publication)| {
-                id.get() <= cursor.get()
-                    && !publication.rules.is_empty()
-                    && publication
-                        .rules
-                        .iter()
-                        .all(|rule| !matches!(rule, PublicationRule::OwnMessage(_)))
-            })
-            .map(|(id, _)| *id)
-            .collect::<BTreeSet<_>>();
         let expected_ids = expected.keys().copied().collect::<BTreeSet<_>>();
         self.replicas[replica]
             .discharged_publications
-            .extend(known_durable.difference(&expected_ids).copied());
+            .extend(tracked.difference(&expected_ids).copied());
     }
 
     fn record_publication_payloads(
