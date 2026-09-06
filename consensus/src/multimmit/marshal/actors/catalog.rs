@@ -4227,6 +4227,42 @@ mod tests {
         OutputRow::new(index, CustodyRef::for_test(block))
     }
 
+    /// Builds an output-only commit extending the supplied accepted checkpoint.
+    fn output_commit<'a>(
+        current: &Checkpoint<Sha256Digest>,
+        blocks: impl IntoIterator<Item = &'a Arc<TransactionBlock<Sha256, TestBody>>>,
+    ) -> Commit<Sha256, MinPk> {
+        let mut emitted = current.emitted().to_vec();
+        let mut committed = current.committed();
+        let outputs = blocks
+            .into_iter()
+            .map(|block| {
+                emitted[block.reference().chain().get() as usize] = block.reference();
+                let index = committed.map_or(OutputIndex::ZERO, |index| index.next().unwrap());
+                committed = Some(index);
+                output_row(index, block)
+            })
+            .collect();
+        let checkpoint = Checkpoint::new(
+            current.epoch(),
+            current.generation(),
+            current.archive_layout(),
+            current.floor(),
+            current.history(),
+            current.history_index(),
+            current.ordered().to_vec(),
+            emitted,
+            committed,
+        )
+        .unwrap();
+        Commit {
+            selected: Vec::new(),
+            history: Vec::new(),
+            outputs,
+            checkpoint,
+        }
+    }
+
     #[test]
     fn block_cache_is_byte_bounded_and_idempotent() {
         let committee = Committee::<MinPk>::new_with_namespace_and_producers(
@@ -4329,33 +4365,8 @@ mod tests {
                     .unwrap();
             }
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            for block in &blocks {
-                emitted[block.reference().chain().get() as usize] = block.reference();
-            }
-            let checkpoint = Checkpoint::new(
-                current.epoch(),
-                current.generation(),
-                current.archive_layout(),
-                current.floor(),
-                current.history(),
-                current.history_index(),
-                current.ordered().to_vec(),
-                emitted,
-                Some(OutputIndex::new(3)),
-            )
-            .unwrap();
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: blocks
-                        .iter()
-                        .enumerate()
-                        .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
-                        .collect(),
-                    checkpoint,
-                })
+                .commit(output_commit(&current, &blocks))
                 .await
                 .unwrap();
             drop(client);
@@ -4726,26 +4737,8 @@ mod tests {
                 client.admit_block(tail.reference(), tail).await.unwrap();
             }
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            emitted[0] = first.reference();
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: vec![output_row(OutputIndex::ZERO, &first)],
-                    checkpoint: Checkpoint::new(
-                        current.epoch(),
-                        current.generation(),
-                        current.archive_layout(),
-                        current.floor(),
-                        current.history(),
-                        current.history_index(),
-                        current.ordered().to_vec(),
-                        emitted,
-                        Some(OutputIndex::ZERO),
-                    )
-                    .unwrap(),
-                })
+                .commit(output_commit(&current, [&first]))
                 .await
                 .unwrap();
             let refs = client
@@ -5486,26 +5479,8 @@ mod tests {
                 .await
                 .unwrap();
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            emitted[0] = cold.reference();
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: vec![output_row(OutputIndex::ZERO, &cold)],
-                    checkpoint: Checkpoint::new(
-                        current.epoch(),
-                        current.generation(),
-                        current.archive_layout(),
-                        current.floor(),
-                        current.history(),
-                        current.history_index(),
-                        current.ordered().to_vec(),
-                        emitted,
-                        Some(OutputIndex::ZERO),
-                    )
-                    .unwrap(),
-                })
+                .commit(output_commit(&current, [&cold]))
                 .await
                 .unwrap();
             drop(client);
@@ -5613,32 +5588,8 @@ mod tests {
                     .unwrap();
             }
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            for block in &blocks {
-                emitted[block.reference().chain().get() as usize] = block.reference();
-            }
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: blocks
-                        .iter()
-                        .enumerate()
-                        .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
-                        .collect(),
-                    checkpoint: Checkpoint::new(
-                        current.epoch(),
-                        current.generation(),
-                        current.archive_layout(),
-                        current.floor(),
-                        current.history(),
-                        current.history_index(),
-                        current.ordered().to_vec(),
-                        emitted,
-                        Some(OutputIndex::new(u64::from(count - 1))),
-                    )
-                    .unwrap(),
-                })
+                .commit(output_commit(&current, &blocks))
                 .await
                 .unwrap();
             drop(client);
@@ -6029,31 +5980,8 @@ mod tests {
             }
 
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            emitted[0] = first.reference();
-            emitted[1] = second.reference();
-            let checkpoint = Checkpoint::new(
-                current.epoch(),
-                current.generation(),
-                current.archive_layout(),
-                current.floor(),
-                current.history(),
-                current.history_index(),
-                current.ordered().to_vec(),
-                emitted,
-                Some(OutputIndex::new(1)),
-            )
-            .unwrap();
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: vec![
-                        output_row(OutputIndex::ZERO, &first),
-                        output_row(OutputIndex::new(1), &second),
-                    ],
-                    checkpoint,
-                })
+                .commit(output_commit(&current, [&first, &second]))
                 .await
                 .unwrap();
             assert_eq!(delivery.next_batch().await.outputs.len(), 2);
@@ -6099,31 +6027,8 @@ mod tests {
                 .unwrap();
 
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            emitted[0] = first.reference();
-            emitted[1] = second.reference();
-            let checkpoint = Checkpoint::new(
-                current.epoch(),
-                current.generation(),
-                current.archive_layout(),
-                current.floor(),
-                current.history(),
-                current.history_index(),
-                current.ordered().to_vec(),
-                emitted,
-                Some(OutputIndex::new(1)),
-            )
-            .unwrap();
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: vec![
-                        output_row(OutputIndex::ZERO, &first),
-                        output_row(OutputIndex::new(1), &second),
-                    ],
-                    checkpoint,
-                })
+                .commit(output_commit(&current, [&first, &second]))
                 .await
                 .unwrap();
 
@@ -7046,59 +6951,17 @@ mod tests {
             .await
             .unwrap();
 
-            let mut first_emitted = current.emitted().to_vec();
-            first_emitted[0] = first.reference();
-            let first_checkpoint = Checkpoint::new(
-                current.epoch(),
-                current.generation(),
-                current.archive_layout(),
-                current.floor(),
-                current.history(),
-                current.history_index(),
-                current.ordered().to_vec(),
-                first_emitted.clone(),
-                Some(OutputIndex::ZERO),
-            )
-            .unwrap();
-            let mut second_emitted = first_emitted;
-            second_emitted[1] = second.reference();
-            let second_checkpoint = Checkpoint::new(
-                current.epoch(),
-                current.generation(),
-                current.archive_layout(),
-                current.floor(),
-                current.history(),
-                current.history_index(),
-                current.ordered().to_vec(),
-                second_emitted,
-                Some(OutputIndex::new(1)),
-            )
-            .unwrap();
+            let first_commit = output_commit(&current, [&first]);
+            let second_commit = output_commit(&first_commit.checkpoint, [&second]);
 
             let completed_before_pipeline = syncs.completions();
             syncs.arm();
             let first_token = client
-                .start_commit(
-                    Commit {
-                        selected: Vec::new(),
-                        history: Vec::new(),
-                        outputs: vec![output_row(OutputIndex::ZERO, &first)],
-                        checkpoint: first_checkpoint,
-                    },
-                    Vec::new(),
-                )
+                .start_commit(first_commit, Vec::new())
                 .await
                 .unwrap();
             let second_token = client
-                .start_commit(
-                    Commit {
-                        selected: Vec::new(),
-                        history: Vec::new(),
-                        outputs: vec![output_row(OutputIndex::new(1), &second)],
-                        checkpoint: second_checkpoint,
-                    },
-                    Vec::new(),
-                )
+                .start_commit(second_commit, Vec::new())
                 .await
                 .unwrap();
 
@@ -7622,26 +7485,8 @@ mod tests {
                 .await
                 .unwrap();
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            emitted[0] = block.reference();
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: vec![output_row(OutputIndex::ZERO, &block)],
-                    checkpoint: Checkpoint::new(
-                        current.epoch(),
-                        current.generation(),
-                        current.archive_layout(),
-                        current.floor(),
-                        current.history(),
-                        current.history_index(),
-                        current.ordered().to_vec(),
-                        emitted,
-                        Some(OutputIndex::ZERO),
-                    )
-                    .unwrap(),
-                })
+                .commit(output_commit(&current, [&block]))
                 .await
                 .unwrap();
             let gate = reads.arm();
@@ -7783,33 +7628,8 @@ mod tests {
                 .collect::<Vec<_>>();
             client.stage_blocks(&blocks).await.unwrap();
             let current = client.checkpoint().await.unwrap();
-            let mut emitted = current.emitted().to_vec();
-            for block in &blocks {
-                emitted[block.reference().chain().get() as usize] = block.reference();
-            }
-            let checkpoint = Checkpoint::new(
-                current.epoch(),
-                current.generation(),
-                current.archive_layout(),
-                current.floor(),
-                current.history(),
-                current.history_index(),
-                current.ordered().to_vec(),
-                emitted,
-                Some(OutputIndex::new(1)),
-            )
-            .unwrap();
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: blocks
-                        .iter()
-                        .enumerate()
-                        .map(|(index, block)| output_row(OutputIndex::new(index as u64), block))
-                        .collect(),
-                    checkpoint,
-                })
+                .commit(output_commit(&current, &blocks))
                 .await
                 .unwrap();
 
