@@ -535,7 +535,9 @@ pub(crate) struct ViewState<V: Variant, D: Digest> {
     pending_nullifications: BTreeMap<View, Observation>,
     pending_vqcs: BTreeMap<View, Observation>,
     assembled_nullifications: BTreeSet<View>,
-    assembled_vqcs: BTreeSet<VqcTranscript<D>>,
+    /// Latest strictly extending transcript for each target. Per-view aggregation is serialized,
+    /// and completing a job invalidates that view's scan before another candidate is selected.
+    assembled_vqcs: BTreeMap<(View, D), Vec<ArtifactId<D>>>,
     forwarded_nullifications: BTreeSet<View>,
     forwarded_vqcs: BTreeMap<View, CertificateId<D>>,
     forwardable_nullifications: BTreeSet<View>,
@@ -713,7 +715,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             pending_nullifications: BTreeMap::new(),
             pending_vqcs: BTreeMap::new(),
             assembled_nullifications: BTreeSet::new(),
-            assembled_vqcs: BTreeSet::new(),
+            assembled_vqcs: BTreeMap::new(),
             forwarded_nullifications: BTreeSet::new(),
             forwarded_vqcs: BTreeMap::new(),
             forwardable_nullifications: BTreeSet::new(),
@@ -800,6 +802,11 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     #[cfg(test)]
+    pub(crate) fn retained_vqc_transcripts(&self) -> usize {
+        self.assembled_vqcs.len()
+    }
+
+    #[cfg(test)]
     pub(crate) fn retained_exit_proofs(&self) -> BTreeMap<View, ArtifactId<D>> {
         self.slots
             .iter()
@@ -852,8 +859,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         self.pending_nullifications.retain(|view, _| retained(view));
         self.pending_vqcs.retain(|view, _| retained(view));
         self.assembled_nullifications.retain(retained);
-        self.assembled_vqcs
-            .retain(|transcript| retained(&transcript.view));
+        self.assembled_vqcs.retain(|(view, _), _| retained(view));
         self.forwardable_nullifications.retain(retained);
         self.forwardable_vqcs.retain(retained);
         self.ready_certificate_views.retain(retained);
@@ -1790,7 +1796,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                                 .expect("a designation quorum fills the target cohort heap"),
                         )
                         .max(&self.leaders[&(scan.view, target)].observation().cohort());
-                    let limit = if self.longest_assembled_vqc(scan.view, target).is_some() {
+                    let limit = if self.assembled_vqcs.contains_key(&(scan.view, target)) {
                         eligible
                     } else {
                         self.config.view_quorum()
@@ -2115,7 +2121,10 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 let materialized =
                     self.vqc_transcript_materialized::<H>(&leader, &prepared.messages, config);
                 if !valid || exit_covered && materialized {
-                    self.assembled_vqcs.insert(candidate.transcript);
+                    self.assembled_vqcs.insert(
+                        (candidate.transcript.view, candidate.transcript.target),
+                        candidate.transcript.messages,
+                    );
                     rescan = materialized;
                 } else {
                     let id = self.next_certificate_id()?;
@@ -2316,7 +2325,10 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         };
         let view = job.leader.view();
         self.pending_vqcs.remove(&view);
-        self.assembled_vqcs.insert(job.transcript);
+        self.assembled_vqcs.insert(
+            (job.transcript.view, job.transcript.target),
+            job.transcript.messages,
+        );
         self.refresh_view(view);
     }
 
@@ -2920,20 +2932,12 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             })
     }
 
-    fn longest_assembled_vqc(&self, view: View, target: D) -> Option<&VqcTranscript<D>> {
-        self.assembled_vqcs
-            .iter()
-            .filter(|transcript| transcript.view == view && transcript.target == target)
-            .max_by_key(|transcript| transcript.messages.len())
-    }
-
     fn vqc_transcript_is_new(&self, candidate: &VqcTranscript<D>) -> bool {
-        let Some(previous) = self.longest_assembled_vqc(candidate.view, candidate.target) else {
+        let Some(previous) = self.assembled_vqcs.get(&(candidate.view, candidate.target)) else {
             return true;
         };
-        candidate.messages.len() > previous.messages.len()
+        candidate.messages.len() > previous.len()
             && previous
-                .messages
                 .iter()
                 .all(|message| candidate.messages.contains(message))
     }
@@ -3050,7 +3054,9 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         if wait_for_vqc
             && !self.pending_vqcs.contains_key(&scan.view)
             && scan.best_vqc.as_ref().is_some_and(|local| {
-                !self.assembled_vqcs.contains(&local.candidate.transcript)
+                self.assembled_vqcs
+                    .get(&(scan.view, local.candidate.target))
+                    .is_none_or(|messages| *messages != local.candidate.transcript.messages)
                     && (local.candidate.observation.cohort(), 0) <= candidate
             })
         {
