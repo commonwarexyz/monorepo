@@ -18,7 +18,7 @@ use commonware_runtime::{Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
-    future::{Future, pending},
+    future::pending,
     num::NonZeroUsize,
     sync::Arc,
 };
@@ -92,30 +92,6 @@ pub(super) fn channel<D: Digest>(
 struct Completion<D: Digest> {
     key: Key<D>,
     value: Result<Option<Bytes>, Error>,
-}
-
-enum Event<D: Digest> {
-    Completion(Completion<D>),
-    Command(Option<Command<D>>),
-}
-
-async fn next_event<J, C, D>(completion: J, command: C, receive: bool) -> Event<D>
-where
-    J: Future<Output = Completion<D>>,
-    C: Future<Output = Option<Command<D>>>,
-    D: Digest,
-{
-    let command = async move {
-        if receive {
-            command.await
-        } else {
-            pending().await
-        }
-    };
-    select! {
-        completion = completion => Event::Completion(completion),
-        command = command => Event::Command(command),
-    }
 }
 
 struct Actor<H, V, B>
@@ -228,16 +204,19 @@ where
             if !commands_open && self.pending == 0 {
                 return Ok(());
             }
-            match next_event(
-                self.active.next_completed(),
-                self.receiver.commands.recv(),
-                commands_open && self.pending < self.max_pending,
-            )
-            .await
-            {
-                Event::Completion(completion) => self.complete(completion)?,
-                Event::Command(Some(command)) => self.accept(command),
-                Event::Command(None) => commands_open = false,
+            let receive = commands_open && self.pending < self.max_pending;
+            select! {
+                completion = self.active.next_completed() => self.complete(completion)?,
+                command = async {
+                    if receive {
+                        self.receiver.commands.recv().await
+                    } else {
+                        pending().await
+                    }
+                } => match command {
+                    Some(command) => self.accept(command),
+                    None => commands_open = false,
+                },
             }
         }
     }
