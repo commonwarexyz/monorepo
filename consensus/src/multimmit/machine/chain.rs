@@ -1533,9 +1533,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         profile: &Profile<impl Hasher<Digest = D>, V>,
         limit: usize,
         run_limit: usize,
-    ) -> Result<Vec<Arc<SignedTransactionBlock<V, D>>>, ChainError> {
+    ) -> Vec<Arc<SignedTransactionBlock<V, D>>> {
         if !matches!(profile.role(), Role::Validator(_)) || limit == 0 || run_limit == 0 {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         let mut ready = Vec::with_capacity(limit.min(self.chains.len()));
         for offset in 0..self.chains.len() {
@@ -1544,12 +1544,15 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 continue;
             }
             let remaining = limit - ready.len();
-            ready.extend(self.eligible_offered(index, run_limit.min(remaining)));
+            ready.extend(
+                self.eligible_offered(index, run_limit.min(remaining))
+                    .cloned(),
+            );
             if ready.len() == limit {
                 break;
             }
         }
-        Ok(ready)
+        ready
     }
 
     /// Returns one chain's offered eligible run above its durable DA-vote frontier, up to `cap`.
@@ -1558,15 +1561,17 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// the durable `da_voted_run` drops any prefix a not-yet-synced plane still lists as unvoted, so
     /// central never re-proposes a height it already chose. The reducer's safety-extension check is
     /// the final authority on which prefix it reserves.
-    fn eligible_offered(&self, chain: usize, cap: usize) -> Vec<Arc<SignedTransactionBlock<V, D>>> {
+    fn eligible_offered(
+        &self,
+        chain: usize,
+        cap: usize,
+    ) -> impl Iterator<Item = &Arc<SignedTransactionBlock<V, D>>> {
         let voted = self.chains[chain].da_voted_run;
         self.chains[chain]
             .offered
             .iter()
-            .filter(|block| block.header().height() > voted)
+            .filter(move |block| block.header().height() > voted)
             .take(cap)
-            .cloned()
-            .collect()
     }
 
     /// Returns the chain of the first offered eligible vote `select` accepts, in round-robin order.
@@ -1574,24 +1579,24 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         &self,
         profile: &Profile<impl Hasher<Digest = D>, V>,
         mut select: impl FnMut(ChainId, Height) -> bool,
-    ) -> Result<Option<ChainId>, ChainError> {
+    ) -> Option<ChainId> {
         if !matches!(profile.role(), Role::Validator(_)) {
-            return Ok(None);
+            return None;
         }
         for offset in 0..self.chains.len() {
             let index = (self.next_da_chain + offset) % self.chains.len();
             if !self.chains[index].pending_da_votes.is_empty() {
                 continue;
             }
-            let Some(block) = self.eligible_offered(index, 1).into_iter().next() else {
+            let Some(block) = self.eligible_offered(index, 1).next() else {
                 continue;
             };
             let header = block.header();
             if select(header.chain(), header.height()) {
-                return Ok(Some(header.chain()));
+                return Some(header.chain());
             }
         }
-        Ok(None)
+        None
     }
 
     pub(crate) fn mark_da_vote_reserved(&mut self, header: TransactionBlockHeader<D>) {
