@@ -662,43 +662,15 @@ fn truncate_at(deltas: &[u64], halting: impl Iterator<Item = bool>) -> (Vec<u64>
         .filter(|(_, (_, halting))| *halting)
         .filter_map(|(chain, (delta, _))| delta.checked_add(1).map(|offset| (offset, chain)))
         .min();
-    let max_offset = deltas.iter().copied().max().unwrap_or(0);
-    let last = deltas.len().saturating_sub(1);
-    let back = match cutoff {
-        Some((1, 0)) => None,
-        Some((offset, chain)) if chain > 0 => Some(Coordinate {
-            offset,
-            chain: chain - 1,
-        }),
-        Some((offset, _)) => Some(Coordinate {
-            offset: offset - 1,
-            chain: last,
-        }),
-        None if max_offset == 0 => None,
-        None => Some(Coordinate {
-            offset: max_offset,
-            chain: last,
-        }),
-    };
-    (truncate_deltas(deltas, back), cutoff.is_some())
-}
-
-fn truncate_deltas(deltas: &[u64], back: Option<Coordinate>) -> Vec<u64> {
-    deltas
+    let truncated = deltas
         .iter()
         .enumerate()
-        .map(|(chain, delta)| {
-            let Some(back) = back else {
-                return 0;
-            };
-            let last_offset = if chain <= back.chain {
-                back.offset
-            } else {
-                back.offset.saturating_sub(1)
-            };
-            (*delta).min(last_offset)
+        .map(|(chain, delta)| match cutoff {
+            None => *delta,
+            Some((offset, halt_chain)) => (*delta).min(offset - u64::from(chain >= halt_chain)),
         })
-        .collect()
+        .collect();
+    (truncated, cutoff.is_some())
 }
 
 fn validate_vectors<D: Digest>(left: &[BlockRef<D>], right: &[BlockRef<D>]) -> Result<(), Error> {
@@ -972,6 +944,39 @@ mod tests {
             height: conflict.height(),
         };
         assert_eq!(state.reconcile(slot, conflict), Err(Error::Conflict));
+    }
+
+    #[test]
+    fn cutoff_handles_empty_and_extreme_frontiers() {
+        for (deltas, halting, expected, halted) in [
+            (vec![], vec![], vec![], false),
+            (vec![0, 0], vec![false, false], vec![0, 0], false),
+            (vec![0, u64::MAX], vec![true, false], vec![0, 0], true),
+            (
+                vec![u64::MAX, 0, u64::MAX],
+                vec![false, true, false],
+                vec![1, 0, 0],
+                true,
+            ),
+            (
+                vec![u64::MAX - 1, u64::MAX, u64::MAX],
+                vec![true, false, false],
+                vec![u64::MAX - 1; 3],
+                true,
+            ),
+            (
+                vec![u64::MAX, u64::MAX - 1, u64::MAX],
+                vec![false, true, false],
+                vec![u64::MAX, u64::MAX - 1, u64::MAX - 1],
+                true,
+            ),
+            (vec![u64::MAX; 2], vec![true; 2], vec![u64::MAX; 2], false),
+        ] {
+            assert_eq!(
+                truncate_at(&deltas, halting.into_iter()),
+                (expected, halted)
+            );
+        }
     }
 
     /// One offset-major pass over `deltas` above `floors`, halting at the first empty slot of a
