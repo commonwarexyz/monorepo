@@ -182,7 +182,12 @@ impl<D: Digest> Tally<D> {
             return Err(Error::Transcript);
         }
 
-        let reference_extensions = canonical_reference(leader, &votes);
+        let reference_extensions = canonical_reference(
+            leader,
+            votes
+                .iter()
+                .map(|(_, body)| (body.positions(), body.extensions())),
+        );
         let mut deviations = Vec::new();
         for (signer, body) in &votes {
             let positions = body
@@ -381,7 +386,13 @@ impl<D: Digest> Tally<D> {
         {
             return Err(Error::Transcript);
         }
-        if canonical_reference_parts(leader, &expanded) != self.reference_extensions {
+        if canonical_reference(
+            leader,
+            expanded
+                .iter()
+                .map(|(_, positions, extensions)| (positions.as_slice(), extensions.as_slice())),
+        ) != self.reference_extensions
+        {
             return Err(Error::Transcript);
         }
         Ok(())
@@ -551,39 +562,20 @@ impl<D: Digest> Read for ConflictingVote<D> {
     }
 }
 
-fn canonical_reference<V: Variant, D: Digest>(
+fn canonical_reference<'a, V: Variant, D: Digest>(
     leader: &LeaderBlock<V, D>,
-    votes: &[(Participant, VoteBody<D>)],
-) -> Vec<Extension<D>> {
-    let parts = votes
-        .iter()
-        .map(|(signer, body)| {
-            (
-                *signer,
-                body.positions().to_vec(),
-                body.extensions().to_vec(),
-            )
-        })
-        .collect::<Vec<_>>();
-    canonical_reference_parts(leader, &parts)
-}
-
-type ExpandedVote<D> = (Participant, Vec<Position>, Vec<Extension<D>>);
-
-fn canonical_reference_parts<V: Variant, D: Digest>(
-    leader: &LeaderBlock<V, D>,
-    votes: &[ExpandedVote<D>],
+    votes: impl IntoIterator<Item = (&'a [Position], &'a [Extension<D>])>,
 ) -> Vec<Extension<D>> {
     let mut standard_candidates = BTreeMap::<Vec<Extension<D>>, usize>::new();
     let mut all_candidates = BTreeMap::<Vec<Extension<D>>, usize>::new();
-    for (_, positions, extensions) in votes {
-        *all_candidates.entry(extensions.clone()).or_default() += 1;
+    for (positions, extensions) in votes {
+        *all_candidates.entry(extensions.to_vec()).or_default() += 1;
         let at_tips = positions
             .iter()
             .zip(leader.proposals())
             .all(|(position, proposal)| position.get() == proposal.payloads().len() as u32);
         if at_tips {
-            *standard_candidates.entry(extensions.clone()).or_default() += 1;
+            *standard_candidates.entry(extensions.to_vec()).or_default() += 1;
         }
     }
 
