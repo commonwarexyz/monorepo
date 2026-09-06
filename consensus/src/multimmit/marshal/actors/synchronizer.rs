@@ -3322,6 +3322,28 @@ mod tests {
         .unwrap()
     }
 
+    async fn genesis_actor(committee: &Committee<MinPk>, max: usize) -> TestSynchronizer {
+        let genesis = committee.config.genesis();
+        let history = genesis_record(committee);
+        let mut actor = actor(
+            checkpoint(
+                committee.config.epoch(),
+                genesis_history::<Sha256>(genesis),
+                genesis.tips().to_vec(),
+                genesis.tips().to_vec(),
+            ),
+            vec![Vec::new(); committee.codec().chains()],
+            committee.codec(),
+            max,
+        )
+        .await;
+        actor
+            .fetcher
+            .histories
+            .push((history.commitment::<Sha256>(), history));
+        actor
+    }
+
     async fn commit_opening(actor: &mut TestSynchronizer, link: HistoryLink<Sha256>) {
         let mut batch = PublicationBatch::new(actor.max_commit_outputs, 0);
         actor.process_opening(link, &mut batch).await.unwrap();
@@ -4395,26 +4417,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             const HINTS: usize = 64;
             let committee = committee(17, 2, Limits::new(2, 1).unwrap());
-            let genesis = committee.config.genesis();
             let proof = Arc::new(committee.lqc(1));
             let id = proof.id::<Sha256>();
-            let history = genesis_record(&committee);
-            let mut actor = actor(
-                checkpoint(
-                    committee.config.epoch(),
-                    genesis_history::<Sha256>(genesis),
-                    genesis.tips().to_vec(),
-                    genesis.tips().to_vec(),
-                ),
-                vec![Vec::new(), Vec::new()],
-                committee.codec(),
-                4,
-            )
-            .await;
-            actor
-                .fetcher
-                .histories
-                .push((history.commitment::<Sha256>(), Arc::clone(&history)));
+            let actor = genesis_actor(&committee, 4).await;
             let commit_calls = Arc::clone(&actor.catalog.commit_calls);
             let (commands, receiver) = mailbox::new(
                 context,
@@ -4441,28 +4446,11 @@ mod tests {
     fn run_batches_distinct_queued_synchronization_hints() {
         deterministic::Runner::default().start(|context| async move {
             let committee = committee(18, 2, Limits::new(2, 1).unwrap());
-            let genesis = committee.config.genesis();
             let first = Arc::new(committee.lqc(1));
             let second = Arc::new(committee.lqc(2));
             let first_id = first.id::<Sha256>();
             let second_id = second.id::<Sha256>();
-            let history = genesis_record(&committee);
-            let mut actor = actor(
-                checkpoint(
-                    committee.config.epoch(),
-                    genesis_history::<Sha256>(genesis),
-                    genesis.tips().to_vec(),
-                    genesis.tips().to_vec(),
-                ),
-                vec![Vec::new(), Vec::new()],
-                committee.codec(),
-                4,
-            )
-            .await;
-            actor
-                .fetcher
-                .histories
-                .push((history.commitment::<Sha256>(), Arc::clone(&history)));
+            let actor = genesis_actor(&committee, 4).await;
             let commit_calls = Arc::clone(&actor.catalog.commit_calls);
             let history_calls = Arc::clone(&actor.fetcher.history_calls);
             let (commands, receiver) = mailbox::new(context, NonZeroUsize::new(2).unwrap());
@@ -4506,7 +4494,6 @@ mod tests {
                     .assemble_lqc::<Sha256, _>(leader.block().clone(), &votes, &Sequential)
                     .unwrap(),
             );
-            let genesis_record = genesis_record(&committee);
             let parent_record = Arc::new(
                 TipRecord::at_tips(parent.leader().history(), genesis.tips().to_vec()).unwrap(),
             );
@@ -4514,22 +4501,11 @@ mod tests {
                 parent_record.commitment::<Sha256>(),
                 higher.leader().history()
             );
-            let mut actor = actor(
-                checkpoint(
-                    committee.config.epoch(),
-                    genesis_history::<Sha256>(genesis),
-                    genesis.tips().to_vec(),
-                    genesis.tips().to_vec(),
-                ),
-                vec![Vec::new(), Vec::new()],
-                committee.codec(),
-                4,
-            )
-            .await;
-            actor.fetcher.histories = vec![
-                (genesis_record.commitment::<Sha256>(), genesis_record),
-                (parent_record.commitment::<Sha256>(), parent_record),
-            ];
+            let mut actor = genesis_actor(&committee, 4).await;
+            actor
+                .fetcher
+                .histories
+                .push((parent_record.commitment::<Sha256>(), parent_record));
             let selected = Arc::clone(&actor.catalog.selected_calls);
             let history_calls = Arc::clone(&actor.fetcher.history_calls);
             let higher_id = higher.id::<Sha256>();
@@ -4561,26 +4537,9 @@ mod tests {
     fn run_pipelines_commit_across_live_synchronization_passes() {
         deterministic::Runner::default().start(|context| async move {
             let committee = committee(22, 2, Limits::new(2, 1).unwrap());
-            let genesis = committee.config.genesis();
             let first = Arc::new(committee.lqc(1));
             let second = Arc::new(committee.lqc(2));
-            let history = genesis_record(&committee);
-            let mut actor = actor(
-                checkpoint(
-                    committee.config.epoch(),
-                    genesis_history::<Sha256>(genesis),
-                    genesis.tips().to_vec(),
-                    genesis.tips().to_vec(),
-                ),
-                vec![Vec::new(), Vec::new()],
-                committee.codec(),
-                4,
-            )
-            .await;
-            actor
-                .fetcher
-                .histories
-                .push((history.commitment::<Sha256>(), Arc::clone(&history)));
+            let mut actor = genesis_actor(&committee, 4).await;
             let waiters = Arc::new(Mutex::new(VecDeque::new()));
             actor.catalog.commit_waiters = Some(Arc::clone(&waiters));
             let commit_calls = Arc::clone(&actor.catalog.commit_calls);
@@ -4636,29 +4595,12 @@ mod tests {
     fn run_preserves_distinct_same_view_finality() {
         deterministic::Runner::default().start(|context| async move {
             let committee = committee(21, 2, Limits::new(2, 1).unwrap());
-            let genesis = committee.config.genesis();
             let first = lqc(&committee, 1, 0..5);
             let second = lqc(&committee, 1, 1..6);
             let first_id = first.id::<Sha256>();
             let second_id = second.id::<Sha256>();
             assert_ne!(first_id, second_id);
-            let history = genesis_record(&committee);
-            let mut actor = actor(
-                checkpoint(
-                    committee.config.epoch(),
-                    genesis_history::<Sha256>(genesis),
-                    genesis.tips().to_vec(),
-                    genesis.tips().to_vec(),
-                ),
-                vec![Vec::new(), Vec::new()],
-                committee.codec(),
-                4,
-            )
-            .await;
-            actor
-                .fetcher
-                .histories
-                .push((history.commitment::<Sha256>(), Arc::clone(&history)));
+            let actor = genesis_actor(&committee, 4).await;
             let selected = Arc::clone(&actor.catalog.selected_calls);
             let (commands, receiver) = mailbox::new(context, NonZeroUsize::new(2).unwrap());
             for (id, proof) in [(first_id, first), (second_id, second)] {
