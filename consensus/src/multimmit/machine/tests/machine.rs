@@ -2639,45 +2639,7 @@ fn lqc_completion_must_match_the_selected_vote_transcript() {
     let profile = profile_for(Role::Observer, 6, 2);
     let (mut machine, _) = start_profile(profile);
     let proposed = leader(&machine, 2);
-    let proposal = observe(
-        &mut machine,
-        Artifact::LeaderBlock(SignedLeaderBlock::new(proposed.clone(), attestation(0))),
-    );
-    complete(&mut machine, &proposal, true);
-    let mut aggregate = None;
-    let mut vqc_aggregate = None;
-    for signer in 0..5 {
-        let artifact = Artifact::Vote(view_vote(&machine, &proposed, signer));
-        let vote = observe(&mut machine, artifact);
-        let step = complete_with_step(&mut machine, &vote, true);
-        aggregate = aggregate.or_else(|| {
-            step.capabilities().iter().find_map(|effect| match effect {
-                Capability::Leader(LeaderCapability::AggregateLqc(job)) => Some(job.clone()),
-                _ => None,
-            })
-        });
-        vqc_aggregate = vqc_aggregate.or_else(|| {
-            step.capabilities().iter().find_map(|effect| match effect {
-                Capability::Leader(LeaderCapability::AggregateVqc(job)) => Some(job.clone()),
-                _ => None,
-            })
-        });
-        let (effects, _) = drive_poll_and_persist(&mut machine, step);
-        aggregate = aggregate.or_else(|| {
-            effects.iter().find_map(|effect| match effect {
-                Capability::Leader(LeaderCapability::AggregateLqc(job)) => Some(job.clone()),
-                _ => None,
-            })
-        });
-        vqc_aggregate = vqc_aggregate.or_else(|| {
-            effects.iter().find_map(|effect| match effect {
-                Capability::Leader(LeaderCapability::AggregateVqc(job)) => Some(job.clone()),
-                _ => None,
-            })
-        });
-    }
-    let aggregate = aggregate.unwrap();
-    let vqc_aggregate = vqc_aggregate.unwrap();
+    let (vqc_aggregate, aggregate) = drive_unanimous_votes(&mut machine, &proposed);
 
     let wrong_votes = (1..=5)
         .map(|signer| view_vote(&machine, &proposed, signer))
@@ -2760,33 +2722,7 @@ fn canceled_lqc_completion_is_not_committed_after_forwarding() {
     let profile = profile_for(Role::Observer, 6, 2);
     let (mut machine, _) = start_profile(profile);
     let proposed = leader(&machine, 2);
-    let proposal = observe(
-        &mut machine,
-        Artifact::LeaderBlock(SignedLeaderBlock::new(proposed.clone(), attestation(0))),
-    );
-    complete(&mut machine, &proposal, true);
-
-    let mut vqc_aggregate = None;
-    let mut lqc_aggregate = None;
-    for signer in 0..5 {
-        let vote = Artifact::Vote(view_vote(&machine, &proposed, signer));
-        let vote = observe(&mut machine, vote);
-        let completed = complete_with_step(&mut machine, &vote, true);
-        let (effects, _) = drive_poll_and_persist(&mut machine, completed);
-        for effect in effects {
-            match effect {
-                Capability::Leader(LeaderCapability::AggregateVqc(job)) => {
-                    vqc_aggregate = Some(job)
-                }
-                Capability::Leader(LeaderCapability::AggregateLqc(job)) => {
-                    lqc_aggregate = Some(job)
-                }
-                _ => {}
-            }
-        }
-    }
-    let vqc_aggregate = vqc_aggregate.unwrap();
-    let lqc_aggregate = lqc_aggregate.unwrap();
+    let (vqc_aggregate, lqc_aggregate) = drive_unanimous_votes(&mut machine, &proposed);
 
     let messages = vqc_aggregate.messages().collect::<Vec<_>>();
     let certificate = vqc(&machine, proposed.clone(), &messages);
@@ -5932,10 +5868,14 @@ fn drive_unanimous_votes(
         for effect in effects {
             match effect {
                 Capability::Leader(LeaderCapability::AggregateVqc(job)) => {
-                    vqc.get_or_insert_with(|| job.clone());
+                    let retained = vqc.get_or_insert_with(|| job.clone());
+                    assert_eq!(retained.id(), job.id());
+                    assert_eq!(retained.generation(), job.generation());
                 }
                 Capability::Leader(LeaderCapability::AggregateLqc(job)) => {
-                    lqc.get_or_insert_with(|| job.clone());
+                    let retained = lqc.get_or_insert_with(|| job.clone());
+                    assert_eq!(retained.id(), job.id());
+                    assert_eq!(retained.generation(), job.generation());
                 }
                 _ => {}
             }
