@@ -2038,75 +2038,66 @@ where
         count: usize,
         final_chunk: bool,
     ) -> Result<(), Fatal> {
-        let (scheduled, admissions, complete) = {
-            let sources = self
-                .observation_sources
-                .get_mut(&ticket)
-                .ok_or(StepError::CompletionMismatch)?;
-            let start = sources
-                .items
-                .len()
-                .checked_sub(count)
-                .ok_or(StepError::CompletionMismatch)?;
-            let classified = match status {
-                StepStatus::Observed(results) => {
-                    if results.len() != count {
-                        return Err(StepError::CompletionMismatch.into());
-                    }
-                    let consumed = sources.items.drain(start..).rev();
-                    results
-                        .iter()
-                        .copied()
-                        .zip(consumed)
-                        .map(|(result, (source, kind))| (result, source, kind))
-                        .collect::<Vec<_>>()
-                }
-                _ => {
-                    sources.items.truncate(start);
-                    Vec::new()
-                }
-            };
-            let scheduled = classified
-                .iter()
-                .filter_map(|(result, source, _)| {
-                    (result.status() == ObservationStatus::Scheduled)
-                        .then_some((result.observation(), source.clone()))
-                })
-                .collect::<Vec<_>>();
-            let admissions = classified
-                .into_iter()
-                .filter_map(|(result, _, kind)| kind.map(|kind| (kind, result.status())))
-                .collect::<Vec<_>>();
-            (scheduled, admissions, sources.items.is_empty())
-        };
-        if final_chunk != complete {
+        let sources = self
+            .observation_sources
+            .get_mut(&ticket)
+            .ok_or(StepError::CompletionMismatch)?;
+        let start = sources
+            .items
+            .len()
+            .checked_sub(count)
+            .ok_or(StepError::CompletionMismatch)?;
+        if let StepStatus::Observed(results) = status
+            && results.len() != count
+        {
             return Err(StepError::CompletionMismatch.into());
         }
+        if final_chunk != (start == 0) {
+            sources.items.truncate(start);
+            return Err(StepError::CompletionMismatch.into());
+        }
+        let result = match status {
+            StepStatus::Observed(results) => {
+                for (result, (_, kind)) in results.iter().zip(sources.items[start..].iter().rev()) {
+                    if let Some(kind) = kind {
+                        self.metrics
+                            .view_proof_admissions
+                            .get_or_create(&ViewProofAdmission {
+                                source: ViewProofSource::Network,
+                                kind: *kind,
+                                outcome: view_proof_admission_outcome(result.status()),
+                            })
+                            .inc();
+                    }
+                }
+                sources
+                    .items
+                    .drain(start..)
+                    .rev()
+                    .zip(results.iter())
+                    .try_for_each(|((source, _), result)| {
+                        if result.status() == ObservationStatus::Scheduled
+                            && self
+                                .verification_sources
+                                .insert(result.observation(), source)
+                                .is_some()
+                        {
+                            return Err(CoreError::SchedulerInvariant.into());
+                        }
+                        Ok(())
+                    })
+            }
+            _ => {
+                sources.items.truncate(start);
+                Ok(())
+            }
+        };
         if final_chunk {
             self.observation_sources
                 .remove(&ticket)
                 .ok_or(StepError::CompletionMismatch)?;
         }
-        for (kind, status) in admissions {
-            self.metrics
-                .view_proof_admissions
-                .get_or_create(&ViewProofAdmission {
-                    source: ViewProofSource::Network,
-                    kind,
-                    outcome: view_proof_admission_outcome(status),
-                })
-                .inc();
-        }
-        for (observation, source) in scheduled {
-            if self
-                .verification_sources
-                .insert(observation, source)
-                .is_some()
-            {
-                return Err(CoreError::SchedulerInvariant.into());
-            }
-        }
-        Ok(())
+        result
     }
 
     fn dispatch_transition(
