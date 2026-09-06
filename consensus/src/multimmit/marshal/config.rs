@@ -760,53 +760,48 @@ where
         )
         .await
         .map_err(|error| error.to_string())?;
-        let (promoter_client, promoter_receiver, promotion_store) =
-            if self.finalized_blocks == ArchiveMode::Immutable {
-                let (client, receiver) = promoter::channel(
-                    context.child("promoter").child("mailbox"),
-                    NonZeroUsize::MIN,
-                );
-                let bodies: FinalBody<T, E, H, B> = FinalizedArchive::init_immutable(
-                    context.child("final_block_bodies"),
-                    self.archive
-                        .immutable(name("final_block_bodies"), self.body_codec_config.clone()),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                let mut promotion = Metadata::init_bounded(
-                    context.child("block_promotion"),
-                    metadata::Config {
-                        partition: name("block_promotion"),
-                        codec_config: chains,
-                    },
-                    self.max_checkpoint_bytes,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                if promotion.get(&Unit).is_none() {
-                    if !fresh && stored_checkpoint.committed().is_some() {
-                        return Err("immutable promotion state is missing".into());
-                    }
-                    promotion = promotion
-                        .put_sync(
-                            Unit,
-                            PromotionState::new(
-                                stored_checkpoint.committed(),
-                                stored_checkpoint.emitted().to_vec(),
-                                vec![stored_checkpoint.generation(); chains],
-                            ),
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
+        let promoter = if self.finalized_blocks == ArchiveMode::Immutable {
+            let (client, receiver) = promoter::channel(
+                context.child("promoter").child("mailbox"),
+                NonZeroUsize::MIN,
+            );
+            let bodies: FinalBody<T, E, H, B> = FinalizedArchive::init_immutable(
+                context.child("final_block_bodies"),
+                self.archive
+                    .immutable(name("final_block_bodies"), self.body_codec_config.clone()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let mut promotion = Metadata::init_bounded(
+                context.child("block_promotion"),
+                metadata::Config {
+                    partition: name("block_promotion"),
+                    codec_config: chains,
+                },
+                self.max_checkpoint_bytes,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            if promotion.get(&Unit).is_none() {
+                if !fresh && stored_checkpoint.committed().is_some() {
+                    return Err("immutable promotion state is missing".into());
                 }
-                (
-                    Some(client),
-                    Some(receiver),
-                    Some(PromotionStore::new(bodies, promotion)?),
-                )
-            } else {
-                (None, None, None)
-            };
+                promotion = promotion
+                    .put_sync(
+                        Unit,
+                        PromotionState::new(
+                            stored_checkpoint.committed(),
+                            stored_checkpoint.emitted().to_vec(),
+                            vec![stored_checkpoint.generation(); chains],
+                        ),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Some((client, receiver, PromotionStore::new(bodies, promotion)?))
+        } else {
+            None
+        };
         let (catalog, catalog_handle) = catalog::spawn(
             actor_context,
             self.catalog_mailbox_size,
@@ -819,7 +814,7 @@ where
             delivery,
             delivery_generation,
             durable_acknowledged,
-            promoter_client.clone(),
+            promoter.as_ref().map(|(client, _, _)| client.clone()),
             self.max_hot_block_bytes,
             self.max_materialized_block_bytes,
             fl,
@@ -838,20 +833,22 @@ where
             .checkpoint()
             .await
             .map_err(|error| error.to_string())?;
-        let promoter_handle = match (promotion_store, promoter_receiver) {
-            (Some(store), Some(receiver)) => Some(promoter::spawn(
-                context.child("promoter"),
-                catalog.clone(),
-                store,
-                receiver,
-                checkpoint.committed(),
-                checkpoint.generation(),
-                checkpoint.emitted().to_vec(),
-                self.max_commit_outputs,
-                self.max_commit_block_bytes,
-            )),
-            (None, None) => None,
-            _ => unreachable!("promoter storage and mailbox are allocated together"),
+        let (promoter_client, promoter_handle) = match promoter {
+            Some((client, receiver, store)) => {
+                let handle = promoter::spawn(
+                    context.child("promoter"),
+                    catalog.clone(),
+                    store,
+                    receiver,
+                    checkpoint.committed(),
+                    checkpoint.generation(),
+                    checkpoint.emitted().to_vec(),
+                    self.max_commit_outputs,
+                    self.max_commit_block_bytes,
+                );
+                (Some(client), Some(handle))
+            }
+            None => (None, None),
         };
         Ok((
             catalog,
