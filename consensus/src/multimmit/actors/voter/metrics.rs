@@ -226,321 +226,273 @@ const ENCODED_BYTES: [f64; 12] = [
 
 impl Metrics {
     pub fn new<E: MetricsTrait>(context: &E, chain_count: usize) -> Self {
-        let stale = context.counter("stale", "stale completions observed by the machine");
-        let fatal = context.counter("fatal", "fatal epoch failures");
-        let publications = context.gauge(
-            "publications",
-            "outstanding durable publications under retry",
-        );
-        let retained_events = context.gauge(
-            "retained_events",
-            "journal events retained since the newest recovery base",
-        );
-        let staged_batches = context.gauge(
-            "staged_batches",
-            "durable batches awaiting journal acknowledgement",
-        );
-        let retained_artifacts = context.gauge(
-            "retained_artifacts",
-            "artifacts pinned by durable safety state",
-        );
-        let nullification_suffix = context.gauge(
-            "nullification_suffix",
-            "exact nullifications retained above the proposal anchor",
-        );
-        let artifact_cache_occupancy = context.gauge(
-            "artifact_cache_occupancy",
-            "retained artifacts plus local protocol reservations",
-        );
-        let artifact_cache_capacity = context.gauge(
-            "artifact_cache_capacity",
-            "configured artifact cache capacity, the denominator of cache saturation",
-        );
-        let remote_artifact_capacity = context.gauge(
-            "remote_artifact_capacity",
-            "artifact capacity available to untrusted non-proof ingress",
-        );
-        let local_artifact_capacity = context.gauge(
-            "local_artifact_capacity",
-            "artifact capacity available to locally authorized non-proof work",
-        );
-        let verification_jobs =
-            context.gauge("verification_jobs", "machine verification jobs in flight");
-        let verification_job_capacity = context.gauge(
-            "verification_job_capacity",
-            "configured verification-job capacity, the denominator of pool saturation",
-        );
-        let future_artifacts = context.gauge("future_artifacts", "retained future-view artifacts");
-        let current_view = context.gauge("current_view", "current leader-chain view");
-        let retired_view = context.gauge("retired_view", "retired leader-chain view floor");
-        let finality_floor = context.gauge("finality_floor", "durable L-QC signing floor");
-        let proposal_anchor_view =
-            context.gauge("proposal_anchor_view", "leader-chain proposal anchor view");
-        let produced_blocks = context.gauge("produced_blocks", "locally produced blocks");
-        let producer_pipeline_blocked = context.gauge(
-            "producer_pipeline_blocked",
-            "whether the local producer is blocked at its DA pipeline limit",
-        );
-        let build_active_gauge =
-            context.gauge("build_active", "local application build slot occupancy");
-        let custody_active_gauge = context.gauge(
-            "custody_active",
-            "local producer bodies entering validated durable custody",
-        );
-        let chains = (0..chain_count)
-            .map(|chain| {
-                let chain_context = context.child("chains").with_attribute("chain", chain);
-                ChainMetrics::new(&chain_context)
-            })
-            .collect();
-        let chain_certified_floor = context.gauge(
-            "chain_certified_floor",
-            "lowest DA-certified height across producer chains",
-        );
-        let chain_da_voted_floor = context.gauge(
-            "chain_da_voted_floor",
-            "lowest locally DA-voted height across producer chains",
-        );
-        let chain_known_floor = context.gauge(
-            "chain_known_floor",
-            "lowest locally known height across producer chains",
-        );
-        let lagging_chains = context.gauge(
-            "lagging_chains",
-            "producer chains finalized below the highest finalized chain",
-        );
-        let headers_after_seal = context.gauge(
-            "headers_after_seal",
-            "verified headers admitted while the local sealed proposal's view was current",
-        );
-        let header_restarts = context.gauge(
-            "header_restarts",
-            "proposal-pass restarts triggered by verified header admissions",
-        );
-        let view_timeouts = context.counter("view_timeouts", "leader-chain view timeouts");
-        let observation_wait = context.histogram(
-            "observation_wait",
-            "batcher hand-off to voter ingestion of one observation cohort",
-            LATENCY,
-        );
-        let busy_micros = context.counter(
-            "busy_micros",
-            "microseconds the voter thread spent inside core service cycles",
-        );
-        let view_timer_armed = context.gauge(
-            "view_timer_armed",
-            "whether the current leader-chain view timer is armed",
-        );
-        let view_timeout_cutoff_vote = context.gauge(
-            "view_timeout_cutoff_vote",
-            "whether the current view timeout selected an ordinary vote",
-        );
-        let view_timeout_cutoff_timeout = context.gauge(
-            "view_timeout_cutoff_timeout",
-            "whether the current view timeout selected NoVote and Nullify",
-        );
-        let view_proof_admissions = context.family(
-            "view_proof_admissions",
-            "self-certifying view proofs classified before verification",
-        );
-        for source in ViewProofAdmission::SOURCES {
-            for kind in ViewProofAdmission::KINDS {
-                for outcome in ViewProofAdmission::OUTCOMES {
-                    let _ = view_proof_admissions.get_or_create(&ViewProofAdmission {
-                        source,
-                        kind,
-                        outcome,
-                    });
-                }
-            }
-        }
-        let production_stalls =
-            context.counter("production_stalls", "local producer deadlines reached");
-        let builds = context.counter("builds", "application blocks produced");
-        let build_declines = context.counter("build_declines", "application builds declined");
-        let invalid_blocks = context.counter("invalid_blocks", "application blocks rejected");
-        let unavailable_validations = context.counter(
-            "unavailable_validations",
-            "block validations the application ended without a verdict",
-        );
-        let forwarded_nullifications = context.counter(
-            "nullifications",
-            "nullification certificates durably selected for forwarding",
-        );
-        let relay_attempts = context.counter(
-            "relay_attempts",
-            "transaction-block Relay broadcasts requested by durable publications",
-        );
-        let relay_closed = context.counter(
-            "relay_closed",
-            "transaction-block Relay broadcasts rejected by a closed application endpoint",
-        );
-        let transmissions = context.family(
-            "transmissions",
-            "protocol messages accepted by the network by plane and recipient",
-        );
-        let transmitted_bytes = context.family(
-            "transmitted_bytes",
-            "protocol bytes accepted by the network by plane and recipient",
-        );
-        let retransmitted_bytes = context.family(
-            "retransmitted_bytes",
-            "protocol bytes accepted by the network for publication retries, by plane",
-        );
-        for plane in Traffic::VOTER {
-            let _ = transmissions.get_or_create(&plane);
-            let _ = transmitted_bytes.get_or_create(&plane);
-            let _ = retransmitted_bytes.get_or_create(&plane);
-        }
-        let da_vote_latency = context.histogram(
-            "da_vote_latency",
-            "time from first network observation of a transaction block to its DA-vote signing",
-            WAN_LATENCY,
-        );
-        let da_recovery_latency = context.histogram(
-            "da_recovery_latency",
-            "CPU latency of DA certificate recovery",
-            histogram::Buckets::CRYPTOGRAPHY,
-        );
-        let da_recovery_fallbacks = context.counter(
-            "da_recovery_fallbacks",
-            "DA recoveries that failed their group check and verified shares individually",
-        );
-        let nullification_recovery_latency = context.histogram(
-            "nullification_recovery_latency",
-            "CPU latency of nullification certificate recovery",
-            histogram::Buckets::CRYPTOGRAPHY,
-        );
-        let round_latency =
-            context.histogram("round_latency", "leader-chain round latency", WAN_LATENCY);
-        let vqc_latency = context.histogram(
-            "vqc_latency",
-            "leader-observed V-QC formation latency",
-            WAN_LATENCY,
-        );
-        let lqc_latency = context.histogram(
-            "lqc_latency",
-            "leader-observed L-QC formation latency",
-            WAN_LATENCY,
-        );
-        let build_latency =
-            context.histogram("build_latency", "application build latency", LATENCY);
-        let validation_latency = context.histogram(
-            "validation_latency",
-            "application validation latency",
-            WAN_LATENCY,
-        );
-        let proposal_payloads = context.histogram(
-            "proposal_payloads",
-            "payload entries proposed by one signed leader block, summed over chains",
-            COVERAGE,
-        );
-        let proposal_certified_anchors = context.histogram(
-            "proposal_certified_anchors",
-            "chains one signed leader block anchors at a DA certificate",
-            COVERAGE,
-        );
-        let vote_positions = context.histogram(
-            "vote_positions",
-            "proposal positions endorsed by one signed ordinary vote, summed over chains",
-            COVERAGE,
-        );
-        let empty_votes = context.counter(
-            "empty_votes",
-            "signed ordinary votes endorsing no positions and carrying no extensions",
-        );
-        let vote_extensions = context.histogram(
-            "vote_extensions",
-            "extension entries carried by one signed ordinary vote, summed over chains",
-            COVERAGE,
-        );
-        let qc_deviations = context.histogram(
-            "qc_deviations",
-            "deviation records carried by one locally aggregated quorum certificate",
-            COVERAGE,
-        );
-        let qc_bytes = context.histogram(
-            "qc_bytes",
-            "encoded size of one locally aggregated quorum certificate",
-            ENCODED_BYTES,
-        );
-        let verification_wait_fast = context.histogram(
-            "verification_wait_fast",
-            "queue wait of view-critical verification jobs before workers are reserved",
-            histogram::Buckets::LOCAL,
-        );
-        let verification_wait_bulk = context.histogram(
-            "verification_wait_bulk",
-            "queue wait of bulk verification jobs before workers are reserved",
-            histogram::Buckets::LOCAL,
-        );
-
         Self {
-            stale,
-            fatal,
-            publications,
-            retained_events,
-            staged_batches,
-            retained_artifacts,
-            nullification_suffix,
-            artifact_cache_occupancy,
-            artifact_cache_capacity,
-            remote_artifact_capacity,
-            local_artifact_capacity,
-            verification_jobs,
-            verification_job_capacity,
-            future_artifacts,
-            current_view,
-            retired_view,
-            finality_floor,
-            proposal_anchor_view,
-            produced_blocks,
-            producer_pipeline_blocked,
-            build_active_gauge,
-            custody_active_gauge,
-            chains,
-            chain_certified_floor,
-            chain_da_voted_floor,
-            chain_known_floor,
-            lagging_chains,
-            headers_after_seal,
-            header_restarts,
-            view_timeouts,
-            busy_micros,
-            observation_wait,
-            view_timer_armed,
-            view_timeout_cutoff_vote,
-            view_timeout_cutoff_timeout,
-            view_proof_admissions,
-            production_stalls,
-            builds,
-            build_declines,
-            invalid_blocks,
-            unavailable_validations,
-            forwarded_nullifications,
-            relay_attempts,
-            relay_closed,
-            transmissions,
-            transmitted_bytes,
-            retransmitted_bytes,
-            da_vote_latency,
-            da_recovery_latency,
-            da_recovery_fallbacks,
-            nullification_recovery_latency,
-            round_latency,
-            vqc_latency,
-            lqc_latency,
-            build_latency,
-            validation_latency,
-            proposal_payloads,
-            proposal_certified_anchors,
-            vote_positions,
-            vote_extensions,
-            empty_votes,
-            qc_deviations,
-            qc_bytes,
-            verification_wait_fast,
-            verification_wait_bulk,
+            stale: context.counter("stale", "stale completions observed by the machine"),
+            fatal: context.counter("fatal", "fatal epoch failures"),
+            publications: context.gauge(
+                "publications",
+                "outstanding durable publications under retry",
+            ),
+            retained_events: context.gauge(
+                "retained_events",
+                "journal events retained since the newest recovery base",
+            ),
+            staged_batches: context.gauge(
+                "staged_batches",
+                "durable batches awaiting journal acknowledgement",
+            ),
+            retained_artifacts: context.gauge(
+                "retained_artifacts",
+                "artifacts pinned by durable safety state",
+            ),
+            nullification_suffix: context.gauge(
+                "nullification_suffix",
+                "exact nullifications retained above the proposal anchor",
+            ),
+            artifact_cache_occupancy: context.gauge(
+                "artifact_cache_occupancy",
+                "retained artifacts plus local protocol reservations",
+            ),
+            artifact_cache_capacity: context.gauge(
+                "artifact_cache_capacity",
+                "configured artifact cache capacity, the denominator of cache saturation",
+            ),
+            remote_artifact_capacity: context.gauge(
+                "remote_artifact_capacity",
+                "artifact capacity available to untrusted non-proof ingress",
+            ),
+            local_artifact_capacity: context.gauge(
+                "local_artifact_capacity",
+                "artifact capacity available to locally authorized non-proof work",
+            ),
+            verification_jobs: context
+                .gauge("verification_jobs", "machine verification jobs in flight"),
+            verification_job_capacity: context.gauge(
+                "verification_job_capacity",
+                "configured verification-job capacity, the denominator of pool saturation",
+            ),
+            future_artifacts: context.gauge("future_artifacts", "retained future-view artifacts"),
+            current_view: context.gauge("current_view", "current leader-chain view"),
+            retired_view: context.gauge("retired_view", "retired leader-chain view floor"),
+            finality_floor: context.gauge("finality_floor", "durable L-QC signing floor"),
+            proposal_anchor_view: context
+                .gauge("proposal_anchor_view", "leader-chain proposal anchor view"),
+            produced_blocks: context.gauge("produced_blocks", "locally produced blocks"),
+            producer_pipeline_blocked: context.gauge(
+                "producer_pipeline_blocked",
+                "whether the local producer is blocked at its DA pipeline limit",
+            ),
+            build_active_gauge: context
+                .gauge("build_active", "local application build slot occupancy"),
+            custody_active_gauge: context.gauge(
+                "custody_active",
+                "local producer bodies entering validated durable custody",
+            ),
+            chains: (0..chain_count)
+                .map(|chain| {
+                    let chain_context = context.child("chains").with_attribute("chain", chain);
+                    ChainMetrics::new(&chain_context)
+                })
+                .collect(),
+            chain_certified_floor: context.gauge(
+                "chain_certified_floor",
+                "lowest DA-certified height across producer chains",
+            ),
+            chain_da_voted_floor: context.gauge(
+                "chain_da_voted_floor",
+                "lowest locally DA-voted height across producer chains",
+            ),
+            chain_known_floor: context.gauge(
+                "chain_known_floor",
+                "lowest locally known height across producer chains",
+            ),
+            lagging_chains: context.gauge(
+                "lagging_chains",
+                "producer chains finalized below the highest finalized chain",
+            ),
+            headers_after_seal: context.gauge(
+                "headers_after_seal",
+                "verified headers admitted while the local sealed proposal's view was current",
+            ),
+            header_restarts: context.gauge(
+                "header_restarts",
+                "proposal-pass restarts triggered by verified header admissions",
+            ),
+            view_timeouts: context.counter("view_timeouts", "leader-chain view timeouts"),
+            observation_wait: context.histogram(
+                "observation_wait",
+                "batcher hand-off to voter ingestion of one observation cohort",
+                LATENCY,
+            ),
+            busy_micros: context.counter(
+                "busy_micros",
+                "microseconds the voter thread spent inside core service cycles",
+            ),
+            view_timer_armed: context.gauge(
+                "view_timer_armed",
+                "whether the current leader-chain view timer is armed",
+            ),
+            view_timeout_cutoff_vote: context.gauge(
+                "view_timeout_cutoff_vote",
+                "whether the current view timeout selected an ordinary vote",
+            ),
+            view_timeout_cutoff_timeout: context.gauge(
+                "view_timeout_cutoff_timeout",
+                "whether the current view timeout selected NoVote and Nullify",
+            ),
+            view_proof_admissions: {
+                let view_proof_admissions = context.family(
+                    "view_proof_admissions",
+                    "self-certifying view proofs classified before verification",
+                );
+                for source in ViewProofAdmission::SOURCES {
+                    for kind in ViewProofAdmission::KINDS {
+                        for outcome in ViewProofAdmission::OUTCOMES {
+                            let _ = view_proof_admissions.get_or_create(&ViewProofAdmission {
+                                source,
+                                kind,
+                                outcome,
+                            });
+                        }
+                    }
+                }
+                view_proof_admissions
+            },
+            production_stalls: context
+                .counter("production_stalls", "local producer deadlines reached"),
+            builds: context.counter("builds", "application blocks produced"),
+            build_declines: context.counter("build_declines", "application builds declined"),
+            invalid_blocks: context.counter("invalid_blocks", "application blocks rejected"),
+            unavailable_validations: context.counter(
+                "unavailable_validations",
+                "block validations the application ended without a verdict",
+            ),
+            forwarded_nullifications: context.counter(
+                "nullifications",
+                "nullification certificates durably selected for forwarding",
+            ),
+            relay_attempts: context.counter(
+                "relay_attempts",
+                "transaction-block Relay broadcasts requested by durable publications",
+            ),
+            relay_closed: context.counter(
+                "relay_closed",
+                "transaction-block Relay broadcasts rejected by a closed application endpoint",
+            ),
+            transmissions: {
+                let transmissions = context.family(
+                    "transmissions",
+                    "protocol messages accepted by the network by plane and recipient",
+                );
+                for plane in Traffic::VOTER {
+                    let _ = transmissions.get_or_create(&plane);
+                }
+                transmissions
+            },
+            transmitted_bytes: {
+                let transmitted_bytes = context.family(
+                    "transmitted_bytes",
+                    "protocol bytes accepted by the network by plane and recipient",
+                );
+                for plane in Traffic::VOTER {
+                    let _ = transmitted_bytes.get_or_create(&plane);
+                }
+                transmitted_bytes
+            },
+            retransmitted_bytes: {
+                let retransmitted_bytes = context.family(
+                    "retransmitted_bytes",
+                    "protocol bytes accepted by the network for publication retries, by plane",
+                );
+                for plane in Traffic::VOTER {
+                    let _ = retransmitted_bytes.get_or_create(&plane);
+                }
+                retransmitted_bytes
+            },
+            da_vote_latency: context.histogram(
+                "da_vote_latency",
+                "time from first network observation of a transaction block to its DA-vote signing",
+                WAN_LATENCY,
+            ),
+            da_recovery_latency: context.histogram(
+                "da_recovery_latency",
+                "CPU latency of DA certificate recovery",
+                histogram::Buckets::CRYPTOGRAPHY,
+            ),
+            da_recovery_fallbacks: context.counter(
+                "da_recovery_fallbacks",
+                "DA recoveries that failed their group check and verified shares individually",
+            ),
+            nullification_recovery_latency: context.histogram(
+                "nullification_recovery_latency",
+                "CPU latency of nullification certificate recovery",
+                histogram::Buckets::CRYPTOGRAPHY,
+            ),
+            round_latency: context.histogram(
+                "round_latency",
+                "leader-chain round latency",
+                WAN_LATENCY,
+            ),
+            vqc_latency: context.histogram(
+                "vqc_latency",
+                "leader-observed V-QC formation latency",
+                WAN_LATENCY,
+            ),
+            lqc_latency: context.histogram(
+                "lqc_latency",
+                "leader-observed L-QC formation latency",
+                WAN_LATENCY,
+            ),
+            build_latency: context.histogram("build_latency", "application build latency", LATENCY),
+            validation_latency: context.histogram(
+                "validation_latency",
+                "application validation latency",
+                WAN_LATENCY,
+            ),
+            proposal_payloads: context.histogram(
+                "proposal_payloads",
+                "payload entries proposed by one signed leader block, summed over chains",
+                COVERAGE,
+            ),
+            proposal_certified_anchors: context.histogram(
+                "proposal_certified_anchors",
+                "chains one signed leader block anchors at a DA certificate",
+                COVERAGE,
+            ),
+            vote_positions: context.histogram(
+                "vote_positions",
+                "proposal positions endorsed by one signed ordinary vote, summed over chains",
+                COVERAGE,
+            ),
+            empty_votes: context.counter(
+                "empty_votes",
+                "signed ordinary votes endorsing no positions and carrying no extensions",
+            ),
+            vote_extensions: context.histogram(
+                "vote_extensions",
+                "extension entries carried by one signed ordinary vote, summed over chains",
+                COVERAGE,
+            ),
+            qc_deviations: context.histogram(
+                "qc_deviations",
+                "deviation records carried by one locally aggregated quorum certificate",
+                COVERAGE,
+            ),
+            qc_bytes: context.histogram(
+                "qc_bytes",
+                "encoded size of one locally aggregated quorum certificate",
+                ENCODED_BYTES,
+            ),
+            verification_wait_fast: context.histogram(
+                "verification_wait_fast",
+                "queue wait of view-critical verification jobs before workers are reserved",
+                histogram::Buckets::LOCAL,
+            ),
+            verification_wait_bulk: context.histogram(
+                "verification_wait_bulk",
+                "queue wait of bulk verification jobs before workers are reserved",
+                histogram::Buckets::LOCAL,
+            ),
         }
     }
 }
