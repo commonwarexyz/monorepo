@@ -381,7 +381,7 @@ where
     }
 
     fn execute_resolver(&mut self, capability: ResolverCapability) -> Result<(), Fatal> {
-        match capability {
+        let message = match capability {
             ResolverCapability::Resolve(job) => {
                 let span = info_span!(
                     "multimmit.voter.resolve",
@@ -391,45 +391,14 @@ where
                     generation = job.generation().traced()
                 );
                 let round = Round::new(self.protocol_epoch, self.round_view);
-                if !self
-                    .resolver
-                    .enqueue(resolver::Message::Resolve(ResolveRequest {
-                        span,
-                        round,
-                        job,
-                    }))
-                    .accepted()
-                {
-                    return Err(Fatal::Closed);
-                }
+                resolver::Message::Resolve(ResolveRequest { span, round, job })
             }
-            ResolverCapability::Cancel(job) => {
-                if !self
-                    .resolver
-                    .enqueue(resolver::Message::Cancel { job })
-                    .accepted()
-                {
-                    return Err(Fatal::Closed);
-                }
-            }
-            ResolverCapability::Reject(job) => {
-                if !self
-                    .resolver
-                    .enqueue(resolver::Message::Reject { job })
-                    .accepted()
-                {
-                    return Err(Fatal::Closed);
-                }
-            }
-            ResolverCapability::Prune(through) => {
-                if !self
-                    .resolver
-                    .enqueue(resolver::Message::Prune { through })
-                    .accepted()
-                {
-                    return Err(Fatal::Closed);
-                }
-            }
+            ResolverCapability::Cancel(job) => resolver::Message::Cancel { job },
+            ResolverCapability::Reject(job) => resolver::Message::Reject { job },
+            ResolverCapability::Prune(through) => resolver::Message::Prune { through },
+        };
+        if !self.resolver.enqueue(message).accepted() {
+            return Err(Fatal::Closed);
         }
         Ok(())
     }
