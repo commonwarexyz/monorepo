@@ -32,7 +32,7 @@ const FINALITY_EVIDENCE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_FIN
 pub(super) type PoolKey<D> = (Round, D);
 type VoteArtifacts<V, D> = Arc<[Arc<Artifact<V, D>>]>;
 pub(super) enum FinalityOutput<V: Variant, D: Digest> {
-    Finality(ArtifactId<D>, Observation, Arc<Artifact<V, D>>),
+    Finality(Observation, Arc<Artifact<V, D>>),
 }
 
 type FinalityOutputs<V, D> = Vec<FinalityOutput<V, D>>;
@@ -994,7 +994,6 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             // The verified certificate remains portable consensus evidence and must still reach
             // the durable signing-floor transition.
             return Ok(vec![FinalityOutput::Finality(
-                id,
                 observation,
                 Arc::clone(artifact),
             )]);
@@ -1218,7 +1217,6 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 );
                 if matches!(claim.artifact.as_ref(), Artifact::Lqc(_)) {
                     outputs.push(FinalityOutput::Finality(
-                        id,
                         observation,
                         Arc::clone(&claim.artifact),
                     ));
