@@ -273,27 +273,29 @@ impl Regions {
 
 /// Traversal state of both passes.
 struct Passes {
-    regions: Regions,
+    base: Vec<u64>,
+    boundary: Vec<u64>,
     positional: Coordinates,
     extension: Coordinates,
 }
 
 impl Passes {
-    fn new(regions: Regions, positional: Vec<u64>, extension: Vec<u64>) -> Self {
+    fn new(base: Vec<u64>, boundary: Vec<u64>, positional: Vec<u64>, extension: Vec<u64>) -> Self {
         Self {
+            base,
+            boundary,
             positional: Coordinates::new(positional),
             extension: Coordinates::new(extension),
-            regions,
         }
     }
 
     fn next<D: Digest>(&mut self, target: &[BlockRef<D>]) -> Option<Slot<D>> {
         if let Some(coordinate) = self.positional.next() {
-            return Some(slot_above(&self.regions.base, target, coordinate));
+            return Some(slot_above(&self.base, target, coordinate));
         }
         self.extension
             .next()
-            .map(|coordinate| slot_above(&self.regions.boundary, target, coordinate))
+            .map(|coordinate| slot_above(&self.boundary, target, coordinate))
     }
 
     fn newest_first<'a, D: Digest>(
@@ -302,11 +304,11 @@ impl Passes {
     ) -> impl Iterator<Item = Slot<D>> + 'a {
         self.extension
             .newest_first()
-            .map(move |coordinate| slot_above(&self.regions.boundary, target, coordinate))
+            .map(move |coordinate| slot_above(&self.boundary, target, coordinate))
             .chain(
                 self.positional
                     .newest_first()
-                    .map(move |coordinate| slot_above(&self.regions.base, target, coordinate)),
+                    .map(move |coordinate| slot_above(&self.base, target, coordinate)),
             )
     }
 }
@@ -325,11 +327,14 @@ impl<D: Digest> Horizontal<D> {
         proposed: &[Height],
     ) -> Result<Self, Error> {
         let regions = Regions::new(base, target, proposed)?;
-        let positional = regions.positional.clone();
-        let extension = regions.extension.clone();
         Ok(Self {
             target: target.to_vec(),
-            passes: Passes::new(regions, positional, extension),
+            passes: Passes::new(
+                regions.base,
+                regions.boundary,
+                regions.positional,
+                regions.extension,
+            ),
         })
     }
 }
@@ -391,7 +396,7 @@ impl<D: Digest> FinalSweep<D> {
             target,
             halted: planned < total,
             planned,
-            passes: Passes::new(regions, positional, extension),
+            passes: Passes::new(regions.base, regions.boundary, positional, extension),
         })
     }
 
