@@ -322,44 +322,28 @@ where
             .pending_blocks
             .as_ref()
             .expect("catalog owns pending blocks");
-        if writes.iter().any(|(write, _)| match write {
-            Admission::Block(reference, _) => !pending_blocks.admits(*reference),
-            _ => false,
-        }) {
-            return Err(Error::Invalid("producer block is below the custody floor"));
-        }
-        let mut footprint = writes
-            .iter()
-            .any(|(write, durable)| *durable || matches!(write, Admission::Block(_, _)))
-            .then_some(AdmissionFootprint {
-                lqc: false,
-                history: false,
-                blocks: false,
-            });
+        let mut footprint = AdmissionFootprint {
+            lqc: false,
+            history: false,
+            blocks: false,
+        };
         for (write, durable) in writes {
             match write {
                 Admission::Lqc(..) => {
-                    if *durable {
-                        footprint.as_mut().expect("durable footprint exists").lqc = true;
-                    }
+                    footprint.lqc |= *durable;
                 }
                 Admission::History(..) => {
-                    if *durable {
-                        footprint
-                            .as_mut()
-                            .expect("durable footprint exists")
-                            .history = true;
-                    }
+                    footprint.history |= *durable;
                 }
-                Admission::Block(_, _) => {
-                    footprint
-                        .as_mut()
-                        .expect("block admission creates a durability footprint")
-                        .blocks = true;
+                Admission::Block(reference, _) => {
+                    if !pending_blocks.admits(*reference) {
+                        return Err(Error::Invalid("producer block is below the custody floor"));
+                    }
+                    footprint.blocks = true;
                 }
             }
         }
-        Ok(footprint)
+        Ok((footprint.lqc || footprint.history || footprint.blocks).then_some(footprint))
     }
 
     /// Lends only the journals touched by one admission. Until completion, the catalog may
