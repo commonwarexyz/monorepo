@@ -104,13 +104,13 @@ fn run_profile(storage_delay: bool) -> ProfileRun {
             let started = Instant::now();
             cluster.produce_once();
             block_elapsed += started.elapsed();
-            block_elapsed += cluster.measure_wait_produced(&nodes, target, 600).await;
+            block_elapsed += cluster.wait_produced(&nodes, target, 600).await;
         }
         let started = Instant::now();
         cluster.stop_producing();
         block_elapsed += started.elapsed();
         block_elapsed += cluster
-            .measure_wait_finalized(&nodes, &chains, BLOCKS_PER_CHAIN, 1_200)
+            .wait_finalized(&nodes, &chains, BLOCKS_PER_CHAIN, 1_200)
             .await;
 
         let view_initial_views = collect_views(&cluster, &nodes).await;
@@ -121,7 +121,7 @@ fn run_profile(storage_delay: bool) -> ProfileRun {
             .expect("the profile has engines")
             + VIEW_ADVANCE;
         let (view_elapsed, final_views) = cluster
-            .measure_wait_view(&nodes, View::new(target_view), 12_000)
+            .wait_view(&nodes, View::new(target_view), 12_000)
             .await;
 
         let views = view_initial_views
