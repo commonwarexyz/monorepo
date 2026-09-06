@@ -1000,8 +1000,7 @@ where
         loop {
             let can_drive = driver.journal.has_capacity();
             if can_drive {
-                let span = driver.round_span.clone();
-                if let Err(fatal) = driver.drive_core_cycle().instrument(span).await {
+                if let Err(fatal) = driver.drive_core_cycle().await {
                     self.failed(&fatal);
                     return;
                 }
@@ -1073,8 +1072,7 @@ where
                         }
                     }
                 }
-                let span = driver.round_span.clone();
-                if let Err(fatal) = driver.drive_core_cycle().instrument(span).await {
+                if let Err(fatal) = driver.drive_core_cycle().await {
                     self.failed(&fatal);
                     break;
                 }
@@ -1821,19 +1819,23 @@ where
 
     /// Drains one bounded Core service cycle, then gives attached runtime tasks one turn.
     async fn drive_core_cycle(&mut self) -> Result<(), Fatal> {
+        #[cfg(test)]
+        debug!("test core cycle started");
         let started = self.context.current();
         let mut yielded = false;
         loop {
             if !self.journal.has_capacity() {
                 break;
             }
-            let action = self.machine.next_action(POLL_BUDGET)?;
+            let span = self.round_span.clone();
+            let action = span.in_scope(|| self.machine.next_action(POLL_BUDGET))?;
             match action {
                 CoreTurn::YieldRequired => {
                     self.record_busy(started);
                     reschedule().await;
                     yielded = true;
-                    self.machine.resume_after_yield()?;
+                    self.round_span
+                        .in_scope(|| self.machine.resume_after_yield())?;
                     break;
                 }
                 CoreTurn::Input(serviced) => {
@@ -1874,15 +1876,16 @@ where
                             .remove(&serviced.ticket)
                             .ok_or(CoreError::SchedulerInvariant)?;
                     }
-                    self.maybe_checkpoint().await?;
+                    let span = self.round_span.clone();
+                    self.maybe_checkpoint().instrument(span).await?;
                 }
                 CoreTurn::Work(work) => {
-                    if !self.dispatch_work(work).await? {
+                    if !self.dispatch_work(work).instrument(span).await? {
                         break;
                     }
                 }
                 CoreTurn::Idle => {
-                    self.maybe_checkpoint().await?;
+                    self.maybe_checkpoint().instrument(span).await?;
                     break;
                 }
             }
@@ -1907,6 +1910,8 @@ where
     }
 
     async fn dispatch_work(&mut self, work: CoreWork<V, H::Digest>) -> Result<bool, Fatal> {
+        #[cfg(test)]
+        debug!(view = self.round_view.get(), "test machine-owned work");
         let made_progress = work.work_remaining() || !work.capabilities().is_empty();
         let (capabilities, activities) = work.into_parts();
         self.execute_capabilities(capabilities)?;
@@ -2104,6 +2109,8 @@ where
         &mut self,
         transition: CoreTransition<V, H::Digest>,
     ) -> Result<(), Fatal> {
+        #[cfg(test)]
+        debug!("test captured input dispatch");
         let generation = self.machine.generation();
         if generation > self.core().task_generation() {
             self.clear_generation_runtime();

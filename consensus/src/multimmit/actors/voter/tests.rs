@@ -1445,6 +1445,80 @@ fn ready_application_work_precedes_later_mailbox_traffic() {
     });
 }
 
+#[test_collect_traces]
+fn work_quanta_refresh_round_without_reparenting_async_inputs(traces: TraceStorage) {
+    DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
+        let (mut node, mut build) = Node::start_gated_build(&context, 76, "quantum").await;
+        build.wait_started().await;
+        let (mut certificates, _) = node.peer(1, 2).await;
+        certificates.send(
+            Recipients::One(node.me.clone()),
+            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
+                node.committee.nullification(1),
+            ))
+            .encode(),
+            true,
+        );
+        while node.inspect().await.view() == View::new(1) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        build.release();
+        loop {
+            let events = traces.get_by_level(Level::DEBUG);
+            if events.iter().any(|event| {
+                event.metadata.content == "test captured input dispatch"
+                    && event.spans.first().is_some_and(|span| {
+                        span.content == "multimmit.voter.produce.complete"
+                    })
+            }) {
+                break;
+            }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
+        let events = traces.get_by_level(Level::DEBUG);
+        let mut first_view = None;
+        let mut advanced_in_cycle = false;
+        for event in events.iter() {
+            match event.metadata.content.as_str() {
+                "test core cycle started" => first_view = None,
+                "test machine-owned work" => {
+                    let view = event
+                        .metadata
+                        .fields
+                        .iter()
+                        .find(|(name, _)| name == "view")
+                        .expect("work records its owning view")
+                        .1
+                        .as_str();
+                    advanced_in_cycle |= first_view.is_some_and(|first| first != view);
+                    first_view.get_or_insert(view);
+                    let root = event.spans.last().expect("work has a round root");
+                    assert_eq!(root.content, "multimmit.voter.round");
+                    root.expect_field_exact("view", view).unwrap();
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            advanced_in_cycle,
+            "the round advances between quanta in one cycle"
+        );
+        events
+            .expect_event(|event| {
+                event.metadata.content == "test captured input dispatch"
+                    && event.spans.first().is_some_and(|span| {
+                        span.content == "multimmit.voter.produce.complete"
+                    })
+                    && event.spans.last().is_some_and(|span| {
+                        span.content == "multimmit.voter.round"
+                            && span.expect_field_exact("view", "1").is_ok()
+                    })
+            })
+            .unwrap();
+    });
+}
+
 #[test_traced]
 fn live_admission_preserves_core_local_priority_under_peer_flood() {
     DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
