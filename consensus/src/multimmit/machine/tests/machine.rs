@@ -627,6 +627,24 @@ fn view_vote(
     Vote::new(body, attestation(signer))
 }
 
+fn view_messages(
+    machine: &TestMachine,
+    leader: &LeaderBlock<MinPk, Digest>,
+    voters: &[u32],
+    nonvoters: &[u32],
+) -> Vec<ViewMessage<MinPk, Digest>> {
+    let mut messages = Vec::with_capacity(voters.len() + nonvoters.len());
+    messages.extend(
+        voters
+            .iter()
+            .map(|&signer| ViewMessage::Vote(view_vote(machine, leader, signer))),
+    );
+    messages.extend(nonvoters.iter().map(|&signer| {
+        ViewMessage::NoVote(no_vote(machine, leader.round().view(), signer))
+    }));
+    messages
+}
+
 fn no_vote(machine: &TestMachine, view: View, signer: u32) -> NoVote<MinPk> {
     NoVote::new(
         Round::new(machine.profile().protocol().epoch(), view),
@@ -3523,22 +3541,8 @@ fn invalid_dependency_bound_is_completion_order_independent() {
         let profile = profile_with_resources(Role::Observer, 6, 2, limits);
         let (mut machine, _) = start_profile(profile);
         let proposed = leader(&machine, 1);
-        let message_sets = [
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(1), 3)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(1), 4)),
-            ],
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(1), 3)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(1), 5)),
-            ],
-        ];
+        let message_sets = [[3, 4], [3, 5]]
+            .map(|nonvoters| view_messages(&machine, &proposed, &[0, 1, 2], &nonvoters));
         let mut parents = message_sets
             .into_iter()
             .map(|messages| {
@@ -3618,29 +3622,8 @@ fn dependency_rejection_saturation_preserves_observed_valid_parents() {
         let profile = profile_with_resources(Role::Observer, 6, 2, limits);
         let (mut machine, _) = start_profile(profile);
         let proposed = leader(&machine, 2);
-        let message_sets = [
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 3)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 4)),
-            ],
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 3)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 5)),
-            ],
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 4)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 5)),
-            ],
-        ];
+        let message_sets = [[3, 4], [3, 5], [4, 5]]
+            .map(|nonvoters| view_messages(&machine, &proposed, &[0, 1, 2], &nonvoters));
         let mut parents = message_sets
             .into_iter()
             .map(|messages| {
@@ -3708,29 +3691,8 @@ fn dependency_rejection_saturation_rechecks_failed_providers() {
         let profile = profile_with_resources(Role::Observer, 6, 2, limits);
         let (mut machine, _) = start_profile(profile);
         let proposed = leader(&machine, 2);
-        let message_sets = [
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 3)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 4)),
-            ],
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 3)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 5)),
-            ],
-            vec![
-                ViewMessage::Vote(view_vote(&machine, &proposed, 0)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 1)),
-                ViewMessage::Vote(view_vote(&machine, &proposed, 2)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 4)),
-                ViewMessage::NoVote(no_vote(&machine, View::new(2), 5)),
-            ],
-        ];
+        let message_sets = [[3, 4], [3, 5], [4, 5]]
+            .map(|nonvoters| view_messages(&machine, &proposed, &[0, 1, 2], &nonvoters));
         let parents = message_sets
             .into_iter()
             .map(|messages| Artifact::Vqc(vqc(&machine, proposed.clone(), &messages)))
@@ -3912,22 +3874,8 @@ fn recovered_vote_survives_remote_dependency_rejection_saturation() {
         signer,
     } = recover_vote_signing(resources_with_dependency_waiters(1));
     let parent_leader = leader(&machine, 2);
-    let message_sets = [
-        vec![
-            ViewMessage::Vote(view_vote(&machine, &parent_leader, 0)),
-            ViewMessage::Vote(view_vote(&machine, &parent_leader, 1)),
-            ViewMessage::Vote(view_vote(&machine, &parent_leader, 2)),
-            ViewMessage::NoVote(no_vote(&machine, View::new(2), 3)),
-            ViewMessage::NoVote(no_vote(&machine, View::new(2), 4)),
-        ],
-        vec![
-            ViewMessage::Vote(view_vote(&machine, &parent_leader, 0)),
-            ViewMessage::Vote(view_vote(&machine, &parent_leader, 1)),
-            ViewMessage::Vote(view_vote(&machine, &parent_leader, 2)),
-            ViewMessage::NoVote(no_vote(&machine, View::new(2), 3)),
-            ViewMessage::NoVote(no_vote(&machine, View::new(2), 5)),
-        ],
-    ];
+    let message_sets = [[3, 4], [3, 5]]
+        .map(|nonvoters| view_messages(&machine, &parent_leader, &[0, 1, 2], &nonvoters));
     for messages in message_sets {
         let parent = Artifact::Vqc(vqc(&machine, parent_leader.clone(), &messages));
         let verification = observe(&mut machine, parent);
