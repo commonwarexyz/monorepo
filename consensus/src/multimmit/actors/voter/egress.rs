@@ -72,6 +72,28 @@ struct Entry<P, D: Digest> {
     origin: PublicationOrigin,
 }
 
+impl<P, D: Digest> Entry<P, D> {
+    fn attempt(&mut self, id: EffectId, now: SystemTime, retry_ceiling: Duration) -> Due<P, D> {
+        let retries = self.attempts;
+        let transmit_due = self.next <= now;
+        if transmit_due {
+            self.attempts = self.attempts.saturating_add(1);
+            self.next = now.saturating_add_ext(self.backoff);
+            self.backoff = self.backoff.saturating_mul(2).min(retry_ceiling);
+        }
+        Due {
+            id,
+            generation: self.generation,
+            retries,
+            delivered: self.delivered,
+            transmit_due,
+            relay_due: self.next_relay.is_some_and(|next| next <= now),
+            transmissions: Arc::clone(&self.transmissions),
+            origin: self.origin,
+        }
+    }
+}
+
 /// Encode-once retry state for the machine's outstanding publications.
 pub(super) struct Egress<P, D: Digest> {
     epoch: Epoch,
@@ -306,29 +328,8 @@ impl<P: Clone, D: Digest> Egress<P, D> {
                     .entries
                     .get_mut(&id)
                     .expect("retry deadlines reference live publications");
-                let retries = entry.attempts;
-                let transmit_due = entry.next <= now;
-                if transmit_due {
-                    entry.attempts = entry.attempts.saturating_add(1);
-                    entry.next = now.saturating_add_ext(entry.backoff);
-                    entry.backoff = entry
-                        .backoff
-                        .saturating_mul(2)
-                        .min(self.limits.retry_ceiling);
-                }
-                (
-                    Self::deadline(entry),
-                    Due {
-                        id,
-                        generation: entry.generation,
-                        retries,
-                        delivered: entry.delivered,
-                        transmit_due,
-                        relay_due: entry.next_relay.is_some_and(|next| next <= now),
-                        transmissions: Arc::clone(&entry.transmissions),
-                        origin: entry.origin,
-                    },
-                )
+                let attempt = entry.attempt(id, now, self.limits.retry_ceiling);
+                (Self::deadline(entry), attempt)
             };
             let inserted = self.deadlines.insert((next, id));
             debug_assert!(inserted, "a serviced publication receives one new deadline");
@@ -346,30 +347,8 @@ impl<P: Clone, D: Digest> Egress<P, D> {
         let (prior, next, attempt) = {
             let entry = self.entries.get_mut(&id)?;
             let prior = Self::deadline(entry);
-            let retries = entry.attempts;
-            let transmit_due = entry.next <= now;
-            if transmit_due {
-                entry.attempts = entry.attempts.saturating_add(1);
-                entry.next = now.saturating_add_ext(entry.backoff);
-                entry.backoff = entry
-                    .backoff
-                    .saturating_mul(2)
-                    .min(self.limits.retry_ceiling);
-            }
-            (
-                prior,
-                Self::deadline(entry),
-                Due {
-                    id,
-                    generation: entry.generation,
-                    retries,
-                    delivered: entry.delivered,
-                    transmit_due,
-                    relay_due: entry.next_relay.is_some_and(|next| next <= now),
-                    transmissions: Arc::clone(&entry.transmissions),
-                    origin: entry.origin,
-                },
-            )
+            let attempt = entry.attempt(id, now, self.limits.retry_ceiling);
+            (prior, Self::deadline(entry), attempt)
         };
         let removed = self.deadlines.remove(&(prior, id));
         debug_assert!(removed, "every publication has one retry deadline");
