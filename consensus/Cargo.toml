@@ -45,6 +45,7 @@ rayon.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-conformance.workspace = true
 commonware-consensus = { path = ".", features = ["mocks", "test-utils"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }

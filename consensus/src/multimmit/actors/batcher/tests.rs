@@ -29,21 +29,18 @@ use commonware_p2p::{
     Receiver, Recipients, Sender as P2pSender,
     simulated::{Link, Oracle},
 };
-use commonware_parallel::{Manual, Sequential, Strategy};
+use commonware_parallel::{Sequential, Strategy, mocks::CountingStrategy};
 use commonware_runtime::{
     Clock as _, IoBuf, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
     deterministic::{Context as DeterministicContext, Runner as DeterministicRunner},
 };
+use commonware_utils::probability;
 use std::{
     collections::VecDeque,
     convert::Infallible,
     fmt,
-    future::{Future, pending},
+    future::pending,
     num::NonZeroUsize,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
     time::{Duration, SystemTime},
 };
 use tracing::Span;
@@ -51,222 +48,13 @@ use tracing::Span;
 type TestActor<T, C> =
     Actor<DeterministicContext, Sha256, Ed25519PublicKey, MinPk, RecordingBlocker, T, C>;
 
-#[derive(Clone, Debug)]
-struct StallingStrategy {
-    calls: Arc<AtomicUsize>,
-    stall_at: usize,
-}
-
-impl StallingStrategy {
-    fn new(stall_at: usize) -> Self {
-        Self {
-            calls: Arc::new(AtomicUsize::new(0)),
-            stall_at,
-        }
-    }
-}
-
-impl Strategy for StallingStrategy {
-    fn manual(&self) -> Manual<Self> {
-        Manual::new(self.clone(), NonZeroUsize::MIN)
-    }
-
-    fn spawn<F, T>(&self, operation: F) -> impl Future<Output = T> + Send + 'static
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let stall_at = self.stall_at;
-        let strategy = self.clone();
-        async move {
-            if call == stall_at {
-                pending::<()>().await;
-            }
-            operation(strategy)
-        }
-    }
-
-    fn fold_init<I, INIT, T, R, ID, F, RD>(
-        &self,
-        iter: I,
-        init: INIT,
-        identity: ID,
-        fold_op: F,
-        reduce_op: RD,
-    ) -> R
-    where
-        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-        INIT: Fn() -> T + Send + Sync,
-        T: Send,
-        R: Send,
-        ID: Fn() -> R + Send + Sync,
-        F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-        RD: Fn(R, R) -> R + Send + Sync,
-    {
-        Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
-    }
-
-    fn try_fold<I, R, E, ID, F, RD>(
-        &self,
-        iter: I,
-        identity: ID,
-        fold_op: F,
-        reduce_op: RD,
-    ) -> Result<R, E>
-    where
-        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-        R: Send,
-        E: Send,
-        ID: Fn() -> R + Send + Sync,
-        F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-        RD: Fn(R, R) -> R + Send + Sync,
-    {
-        Sequential.try_fold(iter, identity, fold_op, reduce_op)
-    }
-
-    fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
-    where
-        R: Send,
-        SEQ: FnOnce() -> R + Send,
-        PAR: FnOnce() -> R + Send,
-    {
-        Sequential.run(len, serial, parallel)
-    }
-
-    fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
-    where
-        R: Send,
-        E: Send,
-        SEQ: FnOnce() -> Result<R, E> + Send,
-        PAR: FnOnce() -> Result<R, E> + Send,
-    {
-        Sequential.try_run(len, serial, parallel)
-    }
-
-    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-    where
-        A: FnOnce() -> RA + Send,
-        B: FnOnce() -> RB + Send,
-        RA: Send,
-        RB: Send,
-    {
-        Sequential.join(a, b)
-    }
-
-    fn sort_by<T, C>(&self, items: &mut [T], compare: C)
-    where
-        T: Send,
-        C: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
-    {
-        Sequential.sort_by(items, compare);
-    }
-}
-
-/// A strategy that counts the jobs submitted to it and runs them like [`Sequential`].
-///
-/// Two instances separate the pools an actor was configured with, so a job's execution pool is
-/// observable without a real thread pool.
-#[derive(Clone, Debug, Default)]
-struct CountingStrategy {
-    spawns: Arc<AtomicUsize>,
-}
-
-impl CountingStrategy {
-    /// Returns how many jobs this pool has been handed.
-    fn spawns(&self) -> usize {
-        self.spawns.load(Ordering::SeqCst)
-    }
-}
-
-impl Strategy for CountingStrategy {
-    fn manual(&self) -> Manual<Self> {
-        Manual::new(self.clone(), NonZeroUsize::MIN)
-    }
-
-    fn spawn<F, T>(&self, operation: F) -> impl Future<Output = T> + Send + 'static
-    where
-        F: FnOnce(Self) -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        self.spawns.fetch_add(1, Ordering::SeqCst);
-        let strategy = self.clone();
-        async move { operation(strategy) }
-    }
-
-    fn fold_init<I, INIT, T, R, ID, F, RD>(
-        &self,
-        iter: I,
-        init: INIT,
-        identity: ID,
-        fold_op: F,
-        reduce_op: RD,
-    ) -> R
-    where
-        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-        INIT: Fn() -> T + Send + Sync,
-        T: Send,
-        R: Send,
-        ID: Fn() -> R + Send + Sync,
-        F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-        RD: Fn(R, R) -> R + Send + Sync,
-    {
-        Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
-    }
-
-    fn try_fold<I, R, E, ID, F, RD>(
-        &self,
-        iter: I,
-        identity: ID,
-        fold_op: F,
-        reduce_op: RD,
-    ) -> Result<R, E>
-    where
-        I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-        R: Send,
-        E: Send,
-        ID: Fn() -> R + Send + Sync,
-        F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-        RD: Fn(R, R) -> R + Send + Sync,
-    {
-        Sequential.try_fold(iter, identity, fold_op, reduce_op)
-    }
-
-    fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
-    where
-        R: Send,
-        SEQ: FnOnce() -> R + Send,
-        PAR: FnOnce() -> R + Send,
-    {
-        Sequential.run(len, serial, parallel)
-    }
-
-    fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
-    where
-        R: Send,
-        E: Send,
-        SEQ: FnOnce() -> Result<R, E> + Send,
-        PAR: FnOnce() -> Result<R, E> + Send,
-    {
-        Sequential.try_run(len, serial, parallel)
-    }
-
-    fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-    where
-        A: FnOnce() -> RA + Send,
-        B: FnOnce() -> RB + Send,
-        RA: Send,
-        RB: Send,
-    {
-        Sequential.join(a, b)
-    }
-
-    fn sort_by<T, C>(&self, items: &mut [T], compare: C)
-    where
-        T: Send,
-        C: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
-    {
-        Sequential.sort_by(items, compare);
+#[test]
+fn strategies_count_submissions_before_polling() {
+    for strategy in [CountingStrategy::default(), CountingStrategy::stalling(0)] {
+        assert_eq!(strategy.spawns(), 0);
+        let operation = strategy.spawn(1, |_| ());
+        assert_eq!(strategy.spawns(), 1);
+        drop(operation);
     }
 }
 
@@ -427,8 +215,8 @@ fn stalled_decode_and_identification_workers_do_not_block_control() {
             let committee =
                 Committee::<MinPk>::new(84 + stall_at as u64, 6, Limits::new(2, 1).unwrap());
             let epoch = committee.config.epoch();
-            let strategy = StallingStrategy::new(stall_at);
-            let calls = Arc::clone(&strategy.calls);
+            let strategy = CountingStrategy::stalling(stall_at);
+            let calls = strategy.clone();
             let (actor, mailbox): (
                 Actor<
                     DeterministicContext,
@@ -436,8 +224,8 @@ fn stalled_decode_and_identification_workers_do_not_block_control() {
                     Ed25519PublicKey,
                     MinPk,
                     RecordingBlocker,
-                    StallingStrategy,
-                    StallingStrategy,
+                    CountingStrategy,
+                    CountingStrategy,
                 >,
                 _,
             ) = Actor::new(
@@ -473,7 +261,7 @@ fn stalled_decode_and_identification_workers_do_not_block_control() {
                 ReadyReceiver::new(Vec::new()),
             );
 
-            while calls.load(Ordering::SeqCst) <= stall_at {
+            while calls.spawns() <= stall_at {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(mailbox.enqueue(Message::ObservationConsumed).accepted());
@@ -747,7 +535,7 @@ impl Harness {
                 Link {
                     latency: Duration::from_millis(1),
                     jitter: Duration::ZERO,
-                    success_rate: 1.0,
+                    success_rate: probability!(1.0),
                 },
             )
             .await
