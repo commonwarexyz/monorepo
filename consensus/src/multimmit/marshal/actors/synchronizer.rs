@@ -3244,6 +3244,26 @@ mod tests {
         .unwrap()
     }
 
+    fn single_chain_opening(
+        epoch: Epoch,
+        base: BlockRef<Sha256Digest>,
+        count: usize,
+        history: Sha256Digest,
+    ) -> (
+        Checkpoint<Sha256Digest>,
+        Vec<Vec<Arc<TestBlock>>>,
+        HistoryLink<Sha256>,
+    ) {
+        let blocks = vec![chain(epoch, base, count)];
+        let record = Arc::new(TipRecord::at_tips(history, vec![tip(&blocks[0])]).unwrap());
+        let commitment = record.commitment::<Sha256>();
+        (
+            checkpoint(epoch, record.parent(), vec![base], vec![base]),
+            blocks,
+            HistoryLink { commitment, record },
+        )
+    }
+
     async fn actor(
         checkpoint: Checkpoint<Sha256Digest>,
         blocks: Vec<Vec<Arc<TestBlock>>>,
@@ -3715,20 +3735,13 @@ mod tests {
     fn cached_headers_backfill_only_the_missing_body_into_custody() {
         block_on(async {
             let committee = committee(23, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, 3)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"cached history", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                3,
+                digest(b"cached history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
-                8,
-            )
-            .await;
+            let mut actor = actor(current, blocks.clone(), committee.codec(), 8).await;
             for (position, block) in blocks[0].iter().enumerate() {
                 actor.insert_header(block.header().clone());
                 if position != 1 {
@@ -3740,7 +3753,7 @@ mod tests {
                 }
             }
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.catalog.block_calls.load(Ordering::Relaxed), 1);
             assert_eq!(actor.catalog.block_batches.lock().len(), 1);
@@ -3768,27 +3781,20 @@ mod tests {
     fn same_chain_bodies_share_one_range_fetch() {
         block_on(async {
             let committee = committee(24, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, 3)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"parallel body history", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                3,
+                digest(b"parallel body history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
-                8,
-            )
-            .await;
+            let mut actor = actor(current, blocks.clone(), committee.codec(), 8).await;
             for block in &blocks[0] {
                 actor.insert_header(block.header().clone());
             }
             actor.backfill_concurrency = 3;
             actor.fetcher.yield_block_fetches = true;
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.fetcher.range_calls.load(Ordering::Relaxed), 1);
             assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), 3);
@@ -3835,24 +3841,17 @@ mod tests {
     fn local_custody_splits_a_producer_range() {
         block_on(async {
             let committee = committee(38, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, 5)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"split range history", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                5,
+                digest(b"split range history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
-                8,
-            )
-            .await;
+            let mut actor = actor(current, blocks.clone(), committee.codec(), 8).await;
             let local = Arc::clone(&blocks[0][2]);
             actor.catalog.blocks.lock().insert(local.reference(), local);
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.fetcher.range_calls.load(Ordering::Relaxed), 2);
             assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), 4);
@@ -3864,23 +3863,16 @@ mod tests {
     fn short_range_prefixes_are_rescheduled() {
         block_on(async {
             let committee = committee(39, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, 5)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"short range history", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                5,
+                digest(b"short range history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks,
-                committee.codec(),
-                8,
-            )
-            .await;
+            let mut actor = actor(current, blocks, committee.codec(), 8).await;
             actor.fetcher.range_limit = Some(2);
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.fetcher.range_calls.load(Ordering::Relaxed), 3);
             assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), 5);
@@ -3892,20 +3884,13 @@ mod tests {
     fn custody_lookup_pages_are_bounded_by_the_resolved_artifact_limit() {
         block_on(async {
             let committee = committee(31, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, 40)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"custody page history", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                40,
+                digest(b"custody page history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
-                64,
-            )
-            .await;
+            let mut actor = actor(current, blocks.clone(), committee.codec(), 64).await;
             for block in &blocks[0] {
                 actor.insert_header(block.header().clone());
                 actor
@@ -3915,7 +3900,7 @@ mod tests {
                     .insert(block.reference(), Arc::clone(block));
             }
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.custody_batch_outputs, 16);
             assert_eq!(
@@ -3966,28 +3951,21 @@ mod tests {
         block_on(async {
             const OUTPUTS: usize = 40;
             let committee = committee(42, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, OUTPUTS)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"small custody window", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                OUTPUTS,
+                digest(b"small custody window", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor_with_backfill(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
-                64,
-                1,
-            )
-            .await;
+            let mut actor =
+                actor_with_backfill(current, blocks.clone(), committee.codec(), 64, 1).await;
             for block in &blocks[0] {
                 actor.insert_header(block.header().clone());
             }
 
             assert_eq!(actor.custody_window_outputs, 15);
             assert_eq!(actor.custody_batch_outputs, 15);
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
             assert_eq!(actor.catalog.outputs.len(), OUTPUTS);
         });
     }
@@ -3998,28 +3976,20 @@ mod tests {
             const OUTPUTS: usize = 40;
             const PAGE: usize = 16;
             let committee = committee(33, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, OUTPUTS)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"custody window history", 0), vec![tip(&blocks[0])])
-                    .unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                OUTPUTS,
+                digest(b"custody window history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
-                64,
-            )
-            .await;
+            let mut actor = actor(current, blocks.clone(), committee.codec(), 64).await;
             for block in &blocks[0] {
                 actor.insert_header(block.header().clone());
             }
             actor.backfill_concurrency = 32;
             actor.fetcher.fetch_requires = Some((blocks[0][0].reference(), PAGE + 1));
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.catalog.outputs.len(), OUTPUTS);
             assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), OUTPUTS);
@@ -4033,28 +4003,20 @@ mod tests {
             const PAGE: usize = 16;
             const WINDOW: usize = PAGE * COMMIT_WINDOW;
             let committee = committee(34, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, OUTPUTS)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"sliding custody history", 0), vec![tip(&blocks[0])])
-                    .unwrap(),
-            );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
                 OUTPUTS,
-            )
-            .await;
+                digest(b"sliding custody history", 0),
+            );
+            let mut actor = actor(current, blocks.clone(), committee.codec(), OUTPUTS).await;
             for block in &blocks[0] {
                 actor.insert_header(block.header().clone());
             }
             actor.backfill_concurrency = WINDOW;
             actor.fetcher.fetch_requires = Some((blocks[0][WINDOW - 1].reference(), WINDOW + 1));
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.catalog.outputs.len(), OUTPUTS);
             assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), OUTPUTS);
@@ -4067,31 +4029,20 @@ mod tests {
             const OUTPUTS: usize = 64;
             const PAGE: usize = 16;
             let committee = committee(35, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, OUTPUTS)];
-            let record = Arc::new(
-                TipRecord::at_tips(
-                    digest(b"batched custody refill history", 0),
-                    vec![tip(&blocks[0])],
-                )
-                .unwrap(),
-            );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
                 OUTPUTS,
-            )
-            .await;
+                digest(b"batched custody refill history", 0),
+            );
+            let mut actor = actor(current, blocks.clone(), committee.codec(), OUTPUTS).await;
             for block in &blocks[0] {
                 actor.insert_header(block.header().clone());
             }
             actor.backfill_concurrency = PAGE * COMMIT_WINDOW;
             actor.fetcher.fetch_delay_by_height = true;
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(
                 actor
@@ -4260,22 +4211,15 @@ mod tests {
             const GAP: usize = 512;
             const BATCH: usize = 17;
             let committee = committee(8, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 10_000);
-            let blocks = vec![chain(epoch, base, GAP)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"long history", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 10_000),
+                GAP,
+                digest(b"long history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks,
-                committee.codec(),
-                BATCH,
-            )
-            .await;
+            let mut actor = actor(current, blocks, committee.codec(), BATCH).await;
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
             assert_eq!(actor.catalog.outputs.len(), GAP);
             assert_eq!(actor.fetcher.block_calls.load(Ordering::Relaxed), GAP);
             assert!(
@@ -4301,24 +4245,17 @@ mod tests {
     fn publication_batches_respect_the_block_byte_bound() {
         block_on(async {
             let committee = committee(29, 1, Limits::new(1, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let base = base(0, 0);
-            let blocks = vec![chain(epoch, base, 5)];
-            let record = Arc::new(
-                TipRecord::at_tips(digest(b"byte bound history", 0), vec![tip(&blocks[0])]).unwrap(),
+            let (current, blocks, opening) = single_chain_opening(
+                committee.config.epoch(),
+                base(0, 0),
+                5,
+                digest(b"byte bound history", 0),
             );
-            let commitment = record.commitment::<Sha256>();
-            let mut actor = actor(
-                checkpoint(epoch, record.parent(), vec![base], vec![base]),
-                blocks.clone(),
-                committee.codec(),
-                8,
-            )
-            .await;
+            let mut actor = actor(current, blocks.clone(), committee.codec(), 8).await;
             let block_bytes = u64::try_from(blocks[0][0].encode_size()).unwrap();
             actor.max_commit_block_bytes = block_bytes * 2;
 
-            commit_opening(&mut actor, HistoryLink { commitment, record }).await;
+            commit_opening(&mut actor, opening).await;
 
             assert_eq!(actor.catalog.batches, vec![2, 2, 1]);
             assert_eq!(actor.catalog.outputs.len(), 5);
