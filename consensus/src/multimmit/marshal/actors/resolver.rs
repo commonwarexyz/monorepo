@@ -64,6 +64,23 @@ fn catalog_error(error: impl Display) -> Error {
     Error::Catalog(Arc::from(error.to_string()))
 }
 
+fn response_process_span(parent: &Span, received: usize) -> Span {
+    info_span!(
+        parent: parent,
+        "multimmit.marshal.resolver.fetch.response.process",
+        received = received,
+    )
+}
+
+fn response_stage_span(process: &Span, blocks: usize, bytes: u64) -> Span {
+    info_span!(
+        parent: process,
+        "multimmit.marshal.resolver.fetch.response.stage",
+        blocks = blocks,
+        bytes = bytes,
+    )
+}
+
 type BlockSegment<H, B> = Arc<Vec<Arc<TransactionBlock<H, B>>>>;
 
 fn validate_history_segment<H: Hasher>(
@@ -1725,12 +1742,7 @@ where
         if staged.is_empty() {
             return;
         }
-        let stage = info_span!(
-            parent: &process,
-            "multimmit.marshal.resolver.fetch.response.stage",
-            blocks = staged.len(),
-            bytes = staged_bytes,
-        );
+        let stage = response_stage_span(&process, staged.len(), staged_bytes);
         self.queue_staging(StagingJob {
             ready,
             ready_ranges: Vec::new(),
@@ -1805,12 +1817,7 @@ where
             .range_received(usize::from(max_items.get()), blocks.len());
         self.admitting.insert(key);
         let staged = blocks.iter().cloned().collect::<Vec<_>>();
-        let stage = info_span!(
-            parent: &process,
-            "multimmit.marshal.resolver.fetch.response.stage",
-            blocks = staged.len(),
-            bytes,
-        );
+        let stage = response_stage_span(&process, staged.len(), bytes);
         self.queue_staging(StagingJob {
             ready: Vec::new(),
             ready_ranges: vec![ReadyRange {
@@ -2034,11 +2041,7 @@ where
                             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                         }
                     }
-                    let process = info_span!(
-                        parent: &deliveries[0].0,
-                        "multimmit.marshal.resolver.fetch.response.process",
-                        received = deliveries.len(),
-                    );
+                    let process = response_process_span(&deliveries[0].0, deliveries.len());
                     for (cause, _) in deliveries.iter().skip(1) {
                         process.follows_from(cause.id());
                     }
@@ -2051,20 +2054,12 @@ where
                 Command::Deliver(span, delivery, value, response)
                     if matches!(&delivery.key, Key::ProducerBlocks { .. }) =>
                 {
-                    let process = info_span!(
-                        parent: &span,
-                        "multimmit.marshal.resolver.fetch.response.process",
-                        received = 1,
-                    );
+                    let process = response_process_span(&span, 1);
                     drop(span);
                     self.deliver_range(delivery, value, response, process);
                 }
                 Command::Deliver(span, delivery, value, response) => {
-                    let process = info_span!(
-                        parent: &span,
-                        "multimmit.marshal.resolver.fetch.response.process",
-                        received = 1,
-                    );
+                    let process = response_process_span(&span, 1);
                     drop(span);
                     let outcome = self.deliver(delivery, value).instrument(process).await?;
                     self.respond(response, outcome);
@@ -2258,7 +2253,7 @@ mod tests {
         },
     };
     use commonware_storage::{Context as StorageContext, translator::TwoCap};
-    use commonware_utils::{NZU16, NZUsize, vec::NonEmptyVec};
+    use commonware_utils::{NZU16, NZUsize, sync::Mutex, vec::NonEmptyVec};
     use futures::future::Either;
     use rstest::rstest;
     use std::{
@@ -2266,8 +2261,89 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
+    use tracing::{Subscriber as TracingSubscriber, span};
+    use tracing_subscriber::{
+        Layer, filter::filter_fn, layer::Context as LayerContext, prelude::*, registry::LookupSpan,
+    };
 
     type TestBody = EmptyBlock<Sha256>;
+
+    #[derive(Default)]
+    struct RecordedTrace {
+        spans: Vec<(&'static str, Option<&'static str>)>,
+        ambient_links: usize,
+    }
+
+    #[derive(Clone, Default)]
+    struct Traces(Arc<Mutex<RecordedTrace>>);
+
+    impl<S: TracingSubscriber + for<'a> LookupSpan<'a>> Layer<S> for Traces {
+        fn on_new_span(
+            &self,
+            attrs: &span::Attributes<'_>,
+            id: &span::Id,
+            ctx: LayerContext<'_, S>,
+        ) {
+            let parent = ctx
+                .span(id)
+                .unwrap()
+                .parent()
+                .map(|parent| parent.metadata().name());
+            self.0.lock().spans.push((attrs.metadata().name(), parent));
+        }
+
+        fn on_follows_from(&self, id: &span::Id, _: &span::Id, ctx: LayerContext<'_, S>) {
+            if ctx.span(id).unwrap().metadata().name() == "filter_ambient" {
+                self.0.lock().ambient_links += 1;
+            }
+        }
+    }
+
+    #[rstest]
+    #[case(true, true)]
+    #[case(false, true)]
+    #[case(true, false)]
+    #[case(false, false)]
+    fn filtered_response_spans_do_not_capture_ambient(#[case] process: bool, #[case] stage: bool) {
+        const PROCESS: &str = "multimmit.marshal.resolver.fetch.response.process";
+        const STAGE: &str = "multimmit.marshal.resolver.fetch.response.stage";
+        const ADMIT: &str = "multimmit.marshal.catalog.stage_blocks";
+        let traces = Traces::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(traces.clone())
+            .with(filter_fn(move |metadata| {
+                (process || metadata.name() != PROCESS) && (stage || metadata.name() != STAGE)
+            }));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info_span!("filter_ambient")
+                .in_scope(fetched_block_deliveries_share_one_catalog_admission_cut);
+        });
+        let recorded = traces.0.lock();
+        assert_eq!(
+            recorded.ambient_links, 0,
+            "disabled processing must not link the ambient span"
+        );
+        let stages = recorded
+            .spans
+            .iter()
+            .filter(|(name, _)| *name == STAGE)
+            .collect::<Vec<_>>();
+        assert_eq!(stages.len(), usize::from(stage));
+        if stage {
+            assert_eq!(stages[0].1, process.then_some(PROCESS));
+        }
+        let admissions = recorded
+            .spans
+            .iter()
+            .filter(|(name, _)| *name == ADMIT)
+            .collect::<Vec<_>>();
+        assert_eq!(admissions.len(), 1);
+        assert_eq!(
+            admissions[0].1,
+            Some(if stage { STAGE } else { "filter_ambient" }),
+            "catalog admission must not retain a disabled staging span's ambient context"
+        );
+    }
     type TestActor = (
         Bridge<Sha256, MinPk, TestBody>,
         Client<Sha256, MinPk, TestBody>,
