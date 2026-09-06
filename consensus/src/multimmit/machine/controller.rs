@@ -95,18 +95,16 @@
 #[cfg(test)]
 use super::contracts::CORE_BUDGET;
 use super::{
-    Artifact, BarrierAck, BuildCompletion, Capabilities, ChainProgress, CheckpointCut,
-    CustodyCancellation, CustodyCompletion, DaChoice, DomainEvent, EffectCompletion, EffectId,
-    IdentifiedArtifact, Input, Inspection, LqcAggregateCompletion, Machine,
-    NullificationRecoveryCompletion, PollResult, ProductionTimer, Profile, Progress, ReplayError,
-    ResolutionCompletion, SigningBatchPass, Snapshot, Step, StepError, StepStatus, Timer,
-    VerificationCompletion, VerificationPass, ViewProof, VqcAggregateCompletion,
+    Artifact, BarrierAck, BuildCompletion, ChainProgress, CheckpointCut, CustodyCancellation,
+    CustodyCompletion, DaChoice, DomainEvent, EffectCompletion, EffectId, IdentifiedArtifact,
+    Input, Inspection, LqcAggregateCompletion, Machine, NullificationRecoveryCompletion,
+    PollResult, ProductionTimer, Profile, Progress, ReplayError, ResolutionCompletion,
+    SigningBatchPass, Snapshot, Step, StepError, Timer, VerificationCompletion, VerificationPass,
+    ViewProof, VqcAggregateCompletion,
     contracts::{FairCursor, LANE_WEIGHTS, Lane, ServiceCycle, ServiceError, TransitionCost},
 };
 use crate::{
-    multimmit::types::{
-        Activity, BlockRef, ChainId, Context, DaCertificate, SignedTransactionBlock,
-    },
+    multimmit::types::{BlockRef, ChainId, Context, DaCertificate, SignedTransactionBlock},
     types::{Height, View},
 };
 use commonware_codec::EncodeSize as _;
@@ -253,71 +251,10 @@ enum QueuedPayload<V: Variant, D: Digest> {
 pub(crate) struct InputTicket(u64);
 
 /// Result of one admitted event transition.
-pub(crate) struct CoreTransition<V: Variant, D: Digest> {
-    status: StepStatus<D>,
-    capabilities: Capabilities<V, D>,
-    activities: Vec<Activity<V, D>>,
-}
-
-impl<V: Variant, D: Digest> CoreTransition<V, D> {
-    fn from_step(step: Step<V, D>) -> Self {
-        let (status, capabilities, activities) = step.into_core_parts();
-        Self {
-            status,
-            capabilities,
-            activities,
-        }
-    }
-
-    pub(crate) const fn status(&self) -> &StepStatus<D> {
-        &self.status
-    }
-
-    #[cfg(test)]
-    pub(crate) fn activities(&self) -> &[Activity<V, D>] {
-        &self.activities
-    }
-
-    pub(crate) fn into_parts(self) -> (Capabilities<V, D>, Vec<Activity<V, D>>) {
-        (self.capabilities, self.activities)
-    }
-}
+pub(crate) type CoreTransition<V, D> = Step<V, D>;
 
 /// Result of one bounded quantum of core-owned semantic work.
-pub(crate) struct CoreWork<V: Variant, D: Digest> {
-    work_remaining: bool,
-    capabilities: Capabilities<V, D>,
-    activities: Vec<Activity<V, D>>,
-}
-
-impl<V: Variant, D: Digest> CoreWork<V, D> {
-    fn from_poll(result: PollResult<V, D>) -> Self {
-        let work_remaining = result.work_remaining();
-        let (capabilities, activities) = result.into_parts();
-        Self {
-            work_remaining,
-            capabilities,
-            activities,
-        }
-    }
-
-    pub(crate) const fn work_remaining(&self) -> bool {
-        self.work_remaining
-    }
-
-    pub(crate) const fn capabilities(&self) -> &Capabilities<V, D> {
-        &self.capabilities
-    }
-
-    #[cfg(test)]
-    pub(crate) fn activities(&self) -> &[Activity<V, D>] {
-        &self.activities
-    }
-
-    pub(crate) fn into_parts(self) -> (Capabilities<V, D>, Vec<Activity<V, D>>) {
-        (self.capabilities, self.activities)
-    }
-}
+pub(crate) type CoreWork<V, D> = PollResult<V, D>;
 
 /// One serviced reducer input.
 pub(crate) struct ServicedInput<V: Variant, D: Digest> {
@@ -668,7 +605,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
     fn poll_machine(&mut self, budget: NonZeroUsize) -> Result<CoreTurn<V, H::Digest>, CoreError> {
         let result = self.machine.poll(budget)?;
         self.drive.record(DriveSource::Machine);
-        Ok(CoreTurn::Work(CoreWork::from_poll(result)))
+        Ok(CoreTurn::Work(result))
     }
 
     fn service_input(
@@ -788,7 +725,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
             cycle: self.cycle,
             observed_items,
             final_chunk,
-            transition: CoreTransition::from_step(step),
+            transition: step,
         }))
     }
 
@@ -864,7 +801,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
             cycle: self.cycle,
             observed_items: 0,
             final_chunk: advance.complete,
-            transition: CoreTransition::from_step(advance.step),
+            transition: advance.step,
         }))
     }
 

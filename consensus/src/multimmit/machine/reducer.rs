@@ -724,11 +724,10 @@ pub enum StepStatus<D: Digest> {
 
 /// Authoritative capabilities and non-authoritative activities emitted by one core transition.
 pub(crate) type StepParts<V, D> = (Capabilities<V, D>, Vec<Activity<V, D>>);
-pub(crate) type CoreParts<V, D> = (StepStatus<D>, Capabilities<V, D>, Vec<Activity<V, D>>);
 
 /// Bounded capabilities emitted while polling core-owned semantic work.
 #[derive(Clone, Debug)]
-pub(super) struct PollResult<V: Variant, D: Digest> {
+pub(crate) struct PollResult<V: Variant, D: Digest> {
     capabilities: Capabilities<V, D>,
     activities: Vec<Activity<V, D>>,
     work_remaining: bool,
@@ -748,7 +747,6 @@ impl<V: Variant, D: Digest> PollResult<V, D> {
     }
 
     /// Returns capabilities in deterministic issuance order.
-    #[cfg(any(test, feature = "test-utils"))]
     pub fn capabilities(&self) -> &[Capability<V, D>] {
         &self.capabilities
     }
@@ -790,7 +788,7 @@ type ReferenceChanges<D> = BTreeMap<ArtifactId<D>, (usize, usize)>;
 
 /// Result of one deterministic machine step.
 #[derive(Clone, Debug)]
-pub(super) struct Step<V: Variant, D: Digest> {
+pub(crate) struct Step<V: Variant, D: Digest> {
     status: StepStatus<D>,
     capabilities: Capabilities<V, D>,
     activities: Vec<Activity<V, D>>,
@@ -841,13 +839,8 @@ impl<V: Variant, D: Digest> Step<V, D> {
     }
 
     /// Consumes the result and separates authoritative capabilities from telemetry.
-    #[cfg(test)]
     pub fn into_parts(self) -> StepParts<V, D> {
         (self.capabilities, self.activities)
-    }
-
-    pub(crate) fn into_core_parts(self) -> CoreParts<V, D> {
-        (self.status, self.capabilities, self.activities)
     }
 }
 
