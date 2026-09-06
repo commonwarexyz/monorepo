@@ -1390,14 +1390,13 @@ where
         proof: Arc<Lqc<V, H::Digest>>,
         history: Arc<TipRecord<H::Digest>>,
     ) -> Result<(), Error> {
+        let expected_history = proof.leader().history();
         self.request(|reply| {
             Command::Admit(
-                vec![Admission::Finality {
-                    view,
-                    id,
-                    proof,
-                    history,
-                }],
+                vec![
+                    Admission::Lqc(view, id, proof),
+                    Admission::History(view, expected_history, history),
+                ],
                 AdmissionMode::Durable,
                 reply,
             )
@@ -2483,19 +2482,6 @@ where
                 if record.commitment::<H>() != *commitment =>
             {
                 Err(Error::Invalid("history commitment mismatch"))
-            }
-            #[cfg(test)]
-            Admission::Finality {
-                view,
-                id,
-                proof,
-                history,
-            } if proof.view() != *view
-                || proof.id::<H>() != *id
-                || epoch.is_some_and(|value| proof.epoch() != value)
-                || history.commitment::<H>() != proof.leader().history() =>
-            {
-                Err(Error::Invalid("finality proof and history mismatch"))
             }
             Admission::Block(_, block) if block.encode_size() > self.max_block_bytes => {
                 Err(Error::Invalid("producer block exceeds encoded-byte bound"))
@@ -8600,6 +8586,10 @@ mod tests {
             ] {
                 result.unwrap();
             }
+            assert_eq!(
+                metric_total(&context.encode(), "admission_cut_scheduled_items_total"),
+                6,
+            );
 
             assert_eq!(
                 client.lqc(proof_id).await.unwrap().as_deref(),

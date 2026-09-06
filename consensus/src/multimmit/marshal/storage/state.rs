@@ -68,8 +68,6 @@ where
     Lqc(PendingLqc<T, E, H, V>),
     History(PendingHistory<T, E, H>),
     Block(Option<Append<E, H, B>>),
-    #[cfg(test)]
-    Finality(PendingLqc<T, E, H, V>, PendingHistory<T, E, H>),
 }
 
 pub(in crate::multimmit::marshal) type FinalBlockReadRequest<H> =
@@ -139,13 +137,6 @@ where
 {
     Lqc(View, CertificateId<H::Digest>, Arc<Lqc<V, H::Digest>>),
     History(View, H::Digest, Arc<TipRecord<H::Digest>>),
-    #[cfg(test)]
-    Finality {
-        view: View,
-        id: CertificateId<H::Digest>,
-        proof: Arc<Lqc<V, H::Digest>>,
-        history: Arc<TipRecord<H::Digest>>,
-    },
     Block(BlockRef<H::Digest>, Arc<TransactionBlock<H, B>>),
 }
 
@@ -360,14 +351,6 @@ where
                             .history = true;
                     }
                 }
-                #[cfg(test)]
-                Admission::Finality { .. } => {
-                    if *durable {
-                        let footprint = footprint.as_mut().expect("durable footprint exists");
-                        footprint.lqc = true;
-                        footprint.history = true;
-                    }
-                }
                 Admission::Block(_, _) => {
                     footprint
                         .as_mut()
@@ -431,32 +414,6 @@ where
                 }
                 .boxed()
             }
-            #[cfg(test)]
-            Admission::Finality {
-                view,
-                id,
-                proof,
-                history: record,
-            } => {
-                let lqc = self.pending_lqc.take().expect("catalog owns pending LQCs");
-                let history = self
-                    .pending_history
-                    .take()
-                    .expect("catalog owns pending history");
-                async move {
-                    let commitment = proof.leader().history();
-                    let (lqc, _) = lqc
-                        .put(view.get(), id.get(), Shared::new(proof))
-                        .await
-                        .map_err(Error::storage)?;
-                    let (history, _) = history
-                        .put(view.get(), commitment, Shared::new(record))
-                        .await
-                        .map_err(Error::storage)?;
-                    Ok(AdmissionWrite::Finality(lqc, history))
-                }
-                .boxed()
-            }
         })
     }
 
@@ -475,11 +432,6 @@ where
                 .finish_put(append)
                 .map_err(Error::storage)?,
             AdmissionWrite::Block(None) => {}
-            #[cfg(test)]
-            AdmissionWrite::Finality(lqc, history) => {
-                self.pending_lqc = Some(lqc);
-                self.pending_history = Some(history);
-            }
         }
         Ok(())
     }
