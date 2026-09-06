@@ -532,20 +532,14 @@ where
             ) else break => {
                 let plane = message.plane();
                 next_network = plane.next();
-                match message {
+                let message = match message {
                     NetworkMessage::Consensus((peer, message)) => {
                         let Ok(message) = message else {
                             self.block(peer, "consensus decoding error");
                             continue;
                         };
                         self.metrics.decoded.get_or_create(&Traffic::CONSENSUS).inc();
-                        let message = NetworkMessage::Consensus((peer, Ok(message)));
-                        let chains = self.codec.chains();
-                        let scheme = Arc::clone(&self.scheme);
-                        let received_at = self.context.current();
-                        ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains, &scheme, received_at)
-                        }));
+                        NetworkMessage::Consensus((peer, Ok(message)))
                     }
                     NetworkMessage::Certificate((peer, message)) => {
                         let Ok(message) = message else {
@@ -553,13 +547,7 @@ where
                             continue;
                         };
                         self.metrics.decoded.get_or_create(&Traffic::CERTIFICATE).inc();
-                        let message = NetworkMessage::Certificate((peer, Ok(message)));
-                        let chains = self.codec.chains();
-                        let scheme = Arc::clone(&self.scheme);
-                        let received_at = self.context.current();
-                        ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains, &scheme, received_at)
-                        }));
+                        NetworkMessage::Certificate((peer, Ok(message)))
                     }
                     NetworkMessage::Data((peer, message)) => {
                         let Ok(message) = message else {
@@ -567,15 +555,15 @@ where
                             continue;
                         };
                         self.metrics.decoded.get_or_create(&Traffic::DATA).inc();
-                        let message = NetworkMessage::Data((peer, Ok(message)));
-                        let chains = self.codec.chains();
-                        let scheme = Arc::clone(&self.scheme);
-                        let received_at = self.context.current();
-                        ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                            Self::prepare(message, chains, &scheme, received_at)
-                        }));
+                        NetworkMessage::Data((peer, Ok(message)))
                     }
-                }
+                };
+                let chains = self.codec.chains();
+                let scheme = Arc::clone(&self.scheme);
+                let received_at = self.context.current();
+                ingress.push(run_ingress_operation(self.strategy.clone(), move || {
+                    Self::prepare(message, chains, &scheme, received_at)
+                }));
             },
             on_end => {
                 // Forward buffered artifacts while the voter has observation credit. Ingress only
