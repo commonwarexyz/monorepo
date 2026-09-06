@@ -953,32 +953,14 @@ fn settle(machine: &mut TestMachine, step: Step<MinPk, Digest>) -> Step<MinPk, D
 
 /// Applies a verification completion without folding scheduler work afterward.
 fn complete_raw(machine: &mut TestMachine, job: &VerifyJob<MinPk, Digest>, valid: bool) {
-    let verdicts = job
-        .items()
-        .iter()
-        .map(|item| Verdict::new(item.ticket(), valid))
-        .collect();
     machine
-        .step(Input::Verified(VerificationCompletion::new(
-            job.id(),
-            job.generation(),
-            verdicts,
-        )))
+        .step(Input::Verified(SymbolicVerifier::new(valid).complete(job)))
         .unwrap();
 }
 
 fn complete(machine: &mut TestMachine, job: &VerifyJob<MinPk, Digest>, valid: bool) {
-    let verdicts = job
-        .items()
-        .iter()
-        .map(|item| Verdict::new(item.ticket(), valid))
-        .collect();
     let step = machine
-        .step(Input::Verified(VerificationCompletion::new(
-            job.id(),
-            job.generation(),
-            verdicts,
-        )))
+        .step(Input::Verified(SymbolicVerifier::new(valid).complete(job)))
         .unwrap();
     settle(machine, step);
 }
@@ -1022,17 +1004,8 @@ fn complete_with_step(
     job: &VerifyJob<MinPk, Digest>,
     valid: bool,
 ) -> Step<MinPk, Digest> {
-    let verdicts = job
-        .items()
-        .iter()
-        .map(|item| Verdict::new(item.ticket(), valid))
-        .collect();
     let step = machine
-        .step(Input::Verified(VerificationCompletion::new(
-            job.id(),
-            job.generation(),
-            verdicts,
-        )))
+        .step(Input::Verified(SymbolicVerifier::new(valid).complete(job)))
         .unwrap();
     settle(machine, step)
 }
@@ -13636,18 +13609,7 @@ fn authenticated_finality_is_bounded_by_the_retained_view_window() {
     else {
         panic!("the certificate cohort must emit one verification job");
     };
-    let verdicts = job
-        .items()
-        .iter()
-        .map(|item| Verdict::new(item.ticket(), true))
-        .collect();
-    machine
-        .step(Input::Verified(VerificationCompletion::new(
-            job.id(),
-            job.generation(),
-            verdicts,
-        )))
-        .unwrap();
+    complete_raw(&mut machine, job, true);
 
     assert_eq!(machine.inspect().pools().len(), 2);
     assert_eq!(
