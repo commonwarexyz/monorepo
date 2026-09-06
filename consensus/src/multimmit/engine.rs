@@ -59,24 +59,12 @@ use std::{
 use tracing::{Instrument as _, debug, info, info_span};
 
 /// Storage sizing for one engine's durable stores.
-///
-/// The defaults are deliberately generous test-grade bounds; production deployments size them
-/// from expected throughput.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct StorageTuning {
     /// Greatest number of events accepted in one persistence barrier.
     max_events_per_record: NonZeroUsize,
     /// Greatest encoded journal record size.
     max_record_bytes: NonZeroUsize,
-}
-
-impl Default for StorageTuning {
-    fn default() -> Self {
-        Self {
-            max_events_per_record: NZUsize!(64),
-            max_record_bytes: NZUsize!(4 * 1024 * 1024),
-        }
-    }
 }
 
 /// Durable events between machine checkpoints.
