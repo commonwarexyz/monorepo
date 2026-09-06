@@ -111,8 +111,8 @@ where
     H: Hasher,
     B: Codec + Digestible<Digest = H::Digest>,
 {
-    bodies: Option<BodyJournal<E, H, B>>,
-    metadata: Option<MetadataJournal<E, H>>,
+    bodies: BodyJournal<E, H, B>,
+    metadata: MetadataJournal<E, H>,
 }
 
 /// Completed journal writes awaiting publication into the catalog's custody indexes.
@@ -133,21 +133,11 @@ where
     H: Hasher,
     B: Codec + Digestible<Digest = H::Digest>,
 {
-    const fn bodies(&self) -> &BodyJournal<E, H, B> {
-        self.bodies.as_ref().expect("catalog owns pending bodies")
-    }
-
-    const fn metadata(&self) -> &MetadataJournal<E, H> {
-        self.metadata
-            .as_ref()
-            .expect("catalog owns pending block metadata")
-    }
-
     /// Truncate an asymmetric crash tail and make the common local range authoritative before
     /// the segment can accept another append.
-    async fn reconcile(mut self, capacity: u64) -> Result<(Self, u64), Error> {
-        let body_bounds = self.bodies().bounds();
-        let metadata_bounds = self.metadata().bounds();
+    async fn reconcile(self, capacity: u64) -> Result<(Self, u64), Error> {
+        let body_bounds = self.bodies.bounds();
+        let metadata_bounds = self.metadata.bounds();
         if body_bounds.start != 0 || metadata_bounds.start != 0 {
             return Err(Error::Inconsistent("pending segment was partially pruned"));
         }
@@ -159,11 +149,7 @@ where
             return Ok((self, common));
         }
 
-        let bodies = self.bodies.take().expect("catalog owns pending bodies");
-        let metadata = self
-            .metadata
-            .take()
-            .expect("catalog owns pending block metadata");
+        let Self { bodies, metadata } = self;
         let (bodies, metadata) = futures::try_join!(
             async move { bodies.rewind(common).await.map_err(Error::from) },
             async move { metadata.rewind(common).await.map_err(Error::from) },
@@ -172,51 +158,40 @@ where
             async move { bodies.sync().await.map_err(Error::from) },
             async move { metadata.sync().await.map_err(Error::from) },
         )?;
-        self.bodies = Some(bodies);
-        self.metadata = Some(metadata);
-        Ok((self, common))
+        Ok((Self { bodies, metadata }, common))
     }
 
     /// Starts one paired durability cut and freezes its body range for readers.
-    async fn start_sync(mut self) -> Result<(Self, Vec<Handle<()>>, BodySnapshot<E, H, B>), Error> {
-        let bodies = self.bodies.take().expect("catalog owns pending bodies");
-        let metadata = self
-            .metadata
-            .take()
-            .expect("catalog owns pending block metadata");
+    async fn start_sync(self) -> Result<(Self, Vec<Handle<()>>, BodySnapshot<E, H, B>), Error> {
+        let Self { bodies, metadata } = self;
         let ((bodies, body_handle), (metadata, metadata_handle)) = futures::try_join!(
             async move { bodies.start_sync().await.map_err(Error::from) },
             async move { metadata.start_sync().await.map_err(Error::from) },
         )?;
         let (bodies, reader) = bodies.snapshot().await?;
-        self.bodies = Some(bodies);
-        self.metadata = Some(metadata);
-        Ok((self, vec![body_handle, metadata_handle], reader))
+        Ok((
+            Self { bodies, metadata },
+            vec![body_handle, metadata_handle],
+            reader,
+        ))
     }
 
     /// Starts the paired durable seal proof (each journal's recovery watermark at the full
     /// segment size). Must only run after the segment's final durability cut completed.
-    async fn start_seal(mut self) -> Result<(Self, Vec<Handle<()>>), Error> {
-        let bodies = self.bodies.take().expect("catalog owns pending bodies");
-        let metadata = self
-            .metadata
-            .take()
-            .expect("catalog owns pending block metadata");
+    async fn start_seal(self) -> Result<(Self, Vec<Handle<()>>), Error> {
+        let Self { bodies, metadata } = self;
         let ((bodies, body_handle), (metadata, metadata_handle)) = futures::try_join!(
             async move { bodies.start_seal().await.map_err(Error::from) },
             async move { metadata.start_seal().await.map_err(Error::from) },
         )?;
-        self.bodies = Some(bodies);
-        self.metadata = Some(metadata);
-        Ok((self, vec![body_handle, metadata_handle]))
+        Ok((
+            Self { bodies, metadata },
+            vec![body_handle, metadata_handle],
+        ))
     }
 
-    async fn destroy(mut self) -> Result<(), Error> {
-        let bodies = self.bodies.take().expect("catalog owns pending bodies");
-        let metadata = self
-            .metadata
-            .take()
-            .expect("catalog owns pending block metadata");
+    async fn destroy(self) -> Result<(), Error> {
+        let Self { bodies, metadata } = self;
         futures::try_join!(
             async move { bodies.destroy().await.map_err(Error::from) },
             async move { metadata.destroy().await.map_err(Error::from) },
@@ -621,7 +596,8 @@ where
     state: Option<Metadata<E, Unit, PendingState>>,
     state_dirty: bool,
     segments: BTreeSet<u64>,
-    open_segments: BTreeMap<u64, Segment<E, H, B>>,
+    /// An occupied empty entry lends both journals to an append; absent entries are cold.
+    open_segments: BTreeMap<u64, Option<Segment<E, H, B>>>,
     active_readers: BTreeMap<u64, BodyReader<E, H, B>>,
     dirty_segments: BTreeSet<u64>,
     /// Segments whose durable seal proof is still being written. Their readers stay retained
@@ -748,17 +724,16 @@ where
             }
 
             let segment = store.open_segment(segment_id).await?;
-            let (mut segment, common_size) = segment.reconcile(store.segment_capacity).await?;
+            let (segment, common_size) = segment.reconcile(store.segment_capacity).await?;
 
             // Metadata is the sole recovery index. The paired-size reconciliation proves that
             // every replayed row has one body at the same local position.
-            let rows = replay_rows::<H>(segment.metadata(), store.archive.replay_buffer).await?;
+            let rows = replay_rows::<H>(&segment.metadata, store.archive.replay_buffer).await?;
             store.remember_rows(segment_start, rows, common_size)?;
 
             if Some(segment_id) == current {
-                let bodies = segment.bodies.take().expect("catalog owns pending bodies");
+                let Segment { bodies, metadata } = segment;
                 let (bodies, reader) = bodies.snapshot().await?;
-                segment.bodies = Some(bodies);
                 store.active_readers.insert(
                     segment_id,
                     BodyReader::new(segment_id, store.segment_capacity, reader),
@@ -766,7 +741,9 @@ where
                 store.next_position = segment_start
                     .checked_add(common_size)
                     .ok_or(Error::Inconsistent("pending position overflow"))?;
-                store.open_segments.insert(segment_id, segment);
+                store
+                    .open_segments
+                    .insert(segment_id, Some(Segment { bodies, metadata }));
             }
         }
         let empty = store
@@ -862,10 +839,7 @@ where
                     }
                 },
             )?;
-            Ok(Segment {
-                bodies: Some(bodies),
-                metadata: Some(metadata),
-            })
+            Ok(Segment { bodies, metadata })
         }
     }
 
@@ -925,7 +899,7 @@ where
         }
         let exists = self.segments.contains(&segment);
         let opened = self.open_segment(segment).await?;
-        self.open_segments.insert(segment, opened);
+        self.open_segments.insert(segment, Some(opened));
         if exists {
             Ok(())
         } else {
@@ -971,12 +945,7 @@ where
                         async move { bodies.await.map_err(Error::from) },
                         async move { metadata.await.map_err(Error::from) },
                     )?;
-                    Segment::<E, H, B> {
-                        bodies: Some(bodies),
-                        metadata: Some(metadata),
-                    }
-                    .destroy()
-                    .await
+                    Segment::<E, H, B> { bodies, metadata }.destroy().await
                 }
             }))
             .await?;
@@ -1135,29 +1104,19 @@ where
         let position = self.next_position;
         let segment_id = self.segment_id(position);
         let local = position % self.segment_capacity;
-        let segment = self.open_segments.insert(
-            segment_id,
-            Segment {
-                bodies: None,
-                metadata: None,
-            },
-        );
+        let segment = self.open_segments.insert(segment_id, None);
         let opening = segment.is_none().then(|| self.open_segment(segment_id));
         Ok(Some(async move {
-            let mut segment = match segment {
-                Some(segment) => segment,
+            let segment = match segment {
+                Some(segment) => segment.expect("append owns pending segment"),
                 None => opening.expect("a missing segment has open inputs").await?,
             };
-            if segment.bodies().size() != local || segment.metadata().size() != local {
+            if segment.bodies.size() != local || segment.metadata.size() != local {
                 return Err(Error::Inconsistent(
                     "pending journals do not match the append coordinate",
                 ));
             }
-            let bodies = segment.bodies.take().expect("append owns pending bodies");
-            let metadata = segment
-                .metadata
-                .take()
-                .expect("append owns pending block metadata");
+            let Segment { bodies, metadata } = segment;
             let stored_body = Shared::new(block);
             let (bodies, metadata) = futures::try_join!(
                 async move { bodies.append(&stored_body).await.map_err(Error::from) },
@@ -1168,12 +1127,13 @@ where
                     "pending journals assigned different local positions",
                 ));
             }
-            segment.bodies = Some(bodies.0);
-            segment.metadata = Some(metadata.0);
             Ok(Append {
                 position,
                 meta,
-                segment,
+                segment: Segment {
+                    bodies: bodies.0,
+                    metadata: metadata.0,
+                },
             })
         }))
     }
@@ -1190,7 +1150,7 @@ where
         } = append;
         assert_eq!(position, self.next_position, "appends complete in order");
         let segment_id = self.segment_id(position);
-        self.open_segments.insert(segment_id, segment);
+        self.open_segments.insert(segment_id, Some(segment));
         if self.segments.insert(segment_id) {
             self.stage_state()?;
         }
@@ -1219,7 +1179,8 @@ where
             let segment = self
                 .open_segments
                 .remove(&segment_id)
-                .ok_or(Error::Inconsistent("dirty pending segment is missing"))?;
+                .ok_or(Error::Inconsistent("dirty pending segment is missing"))?
+                .expect("catalog owns pending segment");
             cuts.push(async move {
                 let (segment, handles, reader) = segment.start_sync().await?;
                 Ok::<_, Error>((segment_id, segment, handles, reader))
@@ -1239,7 +1200,7 @@ where
         let mut handles =
             Vec::with_capacity(cuts.len().saturating_mul(2) + usize::from(dirty_state));
         for (segment_id, segment, segment_handles, reader) in cuts {
-            self.open_segments.insert(segment_id, segment);
+            self.open_segments.insert(segment_id, Some(segment));
             handles.extend(segment_handles);
             self.active_readers.insert(
                 segment_id,
@@ -1250,7 +1211,13 @@ where
         // start_seals can prove it sealed on disk.
         let capacity = self.segment_capacity;
         self.open_segments.retain(|segment, journals| {
-            Some(*segment) == current || journals.bodies().size() == capacity
+            Some(*segment) == current
+                || journals
+                    .as_ref()
+                    .expect("catalog owns pending segment")
+                    .bodies
+                    .size()
+                    == capacity
         });
         if let Some((state, handle)) = state {
             self.state = Some(state);
@@ -1278,7 +1245,12 @@ where
             .open_segments
             .iter()
             .filter(|(segment, journals)| {
-                journals.bodies().size() == self.segment_capacity
+                journals
+                    .as_ref()
+                    .expect("catalog owns pending segment")
+                    .bodies
+                    .size()
+                    == self.segment_capacity
                     && !self.dirty_segments.contains(segment)
                     && !self.sealing.contains(segment)
             })
@@ -1289,12 +1261,13 @@ where
             let segment = self
                 .open_segments
                 .remove(&segment_id)
-                .expect("full pending segment was just observed");
+                .expect("full pending segment was just observed")
+                .expect("catalog owns pending segment");
             let (segment, seal_handles) = segment.start_seal().await?;
             handles.extend(seal_handles);
             self.sealing.insert(segment_id);
             if Some(segment_id) == current {
-                self.open_segments.insert(segment_id, segment);
+                self.open_segments.insert(segment_id, Some(segment));
             }
         }
         Ok((full, handles))
@@ -1491,7 +1464,9 @@ where
             .open_segments
             .get(&segment)
             .ok_or(Error::Inconsistent("active pending segment is missing"))?
-            .bodies()
+            .as_ref()
+            .expect("catalog owns pending segment")
+            .bodies
             .read(local)
             .await?
             .into_inner();
@@ -1718,9 +1693,9 @@ mod tests {
             store.put(reference, Arc::clone(&block)).await.unwrap();
             store.put(reference, Arc::clone(&block)).await.unwrap();
             assert_eq!(store.next_position, 1);
-            let segment = store.open_segments.get(&0).unwrap();
-            assert_eq!(segment.bodies().size(), 1);
-            assert_eq!(segment.metadata().size(), 1);
+            let segment = store.open_segments.get(&0).unwrap().as_ref().unwrap();
+            assert_eq!(segment.bodies.size(), 1);
+            assert_eq!(segment.metadata.size(), 1);
             sync(&mut store).await;
 
             assert_eq!(
@@ -1752,6 +1727,7 @@ mod tests {
                 .start_put(second.reference(), second.clone())
                 .unwrap()
                 .unwrap();
+            assert!(matches!(store.open_segments.get(&0), Some(None)));
             let refs = [(0, first.reference()), (1, second.reference())];
             let mut groups = store.body_read_groups(refs, u64::MAX, 1).unwrap();
             assert_eq!(groups.len(), 1);
@@ -1765,6 +1741,7 @@ mod tests {
             let append = Box::pin(append).await.unwrap();
             assert!(!store.by_digest.contains_key(&second.reference().digest()));
             store.finish_put(append).unwrap();
+            assert!(matches!(store.open_segments.get(&0), Some(Some(_))));
             assert_eq!(store.next_position, 2);
             assert!(store.by_digest.contains_key(&second.reference().digest()));
             assert!(
@@ -2378,23 +2355,24 @@ mod tests {
             .await
             .unwrap();
         sync(&mut store).await;
-        let segment = store.open_segments.get_mut(&0).unwrap();
+        let mut segment = store.open_segments.get_mut(&0).unwrap().take().unwrap();
         if metadata_only {
-            let metadata = segment.metadata.take().unwrap();
+            let metadata = segment.metadata;
             let meta = BlockMeta::new(
                 tail.header().clone(),
                 u64::try_from(tail.encode_size()).unwrap(),
             );
             let (metadata, position) = metadata.append(&meta).await.unwrap();
             assert_eq!(position, 1);
-            segment.metadata = Some(metadata.sync().await.unwrap());
+            segment.metadata = metadata.sync().await.unwrap();
         } else {
-            let bodies = segment.bodies.take().unwrap();
+            let bodies = segment.bodies;
             let body = Shared::new(Arc::clone(&tail));
             let (bodies, position) = bodies.append(&body).await.unwrap();
             assert_eq!(position, 1);
-            segment.bodies = Some(bodies.sync().await.unwrap());
+            segment.bodies = bodies.sync().await.unwrap();
         }
+        store.open_segments.insert(0, Some(segment));
         drop(store);
 
         let mut store = open(context, "partial_reopen", prefix).await;
@@ -2405,9 +2383,9 @@ mod tests {
         );
         assert_eq!(store.header(tail_reference), None);
         assert!(store.block(tail_reference).await.unwrap().is_none());
-        let current = store.open_segments.get(&0).unwrap();
-        assert_eq!(current.bodies().size(), 1);
-        assert_eq!(current.metadata().size(), 1);
+        let current = store.open_segments.get(&0).unwrap().as_ref().unwrap();
+        assert_eq!(current.bodies.size(), 1);
+        assert_eq!(current.metadata.size(), 1);
         store.put(tail_reference, Arc::clone(&tail)).await.unwrap();
         sync(&mut store).await;
         assert_eq!(
@@ -2442,12 +2420,12 @@ mod tests {
                 .put(third.reference(), Arc::clone(&third))
                 .await
                 .unwrap();
-            let segment = store.open_segments.get_mut(&1).unwrap();
-            let bodies = segment.bodies.take().unwrap();
-            let metadata = segment.metadata.take().unwrap();
+            let Segment { bodies, metadata } =
+                store.open_segments.get_mut(&1).unwrap().take().unwrap();
             let (bodies, metadata) = futures::try_join!(bodies.sync(), metadata.sync()).unwrap();
-            segment.bodies = Some(bodies);
-            segment.metadata = Some(metadata);
+            store
+                .open_segments
+                .insert(1, Some(Segment { bodies, metadata }));
             drop(store);
 
             let mut store = open(&context, "reopen", "pending_unpublished_segment").await;
