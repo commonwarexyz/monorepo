@@ -22,7 +22,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub(crate) enum ArtifactState<D: Digest> {
     Pending(VerificationTicket<D>),
-    Waiting(BTreeSet<Dependency<D>>),
+    Waiting(Dependency<D>),
     Ready,
     Dropped,
 }

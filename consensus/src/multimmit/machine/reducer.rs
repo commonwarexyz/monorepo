@@ -3261,38 +3261,29 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     ) -> Result<(), StepError> {
         let entry = &self.artifacts[&id];
         let dependency_protected = entry.dependency_protected;
-        let dependencies = entry
+        let dependency = entry
             .artifact
-            .dependencies()
-            .into_iter()
-            .filter(|dependency| !self.available.contains(dependency))
-            .collect::<BTreeSet<_>>();
+            .dependency()
+            .filter(|dependency| !self.available.contains(dependency));
 
-        if dependencies.is_empty() {
+        let Some(dependency) = dependency else {
             return self.make_ready(id, validated_vqc);
-        }
+        };
         debug_assert!(
             validated_vqc.is_none(),
             "only V-QCs carry validation derivations"
         );
         if !dependency_protected
-            && (dependencies
-                .iter()
-                .any(|dependency| self.invalid_dependencies.contains(dependency))
-                || self.dependency_rejections_saturated
-                    && dependencies
-                        .iter()
-                        .any(|dependency| !self.has_retained_provider(*dependency)))
+            && (self.invalid_dependencies.contains(&dependency)
+                || self.dependency_rejections_saturated && !self.has_retained_provider(dependency))
         {
             self.remove_terminal_artifact(id)?;
             return Ok(());
         }
         self.waiting += 1;
-        for dependency in &dependencies {
-            self.waiters.entry(*dependency).or_default().insert(id);
-        }
+        self.waiters.entry(dependency).or_default().insert(id);
         self.artifacts.get_mut(&id).expect("artifact exists").state =
-            ArtifactState::Waiting(dependencies);
+            ArtifactState::Waiting(dependency);
         self.note_retirement_candidate(id);
         Ok(())
     }
@@ -3319,10 +3310,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     let ArtifactState::Waiting(missing) = &entry.state else {
                         return false;
                     };
-                    !entry.dependency_protected
-                        && missing
-                            .iter()
-                            .any(|dependency| !self.has_retained_provider(*dependency))
+                    !entry.dependency_protected && !self.has_retained_provider(*missing)
                 })
                 .collect::<BTreeSet<_>>()
         } else {
@@ -3398,14 +3386,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             }
             if let ArtifactState::Waiting(missing) = entry.state {
                 self.waiting -= 1;
-                for dependency in missing {
-                    let empty = self.waiters.get_mut(&dependency).is_some_and(|waiters| {
-                        waiters.remove(&id);
-                        waiters.is_empty()
-                    });
-                    if empty {
-                        self.waiters.remove(&dependency);
-                    }
+                let empty = self.waiters.get_mut(&missing).is_some_and(|waiters| {
+                    waiters.remove(&id);
+                    waiters.is_empty()
+                });
+                if empty {
+                    self.waiters.remove(&missing);
                 }
             }
 
@@ -3428,10 +3414,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     let ArtifactState::Waiting(missing) = &entry.state else {
                         return false;
                     };
-                    !entry.dependency_protected
-                        && missing
-                            .iter()
-                            .any(|dependency| !self.has_retained_provider(*dependency))
+                    !entry.dependency_protected && !self.has_retained_provider(*missing)
                 }));
             }
         }
@@ -3548,13 +3531,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 for waiter in waiters {
                     let Some(ArtifactState::Waiting(missing)) = self
                         .artifacts
-                        .get_mut(&waiter)
-                        .map(|entry| &mut entry.state)
+                        .get(&waiter)
+                        .map(|entry| &entry.state)
                     else {
                         continue;
                     };
-                    missing.remove(&provision);
-                    if missing.is_empty() {
+                    if *missing == provision {
                         ready.insert(waiter);
                     }
                 }
@@ -5730,9 +5712,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn needs_dependency_slot(&self, artifact: &Artifact<V, H::Digest>) -> bool {
         artifact
-            .dependencies()
-            .iter()
-            .any(|dependency| !self.available.contains(dependency))
+            .dependency()
+            .is_some_and(|dependency| !self.available.contains(&dependency))
     }
 
     fn retain_provider_index(
