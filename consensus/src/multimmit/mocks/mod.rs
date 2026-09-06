@@ -121,8 +121,6 @@ impl<V: Variant> Committee<V> {
             genesis,
         )
         .expect("mock configuration is valid");
-        let codec = config.codec_config();
-
         let mut network_keys = (0..participants)
             .map(|index| ed25519::PrivateKey::from_seed(seed ^ (u64::from(index) + 1)))
             .collect::<Vec<_>>();
@@ -134,56 +132,7 @@ impl<V: Variant> Committee<V> {
         let identity_set = Set::try_from(identities.clone()).expect("identities are unique");
 
         let mut rng = TestRng::new(seed);
-        let mut ordinary = Vec::with_capacity(participants as usize);
-        let roster_input = identity_set
-            .iter()
-            .map(|identity| {
-                let (private, public) = ops::keypair::<_, V>(&mut rng);
-                let proof = Roster::<ed25519::PublicKey, V>::proof_of_possession(
-                    config.namespace(),
-                    &private,
-                );
-                ordinary.push(private);
-                (identity.clone(), public, proof)
-            })
-            .collect();
-        let roster = Roster::verify(
-            config.namespace(),
-            codec.participants(),
-            roster_input,
-            &Sequential,
-        )
-        .expect("mock roster is valid");
-        let (da, da_shares) = sharing::<V>(
-            &mut rng,
-            participants,
-            u32::try_from(codec.da_quorum()).expect("quorum fits u32"),
-        );
-        let (nullification, nullification_shares) = sharing::<V>(
-            &mut rng,
-            participants,
-            u32::try_from(codec.nullification_quorum()).expect("quorum fits u32"),
-        );
-
-        let signers = ordinary
-            .into_iter()
-            .zip(da_shares)
-            .zip(nullification_shares)
-            .map(|((ordinary, da_share), nullification_share)| {
-                Scheme::signer(
-                    &config,
-                    roster.clone(),
-                    ordinary,
-                    da.clone(),
-                    da_share,
-                    nullification.clone(),
-                    nullification_share,
-                )
-                .expect("mock signer material is consistent")
-            })
-            .collect();
-        let verifier = Scheme::verifier(&config, roster, da, nullification)
-            .expect("mock verifier material is consistent");
+        let (signers, verifier) = schemes(&mut rng, &config, &identity_set);
 
         Self {
             config,
@@ -498,6 +447,70 @@ where
 
 fn digest(label: &[u8], marker: u64) -> Sha256Digest {
     Sha256::hash(&[label, &marker.to_be_bytes()])
+}
+
+/// Constructs deterministic signing material for an existing epoch and ordered identities.
+///
+/// Randomness is consumed for ordinary keys, then DA sharing, then nullification sharing.
+pub fn schemes<V: Variant>(
+    rng: &mut TestRng,
+    config: &Config<Sha256Digest>,
+    identities: &Set<ed25519::PublicKey>,
+) -> (
+    Vec<Scheme<ed25519::PublicKey, V>>,
+    Scheme<ed25519::PublicKey, V>,
+) {
+    let codec = config.codec_config();
+    let participants = u32::try_from(codec.participants()).expect("participant count fits u32");
+    let mut ordinary = Vec::with_capacity(participants as usize);
+    let roster_input = identities
+        .iter()
+        .map(|identity| {
+            let (private, public) = ops::keypair::<_, V>(rng);
+            let proof =
+                Roster::<ed25519::PublicKey, V>::proof_of_possession(config.namespace(), &private);
+            ordinary.push(private);
+            (identity.clone(), public, proof)
+        })
+        .collect();
+    let roster = Roster::verify(
+        config.namespace(),
+        codec.participants(),
+        roster_input,
+        &Sequential,
+    )
+    .expect("mock roster is valid");
+    let (da, da_shares) = sharing::<V>(
+        rng,
+        participants,
+        u32::try_from(codec.da_quorum()).expect("quorum fits u32"),
+    );
+    let (nullification, nullification_shares) = sharing::<V>(
+        rng,
+        participants,
+        u32::try_from(codec.nullification_quorum()).expect("quorum fits u32"),
+    );
+
+    let signers = ordinary
+        .into_iter()
+        .zip(da_shares)
+        .zip(nullification_shares)
+        .map(|((ordinary, da_share), nullification_share)| {
+            Scheme::signer(
+                config,
+                roster.clone(),
+                ordinary,
+                da.clone(),
+                da_share,
+                nullification.clone(),
+                nullification_share,
+            )
+            .expect("mock signer material is consistent")
+        })
+        .collect();
+    let verifier = Scheme::verifier(config, roster, da, nullification)
+        .expect("mock verifier material is consistent");
+    (signers, verifier)
 }
 
 fn sharing<V: Variant>(rng: &mut TestRng, total: u32, required: u32) -> (Sharing<V>, Vec<Share>) {
