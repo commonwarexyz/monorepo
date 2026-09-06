@@ -646,7 +646,8 @@ impl<E: Context, H: Hasher> MetadataCompletion<E, H> {
     fn steps(&self) -> usize {
         match self {
             Self::Canceled(steps) => *steps,
-            Self::History { .. } | Self::Headers { .. } => 1,
+            Self::History { .. } => 1,
+            Self::Headers { steps, .. } => 1 + steps.len(),
             Self::Outputs { state, .. } => state.reads.len(),
         }
     }
@@ -3071,10 +3072,6 @@ where
             .checked_add(steps)
             .expect("metadata step count does not overflow");
         assert!(self.metadata_steps <= self.metadata_step_capacity);
-        self.resume_metadata(job);
-    }
-
-    fn resume_metadata(&mut self, job: MetadataJob<E, H>) {
         match job {
             MetadataJob::History { .. } => self.history_reads.push(job.execute()),
             MetadataJob::Headers { .. } | MetadataJob::Outputs { .. } => {
@@ -3405,15 +3402,11 @@ where
                 result,
             } => {
                 if reply.is_closed() {
-                    self.release_metadata_steps(steps.len());
                     return Ok(());
                 }
                 let outcome = match result {
                     Ok(outcome) => outcome,
-                    Err(error) => {
-                        self.release_metadata_steps(steps.len());
-                        return respond(reply, Err(error));
-                    }
+                    Err(error) => return respond(reply, Err(error)),
                 };
                 match self.advance_header_branch(
                     &mut state.branches[index],
@@ -3424,16 +3417,9 @@ where
                         steps.push(
                             async move { (index, step.execute().await.map_err(Error::storage)) },
                         );
-                        self.metadata_steps = self
-                            .metadata_steps
-                            .checked_add(1)
-                            .expect("metadata step count does not overflow");
                     }
                     Ok(None) => {}
-                    Err(error) => {
-                        self.release_metadata_steps(steps.len());
-                        return respond(reply, Err(error));
-                    }
+                    Err(error) => return respond(reply, Err(error)),
                 }
                 if steps.is_empty() {
                     return respond(
@@ -3445,7 +3431,7 @@ where
                             .collect()),
                     );
                 }
-                self.resume_metadata(MetadataJob::Headers {
+                self.push_metadata(MetadataJob::Headers {
                     state,
                     reply,
                     steps,
@@ -4380,6 +4366,42 @@ mod tests {
             drop(pending);
             drop(client);
             assert!(handle.await.is_ok());
+        });
+    }
+
+    #[test]
+    fn header_completion_owns_all_branch_credits_on_error_or_cancellation() {
+        deterministic::Runner::default().start(|_| async move {
+            for canceled in [false, true] {
+                for count in 1..=4 {
+                    let mut steps = Pool::default();
+                    steps.push(async { (0, Err(Error::Invalid("header read failed"))) });
+                    for _ in 1..count {
+                        steps.push(std::future::pending());
+                    }
+                    let (reply, receiver) = oneshot::channel();
+                    let _receiver = (!canceled).then_some(receiver);
+                    let completion = MetadataJob::<DeterministicContext, Sha256>::Headers {
+                        state: HeaderSegmentsState {
+                            max_bytes: usize::MAX,
+                            branches: Vec::new(),
+                        },
+                        reply,
+                        steps,
+                    }
+                    .execute()
+                    .await;
+                    assert_eq!(completion.steps(), count);
+                    if canceled {
+                        assert!(matches!(completion, MetadataCompletion::Canceled(_)));
+                    } else {
+                        assert!(matches!(
+                            completion,
+                            MetadataCompletion::Headers { result: Err(_), .. }
+                        ));
+                    }
+                }
+            }
         });
     }
 
