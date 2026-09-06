@@ -68,6 +68,8 @@ use tracing::Span;
 pub enum Message<V: Variant, D: Digest> {
     /// One exact resolution completion from the resolver executor.
     Resolution {
+        /// The root span that owns terminal failures from this request.
+        root: Span,
         /// The executor's tracing span.
         span: Span,
         /// The round that issued the request.

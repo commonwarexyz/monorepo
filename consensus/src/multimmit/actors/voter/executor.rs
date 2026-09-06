@@ -18,6 +18,7 @@ where
     pub(super) fn execute_capabilities(
         &mut self,
         capabilities: Capabilities<V, H::Digest>,
+        root: &Span,
     ) -> Result<(), Fatal> {
         for capability in capabilities {
             match capability {
@@ -29,7 +30,7 @@ where
                     }
                     let _ = self.metrics.publications.try_set(self.egress.len());
                 }
-                capability => self.execute_capability(capability)?,
+                capability => self.execute_capability(capability, root)?,
             }
         }
         Ok(())
@@ -62,13 +63,17 @@ where
     }
 
     /// Routes one core capability to its runtime-owned executor.
-    fn execute_capability(&mut self, capability: Capability<V, H::Digest>) -> Result<(), Fatal> {
+    fn execute_capability(
+        &mut self,
+        capability: Capability<V, H::Digest>,
+        root: &Span,
+    ) -> Result<(), Fatal> {
         match capability {
-            Capability::Verification(capability) => self.execute_verification(capability)?,
-            Capability::Durability(capability) => self.execute_durability(capability)?,
-            Capability::Producer(capability) => self.execute_producer(capability)?,
-            Capability::Leader(capability) => self.execute_leader(capability)?,
-            Capability::Resolver(capability) => self.execute_resolver(capability)?,
+            Capability::Verification(capability) => self.execute_verification(capability, root)?,
+            Capability::Durability(capability) => self.execute_durability(capability, root)?,
+            Capability::Producer(capability) => self.execute_producer(capability, root)?,
+            Capability::Leader(capability) => self.execute_leader(capability, root)?,
+            Capability::Resolver(capability) => self.execute_resolver(capability, root)?,
         }
         Ok(())
     }
@@ -76,6 +81,7 @@ where
     fn execute_verification(
         &mut self,
         capability: VerificationCapability<V, H::Digest>,
+        root: &Span,
     ) -> Result<(), Fatal> {
         match capability {
             VerificationCapability::Verify(job) => {
@@ -103,6 +109,7 @@ where
                 );
                 self.schedule_verification(PendingVerification {
                     span,
+                    root: root.clone(),
                     round: Round::new(self.protocol_epoch, self.round_view),
                     job,
                     sources,
@@ -116,9 +123,10 @@ where
     fn execute_durability(
         &mut self,
         capability: DurabilityCapability<V, H::Digest>,
+        root: &Span,
     ) -> Result<(), Fatal> {
         match capability {
-            DurabilityCapability::Persist(directive) => self.persist(directive)?,
+            DurabilityCapability::Persist(directive) => self.persist(directive, root)?,
             DurabilityCapability::Acknowledged {
                 retention,
                 forwarded_nullifications,
@@ -224,7 +232,13 @@ where
                                 artifact: Arc::new(artifact),
                             })
                         };
-                        self.spawn_crypto(critical, TaskClass::LocalSigning, span, operation)?;
+                        self.spawn_crypto(
+                            critical,
+                            TaskClass::LocalSigning,
+                            span,
+                            operation,
+                            root,
+                        )?;
                     }
                     DurableEffect::SignBatch(requests) => {
                         let workers = requests.len().max(1);
@@ -267,6 +281,7 @@ where
                             workers,
                             span,
                             operation,
+                            root,
                         )?;
                     }
                     DurableEffect::Broadcast(artifact) => {
@@ -323,14 +338,27 @@ where
     fn execute_producer(
         &mut self,
         capability: ProducerCapability<V, H::Digest>,
+        root: &Span,
     ) -> Result<(), Fatal> {
         match capability {
             ProducerCapability::ArmTimer(timer) => {
+                #[cfg(test)]
+                debug!(
+                    test_root = root.id().map_or(0, |id| id.into_u64()),
+                    "test production timer armed"
+                );
                 let deadline = self.context.current().saturating_add_ext(timer.delay());
-                self.production_timer = Some((timer, deadline, Span::current()));
+                self.production_timer = Some((
+                    timer,
+                    deadline,
+                    TraceContext {
+                        span: Span::current(),
+                        root: root.clone(),
+                    },
+                ));
             }
-            ProducerCapability::Build(job) => self.spawn_build(&job)?,
-            ProducerCapability::Custody(job) => self.spawn_custody(&job)?,
+            ProducerCapability::Build(job) => self.spawn_build(&job, root)?,
+            ProducerCapability::Custody(job) => self.spawn_custody(&job, root)?,
             ProducerCapability::CancelCustody(cancellation) => {
                 self.cancel_custody(cancellation)?;
             }
@@ -380,7 +408,11 @@ where
         Ok(())
     }
 
-    fn execute_resolver(&mut self, capability: ResolverCapability) -> Result<(), Fatal> {
+    fn execute_resolver(
+        &mut self,
+        capability: ResolverCapability,
+        root: &Span,
+    ) -> Result<(), Fatal> {
         let message = match capability {
             ResolverCapability::Resolve(job) => {
                 let span = info_span!(
@@ -391,7 +423,12 @@ where
                     generation = job.generation().traced()
                 );
                 let round = Round::new(self.protocol_epoch, self.round_view);
-                resolver::Message::Resolve(ResolveRequest { span, round, job })
+                resolver::Message::Resolve(ResolveRequest {
+                    span,
+                    root: root.clone(),
+                    round,
+                    job,
+                })
             }
             ResolverCapability::Cancel(job) => resolver::Message::Cancel { job },
             ResolverCapability::Reject(job) => resolver::Message::Reject { job },
@@ -403,7 +440,11 @@ where
         Ok(())
     }
 
-    fn execute_leader(&mut self, capability: LeaderCapability<V, H::Digest>) -> Result<(), Fatal> {
+    fn execute_leader(
+        &mut self,
+        capability: LeaderCapability<V, H::Digest>,
+        root: &Span,
+    ) -> Result<(), Fatal> {
         match capability {
             LeaderCapability::ArmTimer(timer) => {
                 debug!(view = timer.round().view().get(), "view timer armed");
@@ -439,7 +480,13 @@ where
                             ),
                         })
                 };
-                self.spawn_crypto(critical, TaskClass::CriticalAggregation, span, operation)?;
+                self.spawn_crypto(
+                    critical,
+                    TaskClass::CriticalAggregation,
+                    span,
+                    operation,
+                    root,
+                )?;
             }
             LeaderCapability::AggregateVqc(job) => {
                 let span = info_span!(
@@ -470,7 +517,13 @@ where
                             )),
                         })
                 };
-                self.spawn_crypto(critical, TaskClass::CriticalAggregation, span, operation)?;
+                self.spawn_crypto(
+                    critical,
+                    TaskClass::CriticalAggregation,
+                    span,
+                    operation,
+                    root,
+                )?;
             }
             LeaderCapability::AggregateLqc(job) => {
                 let span = info_span!(
@@ -497,7 +550,13 @@ where
                             )),
                         })
                 };
-                self.spawn_crypto(critical, TaskClass::CriticalAggregation, span, operation)?;
+                self.spawn_crypto(
+                    critical,
+                    TaskClass::CriticalAggregation,
+                    span,
+                    operation,
+                    root,
+                )?;
             }
         }
         Ok(())
@@ -539,8 +598,9 @@ where
         class: TaskClass,
         span: Span,
         operation: impl FnOnce(S) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> + Send + 'static,
+        root: &Span,
     ) -> Result<(), Fatal> {
-        self.spawn_crypto_units(strategy, class, 1, span, operation)
+        self.spawn_crypto_units(strategy, class, 1, span, operation, root)
     }
 
     fn spawn_crypto_units<S: Strategy>(
@@ -550,6 +610,7 @@ where
         units: usize,
         span: Span,
         operation: impl FnOnce(S) -> Result<CryptoOutcome<V, H::Digest>, SchemeError> + Send + 'static,
+        root: &Span,
     ) -> Result<(), Fatal> {
         let permit = self.core_mut().reserve_task(class, units)?;
         debug!(
@@ -559,7 +620,11 @@ where
             "reserved crypto task and completion"
         );
         let operation = run_crypto_operation(strategy, span, operation);
-        self.crypto.push(async move { (permit, operation.await) });
+        let root = root.clone();
+        self.crypto.push(async move {
+            let (span, outcome) = operation.await;
+            (permit, TraceContext { span, root }, outcome)
+        });
         Ok(())
     }
 
@@ -598,13 +663,13 @@ where
             let _ = self.finish_task(permit, TaskTerminal::Cancelled)?;
             return Err(TaskError::Accounting.into());
         }
-        self.verification_tasks.insert(job, permit);
         let wait = if pending.view_critical() {
             &self.metrics.verification_wait_fast
         } else {
             &self.metrics.verification_wait_bulk
         };
         wait.observe_between(pending.queued_at, self.context.current());
+        self.verification_tasks.insert(job, (permit, pending.root));
         if self
             .batcher
             .enqueue(batcher::Message::Verify {
@@ -618,12 +683,12 @@ where
             return Ok(None);
         }
 
-        let permit = self
+        let (permit, root) = self
             .verification_tasks
             .remove(&job)
             .ok_or(TaskError::Accounting)?;
         let _ = self.finish_task(permit, TaskTerminal::Cancelled)?;
-        Err(Fatal::Closed)
+        Err(Fatal::VerificationClosed { root })
     }
 
     fn enqueue_pending_verification(
@@ -681,7 +746,11 @@ where
     ///
     /// Barriers pipeline: the journal appends behind in-flight syncs, and completions are
     /// acknowledged strictly in cursor order.
-    fn persist(&mut self, directive: PersistDirective<V, H::Digest>) -> Result<(), Fatal> {
+    fn persist(
+        &mut self,
+        directive: PersistDirective<V, H::Digest>,
+        root: &Span,
+    ) -> Result<(), Fatal> {
         let (job, staged_retention, release_after_enqueue, _) = directive.into_parts();
 
         // A dedicated span makes each barrier's wall time (append, fsync, acknowledgement)
@@ -697,8 +766,10 @@ where
         let barrier = job.id();
         match self.journal.try_append(span, job) {
             Ok(response) => {
-                self.journal_responses
-                    .push_back(PendingJournal { response });
+                self.journal_responses.push_back(PendingJournal {
+                    response,
+                    root: root.clone(),
+                });
                 Ok(())
             }
             Err(JournalAdmission::Full(_)) => Err(CoreError::SchedulerInvariant.into()),
@@ -712,7 +783,7 @@ where
             )?;
         }
         for job in release_after_enqueue {
-            self.execute_durability(DurabilityCapability::Released(job))?;
+            self.execute_durability(DurabilityCapability::Released(job), root)?;
         }
         Ok(())
     }
@@ -721,6 +792,7 @@ where
     pub(super) fn persistence_completed(
         &mut self,
         durable: JournalDurable<V, H::Digest>,
+        root: &Span,
     ) -> Result<(), Fatal> {
         let JournalDurable {
             span,
@@ -733,7 +805,7 @@ where
             ack: completion,
             retired: Vec::new(),
         });
-        let ticket = self.track_transition(|core| core.persistence_completed(completion))?;
+        let ticket = self.track_transition(|core| core.persistence_completed(completion), root)?;
         self.input_spans
             .get_mut(&ticket)
             .ok_or(CoreError::SchedulerInvariant)?
@@ -743,7 +815,7 @@ where
     }
 
     /// Spawns the application build for one machine-issued production job.
-    fn spawn_build(&mut self, job: &BuildJob<H::Digest>) -> Result<(), Fatal> {
+    fn spawn_build(&mut self, job: &BuildJob<H::Digest>, root: &Span) -> Result<(), Fatal> {
         // Validation work never consumes this slot. The machine issues at most one build at a
         // time, so reserving it before spawning keeps local production bounded without waiting.
         let permit = self.core_mut().reserve_task(TaskClass::LocalBuild, 1)?;
@@ -765,7 +837,10 @@ where
         );
         let started_at = self.context.current();
         let mut automaton = self.automaton.clone();
-        let completion_span = span.clone();
+        let completion_context = TraceContext {
+            span: span.clone(),
+            root: root.clone(),
+        };
         let handle = self.context.child("build").spawn(move |_| {
             async move {
                 let receiver = automaton.propose(context).await;
@@ -781,12 +856,12 @@ where
             .instrument(span)
         });
         self.jobs
-            .push(async move { (permit, completion_span, handle.await) });
+            .push(async move { (permit, completion_context, handle.await) });
         Ok(())
     }
 
     /// Validates and durably retains one locally prepared body before its header may be signed.
-    fn spawn_custody(&mut self, job: &CustodyJob<H::Digest>) -> Result<(), Fatal> {
+    fn spawn_custody(&mut self, job: &CustodyJob<H::Digest>, root: &Span) -> Result<(), Fatal> {
         let permit = self.core_mut().reserve_task(TaskClass::LocalCustody, 1)?;
         let (id, generation) = (job.id(), job.generation());
         let cancellation = CustodyCancellation::new(id, generation);
@@ -803,7 +878,10 @@ where
             height = header.height().get().traced(),
         );
         let mut automaton = self.automaton.clone();
-        let completion_span = span.clone();
+        let completion_context = TraceContext {
+            span: span.clone(),
+            root: root.clone(),
+        };
         let handle = self.context.child("custody").spawn(move |_| {
             async move {
                 let custody = async {
@@ -823,7 +901,7 @@ where
             .instrument(span)
         });
         self.jobs
-            .push(async move { (permit, completion_span, handle.await) });
+            .push(async move { (permit, completion_context, handle.await) });
         Ok(())
     }
 
@@ -832,7 +910,7 @@ where
     pub(super) fn application_outcome(
         &mut self,
         permit: TaskPermit,
-        span: &Span,
+        context: &TraceContext,
         outcome: Result<AppOutcome<H::Digest>, RuntimeError>,
     ) -> Result<(), Fatal> {
         let outcome = match outcome {
@@ -864,10 +942,14 @@ where
                 } else {
                     self.metrics.build_declines.inc();
                 }
-                let completed = info_span!(parent: span, "multimmit.voter.produce.complete");
+                let completed =
+                    info_span!(parent: &context.span, "multimmit.voter.produce.complete");
                 completed.in_scope(|| {
                     let completion = BuildCompletion::new(id, generation, parent, result);
-                    self.track_transition(|core| core.producer_build_completed(completion))?;
+                    self.track_transition(
+                        |core| core.producer_build_completed(completion),
+                        &context.root,
+                    )?;
                     Ok(())
                 })
             }
@@ -898,16 +980,23 @@ where
                 }
                 if cancellation_requested {
                     let cancellation = CustodyCancellation::new(id, generation);
-                    self.track_transition(|core| core.producer_custody_cancelled(cancellation))?;
+                    self.track_transition(
+                        |core| core.producer_custody_cancelled(cancellation),
+                        &context.root,
+                    )?;
                     return Ok(());
                 }
                 if verdict != Some(true) {
                     return Err(Fatal::Automaton);
                 }
-                let completed = info_span!(parent: span, "multimmit.voter.custody.complete");
+                let completed =
+                    info_span!(parent: &context.span, "multimmit.voter.custody.complete");
                 completed.in_scope(|| {
                     let completion = CustodyCompletion::new(id, generation, header);
-                    self.track_transition(|core| core.producer_custodied(completion))?;
+                    self.track_transition(
+                        |core| core.producer_custodied(completion),
+                        &context.root,
+                    )?;
                     Ok(())
                 })
             }
@@ -922,7 +1011,10 @@ where
                 if active.is_some() {
                     return Err(TaskError::Accounting.into());
                 }
-                self.track_transition(|core| core.producer_custody_cancelled(cancellation))?;
+                self.track_transition(
+                    |core| core.producer_custody_cancelled(cancellation),
+                    &context.root,
+                )?;
                 Ok(())
             }
         }
@@ -945,6 +1037,7 @@ where
     fn crypto_outcome(
         &mut self,
         outcome: Result<CryptoOutcome<V, H::Digest>, SchemeError>,
+        root: &Span,
     ) -> Result<(), Fatal> {
         let outcome = outcome?;
         match outcome {
@@ -953,7 +1046,10 @@ where
                 generation,
                 artifact,
             } => {
-                self.track_transition(|core| core.signing_completed(id, generation, artifact))?;
+                self.track_transition(
+                    |core| core.signing_completed(id, generation, artifact),
+                    root,
+                )?;
                 Ok(())
             }
             CryptoOutcome::SignedBatch {
@@ -961,9 +1057,10 @@ where
                 generation,
                 artifacts,
             } => {
-                self.track_transition(|core| {
-                    core.signing_batch_completed(id, generation, artifacts)
-                })?;
+                self.track_transition(
+                    |core| core.signing_batch_completed(id, generation, artifacts),
+                    root,
+                )?;
                 Ok(())
             }
             CryptoOutcome::NullificationRecovered {
@@ -973,7 +1070,10 @@ where
                 self.metrics
                     .nullification_recovery_latency
                     .observe_between(started_at, self.context.current());
-                self.track_transition(|core| core.leader_nullification_recovered(completion))?;
+                self.track_transition(
+                    |core| core.leader_nullification_recovered(completion),
+                    root,
+                )?;
                 Ok(())
             }
             CryptoOutcome::VqcAggregated { view, completion } => {
@@ -984,7 +1084,7 @@ where
                 self.metrics
                     .qc_bytes
                     .observe(completion.certificate().encode_size() as f64);
-                self.track_transition(|core| core.leader_vqc_aggregated(completion))?;
+                self.track_transition(|core| core.leader_vqc_aggregated(completion), root)?;
                 Ok(())
             }
             CryptoOutcome::LqcAggregated { view, completion } => {
@@ -995,7 +1095,7 @@ where
                 self.metrics
                     .qc_bytes
                     .observe(completion.certificate().encode_size() as f64);
-                self.track_transition(|core| core.leader_lqc_aggregated(completion))?;
+                self.track_transition(|core| core.leader_lqc_aggregated(completion), root)?;
                 Ok(())
             }
         }
@@ -1005,8 +1105,8 @@ where
     pub(super) fn crypto_completed(
         &mut self,
         permit: TaskPermit,
-        span: &Span,
-        outcome: Result<Result<CryptoOutcome<V, H::Digest>, SchemeError>, CryptoTaskPanicked>,
+        context: &TraceContext,
+        outcome: CryptoOperationOutcome<V, H::Digest>,
     ) -> Result<(), Fatal> {
         match outcome {
             Ok(outcome) => {
@@ -1018,7 +1118,9 @@ where
                 if !self.finish_task(permit, terminal)? {
                     return Ok(());
                 }
-                span.in_scope(|| self.crypto_outcome(outcome))
+                context
+                    .span
+                    .in_scope(|| self.crypto_outcome(outcome, &context.root))
             }
             Err(CryptoTaskPanicked) => {
                 if !self.finish_task(permit, TaskTerminal::Panicked)? {

@@ -57,6 +57,7 @@ pub struct Config<P: PublicKey, B, T> {
 }
 
 struct Origin {
+    root: Span,
     round: Round,
     started_at: SystemTime,
 }
@@ -508,6 +509,7 @@ where
                             self.metrics.requests.inc();
                             let job = request.job;
                             let origin = Origin {
+                                root: request.root,
                                 round: request.round,
                                 started_at: self.context.current(),
                             };
@@ -664,6 +666,7 @@ where
             view = origin.round.view().get().traced()
         );
         let _ = voter.enqueue(voter::Message::Resolution {
+            root: origin.root.clone(),
             span,
             round: origin.round,
             completion,

@@ -25,6 +25,8 @@ use tracing::Span;
 
 /// One machine-issued resolver request.
 pub struct ResolveRequest {
+    /// The root span that owns terminal failures from this request.
+    pub root: Span,
     /// The issuing tracing span.
     pub span: Span,
     /// The round that issued the request.

@@ -39,6 +39,7 @@ use tracing_subscriber::{Layer, layer::Context as LayerContext, prelude::*, regi
 struct TraceNode {
     id: Id,
     parent: Option<Id>,
+    closed: bool,
 }
 
 #[derive(Clone)]
@@ -59,7 +60,8 @@ where
         let name = attributes.metadata().name();
         if !matches!(
             name,
-            "test.resolver.request"
+            "test.resolver.root"
+                | "test.resolver.request"
                 | "multimmit.resolver.resolve.process"
                 | "multimmit.resolver.resolve.materialize"
                 | "multimmit.resolver.resolve.complete"
@@ -74,8 +76,17 @@ where
             TraceNode {
                 id: id.clone(),
                 parent,
+                closed: false,
             },
         );
+    }
+
+    fn on_close(&self, id: Id, _: LayerContext<'_, S>) {
+        for span in self.spans.lock().values_mut() {
+            if span.id == id {
+                span.closed = true;
+            }
+        }
     }
 }
 
@@ -362,7 +373,7 @@ fn state_prunes_exact_exits_but_keeps_floor() {
 }
 
 #[test]
-fn local_cache_materialization_keeps_request_trace_parent() {
+fn local_cache_materialization_keeps_request_trace_parent_and_root_until_cancel() {
     let spans = Arc::new(Mutex::new(BTreeMap::new()));
     let subscriber = tracing_subscriber::registry().with(TraceParentLayer {
         spans: Arc::clone(&spans),
@@ -407,18 +418,23 @@ fn local_cache_materialization_keeps_request_trace_parent() {
                     .accepted()
             );
             let request = tracing::info_span!(parent: None, "test.resolver.request");
+            let root = tracing::info_span!(parent: None, "test.resolver.root");
+            let root_id = root.id().expect("root enabled");
+            let job = ResolutionJob::fabricate(7, 11, view);
             assert!(
                 endpoints
                     .control
                     .enqueue(Message::Resolve(ResolveRequest {
+                        root,
                         span: request,
                         round: Round::new(committee.config.epoch(), view),
-                        job: ResolutionJob::fabricate(7, 11, view),
+                        job,
                     }))
                     .accepted()
             );
-            let crate::multimmit::actors::voter::Message::Resolution { .. } =
-                voter_receiver.recv().await.expect("cached proof completes");
+            let completion = voter_receiver.recv().await.expect("cached proof completes");
+            let crate::multimmit::actors::voter::Message::Resolution { root, .. } = &completion;
+            assert_eq!(root.id(), Some(root_id));
 
             {
                 let spans = spans.lock();
@@ -435,6 +451,18 @@ fn local_cache_materialization_keeps_request_trace_parent() {
                 assert_eq!(process.parent.as_ref(), Some(&request.id));
                 assert_eq!(materialize.parent.as_ref(), Some(&process.id));
                 assert_eq!(complete.parent.as_ref(), Some(&materialize.id));
+            }
+
+            drop(completion);
+            assert!(!spans.lock().get("test.resolver.root").unwrap().closed);
+            assert!(
+                endpoints
+                    .control
+                    .enqueue(Message::Cancel { job })
+                    .accepted()
+            );
+            while !spans.lock().get("test.resolver.root").unwrap().closed {
+                context.sleep(Duration::from_millis(1)).await;
             }
 
             task.abort();
@@ -505,6 +533,7 @@ fn stalled_codec_worker_keeps_control_and_queries_live() {
                 endpoints
                     .control
                     .enqueue(Message::Resolve(ResolveRequest {
+                        root: Span::none(),
                         span: Span::none(),
                         round: Round::new(committee.config.epoch(), view),
                         job,
@@ -629,6 +658,7 @@ fn wrong_view_response_is_rejected_and_blocks_only_its_peer() {
             endpoints
                 .control
                 .enqueue(Message::Resolve(ResolveRequest {
+                    root: Span::none(),
                     span: Span::none(),
                     round: Round::new(committee.config.epoch(), requested),
                     job,
@@ -710,6 +740,7 @@ fn control_overflow_coalesces_only_between_job_barriers() {
     Message::handle(
         &mut overflow,
         Message::Resolve(ResolveRequest {
+            root: Span::none(),
             span: Span::none(),
             round: Round::new(Epoch::new(4), View::new(9)),
             job: first,

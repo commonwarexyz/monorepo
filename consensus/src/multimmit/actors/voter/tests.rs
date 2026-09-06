@@ -148,6 +148,34 @@ struct TraceFieldLayer {
     spans: Arc<Mutex<BTreeMap<String, BTreeMap<String, TraceFieldKind>>>>,
 }
 
+struct TraceRootLayer;
+
+impl<S> tracing_subscriber::Layer<S> for TraceRootLayer
+where
+    S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut fields = commonware_runtime::telemetry::traces::collector::EventMetadata::default();
+        event.record(&mut fields);
+        let Some((_, root)) = fields.fields.iter().find(|(name, _)| name == "test_root") else {
+            return;
+        };
+        let root: u64 = root.parse().unwrap();
+        assert_ne!(root, 0, "the input retains an enabled terminal-error root");
+        let current = context.lookup_current().expect("work has tracing context");
+        let ancestor = current.scope().from_root().next().unwrap();
+        assert_eq!(
+            ancestor.id().into_u64(),
+            root,
+            "terminal errors and work share the exact root identity"
+        );
+    }
+}
+
 impl<S> tracing_subscriber::Layer<S> for TraceFieldLayer
 where
     S: tracing::Subscriber,
@@ -1160,6 +1188,51 @@ fn local_custody_failure_stops_the_voter() {
     });
 }
 
+#[test_collect_traces]
+fn delayed_custody_failure_is_recorded_once_on_its_original_root(traces: TraceStorage) {
+    DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
+        let (application, mut custody) =
+            MockApplication::with_gated_verification_result(Some(false));
+        application.permit_builds(1);
+        let mut node = Node::start_with_attachments(
+            &context,
+            76,
+            Role::Validator(Participant::new(0)),
+            "fatal_root",
+            Attachments {
+                application,
+                ..Attachments::default()
+            },
+        )
+        .await;
+        custody.wait_started().await;
+        let (mut certificates, _) = node.peer(1, 2).await;
+        certificates.send(
+            Recipients::One(node.me.clone()),
+            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
+                node.committee.nullification(1),
+            ))
+            .encode(),
+            true,
+        );
+        while node.inspect().await.view() == View::new(1) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        custody.release();
+        node.tasks
+            .remove(1)
+            .await
+            .expect("voter stops after failure");
+        let errors = traces.get_by_level(Level::ERROR);
+        assert_eq!(errors.len(), 1, "exactly one terminal error: {errors:?}");
+        let error = &errors[0];
+        assert_eq!(error.metadata.content, "voter failed");
+        assert_eq!(error.spans.len(), 1, "error is directly on its root");
+        assert_eq!(error.spans[0].content, "multimmit.voter.round");
+        error.spans[0].expect_field_exact("view", "1").unwrap();
+    });
+}
+
 /// One signed publication must not reach the wire before the barrier sync covering it.
 #[test_traced]
 fn publication_waits_for_the_covering_barrier_sync() {
@@ -1285,9 +1358,16 @@ fn round_compare_fields_are_numeric() {
     }
 }
 
-#[test_collect_traces]
-fn round_spans_track_ingress_and_publication_boundaries(traces: TraceStorage) {
+#[test]
+fn round_spans_track_ingress_and_publication_boundaries() {
+    let traces = TraceStorage::default();
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            commonware_runtime::telemetry::traces::collector::CollectingLayer::new(traces.clone()),
+        )
+        .with(TraceRootLayer);
     let executor = DeterministicRunner::timed(Duration::from_secs(10));
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     executor.start(|context| async move {
         let seed = 76;
         let node = Node::start_with_attachments(
@@ -1336,6 +1416,23 @@ fn round_spans_track_ingress_and_publication_boundaries(traces: TraceStorage) {
         }
 
         let events = traces.get_by_level(Level::DEBUG);
+        for operation in [
+            "multimmit.voter.produce.complete",
+            "multimmit.voter.custody.complete",
+            "multimmit.voter.sign",
+            "multimmit.voter.persist",
+            "multimmit.voter.verify.process",
+        ] {
+            events
+                .expect_event(|event| {
+                    event.metadata.content == "test captured input dispatch"
+                        && event
+                            .spans
+                            .first()
+                            .is_some_and(|span| span.content == operation)
+                })
+                .unwrap();
+        }
         events
             .expect_event(|event| {
                 event.metadata.content == "test reporter received activity"
@@ -1445,10 +1542,29 @@ fn ready_application_work_precedes_later_mailbox_traffic() {
     });
 }
 
-#[test_collect_traces]
-fn work_quanta_refresh_round_without_reparenting_async_inputs(traces: TraceStorage) {
+#[test]
+fn work_quanta_refresh_round_without_reparenting_async_inputs() {
+    let traces = TraceStorage::default();
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            commonware_runtime::telemetry::traces::collector::CollectingLayer::new(traces.clone()),
+        )
+        .with(TraceRootLayer);
+    let _subscriber = tracing::subscriber::set_default(subscriber);
     DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
-        let (mut node, mut build) = Node::start_gated_build(&context, 76, "quantum").await;
+        let (application, mut build) = MockApplication::with_gated_build();
+        application.permit_builds(0);
+        let mut node = Node::start_with_attachments(
+            &context,
+            76,
+            Role::Validator(Participant::new(0)),
+            "quantum",
+            Attachments {
+                application,
+                ..Attachments::default()
+            },
+        )
+        .await;
         build.wait_started().await;
         let (mut certificates, _) = node.peer(1, 2).await;
         certificates.send(
@@ -1463,13 +1579,32 @@ fn work_quanta_refresh_round_without_reparenting_async_inputs(traces: TraceStora
             context.sleep(Duration::from_millis(1)).await;
         }
         build.release();
+        while !traces
+            .get_by_level(Level::DEBUG)
+            .iter()
+            .any(|event| event.metadata.content == "test production timer armed")
+        {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        certificates.send(
+            Recipients::One(node.me.clone()),
+            node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
+                node.committee.nullification(2),
+            ))
+            .encode(),
+            true,
+        );
+        while node.inspect().await.view() == View::new(2) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
         loop {
             let events = traces.get_by_level(Level::DEBUG);
             if events.iter().any(|event| {
                 event.metadata.content == "test captured input dispatch"
-                    && event.spans.first().is_some_and(|span| {
-                        span.content == "multimmit.voter.produce.complete"
-                    })
+                    && event
+                        .spans
+                        .first()
+                        .is_some_and(|span| span.content == "multimmit.voter.production.timeout")
             }) {
                 break;
             }
@@ -1506,16 +1641,32 @@ fn work_quanta_refresh_round_without_reparenting_async_inputs(traces: TraceStora
         );
         events
             .expect_event(|event| {
-                event.metadata.content == "test captured input dispatch"
-                    && event.spans.first().is_some_and(|span| {
-                        span.content == "multimmit.voter.produce.complete"
-                    })
-                    && event.spans.last().is_some_and(|span| {
-                        span.content == "multimmit.voter.round"
-                            && span.expect_field_exact("view", "1").is_ok()
-                    })
+                event.metadata.content == "test machine-owned work"
+                    && event.metadata.expect_field_exact("view", "3").is_ok()
             })
             .unwrap();
+        for (operation, view, current_view) in [
+            ("multimmit.voter.produce.complete", "1", "2"),
+            ("multimmit.voter.production.timeout", "2", "3"),
+        ] {
+            events
+                .expect_event(|event| {
+                    event.metadata.content == "test captured input dispatch"
+                        && event
+                            .metadata
+                            .expect_field_exact("current_view", current_view)
+                            .is_ok()
+                        && event
+                            .spans
+                            .first()
+                            .is_some_and(|span| span.content == operation)
+                        && event.spans.last().is_some_and(|span| {
+                            span.content == "multimmit.voter.round"
+                                && span.expect_field_exact("view", view).is_ok()
+                        })
+                })
+                .unwrap();
+        }
     });
 }
 
@@ -1741,6 +1892,7 @@ fn accepted_inspection_loses_to_at_most_one_ready_event() {
                 node._voter_control
                     .enqueue(Message::Resolution {
                         span: tracing::Span::none(),
+                        root: tracing::Span::none(),
                         round: Round::new(node.committee.config.epoch(), view),
                         completion,
                     })
