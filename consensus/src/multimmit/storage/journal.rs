@@ -214,7 +214,6 @@ where
             config,
             covered,
             cursor: covered,
-            suffix: Vec::new(),
             suffix_section: None,
             saw_record: false,
             section: 0,
@@ -337,7 +336,6 @@ pub struct Recovery<E: Storage + Metrics + Supervisor, V: Variant, D: Digest> {
     config: Config,
     covered: Cursor,
     cursor: Cursor,
-    suffix: Vec<JournalRecord<V, D>>,
     suffix_section: Option<u64>,
     saw_record: bool,
     section: u64,
@@ -352,11 +350,6 @@ where
     #[cfg(test)]
     const fn cursor(&self) -> Cursor {
         self.cursor
-    }
-
-    /// Returns the contiguous event suffix after the covered checkpoint.
-    pub fn suffix(&self) -> &[JournalRecord<V, D>] {
-        &self.suffix
     }
 
     /// Returns the first section containing an event not covered by the checkpoint.
@@ -414,7 +407,6 @@ where
             }
             self.suffix_section.get_or_insert(section);
             self.cursor = record.result();
-            self.suffix.push(record.clone());
             return Ok(Some(record));
         }
     }
@@ -770,14 +762,18 @@ mod tests {
             sync.await.unwrap();
             drop(journal);
 
-            // A checkpoint covering cursor one leaves only the second record to replay, even
-            // though pruning has not yet removed the first.
-            let mut recovery = TestJournal::open(context.child("recovery"), cfg, Cursor::new(1))
-                .await
-                .unwrap();
-            assert_eq!(recovery.next().await.unwrap(), Some(expected));
-            assert!(recovery.next().await.unwrap().is_none());
-            recovery.finish().unwrap();
+            for covered in [1, 2] {
+                let mut recovery =
+                    TestJournal::open(context.child("recovery"), cfg.clone(), Cursor::new(covered))
+                        .await
+                        .unwrap();
+                let expected = (covered == 1).then(|| expected.clone());
+                assert_eq!(recovery.next().await.unwrap(), expected);
+                assert!(recovery.next().await.unwrap().is_none());
+                assert!(recovery.saw_record());
+                assert_eq!(recovery.suffix_section(), (covered == 1).then_some(0));
+                recovery.finish().unwrap();
+            }
         });
     }
 

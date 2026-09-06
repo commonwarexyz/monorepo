@@ -374,15 +374,15 @@ where
         .instrument(info_span!("multimmit.engine.open_stores.journal"))
         .await?;
 
-    // Buffer the journal suffix so an empty, never-started node can be told apart from a
-    // recovering one.
-    async {
-        while journal.next().await?.is_some() {}
-        Ok::<_, JournalError>(())
+    let records = async {
+        let mut records = Vec::new();
+        while let Some(record) = journal.next().await? {
+            records.push(record);
+        }
+        Ok::<_, JournalError>(records)
     }
     .instrument(info_span!("multimmit.engine.open_stores.read_suffix"))
     .await?;
-    let records = journal.suffix().to_vec();
     let events_since_checkpoint: u64 = records
         .iter()
         .map(|record| record.events().len() as u64)
