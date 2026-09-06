@@ -443,9 +443,11 @@ where
             }
 
             let Some(queued) = self.queued.iter().find(|queued| {
-                matches!(self.readers.get(&queued.read.segment()), Some(SegmentReader::Cold(_)))
-            })
-            else {
+                matches!(
+                    self.readers.get(&queued.read.segment()),
+                    Some(SegmentReader::Cold(_))
+                )
+            }) else {
                 break;
             };
             let segment = queued.read.segment();

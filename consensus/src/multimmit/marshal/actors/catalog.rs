@@ -898,6 +898,15 @@ where
     enqueued: Option<SystemTime>,
 }
 
+fn command_span(parent: &Span, operation: &'static str) -> Span {
+    info_span!(
+        parent: parent,
+        "multimmit.marshal.catalog.process",
+        command = operation,
+        handler_ns = tracing::field::Empty,
+    )
+}
+
 impl<H, V, B> TracedCommand<H, V, B>
 where
     H: Hasher,
@@ -1752,25 +1761,10 @@ where
             return Ok(());
         }
         let operation = read.command.kind();
-        let span = info_span!(parent: &read.span, "multimmit.marshal.catalog.process",
-            command = operation, handler_ns = tracing::field::Empty);
+        let span = command_span(&read.span, operation);
         let started = self.clock.current();
-        let result = {
-            let _guard = span.enter();
-            self.process_lookup(read.command)
-        };
-        let finished = self.clock.current();
-        self.metrics.work("command", operation, started, finished);
-        span.record(
-            "handler_ns",
-            u64::try_from(
-                finished
-                    .duration_since(started)
-                    .unwrap_or_default()
-                    .as_nanos(),
-            )
-            .unwrap_or(u64::MAX),
-        );
+        let result = span.in_scope(|| self.process_lookup(read.command));
+        self.record_command_work(operation, started, &span);
         result
     }
 
@@ -1859,12 +1853,7 @@ where
 
     async fn process_command(&mut self, command: TracedCommand<H, V, B>) -> Result<(), Error> {
         let operation = command.command.kind();
-        let span = info_span!(
-            parent: &command.span,
-            "multimmit.marshal.catalog.process",
-            command = operation,
-            handler_ns = tracing::field::Empty,
-        );
+        let span = command_span(&command.span, operation);
         let started = self.clock.current();
         let result = async {
             let TracedCommand { command, span, .. } = command;
@@ -1877,6 +1866,11 @@ where
         }
         .instrument(span.clone())
         .await;
+        self.record_command_work(operation, started, &span);
+        result
+    }
+
+    fn record_command_work(&self, operation: &'static str, started: SystemTime, span: &Span) {
         let finished = self.clock.current();
         self.metrics.work("command", operation, started, finished);
         span.record(
@@ -1889,7 +1883,6 @@ where
             )
             .unwrap_or(u64::MAX),
         );
-        result
     }
 
     fn process_delivery_cursor(&mut self, control: DeliveryCursorControl) -> Result<(), Error> {
@@ -3969,6 +3962,36 @@ mod tests {
     #[derive(Clone, Default)]
     struct SpanPaths(Arc<Mutex<Vec<Vec<&'static str>>>>);
 
+    #[derive(Clone, Default)]
+    struct SpanRecords(Arc<Mutex<Vec<tracing::span::Id>>>);
+
+    impl<S: tracing::Subscriber> Layer<S> for SpanRecords {
+        fn on_record(
+            &self,
+            id: &tracing::span::Id,
+            _: &tracing::span::Record<'_>,
+            _: LayerContext<'_, S>,
+        ) {
+            self.0.lock().push(id.clone());
+        }
+    }
+
+    #[test]
+    fn filtered_command_span_does_not_record_into_ambient_span() {
+        let records = SpanRecords::default();
+        let subscriber = tracing_subscriber::registry().with(records.clone()).with(
+            tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.name() != "multimmit.marshal.catalog.process"
+            }),
+        );
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let ambient = info_span!("ambient", handler_ns = tracing::field::Empty);
+        ambient.in_scope(|| {
+            command_span(&Span::none(), "bodies").record("handler_ns", 1u64);
+        });
+        assert!(records.0.lock().is_empty());
+    }
+
     impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanPaths {
         fn on_new_span(
             &self,
@@ -3986,8 +4009,10 @@ mod tests {
     #[derive(Clone)]
     struct SyncSpanEntries {
         syncs: PendingSyncs,
-        entries: Arc<Mutex<Vec<(&'static str, u64, usize)>>>,
+        entries: Arc<Mutex<Vec<SyncSpanEntry>>>,
     }
+
+    type SyncSpanEntry = (&'static str, u64, usize);
 
     impl SyncSpanEntries {
         async fn release_phase(&self, operation: &str) -> usize {
@@ -3998,7 +4023,12 @@ mod tests {
                 gate.blocked.await.unwrap();
                 releases.push(gate.release);
             }
-            let entries = self.entries.lock().iter().filter(|entry| entry.0 == operation).count();
+            let entries = self
+                .entries
+                .lock()
+                .iter()
+                .filter(|entry| entry.0 == operation)
+                .count();
             for release in releases {
                 release.send(Ok(())).unwrap();
             }
@@ -4010,13 +4040,16 @@ mod tests {
         fn on_enter(&self, id: &tracing::span::Id, context: LayerContext<'_, S>) {
             let span = context.span(id).unwrap();
             let name = span.metadata().name();
-            if matches!(name,
+            if matches!(
+                name,
                 "multimmit.marshal.catalog.admission_cut"
                     | "multimmit.marshal.catalog.seal_pending"
                     | "multimmit.marshal.catalog.sync_finalized_archives"
                     | "multimmit.marshal.catalog.publish_checkpoint"
             ) {
-                self.entries.lock().push((name, id.into_u64(), self.syncs.starts()));
+                self.entries
+                    .lock()
+                    .push((name, id.into_u64(), self.syncs.starts()));
             }
         }
     }
@@ -4948,7 +4981,11 @@ mod tests {
         assert!(paths.iter().any(|path| {
             path[0] == "multimmit.marshal.materializer.read" && path.contains(&"immediate_request")
         }));
-        assert!(!paths.iter().any(|path| path[0] == "multimmit.marshal.materializer.open"));
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path[0] == "multimmit.marshal.materializer.open")
+        );
     }
 
     #[test]
@@ -5029,9 +5066,23 @@ mod tests {
                 "multimmit.marshal.materializer.open",
                 "multimmit.marshal.materializer.read",
             ] {
+                let matching = paths
+                    .iter()
+                    .filter(|path| path[0] == operation && path.contains(&request))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    matching.len(),
+                    1,
+                    "expected one {operation} under {request}: {paths:?}"
+                );
+                let unrelated = if request == "first_request" {
+                    "second_request"
+                } else {
+                    "first_request"
+                };
                 assert!(
-                    paths.iter().any(|path| path[0] == operation && path.contains(&request)),
-                    "missing {operation} under {request}: {paths:?}",
+                    !matching[0].contains(&unrelated),
+                    "unrelated request became an ancestor"
                 );
             }
         }
