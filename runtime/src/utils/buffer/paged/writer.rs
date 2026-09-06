@@ -902,6 +902,15 @@ impl<B: Blob> Writer<B> {
         Ok(self.sealed_handle(self.cache_ref.next_id()))
     }
 
+    /// Flushes buffered data (including any partial page) to the blob without making it durable.
+    ///
+    /// Flushed bytes are not guaranteed to survive a crash until a later durability operation
+    /// (e.g. [`Self::sync`]) completes.
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        self.flush_internal(true, false).await?;
+        Ok(())
+    }
+
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A newly flushed write can carry [`WriteOptions::SYNC`] when no earlier mutation is pending.
@@ -2740,6 +2749,54 @@ mod tests {
                 .unwrap();
             let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    // Verifies flush writes buffered bytes (including a partial page) without any sync.
+    fn test_flush_writes_without_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Flushing an empty writer performs no blob operations.
+            append.flush().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // A buffered partial page reaches the blob on flush, with no sync issued and no
+            // durability provided.
+            let data = b"hello world";
+            append.append(data).await.unwrap();
+            append.flush().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(blob.size() > 0);
+            assert!(durable.is_empty());
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // Flushed bytes remain readable.
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data);
+
+            // Re-flushing an unchanged partial page writes nothing new.
+            append.flush().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 0);
+            assert_eq!(range_syncs, 0);
+
+            // A later sync provides the durability barrier.
+            append.sync().await.unwrap();
+            let (_, _, full_syncs, range_syncs) = blob.snapshot();
+            assert!(full_syncs + range_syncs > 0);
         });
     }
 

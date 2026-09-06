@@ -303,6 +303,12 @@ pub trait Mutable: Contiguous + Sized {
     /// fails.
     fn rewind(self, size: u64) -> impl std::future::Future<Output = Result<Self, Error>> + Send;
 
+    /// Flush buffered appends to storage without guaranteeing durability.
+    ///
+    /// Flushed state is not guaranteed to survive a crash until a later
+    /// durability operation (e.g. [Self::sync]) completes.
+    fn flush(self) -> impl std::future::Future<Output = Result<Self, Error>> + Send;
+
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
