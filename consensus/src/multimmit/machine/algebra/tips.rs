@@ -23,7 +23,7 @@ pub(crate) struct PoolExtractor<D: Digest> {
     config: CodecConfig,
     leader: D,
     proposals: ProposalPaths<D>,
-    votes: Vec<Option<VotePaths<D>>>,
+    signers_seen: Vec<bool>,
     position_counts: Vec<Vec<usize>>,
     support: Vec<BTreeMap<BlockRef<D>, usize>>,
     qualified: Vec<BTreeSet<BlockRef<D>>>,
@@ -62,7 +62,7 @@ impl<D: Digest> PoolExtractor<D> {
             config,
             leader: leader.digest::<H>(),
             proposals,
-            votes: vec![None; config.participants()],
+            signers_seen: vec![false; config.participants()],
             position_counts,
             support: vec![BTreeMap::new(); config.chains()],
             qualified: vec![BTreeSet::new(); config.chains()],
@@ -72,7 +72,7 @@ impl<D: Digest> PoolExtractor<D> {
         })
     }
 
-    /// Retains a participant's first authenticated complete vote.
+    /// Incorporates a participant's first authenticated complete vote.
     ///
     /// Returns `false` when that participant already has a sticky pool entry.
     pub(crate) fn insert<H, V>(
@@ -86,10 +86,10 @@ impl<D: Digest> PoolExtractor<D> {
         V: Variant,
     {
         let index = usize::from(signer);
-        let Some(slot) = self.votes.get(index) else {
+        let Some(seen) = self.signers_seen.get(index) else {
             return Err(Error::Quorum);
         };
-        if slot.is_some() {
+        if *seen {
             return Ok(false);
         }
         if body.validate(self.config).is_err() {
@@ -120,7 +120,7 @@ impl<D: Digest> PoolExtractor<D> {
         paths
             .index(&mut self.ancestry)
             .expect("vote paths were prevalidated against the ancestry index");
-        self.votes[index] = Some(paths);
+        self.signers_seen[index] = true;
         self.len += 1;
         Ok(true)
     }
