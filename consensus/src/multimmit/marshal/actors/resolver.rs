@@ -614,7 +614,7 @@ where
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, command: Self) {
-        overflow.retain(|command| match command {
+        let retain = |command: &Self| match command {
             Self::Fetch(_, pending, _) => !pending.closed(),
             Self::AdmittedBlock(_, _, reply)
             | Self::AdmittedHistory(_, _, reply)
@@ -622,34 +622,14 @@ where
             #[cfg(test)]
             Self::Barrier(reply) => !reply.is_closed(),
             _ => true,
-        });
+        };
+        overflow.retain(retain);
         match command {
-            #[cfg(test)]
-            Self::Barrier(reply) => {
-                if !reply.is_closed() {
-                    overflow.push_back(Self::Barrier(reply));
-                }
-            }
             Self::Deliver(_, _, _, reply) => reply.send(Outcome::Ambiguous),
             Self::CertifiedBlock(_) => {}
-            Self::Fetch(span, pending, reason) => {
-                if !pending.closed() {
-                    overflow.push_back(Self::Fetch(span, pending, reason));
-                }
-            }
-            Self::AdmittedBlock(reference, block, reply) => {
-                if !reply.is_closed() {
-                    overflow.push_back(Self::AdmittedBlock(reference, block, reply));
-                }
-            }
-            Self::AdmittedHistory(commitment, record, reply) => {
-                if !reply.is_closed() {
-                    overflow.push_back(Self::AdmittedHistory(commitment, record, reply));
-                }
-            }
-            Self::RetireCertified(frontiers, reply) => {
-                if !reply.is_closed() {
-                    overflow.push_back(Self::RetireCertified(frontiers, reply));
+            command => {
+                if retain(&command) {
+                    overflow.push_back(command);
                 }
             }
         }
