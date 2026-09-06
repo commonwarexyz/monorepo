@@ -138,6 +138,23 @@ pub struct ClusterOptions {
     pub view_retention: Option<ViewDelta>,
 }
 
+impl ClusterOptions {
+    /// Creates a cluster configuration with the supplied key seed and committee size.
+    pub const fn new(seed: u64, n: u32) -> Self {
+        Self {
+            n,
+            seed,
+            extras: 0,
+            leaders: None,
+            quota: None,
+            latency: None,
+            jitter: None,
+            production: None,
+            view_retention: None,
+        }
+    }
+}
+
 /// One deterministic cluster of complete Multimmit engines.
 pub struct Cluster<V: Variant> {
     options: ClusterOptions,

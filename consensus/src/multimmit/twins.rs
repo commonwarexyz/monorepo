@@ -1359,15 +1359,8 @@ async fn run_placement_case(
     let mut cluster = Cluster::<MinPk>::new(
         context,
         ClusterOptions {
-            n: participants as u32,
-            seed,
-            extras: 0,
             leaders: Some(schedule_for(&scenario, participants)),
-            quota: None,
-            latency: None,
-            jitter: None,
-            production: None,
-            view_retention: None,
+            ..ClusterOptions::new(seed, participants as u32)
         },
     )
     .await;
@@ -1645,15 +1638,8 @@ fn well_disseminated_block_survives_byzantine_leader_censorship() {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: PARTICIPANTS,
-                seed: 990,
-                extras: 0,
-                leaders: None,
-                quota: None,
-                latency: None,
-                jitter: None,
                 production: Some(Duration::from_millis(10)),
-                view_retention: None,
+                ..ClusterOptions::new(990, PARTICIPANTS)
             },
         )
         .await;
@@ -1922,15 +1908,8 @@ fn scripted_delivery_and_peer_rotation_recover_to_fairness() {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: PARTICIPANTS,
-                seed: 980,
-                extras: 0,
                 leaders: Some(schedule_for(&scenario, PARTICIPANTS as usize)),
-                quota: None,
-                latency: None,
-                jitter: None,
-                production: None,
-                view_retention: None,
+                ..ClusterOptions::new(980, PARTICIPANTS)
             },
         )
         .await;
@@ -1996,17 +1975,7 @@ fn twin_halves_equivocate_without_extra_weight() {
         let byzantine = PARTICIPANTS as usize - 1;
         let mut cluster = Cluster::<MinPk>::new(
             &context,
-            ClusterOptions {
-                n: PARTICIPANTS,
-                seed: 950,
-                extras: 0,
-                leaders: None,
-                quota: None,
-                latency: None,
-                jitter: None,
-                production: None,
-                view_retention: None,
-            },
+            ClusterOptions::new(950, PARTICIPANTS),
         )
         .await;
 

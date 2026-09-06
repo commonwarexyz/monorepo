@@ -85,15 +85,11 @@ fn run_profile(storage_delay: bool) -> ProfileRun {
         let mut cluster = Cluster::<MinPk>::new(
             &context,
             ClusterOptions {
-                n: NODES as u32,
-                seed: PROFILE_SEED,
-                extras: 0,
-                leaders: None,
-                quota: None,
                 latency: Some(NETWORK_LATENCY),
                 jitter: Some(NETWORK_JITTER),
                 production: Some(PRODUCTION_INTERVAL),
                 view_retention: Some(ViewDelta::new(VIEW_RETENTION)),
+                ..ClusterOptions::new(PROFILE_SEED, NODES as u32)
             },
         )
         .await;
