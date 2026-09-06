@@ -276,8 +276,7 @@ pub(super) struct FinalityPoolCapacity<D: Digest> {
     best_effort_limit: usize,
     primary_by_owner: BTreeMap<Participant, PrimaryPool<D>>,
     primary_by_key: BTreeMap<PoolKey<D>, Participant>,
-    best_effort: BTreeMap<PoolKey<D>, Observation>,
-    best_effort_order: BTreeSet<(Observation, PoolKey<D>)>,
+    best_effort: BTreeSet<PoolKey<D>>,
     pinned: BTreeSet<PoolKey<D>>,
 }
 
@@ -289,8 +288,7 @@ impl<D: Digest> FinalityPoolCapacity<D> {
             best_effort_limit: max_pools - primary_limit - pinned_reserve,
             primary_by_owner: BTreeMap::new(),
             primary_by_key: BTreeMap::new(),
-            best_effort: BTreeMap::new(),
-            best_effort_order: BTreeSet::new(),
+            best_effort: BTreeSet::new(),
             pinned: BTreeSet::new(),
         }
     }
@@ -306,20 +304,19 @@ impl<D: Digest> FinalityPoolCapacity<D> {
             return PoolAdmission::Admitted;
         }
 
-        if self.best_effort.contains_key(&key) {
-            self.retain_earlier_best_effort_observation(key, observation);
+        if self.best_effort.contains(&key) {
             if liveness
                 && !self.primary_by_owner.contains_key(&owner)
                 && self.primary_by_owner.len() < self.primary_limit
             {
-                self.remove_best_effort(key);
+                self.best_effort.remove(&key);
                 self.insert_primary(owner, key, observation, false);
             }
             return PoolAdmission::Admitted;
         }
 
         if !liveness || self.primary_by_owner.contains_key(&owner) {
-            return self.admit_best_effort(key, observation);
+            return self.admit_best_effort(key);
         }
 
         if self.primary_by_owner.len() < self.primary_limit {
@@ -327,7 +324,7 @@ impl<D: Digest> FinalityPoolCapacity<D> {
             return PoolAdmission::Admitted;
         }
 
-        self.admit_best_effort(key, observation)
+        self.admit_best_effort(key)
     }
 
     fn activate_unfinalized(
@@ -362,7 +359,7 @@ impl<D: Digest> FinalityPoolCapacity<D> {
         }
 
         if self.primary_by_owner.len() < self.primary_limit {
-            self.remove_best_effort(key);
+            self.best_effort.remove(&key);
             self.insert_primary(owner, key, observation, true);
             return PoolAdmission::Admitted;
         }
@@ -407,32 +404,23 @@ impl<D: Digest> FinalityPoolCapacity<D> {
         for key in primary {
             self.release_unfinalized(key);
         }
-        let best_effort = self
-            .best_effort
-            .keys()
-            .filter(|key| key.0.view() <= floor)
-            .copied()
-            .collect::<Vec<_>>();
-        for key in best_effort {
-            self.remove_best_effort(key);
-        }
+        self.best_effort.retain(|key| key.0.view() > floor);
         self.pinned.retain(|key| key.0.view() > floor);
     }
 
     fn release_unfinalized(&mut self, key: PoolKey<D>) {
-        self.remove_best_effort(key);
+        self.best_effort.remove(&key);
         let Some(owner) = self.primary_by_key.remove(&key) else {
             return;
         };
         self.primary_by_owner.remove(&owner);
     }
 
-    fn admit_best_effort(&mut self, key: PoolKey<D>, observation: Observation) -> PoolAdmission<D> {
+    fn admit_best_effort(&mut self, key: PoolKey<D>) -> PoolAdmission<D> {
         if self.best_effort.len() >= self.best_effort_limit {
             return PoolAdmission::Dropped;
         }
-        self.best_effort.insert(key, observation);
-        self.best_effort_order.insert((observation, key));
+        self.best_effort.insert(key);
         PoolAdmission::Admitted
     }
 
@@ -472,12 +460,9 @@ impl<D: Digest> FinalityPoolCapacity<D> {
         key: PoolKey<D>,
         observation: Observation,
     ) -> PoolAdmission<D> {
-        self.remove_best_effort(key);
+        self.best_effort.remove(&key);
         self.insert_primary(owner, key, observation, true);
-        if matches!(
-            self.admit_best_effort(evicted.key, evicted.observation),
-            PoolAdmission::Dropped
-        ) {
+        if matches!(self.admit_best_effort(evicted.key), PoolAdmission::Dropped) {
             return PoolAdmission::Replaced(evicted.key);
         }
         PoolAdmission::Admitted
@@ -489,20 +474,6 @@ impl<D: Digest> FinalityPoolCapacity<D> {
         self.primary_by_key.remove(&key);
     }
 
-    fn retain_earlier_best_effort_observation(
-        &mut self,
-        key: PoolKey<D>,
-        observation: Observation,
-    ) {
-        let previous = self.best_effort[&key];
-        if observation >= previous {
-            return;
-        }
-        self.best_effort_order.remove(&(previous, key));
-        self.best_effort.insert(key, observation);
-        self.best_effort_order.insert((observation, key));
-    }
-
     fn retain_earlier_observation(&mut self, key: PoolKey<D>, observation: Observation) {
         if let Some(owner) = self.primary_by_key.get(&key) {
             let primary = self
@@ -510,19 +481,7 @@ impl<D: Digest> FinalityPoolCapacity<D> {
                 .get_mut(owner)
                 .expect("the primary indexes agree");
             primary.observation = primary.observation.min(observation);
-            return;
         }
-        if self.best_effort.contains_key(&key) {
-            self.retain_earlier_best_effort_observation(key, observation);
-        }
-    }
-
-    fn remove_best_effort(&mut self, key: PoolKey<D>) -> bool {
-        let Some(observation) = self.best_effort.remove(&key) else {
-            return false;
-        };
-        self.best_effort_order.remove(&(observation, key));
-        true
     }
 }
 
