@@ -161,6 +161,11 @@ pub struct Deploy {
     #[arg(long, default_value_t = 0.25, value_parser = parse_sampling_rate)]
     trace_sampling: f64,
 
+    /// Shared run identity exported as the `commonware.run_id` trace resource attribute.
+    /// Choose a distinct value for each overlapping deployment.
+    #[arg(long)]
+    run_id: Option<String>,
+
     /// Dashboard to provision instead of the bundled dashboard.
     #[arg(long)]
     dashboard: Option<PathBuf>,
@@ -200,6 +205,9 @@ pub struct NodeConfig {
     pub marshal_delivery_bytes: Option<NonZeroUsize>,
     pub storage_dir: PathBuf,
     pub trace_sampling: f64,
+    /// Shared deployment identity exported as resource `commonware.run_id` on every node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 /// Default maximum blocks appended by one producer-chain proposal.
@@ -372,6 +380,7 @@ impl Deploy {
                 marshal_delivery_bytes: self.marshal_delivery_bytes,
                 storage_dir: PathBuf::from("/home/ubuntu/data"),
                 trace_sampling: self.trace_sampling,
+                run_id: self.run_id.clone(),
             };
             write_yaml(&self.output_dir.join(format!("node-{key}.yaml")), &config);
         }
@@ -475,12 +484,57 @@ fn write_yaml(path: &Path, value: &impl Serialize) {
 mod tests {
     use super::*;
     use clap::{Command, FromArgMatches as _};
+    use commonware_deployer::aws::{Host, Hosts, Ips};
 
     fn parse(args: &[&str]) -> Deploy {
         let matches = <Deploy as Args>::augment_args(Command::new("deploy"))
             .try_get_matches_from(args)
             .unwrap();
         Deploy::from_arg_matches(&matches).unwrap()
+    }
+
+    #[test]
+    fn deployment_accepts_shared_trace_run_id() {
+        for args in [vec!["deploy"], vec!["deploy", "--run-id", "cluster-run-42"]] {
+            let mut deploy = parse(&args);
+            deploy.output_dir =
+                std::env::temp_dir().join(format!("commonware-trace-run-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&deploy.output_dir).unwrap();
+            deploy.write_node_configs();
+            let monitoring_ip = "127.0.0.1".parse().unwrap();
+            let hosts = Hosts {
+                monitoring: Ips {
+                    public: monitoring_ip,
+                    private: monitoring_ip,
+                },
+                hosts: (0..deploy.nodes)
+                    .map(|key| Host {
+                        name: key.to_string(),
+                        region: "test".to_owned(),
+                        ip: monitoring_ip,
+                    })
+                    .collect(),
+            };
+            let hosts_path = deploy.output_dir.join("hosts.yaml");
+            write_yaml(&hosts_path, &hosts);
+            for key in 0..deploy.nodes {
+                let path = deploy.output_dir.join(format!("node-{key}.yaml"));
+                let raw = std::fs::read_to_string(&path).unwrap();
+                let node: NodeConfig = serde_yaml::from_str(&raw).unwrap();
+                assert_eq!(node.run_id, deploy.run_id);
+                if deploy.run_id.is_none() {
+                    assert!(!raw.contains("run_id:"));
+                }
+                let config = crate::load_remote_config(path, hosts_path.clone());
+                assert_eq!(config.run_id, deploy.run_id);
+                assert_eq!(
+                    config.trace_endpoint.as_deref(),
+                    Some("http://127.0.0.1:4318/v1/traces")
+                );
+                assert_eq!(config.trace_sampling, deploy.trace_sampling);
+            }
+            std::fs::remove_dir_all(&deploy.output_dir).unwrap();
+        }
     }
 
     #[test]

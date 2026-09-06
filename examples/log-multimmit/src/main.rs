@@ -314,6 +314,15 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
+    /// Local OTLP HTTP trace endpoint. Enables full sampling without enabling metrics.
+    #[arg(long, requires = "headless", conflicts_with = "config")]
+    trace_endpoint: Option<String>,
+
+    /// Shared run identity exported as resource `commonware.run_id`.
+    /// Use the same value for all nodes in a run; remote runs take it from the node config.
+    #[arg(long, conflicts_with = "config")]
+    run_id: Option<String>,
+
     /// Include debug diagnostics in headless logs.
     #[arg(long, requires = "headless")]
     debug: bool,
@@ -351,6 +360,8 @@ struct RunConfig {
     headless: bool,
     monitoring_ip: Option<IpAddr>,
     trace_sampling: f64,
+    trace_endpoint: Option<String>,
+    run_id: Option<String>,
     log_level: Level,
 }
 
@@ -666,11 +677,12 @@ fn main() {
 
     executor.start(async |context| {
         let gui = if config.headless {
-            let traces = config.monitoring_ip.and_then(|monitoring_ip| {
+            let traces = config.trace_endpoint.clone().and_then(|endpoint| {
                 (config.trace_sampling > 0.0).then(|| tokio::tracing::Config {
-                    endpoint: format!("http://{monitoring_ip}:4318/v1/traces"),
+                    endpoint,
                     name: key.to_string(),
                     rate: config.trace_sampling.try_into().expect("valid sampling probability"),
+                    run_id: config.run_id.clone(),
                 })
             });
             tokio::telemetry::init(
@@ -1046,7 +1058,13 @@ fn load_run_config(cli: Cli) -> RunConfig {
         marshal_delivery_bytes: cli.marshal_delivery_bytes,
         headless: cli.headless,
         monitoring_ip: None,
-        trace_sampling: 0.0,
+        trace_sampling: if cli.trace_endpoint.is_some() {
+            1.0
+        } else {
+            0.0
+        },
+        trace_endpoint: cli.trace_endpoint,
+        run_id: cli.run_id,
         log_level: if cli.debug { Level::DEBUG } else { Level::INFO },
     }
 }
@@ -1113,6 +1131,11 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
         headless: true,
         monitoring_ip: Some(hosts.monitoring.private),
         trace_sampling: config.trace_sampling,
+        trace_endpoint: Some(format!(
+            "http://{}:4318/v1/traces",
+            hosts.monitoring.private
+        )),
+        run_id: config.run_id,
         log_level: Level::INFO,
     }
 }
@@ -1120,6 +1143,60 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_trace_run_identity_and_endpoint_are_opt_in() {
+        let args = ["log-multimmit", "--me", "0@3000", "--storage-dir", "unused"];
+        let default = load_run_config(Cli::try_parse_from(args).unwrap());
+        assert_eq!(default.run_id, None);
+        assert_eq!(default.trace_endpoint, None);
+        assert_eq!(default.trace_sampling, 0.0);
+        let identity_only = load_run_config(
+            Cli::try_parse_from(args.into_iter().chain(["--run-id", "cluster-run-42"])).unwrap(),
+        );
+        assert_eq!(identity_only.run_id.as_deref(), Some("cluster-run-42"));
+        assert_eq!(identity_only.trace_endpoint, None);
+        assert_eq!(identity_only.trace_sampling, 0.0);
+        let explicit = load_run_config(
+            Cli::try_parse_from(args.into_iter().chain([
+                "--headless",
+                "--trace-endpoint",
+                "http://localhost:4318/v1/traces",
+                "--run-id",
+                "cluster-run-42",
+            ]))
+            .unwrap(),
+        );
+        assert_eq!(explicit.run_id.as_deref(), Some("cluster-run-42"));
+        assert_eq!(
+            explicit.trace_endpoint.as_deref(),
+            Some("http://localhost:4318/v1/traces")
+        );
+        assert_eq!(explicit.trace_sampling, 1.0);
+        assert_eq!(explicit.monitoring_ip, None);
+        assert!(
+            Cli::try_parse_from(
+                args.into_iter()
+                    .chain(["--trace-endpoint", "http://localhost:4318/v1/traces"])
+            )
+            .is_err()
+        );
+        for option in ["--run-id", "--trace-endpoint"] {
+            assert!(
+                Cli::try_parse_from([
+                    "log-multimmit",
+                    "--config",
+                    "node.yaml",
+                    "--hosts",
+                    "hosts.yaml",
+                    "--headless",
+                    option,
+                    "value",
+                ])
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn local_offered_load_is_optional_and_nonzero() {
