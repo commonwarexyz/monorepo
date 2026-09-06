@@ -924,7 +924,6 @@ where
             automaton: config.automaton,
             relay: config.relay,
             reporter: config.reporter,
-            pending_activities: VecDeque::new(),
             machine,
             journal,
             journal_monitor,
@@ -1006,7 +1005,7 @@ where
                     self.failed(&fatal);
                     return;
                 }
-                if driver.machine.has_runnable_work() || !driver.pending_activities.is_empty() {
+                if driver.machine.has_runnable_work() {
                     continue;
                 }
             }
@@ -1278,8 +1277,6 @@ where
     automaton: A,
     relay: R,
     reporter: F,
-    /// One bounded machine turn of best-effort telemetry.
-    pending_activities: VecDeque<Activity<V, H::Digest>>,
     machine: CoreState<H, V>,
     journal: JournalClient<V, H::Digest>,
     journal_monitor: JournalMonitor,
@@ -1420,9 +1417,7 @@ where
         {
             return Some(event);
         }
-        if (self.machine.has_runnable_work() || !self.pending_activities.is_empty())
-            && self.journal.has_capacity()
-        {
+        if self.machine.has_runnable_work() && self.journal.has_capacity() {
             return None;
         }
 
@@ -1832,7 +1827,6 @@ where
             if !self.journal.has_capacity() {
                 break;
             }
-            self.flush_activities();
             let action = self.machine.next_action(POLL_BUDGET)?;
             match action {
                 CoreTurn::YieldRequired => {
@@ -1916,8 +1910,7 @@ where
         let made_progress = work.work_remaining() || !work.capabilities().is_empty();
         let (capabilities, activities) = work.into_parts();
         self.execute_capabilities(capabilities)?;
-        self.pending_activities.extend(activities);
-        self.flush_activities();
+        self.report_activities(activities);
         self.update_retention_gauges();
         let view = self.update_progress_gauges();
         self.refresh_round_span(view);
@@ -1925,8 +1918,8 @@ where
         Ok(made_progress)
     }
 
-    fn flush_activities(&mut self) {
-        while let Some(activity) = self.pending_activities.pop_front() {
+    fn report_activities(&mut self, activities: Vec<Activity<V, H::Digest>>) {
+        for activity in activities {
             if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
                 &activity
             {
@@ -2135,8 +2128,7 @@ where
         let (capabilities, activities) = transition.into_parts();
         self.execute_capabilities(capabilities)?;
         self.update_retention_gauges();
-        self.pending_activities.extend(activities);
-        self.flush_activities();
+        self.report_activities(activities);
         let view = self.update_progress_gauges();
         self.refresh_round_span(view);
         Ok(())
