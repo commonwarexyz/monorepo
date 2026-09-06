@@ -48,7 +48,7 @@ use commonware_runtime::{
 };
 use commonware_storage::Context as StorageContext;
 use commonware_utils::{N5f1, NZU64, NZUsize, channel::oneshot};
-use futures::{StreamExt as _, stream::FuturesUnordered};
+use futures::{StreamExt as _, TryStreamExt as _, stream};
 use rand::{SeedableRng as _, rngs::StdRng};
 use rand_core::CryptoRng;
 use std::{
@@ -289,29 +289,21 @@ where
     D: Digest,
     A: Automaton<Context = Context<D>, Digest = D>,
 {
-    let mut requirements = requirements.into_iter();
-    let mut verifications = FuturesUnordered::new();
-    let verify = |context, commitment| {
-        let mut automaton = automaton.clone();
-        async move {
-            let verdict = automaton.verify(context, commitment).await;
-            verdict.await
-        }
-    };
-    loop {
-        while verifications.len() < max_inflight.get() {
-            let Some((context, commitment)) = requirements.next() else {
-                break;
-            };
-            verifications.push(verify(context, commitment));
-        }
-        let Some(verdict) = verifications.next().await else {
-            return Ok(());
-        };
-        if !matches!(verdict, Ok(true)) {
-            return Err(OpenError::RecoveredPayloadUnverified);
-        }
-    }
+    stream::iter(requirements)
+        .map(|(context, commitment)| {
+            let mut automaton = automaton.clone();
+            async move {
+                let verdict = automaton.verify(context, commitment).await;
+                if matches!(verdict.await, Ok(true)) {
+                    Ok(())
+                } else {
+                    Err(OpenError::RecoveredPayloadUnverified)
+                }
+            }
+        })
+        .buffer_unordered(max_inflight.get())
+        .try_collect::<()>()
+        .await
 }
 
 /// Opens (or reopens) every durable store for one engine and prepares the startup path.
@@ -1356,6 +1348,45 @@ mod tests {
             let mut config = config(&scheme_committee, 0, "producer-map-mismatch");
             config.profile = profile(&profile_committee, Role::Validator(Participant::new(0)));
             let _ = Engine::new(context.child("engine"), config);
+        });
+    }
+
+    #[test_traced]
+    fn recovered_payload_verification_is_bounded_and_unordered() {
+        DeterministicRunner::timed(Duration::from_secs(1)).start(|context| async move {
+            let application = MockApplication::new();
+            verify_recovered_payloads(&application, Vec::new(), NZUsize!(2))
+                .await
+                .unwrap();
+            let log = application.log();
+            assert!(log.lock().verifications.is_empty());
+
+            let mut gates = application.gate_verifications(3);
+            let payload_context = Context::new(
+                Epoch::new(1),
+                ChainId::new(0),
+                Height::new(1),
+                Sha256::hash(&[b"parent"]),
+            )
+            .unwrap();
+            let requirements = (0u8..3)
+                .map(|index| (payload_context, Sha256::hash(&[&[index]])))
+                .collect();
+            let check = context
+                .child("bounded_recovery_verification")
+                .spawn(move |_| async move {
+                    verify_recovered_payloads(&application, requirements, NZUsize!(2)).await
+                });
+
+            gates[0].wait_started().await;
+            gates[1].wait_started().await;
+            assert_eq!(log.lock().verifications.len(), 2);
+            gates[1].release();
+            gates[2].wait_started().await;
+            assert_eq!(log.lock().verifications.len(), 3);
+            gates[0].release();
+            gates[2].release();
+            check.await.unwrap().unwrap();
         });
     }
 
