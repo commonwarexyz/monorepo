@@ -12057,6 +12057,7 @@ fn local_vqc_emits_quorum_then_grows_to_the_full_sticky_transcript() {
         .expect("the materialized quorum must schedule its strict extension");
     assert_ne!(improved.id(), first.id());
     assert_eq!(improved.messages().count(), 6);
+    assert_eq!(machine.views.retained_vqc_transcripts(), 1);
 
     let improved = machine
         .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
@@ -12068,6 +12069,7 @@ fn local_vqc_emits_quorum_then_grows_to_the_full_sticky_transcript() {
     let improved = settle(&mut machine, improved);
     drive_poll_and_persist(&mut machine, improved);
     assert!(machine.durable.local.contains_key(&full_id));
+    assert_eq!(machine.views.retained_vqc_transcripts(), 1);
     assert_eq!(
         machine
             .durable
