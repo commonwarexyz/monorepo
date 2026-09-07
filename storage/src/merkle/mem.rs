@@ -195,6 +195,13 @@ impl<F: Family, D: Digest> Mem<F, D> {
         F::peaks(self.size())
     }
 
+    /// Return the digests of the peaks, oldest first.
+    pub fn peaks(&self) -> Vec<D> {
+        F::peaks(self.size())
+            .map(|(pos, _)| *self.get_node_unchecked(pos))
+            .collect()
+    }
+
     /// Return the requested node if it is either retained or present in the pinned_nodes map, and
     /// panic otherwise.
     ///
@@ -408,6 +415,80 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
     }
 
+    /// Check that `batch` can be applied to this structure, without mutating it.
+    ///
+    /// The structure must be at the state the batch chain was forked from or at the tip of one
+    /// of the batch's ancestors. States are compared by their peak digests, not by size alone, so
+    /// a sibling fork of the same size is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if the structure is at none of the chain's states and
+    /// [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
+    /// merkleized.
+    pub fn validate_batch<S: Strategy>(
+        &self,
+        batch: &batch::MerkleizedBatch<F, D, S>,
+    ) -> Result<(), Error<F>> {
+        self.skip_ancestors(batch).map(|_| ())
+    }
+
+    /// Validate `batch` (see [`Self::validate_batch`]) and return whether its ancestors are
+    /// already applied and must be skipped.
+    fn skip_ancestors<S: Strategy>(
+        &self,
+        batch: &batch::MerkleizedBatch<F, D, S>,
+    ) -> Result<bool, Error<F>> {
+        let size = self.size();
+        let stale = || Error::StaleBatch {
+            expected: batch.base_size,
+            actual: size,
+        };
+        let skip_ancestors = if size == batch.base_size {
+            false
+        } else if size > batch.base_size && size < batch.size() {
+            true
+        } else if size == batch.size() && batch.appended.is_empty() {
+            // All ancestors committed and this batch has overwrites only (no appends).
+            true
+        } else {
+            return Err(stale());
+        };
+
+        if size < batch.ancestor_base_size {
+            return Err(Error::AncestorDropped {
+                expected: batch.size(),
+                actual: size,
+            });
+        }
+
+        // Size alone cannot distinguish this chain's states from another fork of the same
+        // length, so the peaks must match one of the states the chain recorded at this size.
+        // Overwrite-only batches leave the size unchanged, so several states can share it.
+        let peaks = self.peaks();
+        let mut at_chain_state = (size == batch.base_size && peaks == *batch.base_peaks)
+            || (size == batch.ancestor_base_size && peaks == batch.ancestor_base_peaks);
+        let mut tip = *batch.ancestor_base_size;
+        for (appended, tip_peaks) in batch
+            .ancestor_appended
+            .iter()
+            .zip(&batch.ancestor_tip_peaks)
+        {
+            tip += appended.len() as u64;
+            if tip == *size && peaks == *tip_peaks {
+                at_chain_state = true;
+            }
+        }
+        // An overwrite-only batch may be re-applied at its own tip.
+        if size == batch.size() && peaks == batch.tip_peaks {
+            at_chain_state = true;
+        }
+        if !at_chain_state {
+            return Err(stale());
+        }
+        Ok(skip_ancestors)
+    }
+
     /// Apply a merkleized batch. Already-committed ancestors are skipped automatically.
     ///
     /// Pruning this structure after the batch was merkleized does not invalidate the batch: prune
@@ -415,33 +496,12 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if the structure has diverged from the batch's ancestor chain
-    /// and [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
-    /// merkleized.
+    /// Returns the errors of [`Self::validate_batch`], without mutating the structure.
     pub fn apply_batch<S: Strategy>(
         &mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<(), Error<F>> {
-        let skip_ancestors = if self.size() == batch.base_size {
-            false
-        } else if self.size() > batch.base_size && self.size() < batch.size() {
-            true
-        } else if self.size() == batch.size() && batch.appended.is_empty() {
-            // All ancestors committed and this batch has overwrites only (no appends).
-            true
-        } else {
-            return Err(Error::StaleBatch {
-                expected: batch.base_size,
-                actual: self.size(),
-            });
-        };
-
-        if self.size() < batch.ancestor_base_size {
-            return Err(Error::AncestorDropped {
-                expected: batch.size(),
-                actual: self.size(),
-            });
-        }
+        let skip_ancestors = self.skip_ancestors(batch)?;
 
         // Apply ancestor batches in root-to-tip order. Already-committed
         // batches (whose appended nodes are already in the Mem) are skipped
@@ -1446,6 +1506,72 @@ mod tests {
         }
     }
 
+    /// A retained child of one fork must be rejected once a sibling fork of the same length has
+    /// been applied, whatever the geometry: size alone cannot tell the two histories apart.
+    fn apply_batch_rejects_sibling_fork_at_interior_size<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        for n in 0..8u64 {
+            let mut mem = build_raw::<F>(&hasher, n);
+            let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
+            let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
+            let sibling = mem
+                .new_batch()
+                .add(&hasher, b"a-prime")
+                .merkleize(&mem, &hasher);
+            mem.apply_batch(&sibling).unwrap();
+            let root = plain_root(&mem, &hasher);
+            let size = mem.size();
+
+            assert!(
+                matches!(mem.apply_batch(&b), Err(Error::StaleBatch { .. })),
+                "n={n}: child of the losing fork was accepted"
+            );
+            assert_eq!(
+                mem.size(),
+                size,
+                "n={n}: rejected batch mutated the structure"
+            );
+            assert_eq!(plain_root(&mem, &hasher), root, "n={n}");
+        }
+    }
+
+    /// An overwrite-only sibling leaves the size unchanged, so only the recorded peaks reveal
+    /// that the retained chain no longer describes the structure.
+    fn apply_batch_rejects_overwrite_sibling<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = build_raw::<F>(&hasher, 8);
+        let a = mem
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"a")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        let b = a
+            .new_batch()
+            .update_leaf(&hasher, Location::new(1), b"b")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        let sibling = mem
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"a-prime")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        mem.apply_batch(&sibling).unwrap();
+        let root = plain_root(&mem, &hasher);
+
+        assert!(matches!(mem.apply_batch(&b), Err(Error::StaleBatch { .. })));
+        assert!(matches!(mem.apply_batch(&a), Err(Error::StaleBatch { .. })));
+        assert_eq!(plain_root(&mem, &hasher), root);
+
+        // The chain still applies to a structure at the state it was forked from.
+        let mut fresh = build_raw::<F>(&hasher, 8);
+        fresh.apply_batch(&a).unwrap();
+        fresh.apply_batch(&b).unwrap();
+        assert_eq!(
+            plain_root(&fresh, &hasher),
+            b.root(&fresh, &hasher, 0).unwrap()
+        );
+    }
+
     fn split_root_matches_recompute<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let plain = build::<F>(&hasher, 49);
@@ -1568,6 +1694,14 @@ mod tests {
         apply_batch_chain_after_prune_matches_prune_after_apply::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_apply_batch_rejects_sibling_fork_at_interior_size() {
+        apply_batch_rejects_sibling_fork_at_interior_size::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_rejects_overwrite_sibling() {
+        apply_batch_rejects_overwrite_sibling::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_split_root_matches_recompute() {
         split_root_matches_recompute::<crate::mmr::Family>();
     }
@@ -1681,6 +1815,14 @@ mod tests {
     #[test]
     fn mmb_apply_batch_chain_after_prune_matches_prune_after_apply() {
         apply_batch_chain_after_prune_matches_prune_after_apply::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_rejects_sibling_fork_at_interior_size() {
+        apply_batch_rejects_sibling_fork_at_interior_size::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_rejects_overwrite_sibling() {
+        apply_batch_rejects_overwrite_sibling::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_split_root_matches_recompute() {

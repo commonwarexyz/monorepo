@@ -545,6 +545,11 @@ where
             .into());
         };
 
+        // Confirm the Merkle structure really is at one of the chain's states before any item
+        // is appended, so a stale batch mutates nothing.
+        self.merkle
+            .with_mem(|mem| mem.validate_batch(&batch.inner))?;
+
         // Apply ancestor item batches in root-to-tip order. Already-committed
         // batches are skipped by tracking cumulative leaf count.
         // Batches are collected into a single append_many call to acquire the
@@ -3294,6 +3299,62 @@ mod tests {
 
         assert_eq!(journal_root(&journal), expected_root);
         assert_eq!(*journal.size(), 2);
+    }
+
+    async fn test_stale_batch_interior_fork_inner<F: Family + PartialEq>(context: Context) {
+        let mut journal =
+            create_journal_with_ops::<F>(context.child("open"), "stale-interior", 4).await;
+        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+
+        // Chain A -> B is retained while a same-length sibling of A wins.
+        let batch_a = journal
+            .new_batch()
+            .add(create_operation::<F>(10))
+            .add(commit_op.clone());
+        let a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let batch_b = a.new_batch::<Sha256>().add(create_operation::<F>(20));
+        let b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+        let op_sibling = create_operation::<F>(30);
+        let batch_sibling = journal.new_batch().add(op_sibling.clone()).add(commit_op);
+        let sibling = journal.merkle.with_mem(|mem| batch_sibling.merkleize(mem));
+        journal = journal.apply_batch(&sibling).await.unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal_root(&journal);
+        let size = journal.size();
+
+        // The journal is strictly inside B's chain by size, but B's ancestor is not what was
+        // applied: reusing B must be rejected rather than desynchronizing items and root.
+        let result = journal.apply_batch(&b).await;
+        assert!(
+            matches!(
+                result,
+                Err(super::Error::Merkle(merkle::Error::StaleBatch { .. }))
+            ),
+            "expected StaleBatch, got {result:?}"
+        );
+
+        // The eager reject mutated nothing: reopening recovers exactly the sibling's state.
+        let journal = create_empty_journal::<F>(context.child("reopen"), "stale-interior").await;
+        assert_eq!(journal_root(&journal), root);
+        assert_eq!(journal.size(), size);
+        let (_, ops) = journal
+            .proof(Location::<F>::new(4), NZU64!(1), 0)
+            .await
+            .unwrap();
+        assert_eq!(ops, vec![op_sibling]);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_stale_batch_interior_fork_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_stale_batch_interior_fork_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_stale_batch_interior_fork_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_stale_batch_interior_fork_inner::<mmb::Family>);
     }
 
     #[test_traced("INFO")]
