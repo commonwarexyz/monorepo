@@ -12,8 +12,9 @@
 //! drains the ordinary worker, then waits for every accepted worker cleanup.
 //!
 //! Supervision stays in [`Context`], [`Runner`], and the shared [`Handle`]
-//! wrapper. Worker execution returns before task disposal, allowing the runner
-//! to abort its tasks before their cells and kernel resources are released.
+//! wrapper. The root is destroyed before publication closes. Worker execution
+//! then returns, allowing the runner to abort spawned tasks before their cells
+//! and kernel resources are released.
 //!
 //! ```text
 //! spawn caller: Registry::admit -> factory -> Launch { task, Shared, active }
@@ -1095,7 +1096,7 @@ impl Worker {
         self.deferred.run(&mut self.panics);
     }
 
-    /// Close all publication paths before invoking any user destructor.
+    /// Close publication after root destruction, retaining accepted task cells.
     fn begin_close(&mut self) {
         let mailbox = {
             let mut local = self.local.borrow_mut();
@@ -1435,8 +1436,9 @@ impl Worker {
 
 /// Drive a stack-pinned root, retaining its worker for caller-owned shutdown.
 ///
-/// Publication closes before root destruction. Accepted task cells remain alive
-/// until the caller cancels its tasks and runs cleanup with TLS still installed.
+/// Root construction, execution, and destruction share an ordinary catch scope.
+/// Publication then closes, retaining accepted tasks until the caller cancels
+/// them and runs cleanup with TLS still installed.
 fn run_worker<F, Fut>(
     shared: Arc<Shared>,
     build: F,
@@ -1449,25 +1451,11 @@ where
 {
     // Only the owning runner listens for failures from other workers.
     let owning_runner = interrupts.is_some();
-    let startup = catch_unwind(AssertUnwindSafe(|| Local::new(shared.clone())));
-    let local = match startup {
-        Ok(Ok(local)) => local,
-        error => {
-            let mut panics = Panics::default();
-            panics.retain(match error {
-                Err(panic) => panic,
-                Ok(Err(error)) => Box::new(format!(
-                    "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
-                )),
-                Ok(Ok(_)) => unreachable!(),
-            });
-            // Startup failures do not unwind through a user closure or its
-            // captured values. Each rejected payload is destroyed in isolation.
-            panics.run(|| drop(build));
-            panics.run(|| drop(service));
-            return Err(panics.take().unwrap());
-        }
-    };
+    let local = Local::new(shared.clone()).map_err(|error| -> Panic {
+        Box::new(format!(
+            "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
+        ))
+    })?;
     let mut worker = Worker::new(local);
     let mailbox = worker.local.borrow().mailbox.clone();
     if let Some(service) = service
@@ -1476,49 +1464,27 @@ where
         worker.panics.run(|| drop(service));
     }
     let root_waker = task::Wake::waker(Arc::downgrade(&mailbox), Target::Root);
-    let constructed = catch_unwind(AssertUnwindSafe(|| build(&mailbox)));
-    let mut root = match constructed {
-        Ok(future) => Some(mem::ManuallyDrop::new(future)),
-        Err(panic) => {
+    // The catch owns the root, including when interrupted. Worker and TLS stay
+    // outside it so root destruction can orphan operations or admit more work.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let root = build(&mailbox);
+        match interrupts {
+            Some(interrupts) => worker.drive(pin!(interrupts.interrupt(root)), &root_waker),
+            None => worker.drive(pin!(root), &root_waker),
+        }
+    }));
+    let output = match result {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(panic)) | Err(panic) => {
             worker.panics.retain(panic);
             None
         }
     };
-    let mut output = None;
-    if let Some(root) = root.as_mut() {
-        // SAFETY: `root` refers to storage owned by the stack-local Option above.
-        // That Option is not moved or replaced after this projection. Only this
-        // worker polls the future, and it is destroyed in place below before
-        // its stack storage or Scope is released. ManuallyDrop prevents an
-        // infrastructure unwind from implicitly destroying the pinned future.
-        let pinned = unsafe { Pin::new_unchecked(&mut **root) };
-        match catch_unwind(AssertUnwindSafe(|| {
-            if let Some(interrupts) = interrupts {
-                // Interrupt only the pinned borrow. The actual root is destroyed
-                // separately below, outside a propagated panic's unwind.
-                worker.drive(pin!(interrupts.interrupt(pinned)), &root_waker)
-            } else {
-                worker.drive(pinned, &root_waker)
-            }
-        })) {
-            Ok(Ok(value)) => output = Some(value),
-            Ok(Err(panic)) | Err(panic) => worker.panics.retain(panic),
-        }
-    }
-    // Stop accepting one-off launches before destroying the owning runner's root.
+    // Include work admitted by root destruction in the shutdown barrier.
     if owning_runner {
         shared.workers.close();
     }
     worker.begin_close();
-    if let Some(root) = root.as_mut() {
-        worker.panics.run(|| {
-            // SAFETY: The future remains in the same stack storage used by the
-            // pinned projection above. Polling has ended and no reference to it
-            // survives. This is its only destruction, since the containing
-            // ManuallyDrop has no automatic future destructor.
-            unsafe { mem::ManuallyDrop::drop(root) };
-        });
-    }
     worker.panics.run(|| drop(root_waker));
     Ok((worker, output))
 }
@@ -1546,12 +1512,10 @@ impl Drop for TaskRoot {
 /// Report an infrastructure failure only after that worker's mandatory cleanup.
 fn run_one_off(shared: Arc<Shared>, cell: Pin<Box<dyn Runnable>>) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let (mut worker, output) = run_worker(
-            shared.clone(),
-            |_| TaskRoot { cell: Some(cell) },
-            None,
-            None,
-        )?;
+        // Startup may reject the builder without invoking it. Its captured root
+        // retains the same disposal boundary as an executing spawned task.
+        let root = TaskRoot { cell: Some(cell) };
+        let (mut worker, output) = run_worker(shared.clone(), |_| root, None, None)?;
         worker.cleanup();
         worker.result(output)
     }));
@@ -1896,30 +1860,31 @@ mod tests {
     }
 
     #[test]
-    fn root_failure_survives_a_second_panic_during_future_destruction() {
+    fn single_root_poll_or_drop_panic_clears_scope() {
         struct FailingRoot {
             fail_poll: bool,
-            panicker: Panicker,
+            drops: Arc<AtomicUsize>,
         }
         impl Future for FailingRoot {
             type Output = ();
 
             fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<()> {
                 assert!(!self.fail_poll, "primary root poll failure");
-                self.panicker.notify(Box::new("primary worker failure"));
-                Poll::Pending
+                Poll::Ready(())
             }
         }
         impl Drop for FailingRoot {
             fn drop(&mut self) {
-                panic!("secondary root destruction failure");
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                assert!(self.fail_poll, "root destruction failure");
             }
         }
         for fail_poll in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
             let result = catch_unwind(AssertUnwindSafe(|| {
-                Runner::new(config()).start(|context| FailingRoot {
+                Runner::new(config()).start(|_| FailingRoot {
                     fail_poll,
-                    panicker: context.shared.panicker.clone(),
+                    drops: drops.clone(),
                 });
             }));
             let panic = result.expect_err("root execution must fail the runner");
@@ -1928,9 +1893,59 @@ mod tests {
                 if fail_poll {
                     "primary root poll failure"
                 } else {
-                    "primary worker failure"
+                    "root destruction failure"
                 }
             );
+            assert!(current().is_none());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn root_destruction_can_admit_work_before_shutdown() {
+        struct Root {
+            context: Option<Context>,
+            invoked: Arc<AtomicBool>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Future for Root {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<()> {
+                Poll::Ready(())
+            }
+        }
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let invoked = self.invoked.clone();
+                let payload = DropFlag(self.drops.clone());
+                self.context.take().unwrap().spawn(move |_| {
+                    invoked.store(true, Ordering::SeqCst);
+                    async move {
+                        let _payload = payload;
+                        pending::<()>().await;
+                    }
+                });
+            }
+        }
+
+        for dedicated in [false, true] {
+            let invoked = Arc::new(AtomicBool::new(false));
+            let drops = Arc::new(AtomicUsize::new(0));
+            Runner::new(config()).start(|context| {
+                let context = context.child("root_drop");
+                Root {
+                    context: Some(if dedicated {
+                        context.dedicated()
+                    } else {
+                        context
+                    }),
+                    invoked: invoked.clone(),
+                    drops: drops.clone(),
+                }
+            });
+            assert!(invoked.load(Ordering::SeqCst));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
             assert!(current().is_none());
         }
     }

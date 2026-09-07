@@ -345,8 +345,8 @@ fn shutdown_waits_for_workers_without_observing_late_panics() {
                     let panicker = context.shared.panicker.clone();
                     let (dropped, root_dropped) = mpsc::channel();
                     let publisher = thread::spawn(move || {
-                        // Root destruction follows admission closure and precedes
-                        // the shutdown wait, after root execution has ended.
+                        // Root destruction ends execution. Shutdown still waits
+                        // for this publisher to release its worker responsibility.
                         root_dropped.recv().unwrap();
                         publishing.send(()).unwrap();
                         released.recv().unwrap();
@@ -364,7 +364,6 @@ fn shutdown_waits_for_workers_without_observing_late_panics() {
         });
         let (registry, publisher) = received.recv().unwrap();
         publication.recv().unwrap();
-        assert!(registry.state.lock().closed);
         assert_eq!(registry.state.lock().active, 1);
         assert!(!runner.is_finished());
         release.send(()).unwrap();
