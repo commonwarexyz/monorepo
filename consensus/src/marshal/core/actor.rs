@@ -1452,10 +1452,10 @@ where
                 // need not recompute it. `Certified` annotations come from the
                 // ancestry walk, which can name a commitment this node has only
                 // shard-checked, so those deliveries recompute it.
-                let finalized = annotations
+                let trusted = annotations
                     .iter()
                     .any(|annotation| matches!(annotation, Annotation::Finalized(_)));
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment, finalized);
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment, trusted);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return self;

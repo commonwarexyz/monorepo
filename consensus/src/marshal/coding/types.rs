@@ -309,7 +309,7 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 ///
 /// Pairs the inner block's codec config with the [`Commitment`] that the
 /// decoded block must match. The [`Read`] impl rejects a block whose digest or
-/// coding configuration differs from `expected`. Unless `finalized` is set, it
+/// coding configuration differs from `expected`. Unless `trusted` is set, it
 /// also re-encodes the block and rejects a coding root mismatch.
 pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
@@ -325,7 +325,7 @@ pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// [`CodedBlock::shards`]. A notarization is not enough: notarize votes
     /// attest shard validity against the root, not that the root encodes the
     /// block named by the digest.
-    pub finalized: bool,
+    pub trusted: bool,
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
@@ -333,7 +333,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
         Self {
             inner: self.inner.clone(),
             expected: self.expected,
-            finalized: self.finalized,
+            trusted: self.trusted,
         }
     }
 }
@@ -364,7 +364,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
         // A commitment bound by the finalized chain already fixes the coding
         // root of these bytes, so recomputing it would only re-derive the root
         // already in `expected`.
-        if cfg.finalized {
+        if cfg.trusted {
             return Ok(Self::new_trusted(inner, cfg.expected));
         }
 
@@ -441,7 +441,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
 /// should never be sent over the network. Use [`CodedBlock`] for network transmission.
 /// Its [`Read`] impl recomputes the coding root with [`Scheme::encode`] unless the
-/// expected commitment is finalized (see [`CodedBlockCfg`]).
+/// expected commitment is trusted (see [`CodedBlockCfg`]).
 ///
 /// When reading from storage, we don't need to re-encode the block to compute
 /// the commitment - we stored it alongside the block when we first verified it.
@@ -691,7 +691,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected: coded_block.commitment(),
-                finalized: false,
+                trusted: false,
             },
         )
         .unwrap();
@@ -721,7 +721,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected,
-                finalized: false,
+                trusted: false,
             },
         ) else {
             panic!("config mismatch should be rejected");
@@ -760,7 +760,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected,
-                finalized: false,
+                trusted: false,
             },
         ) else {
             panic!("coding root mismatch should be rejected");
@@ -773,7 +773,7 @@ mod test {
     }
 
     #[test]
-    fn test_coded_block_decode_finalized_is_lazy() {
+    fn test_coded_block_decode_trusted_is_lazy() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
@@ -786,7 +786,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected: coded.commitment(),
-                finalized: true,
+                trusted: true,
             },
         )
         .unwrap();
@@ -798,7 +798,7 @@ mod test {
     }
 
     #[test]
-    fn test_coded_block_decode_finalized_rejects_config_mismatch() {
+    fn test_coded_block_decode_trusted_rejects_config_mismatch() {
         const EXPECTED_CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(3),
@@ -819,7 +819,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected,
-                finalized: true,
+                trusted: true,
             },
         ) else {
             panic!("config mismatch should be rejected");
@@ -832,7 +832,7 @@ mod test {
     }
 
     #[test]
-    fn test_coded_block_decode_finalized_rejects_block_digest_mismatch() {
+    fn test_coded_block_decode_trusted_rejects_block_digest_mismatch() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
@@ -849,7 +849,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected,
-                finalized: true,
+                trusted: true,
             },
         ) else {
             panic!("block digest mismatch should be rejected");
@@ -862,7 +862,7 @@ mod test {
     }
 
     #[test]
-    fn test_coded_block_decode_finalized_rejects_trailing_bytes() {
+    fn test_coded_block_decode_trusted_rejects_trailing_bytes() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
@@ -878,7 +878,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected: coded.commitment(),
-                finalized: true,
+                trusted: true,
             },
         ) else {
             panic!("trailing bytes should be rejected");
@@ -892,14 +892,14 @@ mod test {
 
     #[test]
     #[should_panic(expected = "does not match commitment")]
-    fn test_coded_block_finalized_wrong_root_panics_on_shards() {
+    fn test_coded_block_trusted_wrong_root_panics_on_shards() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
         };
 
-        // A finalized commitment is trusted at decode, so a root that does not
-        // encode the block is only caught when shards are generated.
+        // A trusted commitment is not re-encoded at decode, so a root that does
+        // not encode the block is only caught when shards are generated.
         let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
         let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let commitment = coded.commitment();
@@ -914,7 +914,7 @@ mod test {
             &CodedBlockCfg {
                 inner: (),
                 expected,
-                finalized: true,
+                trusted: true,
             },
         )
         .unwrap();
