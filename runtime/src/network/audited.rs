@@ -307,8 +307,7 @@ mod tests {
         // Step 2: Run the same ordered exchange on each network so audit equality does
         // not depend on how the runtime schedules separate client and server tasks.
         for (network, mut listener) in networks.iter().zip(listeners) {
-            let (mut client_sink, mut client_stream) =
-                network.dial(listener_addr).await.unwrap();
+            let (mut client_sink, mut client_stream) = network.dial(listener_addr).await.unwrap();
             let (_, mut server_sink, mut server_stream) = listener.accept().await.unwrap();
 
             // Send and receive the client request before replying from the server.
