@@ -602,6 +602,21 @@ where
         Ok((journal, boundary))
     }
 
+    /// Return the pruning boundary that [`Self::prune`] with `prune_loc` would establish, without
+    /// pruning anything.
+    pub fn prune_boundary(&self, prune_loc: Location<F>) -> Result<Location<F>, Error<F>> {
+        let bounds = self.journal.bounds();
+        // An empty structure prunes nothing, matching `prune`.
+        if self.merkle.size() == 0 {
+            return Ok(Location::new(bounds.start));
+        }
+        let boundary = self
+            .journal
+            .prune_boundary((*prune_loc).min(bounds.end))
+            .map_err(Error::Journal)?;
+        Ok(Location::new(boundary))
+    }
+
     async fn prune_inner(
         mut self,
         prune_loc: Location<F>,
@@ -1030,6 +1045,12 @@ where
             }
         }
         Ok((self, last_pos))
+    }
+
+    fn prune_boundary(&self, min_position: u64) -> Result<u64, JournalError> {
+        Self::prune_boundary(self, Location::new(min_position))
+            .map(|boundary| *boundary)
+            .map_err(Self::map_error)
     }
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {

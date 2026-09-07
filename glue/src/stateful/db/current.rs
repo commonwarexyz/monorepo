@@ -1621,6 +1621,100 @@ mod tests {
         });
     }
 
+    /// A 32-byte-chunk Current database, so 384-key generations straddle several bitmap chunks.
+    type FixedDb32 = fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        Sequential,
+    >;
+
+    /// Pruning to the oldest retained target must keep every retained target rewindable, so a
+    /// restart whose marshal anchor lags the database reconciles by rewinding instead of failing.
+    #[test]
+    fn database_set_current_prune_keeps_recovery_targets_rewindable() {
+        deterministic::Runner::default().start(|context| async move {
+            type DbSet = Shared<FixedDb32>;
+            let config = fixed_config("current-prune-recovery-window", &context);
+            let databases = <DbSet as crate::stateful::db::DatabaseSet<_>>::init(
+                context.child("db"),
+                config.clone(),
+            )
+            .await;
+
+            // Three generations rewriting the same keys. H1 and H2 become durable; H3 is applied
+            // with no barrier of its own when the prune to H1 runs.
+            let mut targets = Vec::new();
+            for generation in 0..3u64 {
+                let mut batch = databases.new_batch_for_test::<_>().await;
+                for i in 0..384u64 {
+                    batch = batch.write(
+                        Sha256::hash(&[&i.to_be_bytes()]),
+                        Some(Sha256::hash(&[&(generation * 1_000 + i).to_le_bytes()])),
+                    );
+                }
+                let batch = crate::stateful::db::Unmerkleized::merkleize(batch)
+                    .await
+                    .unwrap();
+                <DbSet as crate::stateful::db::DatabaseSet<_>>::apply(&databases, batch).await;
+                if generation < 2 {
+                    assert!(
+                        <DbSet as crate::stateful::db::DatabaseSet<_>>::finalize(&databases)
+                            .await
+                            .durable()
+                            .await
+                    );
+                }
+                targets.push(
+                    <DbSet as crate::stateful::db::DatabaseSet<_>>::committed_targets(&databases)
+                        .await,
+                );
+            }
+            <DbSet as crate::stateful::db::DatabaseSet<_>>::prune(&databases, &targets[0]).await;
+            drop(databases);
+
+            // Reopen recovers H3, which the prune committed. Reconciling to H2, then to H1, must
+            // succeed: both stay inside the retained window.
+            let reopened = <DbSet as crate::stateful::db::DatabaseSet<_>>::init(
+                context.child("reopen_h2"),
+                config.clone(),
+            )
+            .await;
+            assert_eq!(
+                <DbSet as crate::stateful::db::DatabaseSet<_>>::committed_targets(&reopened).await,
+                targets[2]
+            );
+            <DbSet as crate::stateful::db::DatabaseSet<_>>::rewind_to_targets(
+                &reopened,
+                targets[1].clone(),
+            )
+            .await;
+            assert_eq!(
+                <DbSet as crate::stateful::db::DatabaseSet<_>>::committed_targets(&reopened).await,
+                targets[1]
+            );
+            drop(reopened);
+            let reopened = <DbSet as crate::stateful::db::DatabaseSet<_>>::init(
+                context.child("reopen_h1"),
+                config,
+            )
+            .await;
+            <DbSet as crate::stateful::db::DatabaseSet<_>>::rewind_to_targets(
+                &reopened,
+                targets[0].clone(),
+            )
+            .await;
+            assert_eq!(
+                <DbSet as crate::stateful::db::DatabaseSet<_>>::committed_targets(&reopened).await,
+                targets[0]
+            );
+        });
+    }
+
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {

@@ -60,6 +60,23 @@ fn blob_first_position(blob: u64, items_per_blob: u64) -> Result<u64, Error> {
         .ok_or(Error::OffsetOverflow)
 }
 
+/// Return the start of `bounds` that pruning to `min_position` would establish: the first
+/// position of the blob containing `min_position`, capped at the tail blob and never below the
+/// current start.
+fn prune_boundary(
+    min_position: u64,
+    bounds: &Range<u64>,
+    items_per_blob: u64,
+) -> Result<u64, Error> {
+    let target_blob = position_to_blob(min_position, items_per_blob);
+    let tail_blob = position_to_blob(bounds.end, items_per_blob);
+    let min_blob = target_blob.min(tail_blob);
+    if min_blob <= position_to_blob(bounds.start, items_per_blob) {
+        return Ok(bounds.start);
+    }
+    blob_first_position(min_blob, items_per_blob)
+}
+
 /// Return the exclusive logical end for `blob`, clamped to `end`.
 const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
     // No positions exist, so `end - 1` would underflow
@@ -277,6 +294,17 @@ pub trait Mutable: Contiguous + Sized {
         self,
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
+
+    /// Return the start of [`Contiguous::bounds`] that [`Self::prune`] with `min_position` would
+    /// establish, without pruning anything.
+    ///
+    /// Like [`Self::prune`], the result may fall short of `min_position` because of section/blob
+    /// alignment, and it never precedes the current start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the boundary is not representable.
+    fn prune_boundary(&self, min_position: u64) -> Result<u64, Error>;
 
     /// Rewind the journal to the given size, discarding items from the end.
     ///

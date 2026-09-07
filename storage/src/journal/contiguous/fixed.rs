@@ -1073,17 +1073,18 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.start
     }
 
+    /// See [Journal::prune_boundary].
+    pub(crate) fn prune_boundary(&self, min_item_pos: u64) -> Result<u64, Error> {
+        super::prune_boundary(min_item_pos, &self.bounds, self.items_per_blob.get())
+    }
+
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_item_pos: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
-        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
-        let min_blob = std::cmp::min(target_blob, tail_blob);
-
+        let new_boundary = self.prune_boundary(min_item_pos)?;
+        let min_blob = super::position_to_blob(new_boundary, self.items_per_blob.get());
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok((self, false));
         }
@@ -1099,7 +1100,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         sync.await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
@@ -1364,6 +1364,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let (inner, pruned) = self.0.prune(min_item_pos).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Return the boundary that [`Self::prune`] with `min_item_pos` would establish, without
+    /// pruning anything.
+    pub fn prune_boundary(&self, min_item_pos: u64) -> Result<u64, Error> {
+        self.0.prune_boundary(min_item_pos)
     }
 
     /// Remove any persisted data created by the journal.
@@ -1711,6 +1717,10 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
+    }
+
+    fn prune_boundary(&self, min_position: u64) -> Result<u64, Error> {
+        Self::prune_boundary(self, min_position)
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {
@@ -6329,6 +6339,33 @@ mod tests {
 
             drop(snapshot);
             drop(fresh);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `prune_boundary` predicts the start `prune` establishes, including the capped and no-op
+    /// cases.
+    #[test_traced]
+    fn test_prune_boundary_matches_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..17u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            for target in [0u64, 3, 5, 12, 11, 17, 40] {
+                let predicted = journal.prune_boundary(target).unwrap();
+                (journal, _) = journal.prune(target).await.unwrap();
+                assert_eq!(
+                    crate::journal::contiguous::Contiguous::bounds(&journal).start,
+                    predicted,
+                    "target={target}"
+                );
+            }
             journal.destroy().await.unwrap();
         });
     }
