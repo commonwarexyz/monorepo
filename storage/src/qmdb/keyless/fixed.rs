@@ -157,6 +157,21 @@ mod tests {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
 
+    /// The init check is journal-agnostic, so one cell covers it.
+    #[test_traced]
+    fn test_keyless_fixed_init_rejects_pruned_floor() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("db")).await;
+            tests::run_init_rejects_pruned_floor(ctx, db, |ctx| {
+                Box::pin(async move {
+                    let cfg = db_config("partition", &ctx, Sequential);
+                    TestDb::<mmr::Family>::init(ctx, cfg).await
+                })
+            })
+            .await;
+        });
+    }
+
     /// A keyless db over a delayed-sync storage backend.
     type DelayedDb =
         Db<mmr::Family, DelayedSyncContext<deterministic::Context>, U64, Sha256, Sequential>;
@@ -475,6 +490,7 @@ mod tests {
         test_keyless_fixed_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, db;
         test_keyless_fixed_rewind_recovery => run_rewind_recovery, reopen;
         test_keyless_fixed_rewind_pruned_target_errors => run_rewind_pruned_target_errors, reopen;
+        test_keyless_fixed_rewind_pruned_floor_errors => run_rewind_pruned_floor_errors, reopen;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
