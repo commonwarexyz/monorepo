@@ -95,7 +95,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
     use commonware_codec::{Encode, FixedSize};
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
+    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
         certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
@@ -107,6 +107,7 @@ mod tests {
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        utils::reschedule,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -3704,7 +3705,7 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
                 context.child("validator"),
                 "ancestry-block-delivery",
                 ConstantProvider::new(schemes[0].clone()),
@@ -3712,9 +3713,18 @@ mod tests {
             )
             .await;
 
-            // Nothing certified the chain, so each fetch proves its coding root
-            // by re-encoding and none extends certification evidence downward.
-            let mut chain = coding_chain(participants[0].clone(), 2);
+            // Certification persists the candidate before the application verdict.
+            // That write alone must not authenticate its ancestry, so each fetch
+            // below still proves its coding root by re-encoding.
+            let mut chain = coding_chain(participants[0].clone(), 3);
+            let (round, candidate) = chain.pop().expect("candidate");
+            let notarization = CodingHarness::make_notarization(
+                Proposal::new(round, View::new(2), candidate.commitment()),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.report(Activity::Notarization(notarization));
+            assert!(mailbox.certified(round, candidate).await);
             let (_, top) = chain.pop().expect("top");
             let (_, bottom) = chain.pop().expect("bottom");
             for (block, height) in [(top, 2), (bottom, 1)] {
@@ -3870,6 +3880,93 @@ mod tests {
                 "notarized delivery should validate"
             );
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_untrusted_delivery_rejects_mismatched_root() {
+        for notarized in [false, true] {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                    context.child("validator"),
+                    "untrusted-delivery-mismatched-root",
+                    ConstantProvider::new(schemes[0].clone()),
+                    RecordingCodingBuffer::default(),
+                )
+                .await;
+
+                let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
+                let config = candidate.config();
+                let other: TestCodedBlock = CodedBlock::new(
+                    make_coding_block(
+                        candidate_ctx.clone(),
+                        genesis_block().digest(),
+                        Height::new(1),
+                        101,
+                    ),
+                    config,
+                    &Sequential,
+                );
+                let expected = candidate.commitment();
+                let commitment = TestCommitment::from((
+                    expected.block(),
+                    other.commitment().root(),
+                    expected.context(),
+                    config,
+                ));
+                assert_ne!(commitment.root(), expected.root());
+
+                // A leader can obtain notarize votes with valid assigned shards even
+                // though their root encodes different bytes from the named block.
+                for (index, shard) in other.shards(&Sequential).iter().enumerate() {
+                    ReedSolomon::<Sha256>::check(&config, &commitment.root(), index as u16, shard)
+                        .expect("assigned shard should verify against the advertised root");
+                }
+
+                let (value, fallback) = if notarized {
+                    let round = candidate_ctx.round;
+                    let notarization = CodingHarness::make_notarization(
+                        Proposal::new(round, View::zero(), commitment),
+                        &schemes,
+                        QUORUM,
+                    );
+                    (
+                        (notarization, candidate.clone()).encode(),
+                        core::CommitmentFallback::FetchByRound { round },
+                    )
+                } else {
+                    (
+                        candidate.encode(),
+                        core::CommitmentFallback::FetchByCommitment {
+                            height: Height::new(1),
+                        },
+                    )
+                };
+                resolver.respond_to_next_fetch(value);
+                let mut subscription = mailbox.subscribe_by_commitment(commitment, fallback);
+                while resolver.fetches().is_empty() {
+                    reschedule().await;
+                }
+                assert!(
+                    !resolver.wait_for_delivery_response().await,
+                    "mismatched coding root should be rejected (notarized={notarized})"
+                );
+                assert!(matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert!(mailbox.get_block(&candidate.digest()).await.is_none());
+            });
+        }
     }
 
     #[test_traced("WARN")]
