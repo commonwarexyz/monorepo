@@ -524,6 +524,18 @@ where
     }
 }
 
+impl<'a, D> Arbitrary<'a> for ExtensionDeviation<D>
+where
+    D: Digest + for<'b> Arbitrary<'b>,
+{
+    fn arbitrary(u: &mut Unstructured<'a>) -> ArbitraryResult<Self> {
+        Ok(Self::new(
+            u.arbitrary()?,
+            arbitrary_extension(u, codec_config())?,
+        ))
+    }
+}
+
 impl<'a, D> Arbitrary<'a> for Deviation<D>
 where
     D: Digest + for<'b> Arbitrary<'b>,
@@ -539,11 +551,15 @@ where
                 ))
             })
             .collect::<ArbitraryResult<_>>()?;
-        let extensions = if u.arbitrary()? {
-            Some(arbitrary_extensions(u, config)?)
-        } else {
-            None
-        };
+        let extension_count = u.int_in_range(0..=config.chains())?;
+        let extensions = (0..extension_count)
+            .map(|chain| {
+                Ok(ExtensionDeviation::new(
+                    ChainId::new(chain as u32),
+                    arbitrary_extension(u, config)?,
+                ))
+            })
+            .collect::<ArbitraryResult<_>>()?;
 
         Ok(Self::new(
             Participant::from_usize(u.int_in_range(0..=config.participants() - 1)?),
@@ -724,6 +740,7 @@ mod conformance {
         assert_round_trip::<ChainId>((), 1024);
         assert_round_trip::<Position>((), 1024);
         assert_round_trip::<PositionDeviation>((), 1024);
+        assert_round_trip::<ExtensionDeviation<Sha256Digest>>(config.extension_bound(), 128);
         assert_round_trip::<CertificateId<Sha256Digest>>((), 1024);
         assert_round_trip::<BlockRef<Sha256Digest>>((), 1024);
         assert_round_trip::<TipRecord<Sha256Digest>>(config.chains(), 128);
@@ -785,6 +802,7 @@ mod conformance {
         CodecConformance<ChainId> => 1024,
         CodecConformance<Position> => 1024,
         CodecConformance<PositionDeviation> => 1024,
+        CodecConformance<ExtensionDeviation<Sha256Digest>> => 128,
         CodecConformance<CertificateId<Sha256Digest>> => 1024,
         CodecConformance<BlockRef<Sha256Digest>> => 1024,
         TipRecordConformance => 128,

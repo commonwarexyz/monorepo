@@ -296,7 +296,13 @@ impl ProtocolSizes {
             encoded_index_sum(k)?,
             checked_product(k, encoded_len(d - 1)?)?,
         ])?;
-        let replacement_extensions = if e == 0 { 0 } else { extensions };
+        // Every deviation carries a list length. At least one vote uses the reference vector,
+        // so at most votes - 1 replace that empty list with chain-indexed extensions.
+        let replacement_extensions = if e == 0 {
+            0
+        } else {
+            checked_sum(&[extensions, encoded_index_sum(k)?])? - 1
+        };
         let tally_without_signers = |votes: usize| -> Result<usize, BoundsError> {
             checked_sum(&[
                 extensions,
@@ -744,13 +750,153 @@ mod tests {
     use super::*;
     use crate::{
         elector::Terms,
-        multimmit::types::{BlockRef, CertificateId, ChainId, Height},
+        multimmit::types::{
+            Anchor, BlockRef, CertificateId, ChainId, ChainProposal, ConflictingVote,
+            DaCertificate, Extension, Height, LeaderBlock, Lqc, Position, Tally,
+            TransactionBlockHeader, VoteBody, Vqc,
+        },
     };
+    use commonware_codec::Encode;
     use commonware_cryptography::{
         Hasher, Sha256,
-        bls12381::primitives::variant::{MinPk, MinSig},
+        bls12381::{
+            certificate::threshold,
+            primitives::{
+                ops::aggregate,
+                variant::{MinPk, MinSig},
+            },
+        },
+        certificate::Signers,
         sha256::Digest as Sha256Digest,
     };
+    use commonware_math::algebra::Additive;
+
+    fn assert_constructed_certificate_maxima<V: Variant>() {
+        for (participants, chains, depth, bound) in [
+            (1, 1, 1, 0),
+            (6, 6, 2, 0),
+            (6, 6, 2, 2),
+            (6, 129, 129, 1),
+            (129, 1, 1, 1),
+        ] {
+            let config =
+                CodecConfig::new(participants, chains, Limits::new(depth, bound).unwrap()).unwrap();
+            let round = Round::new(Epoch::new(u64::MAX), View::new(u64::MAX));
+            let digest = Sha256::hash(&[b"maximal certificate"]);
+            let proposals = (0..chains)
+                .map(|chain| {
+                    let chain = ChainId::new(chain as u32);
+                    let header = TransactionBlockHeader::new(
+                        round.epoch(),
+                        chain,
+                        Height::new(u64::MAX - u64::from(depth) - u64::from(bound)),
+                        digest,
+                        digest,
+                    )
+                    .unwrap();
+                    let anchor = Anchor::Certificate(DaCertificate::<V, _>::new(
+                        header,
+                        threshold::Certificate::new(V::Signature::zero()),
+                    ));
+                    ChainProposal::new(
+                        chain,
+                        anchor,
+                        vec![digest; depth as usize],
+                        config.pipeline_depth(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let leader = LeaderBlock::<V, _>::new(
+                round,
+                CertificateId::new(digest),
+                digest,
+                proposals,
+                config,
+            )
+            .unwrap();
+            let extensions = |signer: usize| {
+                vec![
+                    Extension::new(
+                        vec![Sha256::hash(&[&signer.to_be_bytes()]); bound as usize],
+                        bound as usize
+                    )
+                    .unwrap();
+                    chains
+                ]
+            };
+            let tally = |count: usize| {
+                Tally::from_votes::<V, Sha256, _>(
+                    &leader,
+                    (participants - count..participants).map(|signer| {
+                        (
+                            Participant::from_usize(signer),
+                            VoteBody::for_leader::<Sha256, V>(
+                                &leader,
+                                vec![Position::new(depth - 1); chains],
+                                extensions(signer),
+                                config,
+                            )
+                            .unwrap(),
+                        )
+                    }),
+                    config,
+                )
+                .unwrap()
+            };
+            let lqc = Lqc::new(
+                leader.clone(),
+                tally(config.view_quorum()),
+                aggregate::Signature::zero(),
+                config,
+            )
+            .unwrap();
+            let sizes = ProtocolSizes::new::<V, Sha256Digest>(config).unwrap();
+            assert_eq!(
+                lqc.encode().len(),
+                sizes.lqc,
+                "participants={participants} chains={chains} depth={depth} bound={bound}"
+            );
+            let largest_vqc = (config.designation_quorum()..=participants)
+                .map(|count| {
+                    let conflicting = (0..participants - count)
+                        .map(|signer| {
+                            ConflictingVote::new(
+                                Participant::from_usize(signer),
+                                digest,
+                                vec![Position::new(depth); chains],
+                                extensions(signer),
+                                config,
+                            )
+                            .unwrap()
+                        })
+                        .collect();
+                    Vqc::new(
+                        leader.clone(),
+                        tally(count),
+                        Signers::from(participants, []),
+                        conflicting,
+                        aggregate::Signature::zero(),
+                        config,
+                    )
+                    .unwrap()
+                    .encode()
+                    .len()
+                })
+                .max()
+                .unwrap();
+            assert_eq!(
+                largest_vqc, sizes.vqc,
+                "participants={participants} chains={chains} depth={depth} bound={bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_bounds_match_constructed_dense_certificates() {
+        assert_constructed_certificate_maxima::<MinPk>();
+        assert_constructed_certificate_maxima::<MinSig>();
+    }
 
     fn genesis(epoch: Epoch, participants: u32) -> EpochGenesis<Sha256Digest> {
         let tips = (0..participants)

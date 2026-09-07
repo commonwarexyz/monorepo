@@ -64,12 +64,62 @@ impl EncodeSize for PositionDeviation {
     }
 }
 
+/// One chain's replacement for a tally's reference extension.
+///
+/// An empty replacement clears the reference extension for this chain.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ExtensionDeviation<D: Digest> {
+    chain: ChainId,
+    extension: Extension<D>,
+}
+
+impl<D: Digest> ExtensionDeviation<D> {
+    /// Creates an extension replacement for `chain`.
+    pub const fn new(chain: ChainId, extension: Extension<D>) -> Self {
+        Self { chain, extension }
+    }
+
+    /// Returns the affected chain.
+    pub const fn chain(&self) -> ChainId {
+        self.chain
+    }
+
+    /// Returns the replacement extension.
+    pub const fn extension(&self) -> &Extension<D> {
+        &self.extension
+    }
+}
+
+impl<D: Digest> Write for ExtensionDeviation<D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.chain.write(writer);
+        self.extension.write(writer);
+    }
+}
+
+impl<D: Digest> Read for ExtensionDeviation<D> {
+    type Cfg = usize;
+
+    fn read_cfg(reader: &mut impl Buf, bound: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            chain: ReadExt::read(reader)?,
+            extension: Extension::read_cfg(reader, bound)?,
+        })
+    }
+}
+
+impl<D: Digest> EncodeSize for ExtensionDeviation<D> {
+    fn encode_size(&self) -> usize {
+        self.chain.encode_size() + self.extension.encode_size()
+    }
+}
+
 /// The fields by which one vote differs from a tally's standard vote.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Deviation<D: Digest> {
     signer: Participant,
     positions: Vec<PositionDeviation>,
-    extensions: Option<Vec<Extension<D>>>,
+    extensions: Vec<ExtensionDeviation<D>>,
 }
 
 impl<D: Digest> Deviation<D> {
@@ -77,7 +127,7 @@ impl<D: Digest> Deviation<D> {
     pub(crate) const fn new(
         signer: Participant,
         positions: Vec<PositionDeviation>,
-        extensions: Option<Vec<Extension<D>>>,
+        extensions: Vec<ExtensionDeviation<D>>,
     ) -> Self {
         Self {
             signer,
@@ -96,9 +146,9 @@ impl<D: Digest> Deviation<D> {
         &self.positions
     }
 
-    /// Returns a replacement extension vector, or `None` when the tally reference is used.
-    pub fn extensions(&self) -> Option<&[Extension<D>]> {
-        self.extensions.as_deref()
+    /// Returns extension replacements in chain order. Omitted chains use the tally reference.
+    pub fn extensions(&self) -> &[ExtensionDeviation<D>] {
+        &self.extensions
     }
 }
 
@@ -127,9 +177,12 @@ impl<D: Digest> Deviation<D> {
         let signer = ReadExt::read(reader)?;
         let positions =
             Vec::<PositionDeviation>::read_cfg(reader, &(RangeCfg::from(0..=config.chains()), ()))?;
-        let extensions = Option::<Vec<Extension<D>>>::read_cfg(
+        let extensions = Vec::<ExtensionDeviation<D>>::read_cfg(
             reader,
-            &(RangeCfg::exact(config.chains()), config.extension_bound()),
+            &(
+                RangeCfg::from(0..=config.chains()),
+                config.extension_bound(),
+            ),
         )?;
         Ok(Self::new(signer, positions, extensions))
     }
@@ -204,9 +257,17 @@ impl<D: Digest> Tally<D> {
                     PositionDeviation::new(ChainId::new(chain as u32), *position)
                 })
                 .collect::<Vec<_>>();
-            let extensions = (body.extensions() != reference_extensions.as_slice())
-                .then(|| body.extensions().to_vec());
-            if positions.is_empty() && extensions.is_none() {
+            let extensions = body
+                .extensions()
+                .iter()
+                .zip(&reference_extensions)
+                .enumerate()
+                .filter(|(_, (extension, reference))| extension != reference)
+                .map(|(chain, (extension, _))| {
+                    ExtensionDeviation::new(ChainId::new(chain as u32), extension.clone())
+                })
+                .collect::<Vec<_>>();
+            if positions.is_empty() && extensions.is_empty() {
                 continue;
             }
             deviations.push(Deviation::new(*signer, positions, extensions));
@@ -301,8 +362,11 @@ impl<D: Digest> Tally<D> {
                 };
                 *current = position.position;
             }
-            if let Some(replacement) = &deviation.extensions {
-                extensions.clone_from(replacement);
+            for replacement in &deviation.extensions {
+                let Some(current) = extensions.get_mut(replacement.chain.get() as usize) else {
+                    return Err(Error::Transcript);
+                };
+                current.clone_from(&replacement.extension);
             }
         }
 
@@ -334,9 +398,13 @@ impl<D: Digest> Tally<D> {
 
         for deviation in &self.deviations {
             if !self.signers.iter().any(|signer| signer == deviation.signer)
-                || deviation.positions.is_empty() && deviation.extensions.is_none()
+                || deviation.positions.is_empty() && deviation.extensions.is_empty()
                 || deviation
                     .positions
+                    .windows(2)
+                    .any(|pair| pair[0].chain >= pair[1].chain)
+                || deviation
+                    .extensions
                     .windows(2)
                     .any(|pair| pair[0].chain >= pair[1].chain)
             {
@@ -350,14 +418,18 @@ impl<D: Digest> Tally<D> {
                     return Err(Error::Transcript);
                 }
             }
-            if let Some(extensions) = &deviation.extensions
-                && (extensions.len() != config.chains()
-                    || extensions == &self.reference_extensions
-                    || extensions
-                        .iter()
-                        .any(|extension| extension.len() > config.extension_bound()))
-            {
-                return Err(Error::Transcript);
+            for replacement in &deviation.extensions {
+                let Some(reference) = self
+                    .reference_extensions
+                    .get(replacement.chain.get() as usize)
+                else {
+                    return Err(Error::Transcript);
+                };
+                if replacement.extension == *reference
+                    || replacement.extension.len() > config.extension_bound()
+                {
+                    return Err(Error::Transcript);
+                }
             }
         }
 
@@ -379,8 +451,9 @@ impl<D: Digest> Tally<D> {
                     for position in &deviation.positions {
                         positions[position.chain.get() as usize] = position.position;
                     }
-                    if let Some(replacement) = &deviation.extensions {
-                        extensions.clone_from(replacement);
+                    for replacement in &deviation.extensions {
+                        extensions[replacement.chain.get() as usize]
+                            .clone_from(&replacement.extension);
                     }
                 }
                 (signer, positions, extensions)
@@ -607,13 +680,24 @@ mod tests {
     use crate::{
         multimmit::{
             config::Limits,
-            types::{Anchor, BlockRef, CertificateId, ChainId, ChainProposal, Height},
+            machine::algebra::{FinalTips, VqcExtraction},
+            mocks::Committee,
+            types::{
+                Anchor, BlockRef, CertificateId, ChainId, ChainProposal, Height, Lqc, ViewMessage,
+                Vqc,
+            },
         },
         types::{Epoch, Round, View},
     };
-    use bytes::Buf as _;
-    use commonware_codec::Encode;
-    use commonware_cryptography::{Hasher, Sha256, bls12381::primitives::variant::MinSig, sha256};
+    use bytes::{Buf as _, BytesMut};
+    use commonware_codec::{Decode, Encode};
+    use commonware_cryptography::{
+        Hasher, Sha256,
+        bls12381::primitives::variant::{MinPk, MinSig},
+        sha256,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
     use proptest::{collection::vec as prop_vec, prelude::*};
 
     fn digest(marker: u64) -> sha256::Digest {
@@ -754,6 +838,293 @@ mod tests {
     }
 
     #[test]
+    fn decoding_rejects_noncanonical_extension_deviations() {
+        let config = config();
+        let leader = leader();
+        let extension = Extension::new(vec![digest(300)], config.extension_bound()).unwrap();
+        let body = VoteBody::for_leader::<Sha256, MinSig>(
+            &leader,
+            vec![Position::new(1); config.chains()],
+            vec![extension.clone(); config.chains()],
+            config,
+        )
+        .unwrap();
+        let tally = Tally::from_votes::<MinSig, Sha256, _>(
+            &leader,
+            (0..3).map(|signer| (Participant::new(signer), body.clone())),
+            config,
+        )
+        .unwrap();
+        let clear = |chain| ExtensionDeviation::new(ChainId::new(chain), Extension::empty());
+        for replacements in [
+            vec![],
+            vec![clear(0), clear(0)],
+            vec![clear(1), clear(0)],
+            vec![clear(config.chains() as u32)],
+            vec![clear(u32::MAX)],
+            vec![ExtensionDeviation::new(ChainId::new(0), extension)],
+            vec![
+                clear(0),
+                ExtensionDeviation::new(ChainId::new(1), tally.reference_extensions[1].clone()),
+            ],
+            vec![ExtensionDeviation::new(
+                ChainId::new(0),
+                Extension::new(vec![digest(400), digest(401)], 2).unwrap(),
+            )],
+        ] {
+            let mut malformed = tally.clone();
+            malformed
+                .deviations
+                .push(Deviation::new(Participant::new(0), vec![], replacements));
+            assert_eq!(malformed.validate(&leader, config), Err(Error::Transcript));
+            assert!(Tally::read_cfg(&mut malformed.encode(), &leader, config).is_err());
+        }
+
+        let mut valid = tally;
+        valid
+            .deviations
+            .push(Deviation::new(Participant::new(0), vec![], vec![clear(0)]));
+        assert_eq!(
+            Tally::read_cfg(&mut valid.encode(), &leader, config).unwrap(),
+            valid
+        );
+        assert!(
+            valid
+                .vote::<MinSig, Sha256>(&leader, Participant::new(0), config)
+                .unwrap()
+                .extensions()[0]
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn decoding_bounds_extension_deviation_counts_and_payloads() {
+        let config = config();
+        let prefix = || {
+            let mut bytes = BytesMut::new();
+            Participant::new(0).write(&mut bytes);
+            Vec::<PositionDeviation>::new().write(&mut bytes);
+            bytes
+        };
+        let mut bytes = prefix();
+        (config.chains() + 1).write(&mut bytes);
+        assert!(matches!(
+            Deviation::<sha256::Digest>::read_cfg(&mut bytes.freeze(), config),
+            Err(CodecError::InvalidLength(_))
+        ));
+
+        let mut bytes = prefix();
+        1usize.write(&mut bytes);
+        ChainId::new(0).write(&mut bytes);
+        (config.extension_bound() + 1).write(&mut bytes);
+        assert!(matches!(
+            Deviation::<sha256::Digest>::read_cfg(&mut bytes.freeze(), config),
+            Err(CodecError::InvalidLength(_))
+        ));
+        let disabled = CodecConfig::new(6, 6, Limits::new(2, 0).unwrap()).unwrap();
+        let mut bytes = prefix();
+        1usize.write(&mut bytes);
+        ChainId::new(0).write(&mut bytes);
+        1usize.write(&mut bytes);
+        assert!(matches!(
+            Deviation::<sha256::Digest>::read_cfg(&mut bytes.freeze(), disabled),
+            Err(CodecError::InvalidLength(_))
+        ));
+    }
+
+    fn certificate_extension_deviations<V: Variant>() {
+        for chains in [6, 128] {
+            let committee = Committee::<V>::new_with_namespace(
+                11,
+                b"_COMMONWARE_CONSENSUS_SPARSE_TALLY_TEST",
+                chains as u32,
+                Limits::new(2, 1).unwrap(),
+            );
+            let config = committee.codec();
+            let signed_leader = committee.leader_block(1);
+            let leader = signed_leader.block();
+            for changed in [0, 1, chains] {
+                for (populated, clear) in [(false, false), (true, false), (true, true)] {
+                    let reference = (0..chains)
+                        .map(|chain| {
+                            if populated {
+                                Extension::new(vec![digest(chain as u64)], 1).unwrap()
+                            } else {
+                                Extension::empty()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let votes = (0..config.view_quorum())
+                        .map(|signer| {
+                            let mut extensions = reference.clone();
+                            if signer >= config.view_quorum() - 2 {
+                                for (chain, extension) in
+                                    extensions.iter_mut().enumerate().rev().take(changed)
+                                {
+                                    *extension = if clear {
+                                        Extension::empty()
+                                    } else {
+                                        Extension::new(vec![digest(1000 + chain as u64)], 1)
+                                            .unwrap()
+                                    };
+                                }
+                            }
+                            let body = VoteBody::for_leader::<Sha256, V>(
+                                leader,
+                                vec![Position::new(0); chains],
+                                extensions,
+                                config,
+                            )
+                            .unwrap();
+                            committee.signers[signer].sign_vote(body).unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    let certificate = committee
+                        .verifier
+                        .assemble_lqc::<Sha256, _>(leader.clone(), &votes, &Sequential)
+                        .unwrap();
+                    let encoded = certificate.encode();
+                    assert_eq!(encoded.len(), certificate.encode_size());
+                    let decoded =
+                        Lqc::<V, sha256::Digest>::decode_cfg(encoded.clone(), &config).unwrap();
+                    assert_eq!(decoded, certificate);
+                    assert!(
+                        committee
+                            .verifier
+                            .verify_lqc::<_, Sha256, _>(&mut test_rng(), &decoded, &Sequential)
+                            .is_some()
+                    );
+                    assert_eq!(decoded.tally().reference_extensions(), reference);
+                    if changed > 0 {
+                        let mut tampered = decoded.tally().clone();
+                        tampered.deviations[0].extensions[0].extension =
+                            Extension::new(vec![digest(10_000)], 1).unwrap();
+                        let tampered = Lqc::new(
+                            leader.clone(),
+                            tampered,
+                            decoded.signature().unwrap().clone(),
+                            config,
+                        )
+                        .unwrap();
+                        assert!(
+                            committee
+                                .verifier
+                                .verify_lqc::<_, Sha256, _>(&mut test_rng(), &tampered, &Sequential)
+                                .is_none()
+                        );
+                    }
+                    for vote in &votes {
+                        let expanded = decoded
+                            .tally()
+                            .vote::<V, Sha256>(leader, vote.signer(), config)
+                            .unwrap();
+                        assert_eq!(expanded.encode(), vote.body().encode());
+                        assert_eq!(
+                            decoded
+                                .tally()
+                                .vote_with_leader_digest(
+                                    leader,
+                                    leader.digest::<Sha256>(),
+                                    vote.signer(),
+                                    config
+                                )
+                                .unwrap(),
+                            expanded
+                        );
+                    }
+                    assert_eq!(
+                        FinalTips::from_lqc::<Sha256, V>(&decoded, config).unwrap(),
+                        FinalTips::from_pool::<Sha256, V, _>(
+                            leader,
+                            votes.iter().map(|vote| (vote.signer(), vote.body())),
+                            config
+                        )
+                        .unwrap()
+                    );
+                    let messages = votes
+                        .iter()
+                        .cloned()
+                        .map(ViewMessage::Vote)
+                        .collect::<Vec<_>>();
+                    let vqc = committee
+                        .verifier
+                        .assemble_vqc::<Sha256, _>(leader.clone(), &messages, &Sequential)
+                        .unwrap();
+                    let decoded_vqc =
+                        Vqc::<V, sha256::Digest>::decode_cfg(vqc.encode(), &config).unwrap();
+                    assert_eq!(decoded_vqc, vqc);
+                    assert!(
+                        committee
+                            .verifier
+                            .verify_vqc::<_, Sha256, _>(&mut test_rng(), &decoded_vqc, &Sequential)
+                            .is_some()
+                    );
+                    assert_eq!(
+                        VqcExtraction::new::<Sha256, V>(&decoded_vqc, config)
+                            .unwrap()
+                            .into_parts()
+                            .0,
+                        VqcExtraction::from_votes::<Sha256, V>(
+                            leader,
+                            leader.digest::<Sha256>(),
+                            votes.iter().map(|vote| (vote.signer(), vote.body())),
+                            config
+                        )
+                        .unwrap()
+                        .into_parts()
+                        .0,
+                    );
+
+                    let tally = certificate.tally();
+                    assert!(
+                        tally
+                            .deviations()
+                            .iter()
+                            .all(|deviation| deviation.extensions().len() == changed)
+                    );
+                    let mut dense = BytesMut::new();
+                    tally.reference_extensions.write(&mut dense);
+                    tally.signers.write(&mut dense);
+                    tally.deviations.len().write(&mut dense);
+                    for deviation in &tally.deviations {
+                        deviation.signer.write(&mut dense);
+                        deviation.positions.write(&mut dense);
+                        Some(
+                            votes[usize::from(deviation.signer)]
+                                .body()
+                                .extensions()
+                                .to_vec(),
+                        )
+                        .write(&mut dense);
+                    }
+                    let old_size = encoded.len() - tally.encode_size() + dense.len();
+                    let old_vqc_size = vqc.encode_size() - tally.encode_size() + dense.len();
+                    eprintln!(
+                        "{} chains={chains} populated={populated} changed={changed} clear={clear}: LQC {old_size}->{} VQC {old_vqc_size}->{}",
+                        core::any::type_name::<V>(),
+                        encoded.len(),
+                        vqc.encode_size()
+                    );
+                    match changed {
+                        0 => assert_eq!(encoded.len(), old_size),
+                        1 => assert!(encoded.len() < old_size),
+                        _ => assert_eq!(encoded.len(), old_size + 2 * (chains - 1)),
+                    }
+                    let bounds = config.encoded_bounds::<V, sha256::Digest>().unwrap();
+                    assert!(encoded.len() <= bounds.max_artifact_bytes());
+                    assert!(vqc.encode_size() <= bounds.max_artifact_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_certificates_preserve_signatures_tips_and_measure_sizes() {
+        certificate_extension_deviations::<MinPk>();
+        certificate_extension_deviations::<MinSig>();
+    }
+
+    #[test]
     fn validation_rejects_noncanonical_reference() {
         let config = config();
         let leader = leader();
@@ -767,13 +1138,12 @@ mod tests {
         let mut tally =
             Tally::from_votes::<MinSig, Sha256, _>(&leader, [(Participant::new(0), body)], config)
                 .unwrap();
-        let original = tally.reference_extensions.clone();
         tally.reference_extensions[0] =
             Extension::new(vec![digest(400)], config.extension_bound()).unwrap();
         tally.deviations.push(Deviation::new(
             Participant::new(0),
             Vec::new(),
-            Some(original),
+            vec![ExtensionDeviation::new(ChainId::new(0), Extension::empty())],
         ));
         assert_eq!(tally.validate(&leader, config), Err(Error::Transcript));
         let mut encoded = tally.encode();
@@ -843,7 +1213,7 @@ mod tests {
                     ChainId::new(u32::MAX),
                     Position::new(0),
                 )],
-                None,
+                Vec::new(),
             )],
         };
 
@@ -851,11 +1221,16 @@ mod tests {
             tally.vote::<MinSig, Sha256>(&leader, Participant::new(0), config),
             Err(Error::Transcript)
         );
-        tally.signers = Signers::new(
-            (config.participants() + 1).try_into().unwrap(),
-            [Participant::new(0)],
-        )
-        .unwrap();
+        tally.deviations[0].positions.clear();
+        tally.deviations[0].extensions.push(ExtensionDeviation::new(
+            ChainId::new(u32::MAX),
+            Extension::empty(),
+        ));
+        assert_eq!(
+            tally.vote::<MinSig, Sha256>(&leader, Participant::new(0), config),
+            Err(Error::Transcript)
+        );
+        tally.signers = Signers::new((config.participants() + 1).try_into().unwrap(), [Participant::new(0)]).unwrap();
         assert_eq!(
             tally.vote::<MinSig, Sha256>(&leader, Participant::new(0), config),
             Err(Error::Context)
