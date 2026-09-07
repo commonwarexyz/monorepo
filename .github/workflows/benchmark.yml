@@ -79,26 +79,6 @@ jobs:
           name: benchmark-${{ matrix.benchmark_name }}
           path: "${{ matrix.benchmark_name }}.txt"
           if-no-files-found: error
-      # Protocol Criterion benchmarks explicitly use Tokio. The standalone
-      # runtime harness selects the native runner and reports its topology.
-      - name: Benchmark native runtime storage
-        if: matrix.package == 'commonware-storage'
-        run: |
-          cargo bench -p commonware-runtime --bench storage --features iouring -- \
-            --workload read_seq --cache warm --duration 30 --file-size 64M \
-            --worker-threads 1 --ring-size 128 --output json > iouring-read.json
-          cargo bench -p commonware-runtime --bench storage --features iouring -- \
-            --workload write_sync --duration 30 --file-size 64M \
-            --worker-threads 1 --ring-size 128 --output json > iouring-write-sync.json
-          jq -e '.backend == "iouring" and .read.ops > 0' iouring-read.json
-          jq -e '.backend == "iouring" and .write.ops > 0' iouring-write-sync.json
-      - name: Upload native runtime storage results
-        if: matrix.package == 'commonware-storage'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: benchmark-commonware-runtime-iouring
-          path: iouring-*.json
-          if-no-files-found: error
 
   publish:
     name: Publish

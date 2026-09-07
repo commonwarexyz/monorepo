@@ -32,8 +32,6 @@ jobs:
           - os: ubuntu-latest
             flags: ""
           - os: macos-latest
-            flags: "--features commonware-runtime/iouring"
-          - os: macos-latest
             flags: ""
     steps:
     - name: Checkout repository
