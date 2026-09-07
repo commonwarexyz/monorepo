@@ -8,7 +8,7 @@ on:
 
 env:
   QUINT_VERSION: "0.32.0"
-  NODE_VERSION: "20.19.5"
+  NODE_VERSION: "22.X"
 
 permissions:
   contents: read
@@ -25,5 +25,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install quint
         run: npm i @informalsystems/quint@${{ env.QUINT_VERSION }} -g
-      - name: Run test
-        run: cd pipeline/minimmit/quint && make typecheck && make test
+      - name: Run Minimmit tests
+        working-directory: pipeline/minimmit/quint
+        run: make typecheck && make test
+      - name: Run Multimmit tests
+        working-directory: pipeline/multimmit/quint
+        run: make typecheck && make test
