@@ -23,6 +23,155 @@ fn config() -> Config {
 }
 
 #[test]
+fn shutdown_cancels_tasks_before_destruction() {
+    struct Cleanup {
+        drops: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        gauge: raw::Gauge,
+        descendant: Arc<Tree>,
+    }
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            // Record ordering without panicking inside the task disposal boundary.
+            if self.gauge.get() == 0 && Tree::child(&self.descendant).1 {
+                self.cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // Cover unpolled local tasks, queued foreign spawns, and pending tasks.
+    for placement in 0..3 {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let gauge = raw::Gauge::default();
+        let handles = Runner::new(config()).start(|context| {
+            let drops = &drops;
+            let cancelled = &cancelled;
+            let gauge = &gauge;
+            async move {
+                let tree = Tree::child(&context.tree).0;
+                let descendant = Tree::child(&tree).0;
+                let mut handles = Vec::new();
+                let mut receivers = Vec::new();
+                for tree in [tree, descendant.clone()] {
+                    let cleanup = Cleanup {
+                        drops: drops.clone(),
+                        cancelled: cancelled.clone(),
+                        gauge: gauge.clone(),
+                        descendant: descendant.clone(),
+                    };
+                    let (started, ready) = oneshot::channel();
+                    let (future, handle) = Handle::init(
+                        async move {
+                            let _cleanup = cleanup;
+                            started.send(()).unwrap();
+                            futures::future::pending::<()>().await;
+                        },
+                        MetricHandle::new(gauge.clone()),
+                        context.shared.panicker.clone(),
+                        tree.clone(),
+                    );
+                    tree.register(handle.aborter().unwrap());
+                    let cell = Task::boxed(future);
+                    if placement == 1 {
+                        let origin = context.origin.clone();
+                        thread::spawn(move || assert!(task::register(&origin, cell).is_ok()))
+                            .join()
+                            .unwrap();
+                    } else {
+                        assert!(task::register(&context.origin, cell).is_ok());
+                    }
+                    handles.push(handle);
+                    receivers.push(ready);
+                }
+                if placement == 2 {
+                    for ready in receivers {
+                        ready.await.unwrap();
+                    }
+                }
+                handles
+            }
+        });
+        assert_eq!(drops.load(Ordering::Relaxed), 2, "placement={placement}");
+        assert_eq!(
+            cancelled.load(Ordering::Relaxed),
+            2,
+            "placement={placement}"
+        );
+        assert_eq!(gauge.get(), 0, "placement={placement}");
+        for handle in handles {
+            assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+        }
+    }
+}
+
+#[test]
+fn one_off_completion_cancels_local_and_remote_descendants() {
+    for blocking in [false, true] {
+        Runner::new(config()).start(|context| async move {
+            let parent = context.child("parent");
+            let parent = if blocking {
+                parent.shared(true)
+            } else {
+                parent.dedicated()
+            };
+            let descendants = parent
+                .spawn(|context| async move {
+                    let local = context
+                        .child("local")
+                        .spawn(|_| futures::future::pending::<()>());
+                    let remote = context
+                        .child("remote")
+                        .dedicated()
+                        .spawn(|_| futures::future::pending::<()>());
+                    [local, remote]
+                })
+                .await
+                .unwrap();
+            for descendant in descendants {
+                assert!(matches!(descendant.await, Err(Error::Closed)));
+            }
+            assert_eq!(
+                context
+                    .child("sibling")
+                    .spawn(|_| async { 7 })
+                    .await
+                    .unwrap(),
+                7
+            );
+        });
+    }
+}
+
+#[test]
+fn root_shutdown_cancels_descendants_across_workers() {
+    let handles = Runner::new(config()).start(|context| async move {
+        let (published, descendants) = oneshot::channel();
+        let parent = context
+            .child("parent")
+            .dedicated()
+            .spawn(|context| async move {
+                let local = context
+                    .child("local")
+                    .spawn(|_| futures::future::pending::<()>());
+                let remote = context
+                    .child("remote")
+                    .shared(true)
+                    .spawn(|_| futures::future::pending::<()>());
+                assert!(published.send([local, remote]).is_ok());
+                futures::future::pending::<()>().await;
+            });
+        let [local, remote] = descendants.await.unwrap();
+        [parent, local, remote]
+    });
+    for handle in handles {
+        assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+    }
+}
+
+#[test]
 fn service_error_reconciles_completions_before_cleanup() {
     let (socket, mut peer) = UnixStream::pair().unwrap();
     socket.set_nonblocking(true).unwrap();
@@ -144,7 +293,12 @@ fn creation_failure_destroys_payload_before_releasing_tracking() {
             };
             context.shared.fail_launch.store(true, Ordering::Relaxed);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let _ = context.shared.launch(Task::boxed(payload));
+                drop(
+                    context
+                        .child("failed_launch")
+                        .shared(true)
+                        .spawn(move |_| payload),
+                );
             }));
             assert!(result.is_err());
             assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -166,7 +320,12 @@ fn transfer_failure_destroys_payload_before_releasing_tracking() {
                 };
                 context.shared.fail_transfer.store(true, Ordering::Relaxed);
                 let rejected = catch_unwind(AssertUnwindSafe(|| {
-                    assert!(context.shared.launch(Task::boxed(payload)).is_ok());
+                    drop(
+                        context
+                            .child("failed_launch")
+                            .shared(true)
+                            .spawn(move |_| payload),
+                    );
                 }));
                 assert_eq!(rejected.is_err(), panic_on_drop);
                 assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -412,7 +571,12 @@ fn startup_failure_survives_rejected_payload_destructor_panic() {
                 panic_on_drop: true,
             };
             context.shared.fail_startup.store(true, Ordering::Relaxed);
-            assert!(context.shared.launch(Task::boxed(payload)).is_ok());
+            drop(
+                context
+                    .child("failed_launch")
+                    .shared(true)
+                    .spawn(move |_| payload),
+            );
             futures::future::pending::<()>().await;
         });
     }));

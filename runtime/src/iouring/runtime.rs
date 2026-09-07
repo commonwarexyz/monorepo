@@ -10,6 +10,10 @@
 //! before receiving their user payload. Runner shutdown closes that registry,
 //! drains the ordinary worker, then waits for every accepted worker cleanup.
 //!
+//! Supervision stays in [`Context`], [`Runner`], and the shared [`Handle`]
+//! wrapper. Worker execution returns before task disposal, allowing the runner
+//! to abort its tasks before their cells and kernel resources are released.
+//!
 //! ```text
 //! Runner::start thread                  one-off worker thread
 //! --------------------                 ---------------------
@@ -652,7 +656,7 @@ impl crate::Spawner for Context {
             f(self).await
         };
         let (future, handle) =
-            Handle::init_local(future, metric, shared.panicker.clone(), parent.clone());
+            Handle::init(future, metric, shared.panicker.clone(), parent.clone());
         if let Some(aborter) = handle.aborter() {
             parent.register(aborter);
         }
@@ -664,6 +668,8 @@ impl crate::Spawner for Context {
         };
         if let Err(cell) = result {
             // Rejection after closure follows the caller's panic boundary.
+            // Cancel descendants and finish metrics before destroying captures.
+            parent.abort();
             drop(cell);
         }
         handle
@@ -1128,12 +1134,9 @@ impl Worker {
         if !messages.is_empty() {
             self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
         }
-        for message in messages {
-            task::contain(|| drop(message));
-        }
-        for message in self.inbox.drain(..) {
-            task::contain(|| drop(message));
-        }
+        // Keep accepted tasks alive until the caller has cancelled them and
+        // cleanup can destroy their cells outside the local borrow.
+        self.inbox.extend(messages);
     }
 
     /// Cancel observers and finish all kernel-visible work before releasing TLS.
@@ -1145,6 +1148,9 @@ impl Worker {
         // before the first drain turn, against unexpected infrastructure unwind.
         let mut retirement = RetirementGuard::new();
         self.begin_close();
+        for message in self.inbox.drain(..) {
+            task::contain(|| drop(message));
+        }
         let mut tasks = Vec::new();
         self.local.borrow_mut().tasks.clear(&mut tasks);
         for Running { cell, waker, .. } in tasks {
@@ -1216,6 +1222,17 @@ impl Worker {
         self.panics.run(|| drop(driver));
         self.finished = true;
         self.scope.take();
+    }
+
+    /// Select the root result after cleanup and any runner-wide failure delivery.
+    fn result<T>(&mut self, output: Option<T>) -> Result<T, Panic> {
+        if let Some(panic) = self.panics.take() {
+            // A failure may arrive after a successful root poll. Its output can
+            // own arbitrary destructors, so preserve the first panic on disposal.
+            self.panics.run(|| drop(output));
+            return Err(panic);
+        }
+        Ok(output.expect("worker root ended without an output or failure"))
     }
 }
 
@@ -1452,19 +1469,22 @@ impl Worker {
     }
 }
 
-/// Run one worker with a stack-pinned root and complete every ownership boundary.
+/// Drive a stack-pinned root, retaining its worker for caller-owned shutdown.
+///
+/// Publication closes before root destruction. Accepted task cells remain alive
+/// until the caller cancels its tasks and runs cleanup with TLS still installed.
 fn run_worker<F, Fut>(
     shared: Arc<Shared>,
     build: F,
     service: Option<Pin<Box<dyn Runnable>>>,
-    root_tree: Option<Arc<Tree>>,
-    mut interrupts: Option<Panicked>,
-) -> Result<Fut::Output, Panic>
+    interrupts: Option<&mut Panicked>,
+) -> Result<(Worker, Option<Fut::Output>), Panic>
 where
     F: FnOnce(&Arc<Mailbox>) -> Fut,
     Fut: Future,
 {
-    let owning_runner = root_tree.is_some();
+    // Only the owning runner listens for failures from other workers.
+    let owning_runner = interrupts.is_some();
     let startup = catch_unwind(AssertUnwindSafe(|| Local::new(shared.clone())));
     let local = match startup {
         Ok(Ok(local)) => local,
@@ -1509,20 +1529,17 @@ where
         // infrastructure unwind from implicitly destroying the pinned future.
         let pinned = unsafe { Pin::new_unchecked(&mut **root) };
         match catch_unwind(AssertUnwindSafe(|| {
-            worker.drive(pinned, &root_waker, interrupts.as_mut())
+            worker.drive(pinned, &root_waker, interrupts)
         })) {
             Ok(Ok(value)) => output = Some(value),
             Ok(Err(panic)) | Err(panic) => worker.panics.retain(panic),
         }
     }
-    // Stop accepting one-off launches before destroying the root's descendants.
+    // Stop accepting one-off launches before destroying the owning runner's root.
     if owning_runner {
         shared.workers.close();
     }
     worker.begin_close();
-    if let Some(tree) = root_tree {
-        worker.panics.run(|| tree.abort());
-    }
     if let Some(root) = root.as_mut() {
         worker.panics.run(|| {
             // SAFETY: The future remains in the same stack storage used by the
@@ -1533,25 +1550,7 @@ where
         });
     }
     worker.panics.run(|| drop(root_waker));
-    worker.cleanup();
-    if owning_runner {
-        shared.workers.wait();
-    }
-    // Every accepted worker has published failure before releasing its count.
-    // Sender objects can still survive in escaped contexts, so close explicitly.
-    if let Some(interrupts) = interrupts.as_mut()
-        && let Some(panic) = interrupts.close()
-    {
-        worker.panics.retain(panic);
-    }
-    worker.panics.run(|| drop(interrupts));
-    if let Some(panic) = worker.panics.take() {
-        // A failure may arrive after a successful root poll. Its output can own
-        // arbitrary destructors, so dispose of it without hiding the first panic.
-        worker.panics.run(|| drop(output));
-        return Err(panic);
-    }
-    Ok(output.expect("worker root ended without an output or failure"))
+    Ok((worker, output))
 }
 
 /// Adapt an already concrete one-off task cell to the worker's root interface.
@@ -1577,13 +1576,14 @@ impl Drop for TaskRoot {
 /// Report an infrastructure failure only after that worker's mandatory cleanup.
 fn run_one_off(shared: Arc<Shared>, cell: Pin<Box<dyn Runnable>>) {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        run_worker(
+        let (mut worker, output) = run_worker(
             shared.clone(),
             |_| TaskRoot { cell: Some(cell) },
             None,
             None,
-            None,
-        )
+        )?;
+        worker.cleanup();
+        worker.result(output)
     }));
     if let Err(panic) = result.unwrap_or_else(Err) {
         shared.panicker.notify_fatal(panic);
@@ -1670,7 +1670,7 @@ impl crate::Runner for Runner {
             ),
             &mut runtime_registry,
         );
-        let (panicker, tasks) = Panicker::new(self.cfg.catch_panics);
+        let (panicker, mut tasks) = Panicker::new(self.cfg.catch_panics);
         let shared = Arc::new(Shared {
             cfg: self.cfg,
             registry,
@@ -1697,7 +1697,7 @@ impl crate::Runner for Runner {
         let context_shared = shared.clone();
         let context_tree = tree.clone();
         let output = run_worker(
-            shared,
+            shared.clone(),
             move |mailbox| {
                 f(Context {
                     name: label.name(),
@@ -1709,9 +1709,20 @@ impl crate::Runner for Runner {
                 })
             },
             Some(Task::boxed(process.collect(Sleep::new))),
-            Some(tree),
-            Some(tasks),
-        );
+            Some(&mut tasks),
+        )
+        .and_then(|(mut worker, output)| {
+            worker.panics.run(|| tree.abort());
+            worker.cleanup();
+            shared.workers.wait();
+            // Accepted workers publish failure before releasing their count.
+            // Escaped contexts may retain senders, so close reception explicitly.
+            if let Some(panic) = tasks.close() {
+                worker.panics.retain(panic);
+            }
+            worker.panics.run(|| drop(tasks));
+            worker.result(output)
+        });
         metric.finish();
         match output {
             Ok(output) => output,
