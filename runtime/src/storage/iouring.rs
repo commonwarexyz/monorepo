@@ -670,10 +670,10 @@ mod tests {
 
     #[test]
     fn test_iouring_storage() {
-        iouring::Runner::default().start(|_| async {
+        iouring::Runner::default().start(|context| async move {
             // Verify the io_uring storage backend satisfies the shared storage trait suite.
             let (storage, storage_directory) = create_test_storage();
-            run_storage_tests(storage).await;
+            run_storage_tests(context, storage).await;
             let _ = std::fs::remove_dir_all(storage_directory);
         });
     }

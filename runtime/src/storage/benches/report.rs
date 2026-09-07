@@ -157,9 +157,8 @@ impl Report {
         );
 
         if let Some(ring_size) = cfg.effective_ring_size() {
-            println!("ring_size={ring_size} ordinary_workers=1 io_driver_threads=1");
+            println!("ring_size={ring_size}");
         }
-        println!("concurrency_source=root_task");
         if let Some(file_size) = cfg.file_size {
             println!("file_size={file_size}");
         }
@@ -195,7 +194,6 @@ impl Report {
             "inflight": cfg.inflight,
             "worker_threads": cfg.worker_threads,
             "ring_size": cfg.effective_ring_size(),
-            "concurrency_source": "root_task",
             "global_queue_interval": cfg.global_queue_interval,
             "file_size": cfg.file_size,
             "root": cfg.root,

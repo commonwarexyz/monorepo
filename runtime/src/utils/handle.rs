@@ -154,7 +154,7 @@ where
         )
     }
 
-    /// Wrap a native worker task without erasing its concrete future type.
+    /// Wrap an io_uring task with cleanup that also runs if it is never polled.
     ///
     /// The cleanup guard exists before registration and therefore also runs
     /// when a task is rejected or dropped before its first poll. Supervision
@@ -336,7 +336,7 @@ where
     }
 }
 
-/// Cleanup retained by a native task even before the task's first poll.
+/// Cleanup retained by an io_uring task even before the task's first poll.
 #[commonware_macros::stability(ALPHA)]
 #[cfg(all(feature = "iouring", target_os = "linux"))]
 struct LocalCleanup {
@@ -459,7 +459,7 @@ impl Panicker {
         self.send(panic);
     }
 
-    /// Report a native worker failure independently of user task panic policy.
+    /// Report a worker failure independently of user task panic policy.
     #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]
     pub(crate) fn notify_fatal(&self, panic: Panic) {
@@ -467,11 +467,15 @@ impl Panicker {
     }
 
     fn send(&self, panic: Panic) {
-        // Publication and discarded payload destruction run after unlocking.
+        // If we've already sent a panic, ignore the new one.
+        // Release the lock before invoking wakers or dropping panic payloads.
         let sender = self.sender.lock().take();
-        if let Some(sender) = sender {
-            let _ = sender.send(panic);
-        }
+        let Some(sender) = sender else {
+            return;
+        };
+
+        // Send the panic.
+        let _ = sender.send(panic);
     }
 }
 
@@ -481,7 +485,7 @@ pub(crate) struct Panicked {
 }
 
 impl Panicked {
-    /// Poll a native root interrupt without unwinding through its user future.
+    /// Poll a root interrupt without unwinding through its user future.
     #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]
     pub(crate) fn poll_panic(&mut self, cx: &mut Context<'_>) -> Poll<Option<Panic>> {
@@ -490,7 +494,7 @@ impl Panicked {
 
     /// Close reception and take any panic that raced normal root completion.
     ///
-    /// The native runner calls this after its worker completion barrier, so no
+    /// The io_uring runner calls this after its worker completion barrier, so no
     /// accepted worker still has an unfinished failure publication.
     #[commonware_macros::stability(ALPHA)]
     #[cfg(all(feature = "iouring", target_os = "linux"))]

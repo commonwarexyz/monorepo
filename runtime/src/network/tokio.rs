@@ -387,6 +387,7 @@ mod tests {
         Stream as _,
         network::{tests, tokio as TokioNetwork},
         telemetry::metrics::Registry,
+        tokio::Runner,
     };
     use commonware_macros::test_group;
     use std::time::{Duration, Instant};
@@ -398,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_trait() {
-        crate::tokio::Runner::default().start(|context| async move {
+        Runner::default().start(|context| async move {
             tests::test_network_trait(context, || {
                 TokioNetwork::Network::new(
                     TokioNetwork::Config::default()
@@ -414,7 +415,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_connect_timeout() {
-        crate::tokio::Runner::default().start(|context| async move {
+        Runner::default().start(|context| async move {
             let connect_timeout = Duration::from_millis(100);
             let network = TokioNetwork::Network::new(
                 TokioNetwork::Config::default().with_connect_timeout(connect_timeout),
@@ -428,7 +429,7 @@ mod tests {
     #[test_group("slow")]
     #[test]
     fn test_stress_trait() {
-        crate::tokio::Runner::default().start(|context| async move {
+        Runner::default().start(|context| async move {
             tests::stress_test_network_trait(context, || {
                 TokioNetwork::Network::new(
                     TokioNetwork::Config::default()

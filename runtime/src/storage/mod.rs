@@ -124,13 +124,13 @@ stability_scope!(BETA {
 pub(crate) mod tests {
     pub(crate) use super::header::tests::v0_blob_bytes;
     use crate::{
-        Blob, BlobVersion, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Storage,
+        Blob, BlobVersion, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Spawner, Storage,
         WriteOptions,
     };
     use futures::FutureExt;
 
     /// Runs the full suite of tests on the provided storage implementation.
-    pub(crate) async fn run_storage_tests<S>(storage: S)
+    pub(crate) async fn run_storage_tests<S>(context: impl Spawner, storage: S)
     where
         S: Storage + Send + Sync + 'static,
         S::Blob: Send + Sync,
@@ -145,7 +145,7 @@ pub(crate) mod tests {
         test_recreate_generations(&storage).await;
         test_read_after_remove_partition_multi(&storage).await;
         test_scan(&storage).await;
-        test_concurrent_access(&storage).await;
+        test_concurrent_access(context, &storage).await;
         test_large_data(&storage).await;
         test_overwrite_data(&storage).await;
         test_read_beyond_bound(&storage).await;
@@ -542,7 +542,7 @@ pub(crate) mod tests {
     }
 
     /// Test concurrent access to the same blob.
-    async fn test_concurrent_access<S>(storage: &S)
+    async fn test_concurrent_access<S>(context: impl Spawner, storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
@@ -554,14 +554,22 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Poll both operations concurrently on the caller's runtime. Keeping
-        // the requests together also exercises admission with a single worker.
-        let (write, read) = futures::join!(
-            blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default()),
-            blob.read_at(0, 16, ReadOptions::default()),
-        );
-        write.unwrap();
-        let buffer = read.unwrap();
+        // Read and write concurrently
+        let write_task = context.child("write").spawn({
+            let blob = blob.clone();
+            |_| async move {
+                blob.write_at(0, IoBuf::from(b"concurrent write"), WriteOptions::default())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let read_task = context.child("read").spawn(move |_| async move {
+            blob.read_at(0, 16, ReadOptions::default()).await.unwrap()
+        });
+
+        write_task.await.unwrap();
+        let buffer = read_task.await.unwrap();
 
         assert_eq!(
             buffer.coalesce(),
