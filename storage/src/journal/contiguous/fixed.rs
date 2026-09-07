@@ -1335,10 +1335,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Returns [Error::InvalidRewind] if `size` is larger than current size.
     /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
     ///
+    /// # Durability
+    ///
+    /// The truncation is durable when this returns. Items appended afterward are not durable
+    /// until `commit` or `sync`.
+    ///
     /// # Warnings
     ///
-    /// * The truncation is durable when this returns. Items appended afterward are not durable
-    ///   until `commit` or `sync`.
     /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
     ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
     /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this

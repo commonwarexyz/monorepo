@@ -1621,6 +1621,9 @@ mod tests {
         });
     }
 
+    /// A rewind to the already-applied target is durable on its own: after `rewind_to_target`
+    /// with an unfinalized applied state and a crash with no further sync, the reopened database
+    /// reports that target.
     #[test]
     fn managed_db_rewind_current_target_survives_crash() {
         let (target, checkpoint) =
@@ -1646,7 +1649,7 @@ mod tests {
                     .unwrap();
                 let target = <FixedDb as ManagedDb<_>>::sync_target(&database);
 
-                // An unchanged target still needs to persist its unfinalized checkpoint
+                // A target equal to the applied state persists its unfinalized checkpoint.
                 let database =
                     <FixedDb as ManagedDb<_>>::rewind_to_target(database, target.clone())
                         .await

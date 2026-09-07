@@ -419,8 +419,8 @@ where
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// The rewind of the operations journal and its Merkle structure is durable before this
-    /// method returns. A `size` equal to the current size truncates nothing and instead makes the
-    /// applied state durable, so a completed rewind always leaves `size` durable.
+    /// method returns. A `size` equal to the current size truncates nothing and makes the applied
+    /// state durable, so a completed rewind always leaves the state at `size` durable.
     #[tracing::instrument(name = "qmdb.keyless.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {

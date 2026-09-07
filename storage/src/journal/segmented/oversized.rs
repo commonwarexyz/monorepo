@@ -984,9 +984,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         self.prepare_rewind(section, index_size, true).await?;
 
         // Rewind the index first (this also removes sections after `section`). Its truncation
-        // is durable when `index.rewind` returns, so by the time rewinding the values frees
-        // their ranges for reuse by later appends, no dropped index entry can survive a crash
-        // and be adopted referencing whatever bytes a later append placed at its offsets.
+        // is durable when `index.rewind` returns, so once the values rewind frees ranges for
+        // later appends, no dropped index entry can survive a crash and be adopted referencing
+        // whatever bytes a later append placed at its offsets.
         self.index = self.index.rewind(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)

@@ -285,8 +285,8 @@ impl Expected {
         self.durable_prune = bounds.start;
         self.max_prune = bounds.start;
 
-        // The barrier makes prior truncations durable and every recorded value exact, so no
-        // alternate values remain admissible.
+        // The barrier pins every recorded value exactly, so no failed-append alternate remains
+        // admissible.
         self.candidates.clear();
     }
 
@@ -296,8 +296,8 @@ impl Expected {
         self.durable_len = size;
         self.max_size = size;
 
-        // The barrier makes prior truncations durable and every recorded value exact, so no
-        // alternate values remain admissible.
+        // The barrier pins every recorded value exactly, so no failed-append alternate remains
+        // admissible.
         self.candidates.clear();
     }
 

@@ -545,8 +545,8 @@ where
     /// from `rewind` and reopen from storage.
     ///
     /// The rewind of the operations journal and its Merkle structure is durable before this
-    /// method returns. A `size` equal to the current size truncates nothing and instead makes the
-    /// applied state durable, so a completed rewind always leaves `size` durable.
+    /// method returns. A `size` equal to the current size truncates nothing and makes the applied
+    /// state durable, so a completed rewind always leaves the state at `size` durable.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -642,7 +642,6 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
-        // Journal rewind happens before in-memory undo application.
         self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below

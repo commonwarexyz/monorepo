@@ -944,7 +944,8 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     }
 }
 
-/// Truncates `section`'s blob to `size`. The shrink is durable when `resize` returns.
+/// Truncate `section`'s blob to `size`. The shrink is durable when `resize` returns, so a later
+/// append cannot reuse the freed range before the repair is durable.
 async fn repair_blob<E: Storage + Metrics, V: Codec>(
     journal: &mut Journal<E, V>,
     section: u64,
