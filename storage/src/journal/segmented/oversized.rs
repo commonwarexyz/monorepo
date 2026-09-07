@@ -382,7 +382,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 let index = preflight.finish().await?;
 
                 // The index truncation is already durable. Release its unreferenced values only
-                // after that proof, preserving the index-first crash-recovery order.
+                // after that proof, preserving the index-first crash-recovery order. The sync
+                // covers the case where nothing was released: on real filesystems the adopted
+                // value bytes may have been readable but not yet synced.
                 let values = values.rewind(section, value_size).await?;
                 (index, values.sync(section).await?)
             }
@@ -427,8 +429,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
-        let mut rewound_index = Vec::new();
-        let mut rewound_values = Vec::new();
         for section in sections {
             let index_size = self.index.size(section)?;
             let glob_size = match self.values.size(section) {
@@ -456,7 +456,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                     index_size, aligned_size, "trailing bytes detected: truncating"
                 );
                 self.index = self.index.rewind_section(section, aligned_size).await?;
-                rewound_index.push(section);
             }
 
             // Values are reachable only through index entries.
@@ -464,7 +463,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 if glob_size > 0 {
                     debug!(section, glob_size, "truncating orphaned value bytes");
                     self.values = self.values.rewind_section(section, 0).await?;
-                    rewound_values.push(section);
                 }
                 continue;
             }
@@ -479,7 +477,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 let valid_size = valid_count * chunk_size;
                 debug!(section, entry_count, valid_count, "rewinding index");
                 self.index = self.index.rewind_section(section, valid_size).await?;
-                rewound_index.push(section);
             }
 
             // Truncate glob trailing garbage (can occur when value was written but
@@ -490,17 +487,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                     glob_size, glob_target, "truncating glob trailing garbage"
                 );
                 self.values = self.values.rewind_section(section, glob_target).await?;
-                rewound_values.push(section);
             }
         }
-
-        // Make the truncations durable before appends can reuse the freed value ranges. A
-        // dropped index entry that stayed durable would be adopted by a later recovery
-        // referencing whatever bytes a subsequent append placed at its offsets, and stale
-        // glob bytes that stayed durable would satisfy a later entry's range with another
-        // record's frame.
-        self.values = self.values.sync(&rewound_values).await?;
-        self.index = self.index.sync(&rewound_index).await?;
 
         // Clean up orphan value sections that don't exist in index
         self.cleanup_orphan_value_sections().await
@@ -598,7 +586,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Truncate value suffixes that became unreachable while fixed replay repaired index pages.
     async fn align_values_to_index(mut self) -> Result<Self, Error> {
         let sections = self.index.sections().collect::<Vec<_>>();
-        let mut rewound = Vec::new();
         for section in sections {
             let target = Self::boundary_value_end(section, &self.index.last(section).await?)?;
             let retained = self.values.size(section)?;
@@ -609,10 +596,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             }
             if retained > target {
                 self.values = self.values.rewind_section(section, target).await?;
-                rewound.push(section);
             }
         }
-        self.values = self.values.sync(&rewound).await?;
         self.cleanup_orphan_value_sections().await
     }
 
@@ -998,21 +983,17 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, true).await?;
 
-        // Rewind index first (this also removes sections after `section`)
+        // Rewind the index first (this also removes sections after `section`). Its truncation
+        // is durable when `index.rewind` returns, so by the time rewinding the values frees
+        // their ranges for reuse by later appends, no dropped index entry can survive a crash
+        // and be adopted referencing whatever bytes a later append placed at its offsets.
         self.index = self.index.rewind(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // Make the index truncation durable before the values are rewound: rewinding the
-        // values frees their ranges for reuse by later appends, and a dropped index entry
-        // that stayed durable would be adopted referencing whatever bytes a later append
-        // placed at its offsets.
-        self.index = self.index.sync(section).await?;
-
         // Rewind values (this also removes sections after `section`)
         self.values = self.values.rewind(section, value_size).await?;
-        self.values = self.values.sync(section).await?;
         Ok(self)
     }
 
@@ -1021,22 +1002,19 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Unlike `rewind`, this does not affect other sections.
     /// The value size is derived from the last entry after rewinding the index.
     ///
-    /// Both truncations are made durable before returning (see [Self::rewind]).
+    /// Both truncations are durable before this returns (see [Self::rewind]).
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, false).await?;
 
-        // Rewind index first
+        // Rewind the index first (see Self::rewind for why its durable truncation must precede
+        // the values rewind).
         self.index = self.index.rewind_section(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // Make the index truncation durable before the values are rewound (see Self::rewind).
-        self.index = self.index.sync(section).await?;
-
         // Rewind values
         self.values = self.values.rewind_section(section, value_size).await?;
-        self.values = self.values.sync(section).await?;
         Ok(self)
     }
 

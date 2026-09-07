@@ -61,6 +61,9 @@ pub trait SectionBuffer: Send + Sync {
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
     /// Resize the logical size of the buffer.
+    ///
+    /// A shrink, and every byte it retains, is durable when this returns. Growth is not durable
+    /// until the next sync.
     fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
@@ -503,8 +506,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             debug!(section = s, "removed blob during rewind");
         }
 
-        // If the section exists, truncate it to the given size. No explicit sync barrier is
-        // needed here: the buffer waits for any in-flight sync before mutating the blob.
+        // If the section exists, truncate it to the given size. No explicit sync is needed
+        // here: the buffer waits for any in-flight sync before mutating the blob and makes the
+        // truncation durable before returning.
         if let Some(blob) = self.blobs.get_mut(&section) {
             let current_size = blob.size();
             if size < current_size {

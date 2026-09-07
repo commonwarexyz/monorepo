@@ -544,9 +544,8 @@ where
     /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
     /// from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
-    /// completes.
+    /// The rewind of the operations journal and its Merkle structure is durable before this
+    /// method returns.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -641,8 +640,7 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
-        // Journal rewind happens before in-memory undo application. This step is not
-        // restart-stable until a later commit/sync.
+        // Journal rewind happens before in-memory undo application.
         self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below

@@ -1172,6 +1172,49 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_resize_shrink_is_durable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+            writer.write_at(0, b"abcdefgh").await.unwrap();
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdefgh");
+            assert_eq!(full_syncs, 1);
+
+            // A shrink is durable on return: the truncation reaches the durable image with a
+            // full sync, leaving nothing for a caller's sync.
+            writer.resize(4).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(full_syncs, 2);
+            writer.sync().await.unwrap();
+            let (_, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(full_syncs, 2);
+
+            // Buffered bytes the shrink retains are flushed and covered by the same sync.
+            writer.write_at(4, b"wxyz").await.unwrap();
+            writer.resize(6).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdwx");
+            assert_eq!(full_syncs, 3);
+            assert_eq!(writer.size(), 6);
+
+            // A shrink below the buffered range discards the buffer and still syncs.
+            writer.write_at(6, b"pq").await.unwrap();
+            writer.resize(2).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"ab");
+            assert_eq!(full_syncs, 4);
+            assert_eq!(writer.size(), 2);
+            writer.sync().await.unwrap();
+            let (_, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(full_syncs, 4);
+        });
+    }
+
+    #[test_traced]
     fn test_write_read_at_on_writer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

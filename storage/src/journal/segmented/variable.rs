@@ -550,11 +550,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Rewinds the journal to the given `section` and `size`.
     ///
-    /// This removes any data beyond the specified `section` and `size`.
+    /// This removes any data beyond the specified `section` and `size`. The rewind is durable
+    /// when this returns. Items appended afterward are not durable until sync is called.
     ///
     /// # Warnings
     ///
-    /// * This operation is not guaranteed to survive restarts until sync is called.
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
@@ -565,10 +565,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Rewinds the `section` to the given `size`.
     ///
     /// Unlike [Self::rewind], this method does not modify anything other than the given `section`.
-    ///
-    /// # Warning
-    ///
-    /// This operation is not guaranteed to survive restarts until sync is called.
+    /// The truncation is durable when this returns.
     pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind_section(section, size).await?;
         Ok(self)
@@ -947,15 +944,13 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     }
 }
 
-/// Truncates `section`'s blob to `size` and makes the truncation durable.
+/// Truncates `section`'s blob to `size`. The shrink is durable when `resize` returns.
 async fn repair_blob<E: Storage + Metrics, V: Codec>(
     journal: &mut Journal<E, V>,
     section: u64,
     size: u64,
 ) -> Result<(), Error> {
-    let blob = journal.0.writer(section);
-    blob.resize(size).await?;
-    blob.sync().await?;
+    journal.0.writer(section).resize(size).await?;
     Ok(())
 }
 

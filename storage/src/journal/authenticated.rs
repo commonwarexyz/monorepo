@@ -579,7 +579,10 @@ where
         Ok(self)
     }
 
-    /// Rewind the journal and Merkle structure.
+    /// Rewind the journal and Merkle structure to `size` items.
+    ///
+    /// The rewind is durable before this method returns, so no item above `size` can survive a
+    /// crash and be paired with the leaves of a later history appended at the same locations.
     #[boxed]
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error<F>> {
         self.journal = self.journal.rewind(size).await?;

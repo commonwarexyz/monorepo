@@ -212,19 +212,37 @@ impl<B: Blob> Write<B> {
 
     /// Resize the logical blob to `len`.
     ///
-    /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
-    /// before resizing the underlying blob.
+    /// Buffered data the resize keeps is flushed to the underlying blob before it is resized.
+    ///
+    /// A shrink, and every byte it retains, is durable when this returns. Growth is not durable
+    /// until the next sync.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
+        let shrink = len < self.buffer.size();
+
         // Flush buffered data to the underlying blob.
         //
-        // This can only happen if the new size is greater than the current size.
+        // This can only happen if the new size is at least the current size.
         if let Some((buf, offset)) = self.buffer.resize(len) {
             self.sync_state
                 .write_at(&self.blob, offset, buf, WriteOptions::default())
                 .await?;
         }
 
+        // A shrink flushes the buffered bytes it retains so one sync below covers them too.
+        if shrink && let Some((buf, offset)) = self.buffer.take() {
+            self.sync_state
+                .write_at(&self.blob, offset, buf, WriteOptions::default())
+                .await?;
+        }
+
         self.sync_state.resize(&self.blob, len).await?;
+
+        // Sync a truncation before the freed range can be reused: a later write over those
+        // bytes, combined with a crash that dropped the unsynced truncation, would leave the
+        // pre-shrink bytes past the write in place as if they were never truncated.
+        if shrink {
+            self.sync_state.sync(&self.blob).await?;
+        }
 
         Ok(())
     }

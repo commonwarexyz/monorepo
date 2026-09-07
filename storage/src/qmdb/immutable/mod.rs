@@ -567,9 +567,8 @@ where
     /// before this method finishes rebuilding in-memory rewind state. Callers must drop this
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
-    /// [`Immutable::sync`] completes, or until the handle returned by a subsequent
-    /// [`Immutable::start_sync`] completes.
+    /// The rewind of the operations journal and its Merkle structure is durable before this
+    /// method returns.
     #[tracing::instrument(name = "qmdb.immutable.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {

@@ -349,7 +349,8 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Rewind to a specific section and size.
     ///
-    /// Truncates the section to the given size and removes all sections after it.
+    /// Truncates the section to the given size and removes all sections after it. The rewind is
+    /// durable when this returns.
     pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind(section, size).await?;
         Ok(self)
@@ -357,7 +358,8 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Rewind only the given section to a specific size.
     ///
-    /// Unlike `rewind`, this does not affect other sections.
+    /// Unlike `rewind`, this does not affect other sections. The truncation is durable when this
+    /// returns.
     pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind_section(section, size).await?;
         Ok(self)
@@ -434,7 +436,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, probability};
 
     fn test_cfg() -> Config<()> {
         Config {
@@ -635,6 +637,62 @@ mod tests {
             let result = glob.get(1, fourth_offset, fourth_size).await;
             assert!(result.is_err());
 
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// A rewind's truncation survives a crash even when a later unsynced append reuses the freed
+    /// range: the crash keeps the append but must not resurrect the rewound bytes behind it.
+    #[test_traced]
+    fn test_glob_rewind_truncation_survives_crash() {
+        let executor = deterministic::Runner::default();
+
+        // A write buffer smaller than one 8-byte frame makes every append a direct unsynced
+        // write, so the append after the rewind reaches the blob before the crash.
+        let cfg = || Config {
+            write_buffer: NZUsize!(4),
+            ..test_cfg()
+        };
+        let (expected, checkpoint) = executor.start_and_recover(|context| async move {
+            let mut glob: Glob<_, i32> = Glob::init(context.child("first"), cfg())
+                .await
+                .expect("Failed to init glob");
+            (glob, _, _) = glob.append(1, &1).await.expect("Failed to append");
+            (glob, _, _) = glob.append(1, &2).await.expect("Failed to append");
+            glob = glob.sync(1).await.expect("Failed to sync");
+
+            // The crash keeps every unsynced write and drops every unsynced resize, so the
+            // truncation survives it only if `rewind_section` synced it.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            glob = glob.rewind_section(1, 0).await.expect("Failed to rewind");
+            let (glob, offset, size) = glob.append(1, &3).await.expect("Failed to append");
+            drop(glob);
+            (offset, size)
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let glob: Glob<_, i32> = Glob::init(context.child("second"), cfg())
+                .await
+                .expect("Failed to reinit glob");
+            let (offset, size) = expected;
+            assert_eq!(
+                glob.size(1).expect("size"),
+                offset + u64::from(size),
+                "rewound bytes survived the rewind"
+            );
+            assert_eq!(glob.get(1, offset, size).await.expect("get"), 3);
             glob.destroy().await.expect("Failed to destroy");
         });
     }
