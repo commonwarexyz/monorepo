@@ -3,9 +3,12 @@
 use super::*;
 use crate::Runner as _;
 use futures::FutureExt;
-use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-    mpsc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
+    thread,
 };
 
 fn config() -> Config {

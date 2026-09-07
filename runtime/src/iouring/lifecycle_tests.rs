@@ -15,7 +15,11 @@ use std::{
     fs::{self, File},
     io::Write as _,
     os::unix::net::UnixStream,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
+    thread,
 };
 
 fn config() -> Config {
@@ -304,40 +308,6 @@ fn creation_failure_destroys_payload_before_releasing_tracking() {
             assert_eq!(drops.load(Ordering::SeqCst), 1);
             assert_eq!(context.shared.workers.state.lock().active, 0);
         });
-    }
-}
-
-#[test]
-fn transfer_failure_destroys_payload_before_releasing_tracking() {
-    for panic_on_drop in [false, true] {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::new(config().with_catch_panics(false)).start(|context| async move {
-                let drops = Arc::new(AtomicUsize::new(0));
-                let payload = RejectedPayload {
-                    registry: context.shared.workers.clone(),
-                    drops: drops.clone(),
-                    panic_on_drop,
-                };
-                context.shared.fail_transfer.store(true, Ordering::Relaxed);
-                let rejected = catch_unwind(AssertUnwindSafe(|| {
-                    drop(
-                        context
-                            .child("failed_launch")
-                            .shared(true)
-                            .spawn(move |_| payload),
-                    );
-                }));
-                assert_eq!(rejected.is_err(), panic_on_drop);
-                assert_eq!(drops.load(Ordering::SeqCst), 1);
-                assert_eq!(context.shared.workers.state.lock().active, 0);
-                futures::future::pending::<()>().await;
-            });
-        }));
-        let panic = result.expect_err("transfer failure must interrupt the pending root");
-        assert_eq!(
-            extract_panic_message(&*panic),
-            "io_uring worker payload transfer failed"
-        );
     }
 }
 

@@ -6,8 +6,9 @@
 //! releasing local state. The calling thread runs the ordinary worker.
 //!
 //! [`Shared`] contains only runner-wide configuration and existing synchronized
-//! services. Dedicated and blocking tasks create one-off workers registered
-//! before receiving their user payload. Runner shutdown closes that registry,
+//! services. Dedicated and blocking tasks reserve one-off worker responsibility
+//! before their factories run, then transfer the task directly to a thread.
+//! Runner shutdown closes that registry,
 //! drains the ordinary worker, then waits for every accepted worker cleanup.
 //!
 //! Supervision stays in [`Context`], [`Runner`], and the shared [`Handle`]
@@ -15,6 +16,11 @@
 //! to abort its tasks before their cells and kernel resources are released.
 //!
 //! ```text
+//! spawn caller: Registry::admit -> factory -> Launch { task, Shared, active }
+//!                                                  |
+//!                                                  v
+//!                                 one-off thread: run -> cleanup -> release
+//!
 //! Runner::start thread                  one-off worker thread
 //! --------------------                 ---------------------
 //! Shared -> Registry <- responsibility  Shared
@@ -83,9 +89,8 @@ use std::{
     path::PathBuf,
     pin::{Pin, pin},
     rc::Rc,
-    sync::{Arc, Weak, mpsc},
+    sync::{Arc, Weak},
     task::{Context as TaskContext, Poll, Waker},
-    thread,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -482,6 +487,20 @@ struct Launch {
     active: ActiveWorker,
 }
 
+impl Launch {
+    fn run(self) {
+        let Self {
+            task,
+            shared,
+            active,
+        } = self;
+        run_one_off(shared, task);
+        // Runtime cleanup, Shared destruction, and failure publication precede
+        // counter release. Native TLS destruction remains outside this boundary.
+        drop(active);
+    }
+}
+
 /// Runner-wide services shared by ordinary and one-off workers.
 pub(super) struct Shared {
     /// Validated configuration, immutable after startup.
@@ -498,11 +517,9 @@ pub(super) struct Shared {
     panicker: Panicker,
     /// Synchronized creation and closure of one-off workers.
     workers: Arc<Registry>,
-    /// Deterministic coverage for thread-creation failure before payload transfer.
+    /// Deterministic coverage for thread-creation failure before execution.
     #[cfg(test)]
     fail_launch: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
-    fail_transfer: std::sync::atomic::AtomicBool,
     /// Deterministic coverage for native initialization failure after launch.
     #[cfg(test)]
     fail_startup: std::sync::atomic::AtomicBool,
@@ -517,72 +534,24 @@ pub(super) struct Shared {
 }
 
 impl Shared {
-    /// Transfer cleanup responsibility only after native thread creation succeeds.
+    /// Transfer an admitted task and its cleanup responsibility to a new thread.
     fn launch(self: &Arc<Self>, task: Pin<Box<dyn Runnable>>, active: ActiveWorker) {
         let payload = Launch {
             task,
             shared: self.clone(),
             active,
         };
-        let (sender, receiver) = mpsc::channel::<Launch>();
         #[cfg(test)]
-        let receiver = if self
-            .fail_transfer
+        if self
+            .fail_launch
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
-            // Disconnect the actual payload channel before publication. The
-            // native entry receives a separate, already-disconnected channel.
-            drop(receiver);
-            let (_, disconnected) = mpsc::channel::<Launch>();
-            disconnected
-        } else {
-            receiver
-        };
-        let injected = {
-            #[cfg(test)]
-            {
-                self.fail_launch
-                    .swap(false, std::sync::atomic::Ordering::Relaxed)
-            }
-            #[cfg(not(test))]
-            {
-                false
-            }
-        };
-        // The entry closure owns only the receiver. On creation failure the
-        // caller still owns the payload and its completion responsibility.
-        let launched = if injected {
-            Err(std::io::Error::other("injected worker launch failure"))
-        } else {
-            thread::Builder::new()
-                .stack_size(self.cfg.thread_stack_size)
-                .spawn(move || {
-                    if let Ok(Launch {
-                        task,
-                        shared,
-                        active,
-                    }) = receiver.recv()
-                    {
-                        run_one_off(shared, task);
-                        // run_one_off consumed every runtime-owned Shared reference
-                        // and published failure before this release. Native TLS
-                        // destruction is outside the runtime completion boundary.
-                        drop(active);
-                    }
-                })
-        };
-        match launched {
-            Ok(thread) => drop(thread),
-            Err(error) => {
-                drop(payload);
-                panic!("failed to spawn io_uring worker: {error}");
-            }
+            // Model an unstarted thread destroying its whole capture outside
+            // the registry lock, including when task destruction panics.
+            drop(payload);
+            panic!("failed to spawn thread: injected worker launch failure");
         }
-        if let Err(error) = sender.send(payload) {
-            self.panicker
-                .notify(Box::new("io_uring worker payload transfer failed"));
-            drop(error.0);
-        }
+        utils::thread::spawn(self.cfg.thread_stack_size, move || payload.run());
     }
 }
 
@@ -1684,8 +1653,6 @@ impl crate::Runner for Runner {
             fail_launch: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_startup: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
-            fail_transfer: std::sync::atomic::AtomicBool::new(false),
             storage,
             network,
             network_buffer_pool,
@@ -1734,7 +1701,13 @@ mod tests {
         executor::block_on,
         future::{pending, poll_fn},
     };
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+    };
 
     struct DropFlag(Arc<AtomicUsize>);
 
@@ -2228,7 +2201,7 @@ mod tests {
             });
         }));
         let panic = result.expect_err("thread creation failure must panic in its caller");
-        assert!(extract_panic_message(&*panic).contains("failed to spawn io_uring worker"));
+        assert!(extract_panic_message(&*panic).contains("failed to spawn thread"));
         assert_eq!(observed.load(Ordering::SeqCst), 1);
     }
 
