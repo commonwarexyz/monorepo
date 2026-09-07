@@ -63,6 +63,7 @@ where
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         _expected: Self::Commitment,
+        _finalized: bool,
     ) -> <Self::Block as Read>::Cfg {
         block_cfg.clone()
     }

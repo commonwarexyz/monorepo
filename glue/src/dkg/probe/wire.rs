@@ -228,7 +228,7 @@ where
     }
 }
 
-/// Decode the body of a block response using its authenticated commitment.
+/// Decode the body of a block response using the payload of a verified finalization.
 pub(crate) fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,
@@ -237,7 +237,7 @@ pub(crate) fn read_block<V>(
 where
     V: Variant,
 {
-    let block_cfg = V::block_cfg(block_codec_config, commitment);
+    let block_cfg = V::block_cfg(block_codec_config, commitment, true);
     V::Block::decode_cfg(reader, &block_cfg)
 }
 

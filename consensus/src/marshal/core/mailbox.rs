@@ -276,6 +276,9 @@ pub enum CommitmentFallback {
     /// It is not part of response validity. A fetched block is delivered if its
     /// commitment matches. A matching block above this bound is delivered but
     /// not cached.
+    ///
+    /// The commitment may not be finalized, so deliveries recompute any
+    /// variant-specific commitment material from the block bytes.
     FetchByCommitment { height: Height },
 }
 

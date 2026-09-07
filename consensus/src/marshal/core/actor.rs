@@ -1437,7 +1437,25 @@ where
         } = delivery;
         match key {
             Key::Block(commitment) => {
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                // The peer-visible request only says "give me this block".
+                // Local annotations explain why the block was requested, and
+                // therefore how much of the commitment to recompute and where,
+                // if anywhere, the block should be stored.
+                let annotations = subscribers
+                    .map_into(|(annotation, _)| annotation)
+                    .into_vec();
+
+                // `Finalized` annotations come only from request sites whose
+                // commitment is the payload of a verified finalization or the
+                // parent commitment of an archived finalized block. Either way
+                // the commitment is already bound to the block, so decoding
+                // need not recompute it. `Certified` annotations come from the
+                // ancestry walk, which can name a commitment this node has only
+                // shard-checked, so those deliveries recompute it.
+                let finalized = annotations
+                    .iter()
+                    .any(|annotation| matches!(annotation, Annotation::Finalized(_)));
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment, finalized);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return self;
@@ -1460,14 +1478,8 @@ where
                     return self;
                 }
 
-                // The peer-visible request only says "give me this block".
-                // Local annotations explain why the block was requested and
-                // therefore where, if anywhere, it should be stored.
                 let height = block.height();
                 let digest = block.digest();
-                let annotations = subscribers
-                    .map_into(|(annotation, _)| annotation)
-                    .into_vec();
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
@@ -1555,14 +1567,9 @@ where
                     return self;
                 };
 
-                // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
-                // is guaranteed to be certified (assuming the certificate verifies). Because of this,
-                // we can skip broader payload checks and just check that the application block matches
-                // the commitment in the finalization proposal.
-                //
-                // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
-                // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
-                // the requested block is certified.
+                // Once the certificate verifies, the finalization authenticates the application
+                // block, so only the height and digest are checked here. The working block is then
+                // rebuilt from the finalized commitment.
                 let commitment = finalization.proposal.payload;
                 if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
@@ -1606,12 +1613,16 @@ where
 
                 // Use the notarization payload to derive the block decode config. Below, the
                 // decoded block is checked against the same payload.
+                //
+                // A notarization is not finalization evidence. Notarize votes need not have
+                // reconstructed the block, so the payload may name a block its variant-specific
+                // components do not encode. The decode recomputes those components from the bytes.
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
                     return self;
                 }
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_cfg(&self.block_codec_config, commitment, false);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return self;

@@ -83,11 +83,16 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
-    /// The returned configuration may bind `expected_commitment` so that decoding rejects
-    /// blocks that do not match the expected commitment.
+    /// The returned configuration may bind `expected` so that decoding rejects blocks that do
+    /// not match it. `finalized` is true when `expected` is bound by the finalized chain, as the
+    /// payload of a verified finalization or as the parent commitment of a finalized block. The
+    /// configuration may then take commitment material from `expected` instead of recomputing
+    /// it from the block bytes. Decoding need not check every component of `expected`, so
+    /// callers that need the full commitment to match compare it after decoding.
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: Self::Commitment,
+        finalized: bool,
     ) -> <Self::Block as Read>::Cfg;
 
     /// Converts a working block to an application block.

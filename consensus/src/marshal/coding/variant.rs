@@ -94,10 +94,12 @@ where
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: Self::Commitment,
+        finalized: bool,
     ) -> <Self::Block as Read>::Cfg {
         CodedBlockCfg {
             inner: block_cfg.clone(),
             expected,
+            finalized,
         }
     }
 

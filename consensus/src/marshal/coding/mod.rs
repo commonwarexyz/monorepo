@@ -3381,9 +3381,9 @@ mod tests {
     #[test_traced("WARN")]
     fn test_backfill_block_mismatched_commitment() {
         // Regression: when backfilling by Key::Block(commitment), a peer may return
-        // a coded block with matching inner digest but a different coding commitment.
-        // If a finalization for this digest is already cached, marshal must reject
-        // the block unless V::commitment(block) matches the finalization payload.
+        // a coded block with matching inner digest but a different coding config.
+        // The finalized decode takes the root from the commitment, so the wire
+        // config must still be checked against it and the block rejected.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -3468,8 +3468,8 @@ mod tests {
             // Report finalization to v0. v0 doesn't have the block:
             //   - it fetches Key::Block(commitment)
             //   - v1 responds with coded_block_b (same digest, wrong commitment)
-            //   - deliver path must reject because the response commitment does not
-            //     match the request key
+            //   - deliver path must reject because the response coding config does
+            //     not match the request key
             CodingHarness::report_finalization(&mut v0_mailbox, finalization).await;
 
             // Wait for the fetch cycle to complete.
@@ -3489,6 +3489,282 @@ mod tests {
                 "finalization should not be archived until matching block is available"
             );
         })
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalized_block_delivery_skips_recoding() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "finalized-block-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let subscription =
+                mailbox.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
+            context.sleep(Duration::from_millis(100)).await;
+
+            // The finalization names the commitment, so the fetched block is
+            // rebuilt from it without recomputing the coding root.
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(candidate_ctx.round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            resolver.respond_to_next_fetch(candidate.encode());
+            CodingHarness::report_finalization(&mut mailbox, finalization).await;
+
+            let delivered = subscription.await.expect("subscription dropped");
+            assert_eq!(delivered.commitment(), commitment);
+            assert!(
+                delivered.shard(0).is_none(),
+                "finalized delivery should not recompute shards"
+            );
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "finalized delivery should validate"
+            );
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Block(requested),
+                        handler::Annotation::Finalized(handler::Finalized::ByRound { .. }),
+                    ) if *requested == commitment
+                )),
+                "finalization should fetch the block by commitment"
+            );
+            assert!(mailbox.get_block(Height::new(1)).await.is_some());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_coalesced_block_delivery_trusts_finalized_subscriber() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "coalesced-block-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let resolver_tx = resolver
+                .sender
+                .clone()
+                .expect("recording resolver should keep its sender");
+
+            let (_, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let height = Height::new(1);
+            let subscription =
+                mailbox.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
+            context.sleep(Duration::from_millis(100)).await;
+
+            // One key can carry an ancestry subscriber and a finalized-chain
+            // subscriber at once. The finalized subscriber alone binds the
+            // coding root, so the shared delivery decodes without recomputing it
+            // and lands in the finalized archive.
+            let mut subscribers = NonEmptyVec::new((
+                handler::Annotation::Certified { height },
+                tracing::Span::none(),
+            ));
+            subscribers.push((
+                handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
+                tracing::Span::none(),
+            ));
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver_tx
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(commitment),
+                            subscribers,
+                        },
+                        value: candidate.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.unwrap(),
+                "coalesced delivery should validate"
+            );
+
+            let delivered = subscription.await.expect("subscription dropped");
+            assert_eq!(delivered.commitment(), commitment);
+            assert!(
+                delivered.shard(0).is_none(),
+                "coalesced delivery should not recompute shards"
+            );
+            assert!(mailbox.get_block(height).await.is_some());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalized_block_delivery_rejects_digest_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "finalized-block-digest-mismatch",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let other = make_coding_block(
+                candidate_ctx.clone(),
+                genesis_block().digest(),
+                Height::new(1),
+                101,
+            );
+            let other: TestCodedBlock = CodedBlock::new(
+                other,
+                coding_config_for_participants(NUM_VALIDATORS as u16),
+                &Sequential,
+            );
+            assert_ne!(other.digest(), candidate.digest());
+
+            // The finalized decode skips the root, so the digest check is what
+            // rejects a different block under the same coding config.
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(candidate_ctx.round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            resolver.respond_to_next_fetch(other.encode());
+            CodingHarness::report_finalization(&mut mailbox, finalization).await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            assert!(
+                !resolver.wait_for_delivery_response().await,
+                "digest mismatch should be rejected"
+            );
+            assert!(mailbox.get_block(Height::new(1)).await.is_none());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_certified_block_delivery_recomputes_root() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "certified-block-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (_, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+
+            // No finalization names the commitment, so the delivery proves the
+            // coding root by re-encoding the block.
+            resolver.respond_to_next_fetch(candidate.encode());
+            let subscription = mailbox.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByCommitment {
+                    height: Height::new(1),
+                },
+            );
+
+            let delivered = subscription.await.expect("subscription dropped");
+            assert_eq!(delivered.commitment(), commitment);
+            assert!(
+                delivered.shard(0).is_some(),
+                "ancestry delivery should recompute shards"
+            );
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "ancestry delivery should validate"
+            );
+            assert!(
+                resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Block(requested),
+                        handler::Annotation::Certified { .. },
+                    ) if *requested == commitment
+                )),
+                "ancestry walk should fetch the block by commitment"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_notarized_delivery_recomputes_root() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "notarized-block-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+            let notarization = CodingHarness::make_notarization(
+                Proposal::new(round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+
+            // A notarization does not bind the coding root to the block, so the
+            // delivery proves it by re-encoding the block.
+            resolver.respond_to_next_fetch((notarization, candidate).encode());
+            let subscription = mailbox.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByRound { round },
+            );
+
+            let delivered = subscription.await.expect("subscription dropped");
+            assert_eq!(delivered.commitment(), commitment);
+            assert!(
+                delivered.shard(0).is_some(),
+                "notarized delivery should recompute shards"
+            );
+            assert!(
+                resolver.wait_for_delivery_response().await,
+                "notarized delivery should validate"
+            );
+        });
     }
 
     #[test_traced("WARN")]

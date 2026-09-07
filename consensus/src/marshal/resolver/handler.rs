@@ -176,10 +176,9 @@ impl<D: Digest> Producer for Handler<D> {
 /// Local processing annotation for a resolved key.
 ///
 /// The resolver key is the peer-visible lookup. An annotation is local
-/// metadata attached to that lookup so marshal can decide how to process the
-/// response after validating it against the key. It is not part of peer
-/// response validity. Multiple local annotations may share one peer key when
-/// they depend on the same block.
+/// metadata attached to that lookup so marshal can decide how to validate,
+/// process, and store the response. Peers never see it. Multiple local
+/// annotations may share one peer key when they depend on the same block.
 ///
 /// [`Notarization`](Annotation::Notarization) carries round-bound local
 /// context. [`Certified`](Annotation::Certified) and
@@ -200,8 +199,16 @@ pub enum Annotation {
     /// supplied when the caller has a validated height bound. It must not make
     /// a commitment-matching response invalid. A matching block above this
     /// bound is delivered but not cached.
+    ///
+    /// The commitment may not be finalized, so deliveries recompute any
+    /// variant-specific commitment material from the block bytes.
     Certified { height: Height },
     /// A block requested by commitment for the finalized chain.
+    ///
+    /// On a [`Key::Block`] delivery this means the requester's commitment is
+    /// the payload of a verified finalization or the parent commitment of an
+    /// archived finalized block, so variant-specific commitment material is
+    /// taken from the commitment instead of recomputed from the block bytes.
     Finalized(Finalized),
 }
 
@@ -285,6 +292,10 @@ impl<D: Digest> Request<D> {
     }
 
     /// Fetch a finalized-chain block by commitment when its height is known.
+    ///
+    /// `commitment` must be the payload of a verified finalization or the parent
+    /// commitment of an archived finalized block. Deliveries take variant-specific
+    /// commitment material from it instead of recomputing it from the block bytes.
     pub const fn finalized_block_by_height(commitment: D, height: Height) -> Self {
         Self {
             kind: RequestKind::FinalizedBlockByHeight { commitment, height },
@@ -292,6 +303,10 @@ impl<D: Digest> Request<D> {
     }
 
     /// Fetch a finalized-chain block by commitment when only its finalization round is known.
+    ///
+    /// `commitment` must be the payload of a verified finalization. Deliveries take
+    /// variant-specific commitment material from it instead of recomputing it from the
+    /// block bytes.
     pub const fn finalized_block_by_round(commitment: D, round: Round) -> Self {
         Self {
             kind: RequestKind::FinalizedBlockByRound { commitment, round },
