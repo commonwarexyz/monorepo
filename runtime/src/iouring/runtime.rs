@@ -81,7 +81,7 @@ use std::{
     ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
-    pin::Pin,
+    pin::{Pin, pin},
     rc::Rc,
     sync::{Arc, Weak, mpsc},
     task::{Context as TaskContext, Poll, Waker},
@@ -130,7 +130,7 @@ pub struct Config {
     idle_spinner: SpinnerConfig,
     /// Stack size for one-off worker and Rayon threads.
     thread_stack_size: usize,
-    /// Whether user closure and poll panics report Exited instead of failing the runner.
+    /// Whether spawned-task panics and one-off worker failures are caught.
     /// Task disposal escaping that wrapper is contained with either setting.
     catch_panics: bool,
     /// Base directory held while storage resources or requests remain alive.
@@ -196,7 +196,11 @@ impl Config {
         self
     }
 
-    /// Set whether user closure and poll panics are caught. Infrastructure failures remain fatal.
+    /// Set whether spawned-task panics and one-off worker failures are caught.
+    ///
+    /// Caught failures are logged without interrupting the root. Propagated
+    /// failures are observed only while the root is executing. Failures in the
+    /// calling-thread worker still fail the runner.
     ///
     /// Cancellation-time and task-disposal panics escaping the user-poll wrapper
     /// are contained with either setting. An unpublished result may resolve to
@@ -295,7 +299,7 @@ impl Config {
         self.thread_stack_size
     }
 
-    /// Return whether user task panics are caught.
+    /// Return whether spawned-task panics and one-off worker failures are caught.
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
@@ -583,7 +587,7 @@ impl Shared {
         }
         if let Err(error) = sender.send(payload) {
             self.panicker
-                .notify_fatal(Box::new("io_uring worker payload transfer failed"));
+                .notify(Box::new("io_uring worker payload transfer failed"));
             drop(error.0);
         }
         Ok(())
@@ -1224,7 +1228,7 @@ impl Worker {
         self.scope.take();
     }
 
-    /// Select the root result after cleanup and any runner-wide failure delivery.
+    /// Select the root result after cleanup.
     fn result<T>(&mut self, output: Option<T>) -> Result<T, Panic> {
         if let Some(panic) = self.panics.take() {
             // A failure may arrive after a successful root poll. Its output can
@@ -1319,7 +1323,6 @@ impl Worker {
         &mut self,
         mut root: Pin<&mut Fut>,
         root_waker: &Waker,
-        mut interrupts: Option<&mut Panicked>,
     ) -> Result<Fut::Output, Panic> {
         let mailbox = self.local.borrow().mailbox.clone();
         let spinner_cfg = self.local.borrow().shared.cfg.idle_spinner.clone();
@@ -1366,14 +1369,6 @@ impl Worker {
             };
             if poll_root {
                 let mut cx = TaskContext::from_waker(root_waker);
-                // Shared retains the sender until failure publication or the end
-                // of polling, so closure without a payload cannot occur here.
-                // Final receiver closure follows cleanup and the worker barrier.
-                if let Some(interrupts) = interrupts.as_mut()
-                    && let Poll::Ready(Some(panic)) = interrupts.poll_panic(&mut cx)
-                {
-                    return Err(panic);
-                }
                 // A wake during this poll sets root_ready again. Pending must
                 // not clear it, including a wake caused by the root itself.
                 if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
@@ -1477,7 +1472,7 @@ fn run_worker<F, Fut>(
     shared: Arc<Shared>,
     build: F,
     service: Option<Pin<Box<dyn Runnable>>>,
-    interrupts: Option<&mut Panicked>,
+    interrupts: Option<Panicked>,
 ) -> Result<(Worker, Option<Fut::Output>), Panic>
 where
     F: FnOnce(&Arc<Mailbox>) -> Fut,
@@ -1529,7 +1524,13 @@ where
         // infrastructure unwind from implicitly destroying the pinned future.
         let pinned = unsafe { Pin::new_unchecked(&mut **root) };
         match catch_unwind(AssertUnwindSafe(|| {
-            worker.drive(pinned, &root_waker, interrupts)
+            if let Some(interrupts) = interrupts {
+                // Interrupt only the pinned borrow. The actual root is destroyed
+                // separately below, outside a propagated panic's unwind.
+                worker.drive(pin!(interrupts.interrupt(pinned)), &root_waker)
+            } else {
+                worker.drive(pinned, &root_waker)
+            }
         })) {
             Ok(Ok(value)) => output = Some(value),
             Ok(Err(panic)) | Err(panic) => worker.panics.retain(panic),
@@ -1586,7 +1587,7 @@ fn run_one_off(shared: Arc<Shared>, cell: Pin<Box<dyn Runnable>>) {
         worker.result(output)
     }));
     if let Err(panic) = result.unwrap_or_else(Err) {
-        shared.panicker.notify_fatal(panic);
+        shared.panicker.notify(panic);
     }
 }
 
@@ -1670,7 +1671,7 @@ impl crate::Runner for Runner {
             ),
             &mut runtime_registry,
         );
-        let (panicker, mut tasks) = Panicker::new(self.cfg.catch_panics);
+        let (panicker, tasks) = Panicker::new(self.cfg.catch_panics);
         let shared = Arc::new(Shared {
             cfg: self.cfg,
             registry,
@@ -1709,18 +1710,12 @@ impl crate::Runner for Runner {
                 })
             },
             Some(Task::boxed(process.collect(Sleep::new))),
-            Some(&mut tasks),
+            Some(tasks),
         )
         .and_then(|(mut worker, output)| {
             worker.panics.run(|| tree.abort());
             worker.cleanup();
             shared.workers.wait();
-            // Accepted workers publish failure before releasing their count.
-            // Escaped contexts may retain senders, so close reception explicitly.
-            if let Some(panic) = tasks.close() {
-                worker.panics.retain(panic);
-            }
-            worker.panics.run(|| drop(tasks));
             worker.result(output)
         });
         metric.finish();
@@ -1895,13 +1890,18 @@ mod tests {
     }
 
     #[test]
-    fn root_poll_failure_survives_a_second_panic_during_future_destruction() {
-        struct FailingRoot;
+    fn root_failure_survives_a_second_panic_during_future_destruction() {
+        struct FailingRoot {
+            fail_poll: bool,
+            panicker: Panicker,
+        }
         impl Future for FailingRoot {
             type Output = ();
 
             fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<()> {
-                panic!("primary root poll failure");
+                assert!(!self.fail_poll, "primary root poll failure");
+                self.panicker.notify(Box::new("primary worker failure"));
+                Poll::Pending
             }
         }
         impl Drop for FailingRoot {
@@ -1909,12 +1909,24 @@ mod tests {
                 panic!("secondary root destruction failure");
             }
         }
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::new(config()).start(|_| FailingRoot);
-        }));
-        let panic = result.expect_err("root poll must fail the runner");
-        assert_eq!(extract_panic_message(&*panic), "primary root poll failure");
-        assert!(current().is_none());
+        for fail_poll in [false, true] {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                Runner::new(config()).start(|context| FailingRoot {
+                    fail_poll,
+                    panicker: context.shared.panicker.clone(),
+                });
+            }));
+            let panic = result.expect_err("root execution must fail the runner");
+            assert_eq!(
+                extract_panic_message(&*panic),
+                if fail_poll {
+                    "primary root poll failure"
+                } else {
+                    "primary worker failure"
+                }
+            );
+            assert!(current().is_none());
+        }
     }
 
     #[test]
@@ -1989,7 +2001,7 @@ mod tests {
     #[test]
     fn one_off_infrastructure_failure_interrupts_pending_root() {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::new(config().with_catch_panics(true)).start(|context| async move {
+            Runner::new(config().with_catch_panics(false)).start(|context| async move {
                 context.shared.fail_startup.store(true, Ordering::Relaxed);
                 context
                     .child("failed_native_startup")
@@ -2110,12 +2122,19 @@ mod tests {
     }
 
     #[test]
-    fn failure_queued_before_barrier_close_is_retained() {
-        let (panicker, mut panicked) = Panicker::new(true);
-        panicker.notify_fatal(Box::new("late worker panic"));
+    fn failure_queued_before_root_poll_interrupts_root() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config()).start(|context| {
+                context
+                    .shared
+                    .panicker
+                    .notify(Box::new("queued worker panic"));
+                async { panic!("interrupted root must not be polled") }
+            });
+        }));
         assert_eq!(
-            panicked.close().unwrap().downcast_ref::<&str>(),
-            Some(&"late worker panic")
+            extract_panic_message(&*result.expect_err("queued failure must interrupt the root")),
+            "queued worker panic"
         );
     }
 

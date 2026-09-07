@@ -369,25 +369,13 @@ impl Panicker {
             return;
         }
 
-        self.send(panic);
-    }
-
-    /// Report a worker failure independently of user task panic policy.
-    #[commonware_macros::stability(ALPHA)]
-    #[cfg(all(feature = "iouring", target_os = "linux"))]
-    pub(crate) fn notify_fatal(&self, panic: Panic) {
-        self.send(panic);
-    }
-
-    fn send(&self, panic: Panic) {
-        // If we've already sent a panic, ignore the new one.
-        // Release the lock before invoking wakers or dropping panic payloads.
-        let sender = self.sender.lock().take();
-        let Some(sender) = sender else {
+        // If we've already sent a panic, ignore the new one
+        let mut sender = self.sender.lock();
+        let Some(sender) = sender.take() else {
             return;
         };
 
-        // Send the panic.
+        // Send the panic
         let _ = sender.send(panic);
     }
 }
@@ -398,24 +386,6 @@ pub(crate) struct Panicked {
 }
 
 impl Panicked {
-    /// Poll a root interrupt without unwinding through its user future.
-    #[commonware_macros::stability(ALPHA)]
-    #[cfg(all(feature = "iouring", target_os = "linux"))]
-    pub(crate) fn poll_panic(&mut self, cx: &mut Context<'_>) -> Poll<Option<Panic>> {
-        Pin::new(&mut self.receiver).poll(cx).map(Result::ok)
-    }
-
-    /// Close reception and take any panic that raced normal root completion.
-    ///
-    /// The io_uring runner calls this after its worker completion barrier, so no
-    /// accepted worker still has an unfinished failure publication.
-    #[commonware_macros::stability(ALPHA)]
-    #[cfg(all(feature = "iouring", target_os = "linux"))]
-    pub(crate) fn close(&mut self) -> Option<Panic> {
-        self.receiver.close();
-        self.receiver.try_recv().ok()
-    }
-
     /// Polls a task that should be interrupted by a panic.
     pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
     where

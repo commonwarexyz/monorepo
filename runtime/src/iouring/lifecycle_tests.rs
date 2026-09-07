@@ -311,7 +311,7 @@ fn creation_failure_destroys_payload_before_releasing_tracking() {
 fn transfer_failure_destroys_payload_before_releasing_tracking() {
     for panic_on_drop in [false, true] {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::new(config().with_catch_panics(true)).start(|context| async move {
+            Runner::new(config().with_catch_panics(false)).start(|context| async move {
                 let drops = Arc::new(AtomicUsize::new(0));
                 let payload = RejectedPayload {
                     registry: context.shared.workers.clone(),
@@ -330,9 +330,10 @@ fn transfer_failure_destroys_payload_before_releasing_tracking() {
                 assert_eq!(rejected.is_err(), panic_on_drop);
                 assert_eq!(drops.load(Ordering::SeqCst), 1);
                 assert_eq!(context.shared.workers.state.lock().active, 0);
+                futures::future::pending::<()>().await;
             });
         }));
-        let panic = result.expect_err("transfer failure must remain runner-fatal");
+        let panic = result.expect_err("transfer failure must interrupt the pending root");
         assert_eq!(
             extract_panic_message(&*panic),
             "io_uring worker payload transfer failed"
@@ -340,27 +341,17 @@ fn transfer_failure_destroys_payload_before_releasing_tracking() {
     }
 }
 
-struct FailingOutput(Arc<AtomicBool>);
-
-impl Drop for FailingOutput {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-        panic!("secondary output destruction failure");
-    }
-}
-
 struct RootWithLatePublisher {
     dropped: Option<mpsc::Sender<()>>,
     fail: bool,
-    output_dropped: Arc<AtomicBool>,
 }
 
 impl Future for RootWithLatePublisher {
-    type Output = FailingOutput;
+    type Output = u8;
 
     fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<Self::Output> {
         assert!(!self.fail, "primary root failure");
-        Poll::Ready(FailingOutput(self.output_dropped.clone()))
+        Poll::Ready(7)
     }
 }
 
@@ -371,41 +362,35 @@ impl Drop for RootWithLatePublisher {
 }
 
 #[test]
-fn shutdown_waits_for_delayed_failure_and_preserves_primary_panic() {
+fn shutdown_waits_for_workers_without_observing_late_panics() {
     for root_fails in [false, true] {
         let (metadata, received) = mpsc::channel();
         let (publishing, publication) = mpsc::channel();
         let (release, released) = mpsc::channel();
-        let output_dropped = Arc::new(AtomicBool::new(false));
-        let observed_output = output_dropped.clone();
         let runner = thread::spawn(move || {
             let result = catch_unwind(AssertUnwindSafe(|| {
-                Runner::new(config().with_catch_panics(true)).start(move |context| {
+                Runner::new(config().with_catch_panics(false)).start(move |context| {
                     let registry = context.shared.workers.clone();
                     let active = registry.admit().unwrap();
                     let panicker = context.shared.panicker.clone();
                     let (dropped, root_dropped) = mpsc::channel();
                     let publisher = thread::spawn(move || {
                         // Root destruction follows admission closure and precedes
-                        // the shutdown wait, when its interrupt waker is inert.
+                        // the shutdown wait, after root execution has ended.
                         root_dropped.recv().unwrap();
                         publishing.send(()).unwrap();
                         released.recv().unwrap();
-                        panicker.notify_fatal(Box::new("delayed worker failure"));
+                        panicker.notify(Box::new("delayed worker failure"));
                         drop(active);
                     });
                     metadata.send((registry, publisher)).unwrap();
                     RootWithLatePublisher {
                         dropped: Some(dropped),
                         fail: root_fails,
-                        output_dropped,
                     }
-                });
+                })
             }));
-            match result {
-                Ok(_) => panic!("delayed worker failure must fail the runner"),
-                Err(panic) => extract_panic_message(&*panic),
-            }
+            result.map_err(|panic| extract_panic_message(&*panic))
         });
         let (registry, publisher) = received.recv().unwrap();
         publication.recv().unwrap();
@@ -417,13 +402,46 @@ fn shutdown_waits_for_delayed_failure_and_preserves_primary_panic() {
         assert_eq!(
             runner.join().unwrap(),
             if root_fails {
-                "primary root failure"
+                Err("primary root failure".into())
             } else {
-                "delayed worker failure"
+                Ok(7)
             }
         );
-        assert_eq!(observed_output.load(Ordering::SeqCst), !root_fails);
         assert_eq!(registry.state.lock().active, 0);
+    }
+}
+
+#[test]
+fn worker_startup_failure_uses_configured_panic_policy() {
+    for catch in [false, true] {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                context.shared.fail_startup.store(true, Ordering::Relaxed);
+                let failed = context
+                    .child("failed_worker")
+                    .dedicated()
+                    .spawn(|_| async {});
+                assert!(matches!(failed.await, Err(Error::Closed)));
+                if !catch {
+                    // Keep the root active until it observes the worker failure.
+                    futures::future::pending::<()>().await;
+                }
+                context
+                    .child("sibling")
+                    .spawn(|_| async { 11 })
+                    .await
+                    .unwrap()
+            })
+        }));
+        if catch {
+            assert_eq!(result.unwrap(), 11);
+        } else {
+            let panic = result.expect_err("an uncaught worker failure must interrupt the root");
+            assert!(
+                extract_panic_message(&*panic)
+                    .contains("injected native worker initialization failure")
+            );
+        }
     }
 }
 
@@ -564,7 +582,7 @@ fn startup_failure_survives_rejected_payload_destructor_panic() {
     let drops = Arc::new(AtomicUsize::new(0));
     let observed = drops.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        Runner::new(config().with_catch_panics(true)).start(|context| async move {
+        Runner::new(config().with_catch_panics(false)).start(|context| async move {
             let payload = RejectedPayload {
                 registry: context.shared.workers.clone(),
                 drops,
