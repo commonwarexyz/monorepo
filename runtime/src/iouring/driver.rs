@@ -119,8 +119,6 @@ struct State {
     outstanding_cancels: usize,
     /// Whether a transient submit left work requiring another service enter.
     submit_retry: bool,
-    /// Whether new local admission is permanently closed.
-    closed: bool,
     /// Inject one transient flush that leaves the SQ untouched.
     #[cfg(test)]
     stall_flush_once: bool,
@@ -153,7 +151,6 @@ impl Driver {
                 wake_rearm_needed: true,
                 outstanding_cancels: 0,
                 submit_retry: false,
-                closed: false,
                 #[cfg(test)]
                 stall_flush_once: false,
             },
@@ -165,7 +162,6 @@ impl Driver {
     /// The caller reserves its ordinary-operation entry first. Deadline
     /// validation happens during service after the wheel has been advanced.
     pub fn admit(&mut self, request: Request, observer: Observer) -> WaiterId {
-        assert!(!self.state.closed, "io_uring driver admission is closed");
         assert!(
             !self.state.waiters.is_full(),
             "io_uring waiter capacity exhausted"
@@ -223,14 +219,6 @@ impl Driver {
         if !self.state.waiters.retains_on_orphan(id) {
             self.state.cancel(id, completed);
         }
-    }
-
-    /// Close admission after the caller detaches its ordinary observations.
-    ///
-    /// The caller first clears its operation slab and admission registrations.
-    /// Detached sync observers remain available for terminal publication.
-    pub const fn close(&mut self) {
-        self.state.closed = true;
     }
 
     /// Service posted completions, logical deadlines, and pending SQ work.
@@ -683,7 +671,7 @@ mod tests {
 
         fn drain(&mut self) {
             // The harness admits directly without Local's operation slab, so
-            // detach its observers before closing admission and retiring I/O.
+            // detach its observers before retiring I/O.
             let observers = self
                 .driver
                 .state
@@ -693,7 +681,6 @@ mod tests {
             for (id, operation) in observers {
                 self.driver.orphan(id, operation, &mut self.completed);
             }
-            self.driver.close();
             let limit = Instant::now() + Duration::from_secs(10);
             while !self.driver.is_empty() || self.driver.has_pending_submissions() {
                 assert!(Instant::now() < limit, "driver retirement stalled");

@@ -49,7 +49,7 @@ pub(super) enum EntryState {
         /// Bounded waiter paired with this observer at admission.
         waiter_id: WaiterId,
         /// Most recent observer waker, replaced without destruction under Local.
-        waker: Option<Waker>,
+        waker: Waker,
     },
     /// Terminal output retained independently of active waiter capacity.
     Ready(RequestOutput),
@@ -70,13 +70,8 @@ impl Operations {
 
     /// Install the waiter association before releasing the local borrow.
     fn insert(&mut self, id: OperationId, waiter_id: WaiterId, waker: Waker) {
-        self.entries.insert_at(
-            id.0,
-            EntryState::Pending {
-                waiter_id,
-                waker: Some(waker),
-            },
-        );
+        self.entries
+            .insert_at(id.0, EntryState::Pending { waiter_id, waker });
     }
 
     /// Inspect a live full-width identity without following stale waiter IDs.
@@ -201,11 +196,7 @@ impl Future for Operation {
                             return Poll::Ready(Ok(output));
                         }
                         EntryState::Pending { waker, .. } => {
-                            if incoming.is_none()
-                                && waker
-                                    .as_ref()
-                                    .is_some_and(|waker| waker.will_wake(cx.waker()))
-                            {
+                            if incoming.is_none() && waker.will_wake(cx.waker()) {
                                 return Poll::Pending;
                             }
                         }
@@ -270,9 +261,8 @@ impl Future for Operation {
                     else {
                         unreachable!()
                     };
-                    if let Some(old) = waker.replace(incoming) {
-                        local.deferred.drops.push(old);
-                    }
+                    let old = mem::replace(waker, incoming);
+                    local.deferred.drops.push(old);
                     this.state = State::Waiting {
                         mailbox,
                         operation_id,
@@ -538,9 +528,7 @@ impl Local {
     pub(super) fn orphan_operation(&mut self, id: OperationId) {
         match self.operations.take(id) {
             Some(EntryState::Pending { waiter_id, waker }) => {
-                if let Some(waker) = waker {
-                    self.deferred.drops.push(waker);
-                }
+                self.deferred.drops.push(waker);
                 self.driver
                     .as_mut()
                     .expect("driver present during orphaning")
@@ -569,9 +557,7 @@ impl Local {
                     let EntryState::Pending { waker, .. } = old else {
                         panic!("operation completed twice")
                     };
-                    if let Some(waker) = waker {
-                        self.deferred.wakes.push(waker);
-                    }
+                    self.deferred.wakes.push(waker);
                 }
                 Observer::DetachedSync(sender) => {
                     let RequestOutput::Sync(output) = completed.output else {

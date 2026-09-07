@@ -865,8 +865,6 @@ pub(super) struct Local {
     pub(super) now: Instant,
     /// Root notification, taken before a root poll and never cleared afterward.
     pub(super) root_ready: bool,
-    /// Whether root wakes may still schedule a poll.
-    pub(super) root_live: bool,
     /// Strong mailbox ownership retained through kernel retirement.
     pub(super) mailbox: Arc<Mailbox>,
     /// Ownership detached from local transitions before callbacks run.
@@ -911,7 +909,6 @@ impl Local {
             closing: false,
             now,
             root_ready: true,
-            root_live: true,
             mailbox,
             deferred: Deferred::default(),
             completed: Vec::new(),
@@ -940,7 +937,7 @@ impl Local {
     /// Whether task polling or callbacks prevent the worker from parking.
     fn is_ready(&self) -> bool {
         self.tasks.is_ready()
-            || (self.root_live && self.root_ready)
+            || self.root_ready
             || !self.completed.is_empty()
             || !self.deferred.is_empty()
     }
@@ -1101,7 +1098,6 @@ impl Worker {
         let mailbox = {
             let mut local = self.local.borrow_mut();
             local.closing = true;
-            local.root_live = false;
             local.mailbox.clone()
         };
         let messages = mailbox.close();
@@ -1129,7 +1125,7 @@ impl Worker {
         self.local.borrow_mut().tasks.clear(&mut tasks);
         for Running { cell, waker, .. } in tasks {
             task::contain(|| drop(cell));
-            self.panics.run(|| drop(waker));
+            drop(waker);
         }
         {
             let mut local = self.local.borrow_mut();
@@ -1138,12 +1134,10 @@ impl Worker {
                 admissions,
                 timers,
                 deferred,
-                driver,
                 ..
             } = &mut *local;
             admissions.clear(&mut deferred.drops);
             timers.clear(&mut deferred.drops);
-            driver.as_mut().unwrap().close();
             local.apply_completions();
             local.update_pending();
         }
@@ -1243,9 +1237,8 @@ impl Worker {
                 Message::Wake(target) => {
                     let mut local = self.local.borrow_mut();
                     match target {
-                        Target::Root if local.root_live => local.root_ready = true,
+                        Target::Root => local.root_ready = true,
                         Target::Task(id) => local.tasks.wake(id),
-                        Target::Root => {}
                     }
                 }
                 Message::CancelAdmission(id) => self.local.borrow_mut().cancel_admission(id),
@@ -1304,13 +1297,8 @@ impl Worker {
                 return Err(self.panics.take().unwrap());
             }
             for _ in 0..64 {
-                if !self.local.borrow().tasks.is_ready() {
-                    break;
-                }
                 let Some(mut running) = self.local.borrow_mut().tasks.take() else {
-                    // A stale ready token consumes budget too, bounding the
-                    // distance to the next driver service point under churn.
-                    continue;
+                    break;
                 };
                 // The inner wrapper handles user polling policy. This boundary
                 // also catches destruction performed by the abort wrapper.
@@ -1326,23 +1314,19 @@ impl Worker {
                     self.local.borrow_mut().tasks.complete(running.id);
                     let Running { cell, waker, .. } = running;
                     task::contain(|| drop(cell));
-                    self.panics.run(|| drop(waker));
-                }
-                if self.panics.is_pending() {
-                    return Err(self.panics.take().unwrap());
+                    drop(waker);
                 }
             }
 
             let poll_root = {
                 let mut local = self.local.borrow_mut();
-                local.root_live && mem::take(&mut local.root_ready)
+                mem::take(&mut local.root_ready)
             };
             if poll_root {
                 let mut cx = TaskContext::from_waker(root_waker);
                 // A wake during this poll sets root_ready again. Pending must
                 // not clear it, including a wake caused by the root itself.
                 if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
-                    self.local.borrow_mut().root_live = false;
                     return Ok(output);
                 }
             }
@@ -1485,7 +1469,7 @@ where
         shared.workers.close();
     }
     worker.begin_close();
-    worker.panics.run(|| drop(root_waker));
+    drop(root_waker);
     Ok((worker, output))
 }
 

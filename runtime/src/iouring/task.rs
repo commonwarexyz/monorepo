@@ -17,7 +17,7 @@
 //! The worker takes both the cell and its cached waker before polling. This
 //! permits reentrant spawning to grow the arena without invalidating anything
 //! used by the poll. Retirement also returns owned values to the worker, so
-//! user destructors and waker callbacks run outside the local state borrow.
+//! user future destruction runs outside the local state borrow.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -72,7 +72,7 @@ pub(super) struct Wake {
 }
 
 impl Wake {
-    /// Construct the cached routing waker outside any local borrow.
+    /// Construct a routing waker that owns no user callbacks.
     pub(super) fn waker(mailbox: Weak<Mailbox>, target: Target) -> Waker {
         waker(Arc::new(Self { mailbox, target }))
     }
@@ -85,8 +85,7 @@ impl ArcWake for Wake {
             if std::ptr::eq(Arc::as_ptr(&local.mailbox), arc_self.mailbox.as_ptr()) {
                 if !local.closing {
                     match arc_self.target {
-                        Target::Root if local.root_live => local.root_ready = true,
-                        Target::Root => {}
+                        Target::Root => local.root_ready = true,
                         Target::Task(id) => local.tasks.wake(id),
                     }
                 }
@@ -120,22 +119,12 @@ pub(super) fn register(
     cell: Pin<Box<dyn Runnable>>,
 ) -> Result<(), Pin<Box<dyn Runnable>>> {
     if let Some(local) = runtime::current() {
-        let id = {
-            let state = local.borrow();
-            if std::ptr::eq(Arc::as_ptr(&state.mailbox), mailbox.as_ptr()) {
-                if state.closing {
-                    return Err(cell);
-                }
-                Some(state.tasks.reserve())
-            } else {
-                None
+        let mut local = local.borrow_mut();
+        if std::ptr::eq(Arc::as_ptr(&local.mailbox), mailbox.as_ptr()) {
+            if local.closing {
+                return Err(cell);
             }
-        };
-        if let Some(id) = id {
-            // The routing object performs no user callback during construction.
-            // No task registration can interleave with this reserved insertion.
-            let waker = Wake::waker(mailbox.clone(), Target::Task(id));
-            local.borrow_mut().tasks.insert(id, cell, waker);
+            local.tasks.insert(cell, mailbox.clone());
             return Ok(());
         }
     }
@@ -219,28 +208,26 @@ pub(super) struct Running {
 pub(super) struct Tasks {
     /// Generational slots owned by this worker.
     entries: Slab<Entry>,
-    /// FIFO notifications, including harmless stale tokens.
+    /// Exactly one FIFO token for every queued task.
     ready: VecDeque<TaskId>,
 }
 
 impl Tasks {
-    /// Select an identity before constructing its routing waker outside Local.
-    /// No other insertion may occur before the matching `insert` call.
-    pub(super) fn reserve(&self) -> TaskId {
-        TaskId(self.entries.next_id())
-    }
-
-    /// Insert previously selected ownership without invoking any callback.
-    pub(super) fn insert(&mut self, id: TaskId, cell: Pin<Box<dyn Runnable>>, waker: Waker) {
-        self.entries.insert_at(
-            id.0,
-            Entry {
-                state: State::Queued,
-                cell: Some(cell),
-                cached_waker: Some(waker),
-            },
-        );
+    /// Insert a task and its routing waker without invoking user callbacks.
+    pub(super) fn insert(
+        &mut self,
+        cell: Pin<Box<dyn Runnable>>,
+        mailbox: Weak<Mailbox>,
+    ) -> TaskId {
+        // Native routing wakers contain only the weak mailbox and task identity,
+        // so constructing them under Local cannot reenter the runtime.
+        let id = TaskId(self.entries.insert_with(|id| Entry {
+            state: State::Queued,
+            cell: Some(cell),
+            cached_waker: Some(Wake::waker(mailbox, Target::Task(TaskId(id)))),
+        }));
         self.ready.push_back(id);
+        id
     }
 
     /// Record a notification, coalescing queued and poll-local duplicates.
@@ -258,16 +245,11 @@ impl Tasks {
         }
     }
 
-    /// Consume one token, counting stale tokens toward the caller's budget.
-    ///
-    /// `None` means this token was stale or the lane was empty. The caller uses
-    /// `is_ready` to distinguish an exhausted lane from remaining stale tokens.
+    /// Take the next queued task, returning None only when the lane is empty.
     pub(super) fn take(&mut self) -> Option<Running> {
         let id = self.ready.pop_front()?;
-        let entry = self.entries.get_mut(id.0)?;
-        if entry.state != State::Queued {
-            return None;
-        }
+        let entry = self.entries.get_mut(id.0).expect("queued task missing");
+        assert_eq!(entry.state, State::Queued, "ready task must be queued");
         entry.state = State::Running;
         Some(Running {
             id,
@@ -298,12 +280,12 @@ impl Tasks {
     pub(super) fn complete(&mut self, id: TaskId) {
         let entry = self.entries.get(id.0).expect("running task missing");
         assert!(matches!(entry.state, State::Running | State::Notified));
-        // The poll-local Running owns both callback-bearing values.
+        // The poll-local Running owns the cell and cached routing waker.
         assert!(entry.cell.is_none() && entry.cached_waker.is_none());
         self.entries.remove(id.0);
     }
 
-    /// Whether at least one token remains, including stale tokens.
+    /// Whether at least one queued task remains.
     pub(super) fn is_ready(&self) -> bool {
         !self.ready.is_empty()
     }
@@ -336,7 +318,6 @@ mod tests {
         iouring::{Config, Runner},
     };
     use commonware_utils::channel::oneshot;
-    use futures::task::noop_waker;
 
     struct PanickingDrop;
 
@@ -388,9 +369,7 @@ mod tests {
     }
 
     fn insert(tasks: &mut Tasks) -> TaskId {
-        let id = tasks.reserve();
-        tasks.insert(id, Task::boxed(std::future::pending()), noop_waker());
-        id
+        tasks.insert(Task::boxed(std::future::pending()), Weak::new())
     }
 
     #[test]
@@ -427,7 +406,8 @@ mod tests {
         let task = tasks.take().unwrap();
         assert_eq!(task.id, next);
         tasks.pending(task);
-        tasks.ready.push_back(id);
+        // A delayed wake for the removed incarnation cannot enqueue its replacement.
+        tasks.wake(id);
         assert!(tasks.take().is_none());
         assert!(!tasks.is_ready());
     }
@@ -446,8 +426,7 @@ mod tests {
     #[test]
     fn arena_growth_preserves_poll_local_cell_and_waker() {
         let mut tasks = Tasks::default();
-        let id = tasks.reserve();
-        tasks.insert(id, Task::boxed(async {}), noop_waker());
+        let id = tasks.insert(Task::boxed(async {}), Weak::new());
         let mut running = tasks.take().unwrap();
         for _ in 0..1024 {
             insert(&mut tasks);
