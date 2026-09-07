@@ -85,6 +85,9 @@
 //! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
 //! every item that may have become durable through `commit` or storage behavior.
 //!
+//! A rewind's truncation is durable before `rewind` returns, so recovery never stitches bytes
+//! appended afterward onto the pre-rewind bytes they replaced.
+//!
 //! # Watermark advancement
 //!
 //! The watermark must never exceed what is durably on disk. `sync()` completes its data sync
@@ -1336,7 +1339,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Warnings
     ///
-    /// * This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// * The truncation is durable when this returns. Items appended afterward are not durable
+    ///   until `commit` or `sync`.
     /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
     ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
     /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
@@ -5496,6 +5500,74 @@ mod tests {
             for i in 3..8u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A rewind's truncation survives a crash even when a later unsynced append reuses the freed
+    /// range. A crash that dropped an unsynced truncation while keeping the append's pages would
+    /// otherwise stitch those pages onto the pre-rewind bytes still on disk. Here the page-aligned
+    /// bulk write of two re-appended items ends inside the second item, so the pre-rewind history
+    /// would supply that item's remaining bytes and resurrect the third item behind it.
+    #[test_traced]
+    fn test_fixed_journal_rewind_truncation_survives_crash() {
+        // A 24-byte page splits 32-byte digests across pages, and the two-page write buffer
+        // floor sends a two-item append down the direct path: two full pages are written and
+        // the 16-byte suffix stays buffered.
+        const PAGE_SIZE: NonZeroU16 = NZU16!(24);
+        fn cfg(pooler: &impl BufferPooler) -> Config {
+            Config {
+                partition: "rewind-truncation-crash".into(),
+                items_per_blob: NZU64!(10),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(2048),
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg(&context))
+                .await
+                .unwrap();
+            for i in 0..3u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // The crash keeps every unsynced write and drops every unsynced resize, so the
+            // truncation survives it only if `rewind` synced it.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            let journal = journal.rewind(0).await.unwrap();
+            let (journal, _) = journal
+                .append_many(Many::Flat(&[test_digest(10), test_digest(11)]))
+                .await
+                .unwrap();
+            drop(journal);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal = Journal::<_, Digest>::init(context.child("recover"), cfg(&context))
+                .await
+                .unwrap();
+            assert_eq!(
+                journal.bounds(),
+                0..1,
+                "pre-rewind bytes survived the rewind"
+            );
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(10));
             journal.destroy().await.unwrap();
         });
     }

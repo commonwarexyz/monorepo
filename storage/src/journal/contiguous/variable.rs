@@ -2236,7 +2236,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
     /// # Warning
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
+    /// - The truncation is durable when this returns. Items appended afterward are not durable
+    ///   until `commit` or `sync`.
     /// - Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
     ///   rewind truncates into their range.
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
