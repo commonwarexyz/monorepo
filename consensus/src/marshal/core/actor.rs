@@ -2,6 +2,7 @@ use super::{
     Buffer, Retirement, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
+    certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
     floor::{Floor, State as FloorState},
@@ -140,6 +141,8 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Commitments known certified above the processed floor
+    certified: Certified<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
@@ -263,6 +266,7 @@ where
                 cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
                 cache,
                 finalizations_by_height,
@@ -726,6 +730,23 @@ where
                 });
                 ack.send_lossy(handle);
             }
+            Message::Certification { notarization, .. } => {
+                // The engine reports a certification after its own certify verdict,
+                // so the notarization is not re-verified. A certified block arrived
+                // bound to its commitment, and its embedded parent commitment was
+                // checked against a root-bound parent, by this node or by the honest
+                // validators whose certification its notarization required. Later
+                // ancestry fetches can trust both commitments.
+                let commitment = notarization.proposal.payload;
+                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                    debug!(?commitment, "certified block unavailable locally");
+                    return self;
+                };
+                self.certified.insert(block.height(), commitment);
+                if let Some(parent) = block.height().previous() {
+                    self.certified.insert(parent, V::parent_commitment(&block));
+                }
+            }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
                 let commitment = notarization.proposal.payload;
@@ -1130,12 +1151,19 @@ where
                     }
                 };
 
-                // This path is only for accepted ancestry or finalized repair,
-                // never for a candidate block's immediate parent.
-                self.floor
-                    .fetch_if_permitted(resolver, Request::certified_block(commitment, height))
-                    .ignore();
-                debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
+                // This path serves ancestry walks and caller-driven finalized-gap
+                // repair, never a candidate block's immediate parent. Certification
+                // evidence lets the delivery skip recomputing the commitment.
+                // Without it the delivery re-derives the commitment from the block
+                // bytes, since an optimistic ancestry walk can name a commitment
+                // that is only notarized.
+                let request = if self.certified.contains(height, &commitment) {
+                    Request::certified_block(commitment, height)
+                } else {
+                    Request::ancestry_block(commitment, height)
+                };
+                self.floor.fetch_if_permitted(resolver, request).ignore();
+                debug!(%height, ?commitment, ?digest, "ancestry block unavailable");
             }
             CommitmentFallback::Wait => {}
         }
@@ -1447,14 +1475,18 @@ where
 
                 // `Finalized` annotations come only from request sites whose
                 // commitment is the payload of a verified finalization or the
-                // parent commitment of an archived finalized block. Either way
-                // the commitment is already bound to the block, so decoding
-                // need not recompute it. `Certified` annotations come from the
-                // ancestry walk, which can name a commitment this node has only
-                // shard-checked, so those deliveries recompute it.
-                let trusted = annotations
-                    .iter()
-                    .any(|annotation| matches!(annotation, Annotation::Finalized(_)));
+                // parent commitment of an archived finalized block. `Certified`
+                // annotations come only from ancestry fetches for commitments
+                // this node recorded as certified. Either way the commitment is
+                // already bound to the block, so decoding need not recompute it.
+                // `Ancestry` annotations carry no such evidence, so those
+                // deliveries recompute it.
+                let trusted = annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation,
+                        Annotation::Finalized(_) | Annotation::Certified { .. }
+                    )
+                });
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment, trusted);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
@@ -1480,6 +1512,16 @@ where
 
                 let height = block.height();
                 let digest = block.digest();
+
+                // A certified block's parent link was checked by the validators
+                // that certified it, so the walk keeps trusting as it descends.
+                if annotations
+                    .iter()
+                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
+                    && let Some(parent) = height.previous()
+                {
+                    self.certified.insert(parent, V::parent_commitment(&block));
+                }
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
@@ -1513,14 +1555,15 @@ where
                 } else if annotations.iter().any(|annotation| {
                     matches!(
                         annotation,
-                        Annotation::Certified { height: bound } if height <= *bound
+                        Annotation::Certified { height: bound }
+                        | Annotation::Ancestry { height: bound } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
                 {
                     self.cache = self
                         .cache
-                        .put_certified(
+                        .put_ancestry(
                             bounds.epoch(),
                             height,
                             digest,
@@ -2389,6 +2432,10 @@ where
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+
+        // Certification evidence at or below the processed height can no longer
+        // gate a fetch.
+        self.certified.prune(height.next());
     }
 
     /// Returns the latest recoverable round at or immediately after the processed height.
@@ -2526,7 +2573,7 @@ where
         self
     }
 
-    /// Prunes finalized archives and height-indexed certified cache data below the durable floor.
+    /// Prunes finalized archives and the ancestry cache below the durable floor.
     async fn prune_after_floor(mut self: Box<Self>, height: Height) -> Box<Self> {
         (
             self.cache,

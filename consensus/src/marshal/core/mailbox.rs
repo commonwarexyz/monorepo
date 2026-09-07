@@ -222,6 +222,16 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The finalization.
         finalization: Finalization<S, V::Commitment>,
     },
+    /// A notarization this node certified, from the consensus engine.
+    ///
+    /// The engine reports it after its own certify verdict, so it is not
+    /// re-verified here.
+    Certification {
+        /// The span carried with this request.
+        span: Span,
+        /// The certified notarization.
+        notarization: Notarization<S, V::Commitment>,
+    },
 }
 
 /// How a digest-keyed block subscription should behave when the block is missing locally.
@@ -277,8 +287,10 @@ pub enum CommitmentFallback {
     /// commitment matches. A matching block above this bound is delivered but
     /// not cached.
     ///
-    /// The commitment may not be finalized, so deliveries recompute any
-    /// variant-specific commitment material from the block bytes.
+    /// Marshal issues a certified request when it holds certification evidence
+    /// for the commitment and an ancestry request otherwise. Only ancestry
+    /// deliveries recompute variant-specific commitment material from the block
+    /// bytes.
     FetchByCommitment { height: Height },
 }
 
@@ -298,6 +310,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Certified { span, .. }
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
+            | Self::Certification { span, .. }
             | Self::GetProcessedHeight { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
@@ -326,6 +339,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::Prune { .. } => "prune",
             Self::Notarization { .. } => "notarization",
             Self::Finalization { .. } => "finalization",
+            Self::Certification { .. } => "certification",
         }
     }
 
@@ -363,7 +377,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 
@@ -386,7 +401,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 }
@@ -1005,6 +1021,10 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
             Activity::Finalization(finalization) => Message::Finalization {
                 span: info_span!("marshal.mailbox.finalization", round = %finalization.round()),
                 finalization,
+            },
+            Activity::Certification(notarization) => Message::Certification {
+                span: info_span!("marshal.mailbox.certification", round = %notarization.round()),
+                notarization,
             },
             _ => return Feedback::Ok,
         };

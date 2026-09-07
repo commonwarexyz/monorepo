@@ -181,27 +181,40 @@ impl<D: Digest> Producer for Handler<D> {
 /// annotations may share one peer key when they depend on the same block.
 ///
 /// [`Notarization`](Annotation::Notarization) carries round-bound local
-/// context. [`Certified`](Annotation::Certified) and
-/// [`Finalized`](Annotation::Finalized) describe how block-bearing responses
-/// should be processed locally.
+/// context. [`Ancestry`](Annotation::Ancestry), [`Certified`](Annotation::Certified)
+/// and [`Finalized`](Annotation::Finalized) describe how block-bearing
+/// responses should be validated and stored locally.
 ///
-/// This storage role is part of the annotation because a [`Key::Block`]
-/// only names the peer-visible commitment. The same block-shaped response may
-/// need to update different local stores depending on whether it was fetched
-/// for a certified chain or for the finalized chain.
+/// This role is part of the annotation because a [`Key::Block`] only names
+/// the peer-visible commitment. The same block-shaped response may need to
+/// update different local stores, and may or may not need its variant-specific
+/// commitment material recomputed, depending on the evidence the requester
+/// held for the commitment.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
     /// A notarization requested by round.
     Notarization { round: Round },
-    /// A block requested by commitment for a certified chain.
+    /// A block requested by commitment while walking ancestry without
+    /// certification evidence for the commitment.
     ///
     /// The expected height is local pruning metadata and should only be
     /// supplied when the caller has a validated height bound. It must not make
     /// a commitment-matching response invalid. A matching block above this
     /// bound is delivered but not cached.
     ///
-    /// The commitment may not be finalized, so deliveries recompute any
-    /// variant-specific commitment material from the block bytes.
+    /// Deliveries recompute any variant-specific commitment material from the
+    /// block bytes.
+    Ancestry { height: Height },
+    /// A block requested by commitment that this node certified, or an ancestor
+    /// of one.
+    ///
+    /// A certified block arrives bound to its commitment, and its
+    /// certification, by this node or by the honest validators consensus
+    /// required, checked its embedded parent commitment against a root-bound
+    /// parent. So every ancestor recorded from a certified block encodes its
+    /// commitment. Deliveries take variant-specific commitment material from
+    /// the commitment instead of recomputing it. The height bound behaves as
+    /// for [`Ancestry`](Annotation::Ancestry).
     Certified { height: Height },
     /// A block requested by commitment for the finalized chain.
     ///
@@ -255,7 +268,9 @@ pub(crate) enum RequestKind<D: Digest> {
     Notarized { round: Round },
     /// Fetch a finalization for a height.
     Finalized { height: Height },
-    /// Fetch a certified-chain block by commitment.
+    /// Fetch a block by commitment while walking ancestry without certification evidence.
+    AncestryBlock { commitment: D, height: Height },
+    /// Fetch a block this node certified, or an ancestor of one, by commitment.
     CertifiedBlock { commitment: D, height: Height },
     /// Fetch a finalized-chain block by commitment when its height is known.
     FinalizedBlockByHeight { commitment: D, height: Height },
@@ -284,7 +299,21 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    /// Fetch a certified-chain block by commitment.
+    /// Fetch a block by commitment while walking ancestry without certification
+    /// evidence for `commitment`.
+    ///
+    /// Deliveries recompute variant-specific commitment material from the block
+    /// bytes.
+    pub const fn ancestry_block(commitment: D, height: Height) -> Self {
+        Self {
+            kind: RequestKind::AncestryBlock { commitment, height },
+        }
+    }
+
+    /// Fetch a block this node certified, or an ancestor of one, by commitment.
+    ///
+    /// Deliveries take variant-specific commitment material from `commitment`
+    /// instead of recomputing it from the block bytes.
     pub const fn certified_block(commitment: D, height: Height) -> Self {
         Self {
             kind: RequestKind::CertifiedBlock { commitment, height },
@@ -316,6 +345,7 @@ impl<D: Digest> Request<D> {
     pub(crate) fn above_height_floor(&self, floor: Height) -> bool {
         match self.kind {
             RequestKind::Finalized { height }
+            | RequestKind::AncestryBlock { height, .. }
             | RequestKind::CertifiedBlock { height, .. }
             | RequestKind::FinalizedBlockByHeight { height, .. } => height > floor,
             RequestKind::Notarized { .. } | RequestKind::FinalizedBlockByRound { .. } => true,
@@ -328,6 +358,7 @@ impl<D: Digest> Request<D> {
                 round > floor
             }
             RequestKind::Finalized { .. }
+            | RequestKind::AncestryBlock { .. }
             | RequestKind::CertifiedBlock { .. }
             | RequestKind::FinalizedBlockByHeight { .. } => true,
         }
@@ -342,6 +373,9 @@ impl<D: Digest> Request<D> {
                 Key::Finalized { height },
                 Annotation::Finalized(Finalized::ByHeight { height }),
             ),
+            RequestKind::AncestryBlock { commitment, height } => {
+                (Key::Block(commitment), Annotation::Ancestry { height })
+            }
             RequestKind::CertifiedBlock { commitment, height } => {
                 (Key::Block(commitment), Annotation::Certified { height })
             }
@@ -380,7 +414,8 @@ pub(crate) fn above_height_floor<D: Digest>(
         (Key::Finalized { height: requested }, _) => *requested > height,
         (
             Key::Block(_),
-            Annotation::Certified { height: requested }
+            Annotation::Ancestry { height: requested }
+            | Annotation::Certified { height: requested }
             | Annotation::Finalized(Finalized::ByHeight { height: requested }),
         ) => *requested > height,
         _ => true,
@@ -720,6 +755,12 @@ mod tests {
         let stale_certified = Annotation::Certified {
             height: Height::new(100),
         };
+        let fresh_ancestry = Annotation::Ancestry {
+            height: Height::new(101),
+        };
+        let stale_ancestry = Annotation::Ancestry {
+            height: Height::new(100),
+        };
 
         let predicate = above_height_floor(floor);
         assert!(predicate(
@@ -735,6 +776,7 @@ mod tests {
             }
         ));
         assert!(predicate(&block, &fresh_certified));
+        assert!(predicate(&block, &fresh_ancestry));
 
         let same_height = Key::<D>::Finalized {
             height: Height::new(100),
@@ -747,6 +789,7 @@ mod tests {
         ));
         assert!(!predicate(&block, &stale_finalized));
         assert!(!predicate(&block, &stale_certified));
+        assert!(!predicate(&block, &stale_ancestry));
     }
 
     #[test]

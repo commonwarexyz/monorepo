@@ -64,7 +64,7 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Relay, Reporter,
         marshal::{
             ancestry::BlockProvider,
             coding::{
@@ -86,7 +86,9 @@ mod tests {
             resolver::handler,
         },
         simplex::{
-            Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal,
+            Plan,
+            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+            types::{Activity, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
     };
@@ -488,6 +490,32 @@ mod tests {
         let coded_candidate: TestCodedBlock =
             CodedBlock::new(candidate, coding_config, &Sequential);
         (candidate_ctx, coded_candidate)
+    }
+
+    /// Builds `length` coded blocks above genesis, each proposed at the view
+    /// matching its height and naming the block below it as its parent.
+    fn coding_chain(leader: K, length: u64) -> Vec<(Round, TestCodedBlock)> {
+        let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+        let genesis = genesis_block();
+        let mut parent_view = View::zero();
+        let mut parent_commitment = genesis_coding_commitment(&genesis);
+        let mut parent_digest = genesis.digest();
+        let mut chain = Vec::new();
+        for height in 1..=length {
+            let round = Round::new(Epoch::zero(), View::new(height));
+            let ctx = CodingCtx {
+                round,
+                leader: leader.clone(),
+                parent: (parent_view, parent_commitment),
+            };
+            let block = make_coding_block(ctx, parent_digest, Height::new(height), height * 100);
+            let coded: TestCodedBlock = CodedBlock::new(block, coding_config, &Sequential);
+            parent_view = round.view();
+            parent_commitment = coded.commitment();
+            parent_digest = coded.digest();
+            chain.push((round, coded));
+        }
+        chain
     }
 
     #[test_traced("WARN")]
@@ -3576,12 +3604,12 @@ mod tests {
                 mailbox.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
             context.sleep(Duration::from_millis(100)).await;
 
-            // One key can carry an ancestry subscriber and a finalized-chain
-            // subscriber at once. The finalized subscriber alone binds the
-            // coding root, so the shared delivery decodes without recomputing it
-            // and lands in the finalized archive.
+            // One key can carry an ancestry subscriber without certification
+            // evidence and a finalized-chain subscriber at once. The finalized
+            // subscriber alone binds the coding root, so the shared delivery
+            // decodes without recomputing it and lands in the finalized archive.
             let mut subscribers = NonEmptyVec::new((
-                handler::Annotation::Certified { height },
+                handler::Annotation::Ancestry { height },
                 tracing::Span::none(),
             ));
             subscribers.push((
@@ -3668,7 +3696,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_certified_block_delivery_recomputes_root() {
+    fn test_coding_ancestry_block_delivery_recomputes_root() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -3678,45 +3706,122 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
                 context.child("validator"),
-                "certified-block-delivery",
+                "ancestry-block-delivery",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
             )
             .await;
 
-            let (_, candidate) = missing_candidate(participants[0].clone());
-            let commitment = candidate.commitment();
+            // Nothing certified the chain, so each fetch proves its coding root
+            // by re-encoding and none extends certification evidence downward.
+            let mut chain = coding_chain(participants[0].clone(), 2);
+            let (_, top) = chain.pop().expect("top");
+            let (_, bottom) = chain.pop().expect("bottom");
+            for (block, height) in [(top, 2), (bottom, 1)] {
+                resolver.respond_to_next_fetch(block.encode());
+                let delivered = mailbox
+                    .subscribe_by_commitment(
+                        block.commitment(),
+                        core::CommitmentFallback::FetchByCommitment {
+                            height: Height::new(height),
+                        },
+                    )
+                    .await
+                    .expect("subscription dropped");
+                assert_eq!(delivered.commitment(), block.commitment());
+                assert!(
+                    delivered.shard(0).is_some(),
+                    "ancestry delivery should recompute shards"
+                );
+                assert!(
+                    resolver.wait_for_delivery_response().await,
+                    "ancestry delivery should validate"
+                );
+            }
+            let fetches = resolver.fetches();
+            assert_eq!(fetches.len(), 2);
+            assert!(fetches.iter().all(|fetch| matches!(
+                (&fetch.key, &fetch.subscriber),
+                (handler::Key::Block(_), handler::Annotation::Ancestry { .. })
+            )));
+        });
+    }
 
-            // No finalization names the commitment, so the delivery proves the
-            // coding root by re-encoding the block.
-            resolver.respond_to_next_fetch(candidate.encode());
-            let subscription = mailbox.subscribe_by_commitment(
-                commitment,
-                core::CommitmentFallback::FetchByCommitment {
-                    height: Height::new(1),
-                },
-            );
+    #[test_traced("WARN")]
+    fn test_coding_certified_ancestry_delivery_skips_recoding() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "certified-ancestry-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
 
-            let delivered = subscription.await.expect("subscription dropped");
-            assert_eq!(delivered.commitment(), commitment);
-            assert!(
-                delivered.shard(0).is_some(),
-                "ancestry delivery should recompute shards"
+            // Build genesis <- grandparent <- parent <- child, verify the child
+            // locally, and have consensus report that it was certified.
+            // Certification implies its ancestors are certified.
+            let mut chain = coding_chain(participants[0].clone(), 3);
+            let (child_round, child) = chain.pop().expect("child");
+            let (_, parent) = chain.pop().expect("parent");
+            let (_, grandparent) = chain.pop().expect("grandparent");
+            assert!(mailbox.verified(child_round, child.clone()).await);
+            let notarization = CodingHarness::make_notarization(
+                Proposal::new(child_round, View::new(2), child.commitment()),
+                &schemes,
+                QUORUM,
             );
+            mailbox.report(Activity::Certification(notarization));
+
+            // The parent is fetched under certification evidence and arrives lazy.
+            resolver.respond_to_next_fetch(parent.encode());
+            let delivered = mailbox
+                .subscribe_by_commitment(
+                    parent.commitment(),
+                    core::CommitmentFallback::FetchByCommitment {
+                        height: Height::new(2),
+                    },
+                )
+                .await
+                .expect("parent subscription dropped");
             assert!(
-                resolver.wait_for_delivery_response().await,
-                "ancestry delivery should validate"
+                delivered.shard(0).is_none(),
+                "certified parent should not recompute shards"
             );
+            assert!(resolver.wait_for_delivery_response().await);
+
+            // The delivered parent extends the evidence to the grandparent.
+            resolver.respond_to_next_fetch(grandparent.encode());
+            let delivered = mailbox
+                .subscribe_by_commitment(
+                    grandparent.commitment(),
+                    core::CommitmentFallback::FetchByCommitment {
+                        height: Height::new(1),
+                    },
+                )
+                .await
+                .expect("grandparent subscription dropped");
             assert!(
-                resolver.fetches().iter().any(|fetch| matches!(
-                    (&fetch.key, &fetch.subscriber),
-                    (
-                        handler::Key::Block(requested),
-                        handler::Annotation::Certified { .. },
-                    ) if *requested == commitment
-                )),
-                "ancestry walk should fetch the block by commitment"
+                delivered.shard(0).is_none(),
+                "certified grandparent should not recompute shards"
             );
+            assert!(resolver.wait_for_delivery_response().await);
+
+            let certified: Vec<Height> = resolver
+                .fetches()
+                .iter()
+                .filter_map(|fetch| match fetch.subscriber {
+                    handler::Annotation::Certified { height } => Some(height),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(certified, vec![Height::new(2), Height::new(1)]);
         });
     }
 

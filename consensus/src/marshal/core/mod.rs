@@ -47,6 +47,7 @@ pub use actor::Actor;
 
 mod acks;
 pub(crate) mod cache;
+mod certified;
 mod delivery;
 pub(crate) mod durability;
 mod floor;

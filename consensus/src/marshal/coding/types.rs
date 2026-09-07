@@ -316,12 +316,12 @@ pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     pub inner: <B as Read>::Cfg,
     /// The commitment the decoded block must match.
     pub expected: Commitment<B, C, H>,
-    /// Whether `expected` is bound by the finalized chain.
+    /// Whether this node holds certification evidence for `expected`.
     ///
-    /// The commitment is the payload of a verified finalization or the parent
-    /// commitment of a finalized block. Either way the finalized chain already
-    /// fixes the coding root of the bytes that match the block digest, so
-    /// decoding takes the root from `expected` and defers shard generation to
+    /// The commitment is on the finalized chain, or it is a block this node
+    /// certified or an ancestor of one. Either way the commitment was already
+    /// checked to encode the bytes that match its block digest, so decoding
+    /// takes the root from `expected` and defers shard generation to
     /// [`CodedBlock::shards`]. A notarization is not enough: notarize votes
     /// attest shard validity against the root, not that the root encodes the
     /// block named by the digest.
@@ -361,9 +361,8 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             ));
         }
 
-        // A commitment bound by the finalized chain already fixes the coding
-        // root of these bytes, so recomputing it would only re-derive the root
-        // already in `expected`.
+        // A certified commitment already fixes the coding root of these bytes,
+        // so recomputing it would only re-derive the root already in `expected`.
         if cfg.trusted {
             return Ok(Self::new_trusted(inner, cfg.expected));
         }
