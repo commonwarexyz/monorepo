@@ -879,12 +879,13 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         });
     }
 
-    /// Drops the first-forwarding facts for views the machine no longer retains.
+    /// Retains forwarding facts for live views and exact retained proposal parents.
     ///
-    /// Nothing below the floor can be forwarded again: its candidates and messages are already
-    /// retired, so the fact has no rule left to enforce.
+    /// Parent provenance allows proposals to omit a certificate already authorized for dissemination.
+    /// Retire parents first so facts below the floor remain bounded by retained parents.
     pub(crate) fn retire_forwarded_through(&mut self, floor: View) {
-        self.forwarded_vqcs.retain(|view, _| *view > floor);
+        self.forwarded_vqcs
+            .retain(|view, id| *view > floor || self.parents.contains_key(id));
         self.forwarded_nullifications.retain(|view| *view > floor);
     }
 
@@ -2191,8 +2192,8 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             self.ready_certificate_views.remove(&view);
         }
 
-        // First forwarding is a per-view rule, and a retired view no longer keeps the fact that
-        // enforces it. A certificate resolved for such a view is finality input only.
+        // Only live views have a first-forwarding duty. Certificates resolved for retired
+        // views supply finality evidence and proposal parents.
         let live = view > self.retired_transitions;
         let candidates = live.then(|| self.forward_candidates(view));
         let vqc = candidates
@@ -2220,6 +2221,11 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
 
     pub(crate) fn certificate_reservations(&self) -> usize {
         self.certificate_jobs.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_forwarded_vqcs(&self) -> usize {
+        self.forwarded_vqcs.len()
     }
 
     #[cfg(test)]

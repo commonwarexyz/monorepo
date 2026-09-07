@@ -5192,6 +5192,9 @@ fn proposal_anchor_prefers_more_accounted_messages() {
         .retain_vqc_parent::<Sha256>(&smaller, &profile)
         .unwrap();
 
+    machine.views.observe_forwarded::<Sha256>(&smaller);
+    machine.views.retire_forwarded_through(View::new(1));
+
     let nullification = symbolic_nullification(&machine, View::new(1), 0);
     let nullification = observe(&mut machine, Artifact::Nullification(nullification));
     let forwarding = machine
@@ -5592,6 +5595,7 @@ fn successive_lqc_floors_retain_only_the_latest_proposal_parent() {
             ))
         );
         assert_eq!(machine.views.retained_finality_proofs(), 0);
+        assert_eq!(machine.views.retained_forwarded_vqcs(), 1);
     }
 
     assert_eq!(machine.inspect().view(), View::new(16));
@@ -7208,59 +7212,99 @@ fn proposal_may_repeat_its_exact_parent_after_forwarding() {
 }
 
 #[test]
-fn proposal_may_omit_an_exact_parent_after_its_forwarding_fact_retires() {
-    let signer = LeaderSchedule::round_robin(6).leader(View::new(2));
-    let profile = profile_for(Role::Validator(signer), 6, 2);
-    let machine = Machine::new(profile.clone());
-    let proposed = leader(&machine, 1);
-    let votes = (0..5)
-        .map(|signer| view_vote(&machine, &proposed, signer))
-        .collect::<Vec<_>>();
-    let certificate = lqc(&machine, proposed, &votes);
-    let parent = certificate
-        .derive_vqc(machine.profile().protocol().codec_config())
-        .unwrap();
-    let attached = proposal_request_with_parent(&machine, View::new(2), parent.clone());
-    let request = ProposalRequest::new(attached.block().clone(), attached.parent().clone(), false);
-    let mut restored = Machine::restore(profile, machine.live_snapshot_for_test()).unwrap();
+fn proposal_parent_forwarding_provenance_survives_retirement() {
+    for forwarded_exact_parent in [true, false] {
+        let signer = LeaderSchedule::round_robin(6).leader(View::new(2));
+        let profile = profile_for(Role::Validator(signer), 6, 2);
+        let machine = Machine::new(profile.clone());
+        let proposed = leader(&machine, 1);
+        let votes = (0..5)
+            .map(|signer| view_vote(&machine, &proposed, signer))
+            .collect::<Vec<_>>();
+        let certificate = lqc(&machine, proposed.clone(), &votes);
+        let parent = certificate
+            .derive_vqc(machine.profile().protocol().codec_config())
+            .unwrap();
+        let forwarded = if forwarded_exact_parent {
+            parent.clone()
+        } else {
+            let messages = [0, 1, 2, 3, 5]
+                .into_iter()
+                .map(|signer| ViewMessage::Vote(view_vote(&machine, &proposed, signer)))
+                .collect::<Vec<_>>();
+            let alternate = vqc(&machine, proposed, &messages);
+            assert_ne!(alternate.id::<Sha256>(), parent.id::<Sha256>());
+            alternate
+        };
+        let mut restored =
+            Machine::restore(profile.clone(), machine.live_snapshot_for_test()).unwrap();
 
-    let forwarding_cursor = Cursor::zero().next().unwrap();
-    restored
-        .replay(DomainEvent::new(
-            restored.profile().protocol().epoch(),
-            forwarding_cursor,
-            Change::ArtifactForwarded {
-                publication: EffectId::from_cursor(forwarding_cursor),
-                retired: Vec::new(),
-                artifact: Arc::new(Artifact::Vqc(parent)),
-            },
-        ))
-        .unwrap();
-    let floor_cursor = forwarding_cursor.next().unwrap();
-    restored
-        .replay(DomainEvent::new(
-            restored.profile().protocol().epoch(),
-            floor_cursor,
-            Change::FinalityFloorAdvanced {
-                proof: Arc::new(Artifact::Lqc(certificate)),
-                retired: Vec::new(),
-                publication_retired: Vec::new(),
-            },
-        ))
-        .unwrap();
-    assert!(restored.durable.forwarded_vqcs.is_empty());
+        let forwarding_cursor = Cursor::zero().next().unwrap();
+        restored
+            .replay(DomainEvent::new(
+                profile.protocol().epoch(),
+                forwarding_cursor,
+                Change::ArtifactForwarded {
+                    publication: EffectId::from_cursor(forwarding_cursor),
+                    retired: Vec::new(),
+                    artifact: Arc::new(Artifact::Vqc(forwarded)),
+                },
+            ))
+            .unwrap();
+        let floor_cursor = forwarding_cursor.next().unwrap();
+        restored
+            .replay(DomainEvent::new(
+                profile.protocol().epoch(),
+                floor_cursor,
+                Change::FinalityFloorAdvanced {
+                    proof: Arc::new(Artifact::Lqc(certificate)),
+                    retired: Vec::new(),
+                    publication_retired: Vec::new(),
+                },
+            ))
+            .unwrap();
+        assert!(restored.durable.forwarded_vqcs.is_empty());
+        let snapshot = restored.live_snapshot_for_test();
+        let request = restored
+            .views
+            .drive_regular_sign_request::<Sha256>(&profile, View::new(2), &restored.chain, 16)
+            .unwrap()
+            .request
+            .unwrap();
+        let SignRequest::LeaderBlock(proposal) = &request else {
+            panic!("the view-two leader must propose");
+        };
+        assert_eq!(proposal.parent().exact().map(Arc::as_ref), Some(&parent));
+        assert_eq!(proposal.attach_parent(), !forwarded_exact_parent);
 
-    let proposal_cursor = floor_cursor.next().unwrap();
-    restored
-        .replay(DomainEvent::new(
-            restored.profile().protocol().epoch(),
-            proposal_cursor,
-            Change::OutboxQueued {
-                id: EffectId::from_cursor(proposal_cursor),
-                effect: Box::new(DurableEffect::Sign(SignRequest::LeaderBlock(request))),
-            },
-        ))
-        .unwrap();
+        // A snapshot retains the exact proof, but retired forwarding provenance is volatile.
+        let mut recovered = Machine::restore(profile.clone(), snapshot).unwrap();
+        recovered.step(Input::RecoveryComplete).unwrap();
+        let recovered_request = recovered
+            .views
+            .drive_regular_sign_request::<Sha256>(&profile, View::new(2), &recovered.chain, 16)
+            .unwrap()
+            .request
+            .unwrap();
+        let SignRequest::LeaderBlock(proposal) = recovered_request else {
+            panic!("the recovered leader must propose");
+        };
+        assert_eq!(proposal.parent().exact().map(Arc::as_ref), Some(&parent));
+        assert!(proposal.attach_parent());
+
+        let proposal_cursor = floor_cursor.next().unwrap();
+        restored
+            .replay(DomainEvent::new(
+                profile.protocol().epoch(),
+                proposal_cursor,
+                Change::OutboxQueued {
+                    id: EffectId::from_cursor(proposal_cursor),
+                    effect: Box::new(DurableEffect::Sign(request)),
+                },
+            ))
+            .unwrap();
+        Machine::restore(profile, restored.live_snapshot_for_test()).unwrap();
+    }
 }
 
 #[test]

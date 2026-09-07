@@ -1553,7 +1553,6 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let finality_floor = self.signing_floor_view();
         let (anchor_view, anchor) = self.proposal_anchor();
         self.views.retire_transitions_through(transition_floor);
-        self.views.retire_forwarded_through(transition_floor);
         self.views
             .retire_finality_proofs_through(self.signing_floor_view());
         self.retire_finality_through(self.retention_floor())
@@ -1569,6 +1568,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             self.available.remove(&dependency);
             self.providers.remove(&dependency);
         }
+        self.views.retire_forwarded_through(transition_floor);
         Ok(())
     }
 

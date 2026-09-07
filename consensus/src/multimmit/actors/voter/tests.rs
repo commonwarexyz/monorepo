@@ -4836,6 +4836,15 @@ fn attached_observer_matches_the_synchronous_core() {
 
 #[test_traced]
 fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
+    broadcast_parent_proposal(true);
+}
+
+#[test_traced]
+fn exact_broadcast_parent_is_omitted_from_a_live_proposal() {
+    broadcast_parent_proposal(false);
+}
+
+fn broadcast_parent_proposal(update_parent: bool) {
     DeterministicRunner::timed(Duration::from_secs(10)).start(|context| async move {
         let seed = 79;
         let committee = Committee::<MinPk>::new(seed, 6, Limits::new(2, 1).unwrap());
@@ -4876,7 +4885,7 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
         let messages = (0..6)
             .map(|signer| ViewMessage::Vote(committee.vote(signer, &block)))
             .collect::<Vec<_>>();
-        let votes = messages
+        let votes = messages[..committee.codec().view_quorum()]
             .iter()
             .map(|message| {
                 let ViewMessage::Vote(vote) = message else {
@@ -4907,6 +4916,26 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
         context.sleep(Duration::from_millis(100)).await;
         assert_eq!(node.inspect().await.view(), View::new(2));
 
+        let updated = update_parent.then(|| {
+            committee
+                .verifier
+                .assemble_vqc::<Sha256, _>(block.block().clone(), &messages, &Sequential)
+                .expect("all participants form a fuller V-QC")
+        });
+        if let Some(parent) = &updated {
+            assert_ne!(
+                parent.id::<Sha256>(),
+                published.as_ref().unwrap().id::<Sha256>()
+            );
+            certificate_tx.send(
+                Recipients::One(node.me.clone()),
+                node.envelope(CertificateMessage::Vqc(parent.clone()))
+                    .encode(),
+                true,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+        }
+
         certificate_tx.send(
             Recipients::One(node.me.clone()),
             node.envelope(CertificateMessage::<MinPk, Sha256Digest>::Nullification(
@@ -4915,9 +4944,8 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
             .encode(),
             true,
         );
-        // The view-3 proposal must carry a view-1 V-QC that is at least the transcript the node
-        // broadcast: the same certificate, or one improved by votes that arrived after it,
-        // whichever vote cohorts the batcher formed.
+        // The proposal names its exact parent. A fuller certificate requires an attachment;
+        // the first broadcast already supplies the unchanged parent.
         let deadline = context.current() + Duration::from_secs(2);
         loop {
             let (_, bytes) = select! {
@@ -4944,17 +4972,23 @@ fn updated_broadcast_parent_is_attached_to_a_live_proposal() {
                 &node.envelope_cfg(node.committee.codec()),
             )
             .expect("canonical consensus envelope");
-            let ConsensusMessage::Proposal {
-                block,
-                parent: Some(parent),
-            } = envelope.into_payload()
-            else {
+            let ConsensusMessage::Proposal { block, parent } = envelope.into_payload() else {
                 continue;
             };
             if block.view() != View::new(3) {
                 continue;
             }
             let published = published.expect("a view-1 V-QC was published");
+            let Some(updated) = &updated else {
+                assert_eq!(block.block().parent(), published.id::<Sha256>());
+                assert!(
+                    parent.is_none(),
+                    "the exact broadcast parent must be omitted"
+                );
+                break;
+            };
+            let parent = parent.expect("the fuller parent must accompany the proposal");
+            assert_eq!(parent.as_ref(), updated);
             assert_eq!(block.block().parent(), parent.id::<Sha256>());
             assert_eq!(parent.leader(), published.leader());
             assert!(
