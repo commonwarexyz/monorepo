@@ -143,6 +143,8 @@ where
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
+    // Finalized blocks awaiting durable dispatch, capped at the pending-ack capacity
+    staged: BTreeMap<Height, Arc<V::Block>>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -264,6 +266,7 @@ where
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 dispatch_gate: DispatchGate::default(),
+                staged: BTreeMap::new(),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
@@ -795,10 +798,19 @@ where
                     }
 
                     let height = block.height();
+                    self = self
+                        .update_processed_round_floor(height, round, buffer, application, resolver)
+                        .await;
+
+                    // Retain only blocks that can still be dispatched and fit in staging
+                    let next_height = self
+                        .pending_acks
+                        .next_dispatch_height(self.stream.next_height());
+                    let staged = (height >= next_height
+                        && self.staged.len() < self.pending_acks.capacity())
+                    .then(|| Arc::clone(&block));
                     let stored;
                     (self, stored) = self
-                        .update_processed_round_floor(height, round, buffer, application, resolver)
-                        .await
                         .store_finalization(
                             height,
                             digest,
@@ -808,6 +820,10 @@ where
                         )
                         .await;
                     if stored {
+                        if let Some(block) = staged {
+                            self.staged.insert(height, block);
+                        }
+
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
                         (self, _) = self.try_repair_gaps(buffer, resolver, application).await;
@@ -1881,18 +1897,27 @@ where
             if barrier.is_some_and(|lowest| next_height >= lowest) {
                 return self;
             }
-            let Some(block) = self.get_finalized_block(next_height).await else {
-                return self;
-            };
-            assert_eq!(
-                block.height(),
-                next_height,
-                "finalized block height mismatch"
-            );
 
-            let (height, commitment) = (block.height(), V::commitment(&block));
+            // Reuse the staged object or recover an unstaged block from the archive
+            let (height, commitment, block) = match self.staged.remove(&next_height) {
+                Some(block) => (
+                    block.height(),
+                    V::commitment(&block),
+                    V::into_inner_shared(block),
+                ),
+                None => match self.get_finalized_block(next_height).await {
+                    Some(block) => (
+                        block.height(),
+                        V::commitment(&block),
+                        V::owned_into_inner_shared(block),
+                    ),
+                    None => return self,
+                },
+            };
+            assert_eq!(height, next_height, "finalized block height mismatch");
+
             let (ack, ack_waiter) = A::handle();
-            application.report(Update::Block(V::owned_into_inner_shared(block), ack));
+            application.report(Update::Block(block, ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
@@ -2375,6 +2400,9 @@ where
         let _ = self
             .processed_height
             .try_set(self.floor.processed_height().get());
+
+        // Release staged blocks skipped by a floor transition
+        self.staged = self.staged.split_off(&height.next());
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
