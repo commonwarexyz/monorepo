@@ -627,7 +627,8 @@ module tests_n6t1f1 {
         .then(finalize("n0"))
         .expect(replica_state.get("n0").ghost_log == [ORD_B1, ORD_B2, ORD_C1])
         .expect(emit(ORD_POOL3, ORD_LB3,
-            held_vqcs("n4").union(Set(genesis_vqc(CHAINS))), PARAMS) == None)
+            held_vqcs("n4").union(Set(genesis_vqc(CHAINS))),
+            PARAMS, SWEEP_OFFSET_BOUND) == None)
         .expect(replica_state.get("n4").ghost_log == [])
         .expect(agreement)
 

@@ -75,6 +75,14 @@ module consensus {
     const EXT_E: int
 
     pure val PARAMS: Params = { n: N, t: T, d: PIPELINE_D, e: EXT_E }
+    // Every tip visited by extraction has height at most MAX_HEIGHT. Hash
+    // anchors and DA-certified blocks are capped directly; advancing past an
+    // anchor through either the position rank or an extension carry requires
+    // a correct signer, whose vote only endorses DA-voted blocks under the
+    // same cap. Since heights are non-negative, MAX_HEIGHT also bounds every
+    // height delta. Passing it explicitly keeps the sweep ranges static for
+    // Apalache while their dynamic guards preserve the protocol order.
+    pure val SWEEP_OFFSET_BOUND = MAX_HEIGHT
 
     // Thresholds.
     pure val D = da_quorum(PARAMS)      // n - 2t : DA-certificates
@@ -701,7 +709,8 @@ module consensus {
         // block, never unrelated votes or two equivocations by one signer.
         val pool = notarize_votes(store_vote.get(id)).filter(v => vote_matches(v, lb))
         val maybe_emitted = emit(
-            pool, lb, held_vqcs(id).union(Set(genesis_vqc(CHAINS))), PARAMS)
+            pool, lb, held_vqcs(id).union(Set(genesis_vqc(CHAINS))),
+            PARAMS, SWEEP_OFFSET_BOUND)
         match maybe_emitted {
         | None => disabled_action
         | Some(emitted) => all {
@@ -931,14 +940,15 @@ module consensus {
             all {
                 sent_leader_block != Set(),
                 nondet lb = oneOf(sent_leader_block)
-                val position_maps = lb.proposal.keys()
-                    .setOfMaps(0.to(PIPELINE_D))
-                    .filter(ps => lb.proposal.keys().forall(i =>
-                        ps.get(i) <= num_proposal_entries(lb.proposal, i)))
-                nondet positions = oneOf(position_maps)
+                nondet positions = oneOf(
+                    lb.proposal.keys().setOfMaps(0.to(PIPELINE_D)))
                 nondet extensions = oneOf(lb.proposal.keys().setOfMaps(
                     bounded_payload_lists(EXT_E)))
-                byzantine_notarize_vote_step(byz, lb, positions, extensions)
+                all {
+                    lb.proposal.keys().forall(i =>
+                        positions.get(i) <= num_proposal_entries(lb.proposal, i)),
+                    byzantine_notarize_vote_step(byz, lb, positions, extensions),
+                }
             },
             // novote and nullify freely
             all {

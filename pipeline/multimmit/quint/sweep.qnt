@@ -118,26 +118,37 @@ module sweep {
     //
     // Chains are indexed 1..n, one per processor, so `n` gives the
     // ordered inner sweep directly and every index in range(1, n + 1) is
-    // a chain. Tips vectors of any other shape yield the empty sequence,
-    // which keeps horiz total.
+    // a chain. `offset_bound` is a static model bound at least as large as
+    // every possible height delta; the guard below recovers the dynamic
+    // `max_offset` semantics while keeping the range acceptable to Apalache.
+    // Tips vectors of any other shape yield the empty sequence, which keeps
+    // horiz total.
     //
     // Offset is the outer loop and chain index the inner; that nesting
     // is the horizontal order. Swapping them gives the vertical order,
     // emitting each chain's whole new segment before moving on.
-    pure def horiz(t: Tips, t2: Tips, n: int): List[Block] = {
+    pure def horiz(t: Tips, t2: Tips, n: int, offset_bound: int): List[Block] = {
         if (t.keys() != 1.to(n) or t2.keys() != t.keys())
             List()
         else {
             val max_offset = t.keys().fold(0, (a, i) =>
                 max(a, block_height(t2.get(i)) - block_height(t.get(i))))
-            range(1, max_offset + 1).foldl(List(), (acc, o) =>
-                range(1, n + 1).foldl(acc, (acc2, i) => {
-                    val h = block_height(t.get(i)) + o
-                    if (h <= block_height(t2.get(i)))
-                        acc2.append(ancestor_at(t2.get(i), h))
-                    else
-                        acc2
-                }))
+            range(1, offset_bound + 1).foldl(List(), (acc, o) =>
+                if (o > max_offset)
+                    acc
+                else {
+                    // Build one horizontal row independently, then append it.
+                    // Carrying the whole prefix through every cell makes the
+                    // statically bounded fold grow prohibitively in Apalache.
+                    val row = range(1, n + 1).foldl(List(), (row_acc, i) => {
+                        val h = block_height(t.get(i)) + o
+                        if (h <= block_height(t2.get(i)))
+                            row_acc.append(ancestor_at(t2.get(i), h))
+                        else
+                            row_acc
+                    })
+                    acc.concat(row)
+                })
         }
     }
 
@@ -159,33 +170,49 @@ module sweep {
     // outer, chain inner), same append. So rho is always a prefix of
     // Horiz(T, TF), and equals it when no chain halts the sweep, which
     // is the paper's rho <= Horiz. `n` gives the inner sweep as it does
-    // there.
-    pure def emit_sweep(t: Tips, tf: Tips, settled: ChainId -> bool, n: int): List[Block] = {
+    // there. As in `horiz`, `offset_bound` is static and `max_offset`
+    // restricts the iterations that affect the result.
+    pure def emit_sweep(
+        t: Tips,
+        tf: Tips,
+        settled: ChainId -> bool,
+        n: int,
+        offset_bound: int
+    ): List[Block] = {
         if (t.keys() != 1.to(n) or tf.keys() != t.keys() or settled.keys() != t.keys())
             List()
         else {
             val max_offset = t.keys().fold(0, (a, i) =>
                 max(a, block_height(tf.get(i)) - block_height(t.get(i))))
-            range(1, max_offset + 1).foldl(
+            range(1, offset_bound + 1).foldl(
                 { halted: false, out: List() },
                 (acc, o) =>
                     // once halted nothing more is appended, so the whole
                     // inner sweep is skipped rather than walked
-                    if (acc.halted)
+                    if (o > max_offset or acc.halted)
                         acc
-                    else
-                        range(1, n + 1).foldl(acc, (acc2, i) =>
-                            if (acc2.halted)
-                                acc2
+                    else {
+                        // As in horiz, keep the row-local output separate from
+                        // the prefix. Only the halt bit crosses cell boundaries.
+                        val row = range(1, n + 1).foldl(
+                            { halted: false, out: List() },
+                            (row_acc, i) =>
+                            if (row_acc.halted)
+                                row_acc
                             else {
                                 val h = block_height(t.get(i)) + o
                                 if (h <= block_height(tf.get(i)))
-                                    { ...acc2, out: acc2.out.append(ancestor_at(tf.get(i), h)) }
+                                    { ...row_acc, out: row_acc.out.append(ancestor_at(tf.get(i), h)) }
                                 else if (settled.get(i))
-                                    acc2
+                                    row_acc
                                 else
-                                    { ...acc2, halted: true }
+                                    { ...row_acc, halted: true }
                             })
+                        {
+                            halted: row.halted,
+                            out: acc.out.concat(row.out),
+                        }
+                    }
             ).out
         }
     }
@@ -251,7 +278,12 @@ module sweep {
     // Because validity forces each proposal to extend, chain by chain,
     // the tips of the V-QC it references, every Ord(Q) has Ord(Q') as a
     // prefix: the ordering only ever grows.
-    pure def ord(q: VQC, vqcs: Set[VQC], p: Params): Option[List[Block]] = {
+    pure def ord(
+        q: VQC,
+        vqcs: Set[VQC],
+        p: Params,
+        offset_bound: int
+    ): Option[List[Block]] = {
         match vqc_ancestry(q, vqcs) {
             | None => None
             | Some(ancestry) => {
@@ -262,7 +294,8 @@ module sweep {
                             | None => { prev: Some(x), out: acc.out }
                             | Some(pq) => {
                                 prev: Some(x),
-                                out: acc.out.concat(horiz(tips(pq, p), tips(x, p), p.n)),
+                                out: acc.out.concat(horiz(
+                                    tips(pq, p), tips(x, p), p.n, offset_bound)),
                             }
                         })
                 Some(res.out)
@@ -288,17 +321,24 @@ module sweep {
     // the view v V-QC that the next leader block references -- and that
     // holds even if the next leader tries to censor, since anchoring is
     // all-or-nothing.
-    pure def emit(pool: Tally, lb: LeaderBlock, vqcs: Set[VQC], p: Params): Option[List[Block]] = {
+    pure def emit(
+        pool: Tally,
+        lb: LeaderBlock,
+        vqcs: Set[VQC],
+        p: Params,
+        offset_bound: int
+    ): Option[List[Block]] = {
         match resolve_vqc(lb.parent_vqc, vqcs) {
             | None => None
             | Some(parent) =>
-                match ord(parent, vqcs, p) {
+                match ord(parent, vqcs, p, offset_bound) {
                     | None => None
                     | Some(prefix) => Some(prefix.concat(emit_sweep(
                             tips(parent, p),
                             tips_f(pool, lb, p),
                             settled_chains(pool, lb, p),
-                            p.n)))
+                            p.n,
+                            offset_bound)))
                 }
         }
     }

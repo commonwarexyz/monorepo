@@ -3,6 +3,14 @@
 // and sweep.qnt directly, at parameters chosen for the test rather than
 // for any instance under check. Needing to import a state machine here
 // would mean the purity boundary has leaked.
+//
+// The first two tests reproduce the two worked examples of the informal
+// specification. They pin down, respectively, the two rank thresholds
+// and the interleaving of the horizontal sweep -- the two independent
+// ways the extraction apparatus goes wrong.
+//
+// The third guards the base-relative reading of endorsement, which the
+// path representation of blocks makes it easy to lose.
 
 module tests_extraction {
     import types.* from "../types"
@@ -53,6 +61,7 @@ module tests_extraction {
     // this is the whole of consistency across the two layers.
 
     pure val P11: Params = { n: 11, t: 2, d: 4, e: 2 }
+    pure val TEST_SWEEP_OFFSET_BOUND = 6
 
     pure val LB_RANK: LeaderBlock = {
         view: 1,
@@ -120,11 +129,12 @@ module tests_extraction {
         val complete = Set(qgen, Q_RANK)
         all {
             vqc_ancestry(Q_RANK, Set(Q_RANK)) == None,
-            ord(Q_RANK, Set(Q_RANK), P11) == None,
+            ord(Q_RANK, Set(Q_RANK), P11, TEST_SWEEP_OFFSET_BOUND) == None,
             vqc_ancestry(Q_RANK, complete) == Some([qgen, Q_RANK]),
-            is_some(ord(Q_RANK, complete, P11)),
-            emit(POOL_RANK, LB_RANK, Set(), P11) == None,
-            is_some(emit(POOL_RANK, LB_RANK, complete, P11)),
+            is_some(ord(Q_RANK, complete, P11, TEST_SWEEP_OFFSET_BOUND)),
+            emit(POOL_RANK, LB_RANK, Set(), P11, TEST_SWEEP_OFFSET_BOUND) == None,
+            is_some(emit(
+                POOL_RANK, LB_RANK, complete, P11, TEST_SWEEP_OFFSET_BOUND)),
         }
     }
 
@@ -147,7 +157,7 @@ module tests_extraction {
     pure val TIPS_HI: Tips = Map(1 -> blk(1, 4), 2 -> blk(2, 4), 3 -> blk(3, 3), 4 -> blk(4, 3))
 
     run horizTest = all {
-        horiz(TIPS_LO, TIPS_HI, 4) == [
+        horiz(TIPS_LO, TIPS_HI, 4, TEST_SWEEP_OFFSET_BOUND) == [
             // offset 1: every chain's first new block
             blk(1, 2), blk(2, 3), blk(3, 2), blk(4, 2),
             // offset 2: every chain's second
@@ -159,10 +169,10 @@ module tests_extraction {
         // the sweep determines only the interleaving, never which
         // blocks are included: every block above each chain's old tip
         // appears exactly once
-        horiz(TIPS_LO, TIPS_HI, 4).length() == 3 + 2 + 2 + 2,
+        horiz(TIPS_LO, TIPS_HI, 4, TEST_SWEEP_OFFSET_BOUND).length() == 3 + 2 + 2 + 2,
 
         // nothing to append when the tips have not moved
-        horiz(TIPS_HI, TIPS_HI, 4) == [],
+        horiz(TIPS_HI, TIPS_HI, 4, TEST_SWEEP_OFFSET_BOUND) == [],
     }
 
     // -------------------------------------------------

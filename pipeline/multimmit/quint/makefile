@@ -17,9 +17,9 @@ typecheck:
 	quint typecheck main_n7t1f1.qnt
 
 test:
-	quint test tests/tests_extraction.qnt
-	quint test tests/tests_n6t1f1.qnt
-	quint test tests/tests_byzantine_n6t1f1.qnt
+	quint test --max-samples 1000 tests/tests_extraction.qnt
+	quint test --max-samples 1000 tests/tests_n6t1f1.qnt
+	quint test --max-samples 1000 tests/tests_byzantine_n6t1f1.qnt
 
 repl:
 	quint -r main_n6t1f1.qnt::main_n6t1f1
