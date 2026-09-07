@@ -86,7 +86,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{mmb, mmr},
+        merkle::{Location, mmb, mmr},
         qmdb::keyless::tests::{self, keyless_tests},
     };
     use commonware_cryptography::Sha256;
@@ -173,6 +173,60 @@ mod tests {
 
     fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
         Box::new(|ctx| Box::pin(open_db(ctx)))
+    }
+
+    /// A rewind must survive a crash on its own. Three items per section put the rewind target
+    /// at the start of a sealed section, so the rewind empties that section's blob, a
+    /// truncation a crash can lose when it is not synced.
+    #[test_traced]
+    fn test_keyless_variable_rewind_survives_crash() {
+        fn config(
+            context: &deterministic::Context,
+        ) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
+            let mut cfg = db_config("rewind-crash", context);
+            cfg.log.items_per_section = NZU64!(3);
+            cfg
+        }
+
+        let (root, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|ctx| async move {
+                let db = TestDb::<mmr::Family>::init(ctx.child("first"), config(&ctx))
+                    .await
+                    .unwrap();
+                let floor = db.inactivity_floor_loc();
+
+                // Commits at 2, 5, and 6 fill the first two sections and open a third.
+                let batch = db
+                    .new_batch()
+                    .append(vec![1])
+                    .merkleize(&db, None, floor)
+                    .await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let batch = db
+                    .new_batch()
+                    .append(vec![2])
+                    .append(vec![3])
+                    .merkleize(&db, None, floor)
+                    .await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let batch = db.new_batch().merkleize(&db, None, floor).await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                assert_eq!(db.bounds().end, Location::new(7));
+                let db = db.sync().await.unwrap();
+
+                let db = db.rewind(Location::new(3)).await.unwrap();
+                let root = db.root();
+                drop(db);
+                root
+            });
+
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            let db = TestDb::<mmr::Family>::init(ctx.child("second"), config(&ctx))
+                .await
+                .unwrap();
+            assert_eq!(db.bounds().end, Location::new(3));
+            assert_eq!(db.root(), root);
+        });
     }
 
     keyless_tests! {

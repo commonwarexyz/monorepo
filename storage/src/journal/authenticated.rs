@@ -579,10 +579,16 @@ where
         Ok(self)
     }
 
-    /// Rewind the journal and Merkle structure.
+    /// Rewind the journal and Merkle structure to `size` items.
+    ///
+    /// The rewind is durable before this method returns, so no item above `size` can survive a
+    /// crash and be paired with the leaves of a later history appended at the same locations.
     #[boxed]
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error<F>> {
-        self.journal = self.journal.rewind(size).await?;
+        // The Merkle structure persists its own truncation and recovery aligns the two components
+        // by length alone, so a journal whose truncation was lost in a crash would pair its old
+        // items with the new leaves.
+        self.journal = self.journal.rewind(size).await?.sync().await?;
 
         let leaves = *self.merkle.leaves();
         if leaves > size {
@@ -1099,7 +1105,7 @@ mod tests {
         },
         utils::detached::{DropMonitor, block_strategy},
     };
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::{Manual, Rayon, Sequential};
@@ -1921,6 +1927,69 @@ mod tests {
     fn test_rewind_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_rewind_inner::<mmb::Family>);
+    }
+
+    /// A rewind must survive a crash on its own. Pages are sized to one item so the truncation
+    /// lands on a page boundary, the shape a crash can lose when it is not synced. Seven items
+    /// fill and seal the first blob, so the rewind also demotes a sealed blob back to the tail.
+    fn test_rewind_survives_crash_inner<F: Family + PartialEq>() {
+        let page_size = NonZeroU16::new(TestOp::<F>::SIZE as u16).unwrap();
+        let open = move |context: Context| async move {
+            let merkle_cfg = merkle_config("rewind-crash", &context);
+            let mut journal_cfg = journal_config("rewind-crash", &context);
+            journal_cfg.page_cache = CacheRef::from_pooler(&context, page_size, PAGE_CACHE_SIZE);
+            TestJournal::<F>::new(
+                context,
+                merkle_cfg,
+                journal_cfg,
+                |op: &TestOp<F>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .unwrap()
+        };
+
+        let (root, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let mut journal = open(context.child("first")).await;
+                for i in 0..2 {
+                    (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
+                    .await
+                    .unwrap();
+                for i in 3..6 {
+                    (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+
+                journal = journal.rewind(3).await.unwrap();
+                assert_eq!(journal.size(), 3);
+                let root = journal_root(&journal);
+                drop(journal);
+                root
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let journal = open(context.child("second")).await;
+            assert_eq!(journal.size(), 3);
+            assert_eq!(journal_root(&journal), root);
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_rewind_survives_crash_mmr() {
+        test_rewind_survives_crash_inner::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_rewind_survives_crash_mmb() {
+        test_rewind_survives_crash_inner::<mmb::Family>();
     }
 
     /// Verify that append() increments the operation count, returns correct locations, and

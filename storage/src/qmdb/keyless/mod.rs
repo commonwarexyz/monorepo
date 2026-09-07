@@ -418,9 +418,7 @@ where
     /// before this method finishes updating in-memory rewind state. Callers must drop this
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
-    /// [`Self::sync`] completes, or until the handle returned by a subsequent
-    /// [`Self::start_sync`] completes.
+    /// The journal rewind is durable before this method returns.
     #[tracing::instrument(name = "qmdb.keyless.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
@@ -2802,8 +2800,8 @@ pub(crate) mod tests {
         assert_eq!(db.inactivity_floor_loc(), floor_a);
         assert_eq!(db.last_commit_loc(), Location::new(3));
 
-        // Commit the rewind so it's durable, then reopen and confirm the floor again.
-        db.commit().await.unwrap();
+        // Reopen and confirm the floor again.
+        drop(db);
         let db = reopen(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.inactivity_floor_loc(), floor_a);
 

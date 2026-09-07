@@ -76,7 +76,7 @@ mod tests {
         BufferPooler, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync},
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
@@ -202,6 +202,86 @@ mod tests {
             .await;
         let (db, range) = db.apply_batch(batch).await.unwrap();
         (db, range.start)
+    }
+
+    /// Rewinding a durable history and applying an equal-length sibling, then crashing after
+    /// only the Merkle half of `start_sync` lands, must reopen to a single history: the rewound
+    /// state, never the old operations under the sibling's root.
+    #[test_traced]
+    fn test_keyless_fixed_rebranch_survives_partial_sync() {
+        // A fixed U64 operation is 18 bytes. One record per page makes the rewind a pure blob
+        // truncation, and seven records per blob keeps every record in one blob.
+        fn open(
+            context: &deterministic::Context,
+            label: &'static str,
+            pending: &PendingSyncs,
+        ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
+            let mut cfg = db_config("rebranch", context, Sequential);
+            cfg.log.page_cache = CacheRef::from_pooler(context, NZU16!(18), PAGE_CACHE_SIZE);
+            DelayedDb::init(
+                DelayedSyncContext {
+                    inner: context.child(label),
+                    pending: pending.clone(),
+                },
+                cfg,
+            )
+        }
+
+        let (root_rewound, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|ctx| async move {
+                let pending = PendingSyncs::default();
+                let open = open(&ctx, "first", &pending);
+                let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+
+                // Durably store the first history, then rewind to the initial commit.
+                let floor = db.inactivity_floor_loc();
+                (db, _) = apply_append(db, U64::new(11), floor).await;
+                db = drive_pending_syncs(&pending, db.sync()).await.unwrap();
+                let root_a = db.root();
+                db = drive_pending_syncs(&pending, db.rewind(Location::new(1)))
+                    .await
+                    .unwrap();
+                let root_rewound = db.root();
+
+                // Apply an equal-length sibling and start a sync.
+                let floor = db.inactivity_floor_loc();
+                (db, _) = apply_append(db, U64::new(22), floor).await;
+                assert_eq!(db.bounds().end, Location::new(3));
+                assert_ne!(db.root(), root_a);
+                let starts_before = pending.starts();
+                let completions_before = pending.completions();
+                let handle;
+                (db, handle) = db.start_sync().await.unwrap();
+                assert_eq!(pending.starts() - starts_before, 2);
+
+                // Let only the Merkle sync land, then crash.
+                let _journal_sync = next_pending_sync(&pending);
+                let merkle_sync = next_pending_sync(&pending);
+                let _waiter = ctx.child("partial_sync").spawn(|_| handle);
+                merkle_sync.release.send(Ok(())).unwrap();
+                while pending.completions() < completions_before + 1 {
+                    reschedule().await;
+                }
+                drop(db);
+                root_rewound
+            });
+
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open(&ctx, "second", &pending);
+            let db = drive_pending_syncs(&pending, open).await.unwrap();
+
+            // Only the rewound history is recoverable, and its proofs verify against its root.
+            assert_eq!(db.bounds().end, Location::new(1));
+            assert_eq!(db.root(), root_rewound);
+            let (proof, ops) = db.proof(Location::new(0), NZU64!(3)).await.unwrap();
+            assert!(crate::qmdb::verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(0),
+                &ops,
+                &db.root(),
+            ));
+        });
     }
 
     /// A sync handle must not block database use while the backend sync is pending.
