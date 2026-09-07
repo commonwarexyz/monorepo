@@ -593,7 +593,7 @@ where
 
         let pruned_to;
         (self.any, pruned_to) = self.any.prune_log(prune_loc).await?;
-        debug_assert_eq!(
+        assert_eq!(
             pruned_to, boundary,
             "log and bitmap pruned to different boundaries"
         );

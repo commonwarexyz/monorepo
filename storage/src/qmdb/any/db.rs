@@ -466,7 +466,7 @@ where
 
         let boundary;
         (self.log, boundary) = self.log.prune(prune_loc).await?;
-        debug_assert!(
+        assert!(
             self.bitmap.write().pruned_bits() <= *boundary,
             "bitmap pruned past the retained log"
         );
@@ -497,7 +497,7 @@ where
         let mut db = self;
         let boundary = db.prune_bitmap_to_log_boundary(prune_loc)?;
         let (db, pruned_to) = db.prune_log(prune_loc).await?;
-        debug_assert_eq!(
+        assert_eq!(
             pruned_to, boundary,
             "log and bitmap pruned to different boundaries"
         );
