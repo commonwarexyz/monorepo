@@ -414,7 +414,8 @@ impl Item {
         let decoded = VerifyingKey::decode(self.verifying_key.as_ref()).unwrap();
         assert_eq!(
             decoded.verify(&self.namespace, &self.message, &self.signature),
-            actual
+            actual,
+            "item: {self:#?}"
         );
 
         let signature = ed25519_consensus::Signature::try_from(self.signature.as_ref()).unwrap();
@@ -494,6 +495,8 @@ impl Batch {
             expected &= item.verify();
         }
         assert_eq!(self.verify(&Sequential), expected, "batch: {self:#?}");
+
+        // The fuzz target stays single-threaded, so only the unit test exercises the pool.
         #[cfg(test)]
         {
             let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))

@@ -355,6 +355,7 @@ fn backend_at_bounds() {
                 backend.square(max),
                 "backend square at bound",
             );
+
             // These coordinates need not form a curve point: compare the complete formulas
             // coordinate-wise to exercise their loose-intermediate bounds.
             let point = GVec {
@@ -459,8 +460,8 @@ fn fuzz_group_matches_portable<B: Backend>(
     let lanes = array::from_fn(|i| {
         let scalar = GAffine::decompress(&encodings[i]);
         assert_eq!(
-            decoded[i].map(|point| point.to_extended().to_bytes()),
-            scalar.map(|point| point.to_extended().to_bytes()),
+            decoded[i].map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+            scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
             "decompression lane {i}",
         );
         scalar.unwrap_or(GAffine::IDENTITY)
@@ -547,8 +548,8 @@ fn zip215_decompression_and_group_laws() {
                 let lanes = array::from_fn(|i| {
                     let scalar = GAffine::decompress(&bytes[i]);
                     assert_eq!(
-                        decoded[i].map(|p| p.to_extended().to_bytes()),
-                        scalar.map(|p| p.to_extended().to_bytes())
+                        decoded[i].map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
+                        scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
                     );
                     scalar.unwrap_or(GAffine::IDENTITY)
                 });

@@ -25,7 +25,6 @@ const MU: [u64; 5] = [
 
 /// An integer modulo `L`, always canonically reduced (`< L`).
 #[derive(Copy, Clone, Zeroize)]
-#[cfg_attr(test, derive(Debug))]
 pub struct Scalar([u64; 4]);
 
 /// Returns `true` if `a < b`, comparing as 256-bit unsigned integers (little-endian limbs).

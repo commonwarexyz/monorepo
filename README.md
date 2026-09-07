@@ -20,7 +20,6 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [conformance](./conformance/README.md): Automatically assert the stability of encoding and mechanisms over time.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
-* [cryptography/curve25519](./cryptography/curve25519/README.md): Perform Curve25519 arithmetic, Ed25519 signing and verification, and X25519 key exchange.
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [glue](./glue/README.md): Default constructions that span multiple primitives.
 * [math](./math/README.md): Create and manipulate mathematical objects.
@@ -84,6 +83,8 @@ RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ## Platform Compatibility
 
 The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
+
+x86-64 SIMD extensions (AVX2, AVX-512) are detected at runtime. AArch64 builds assume NEON.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 

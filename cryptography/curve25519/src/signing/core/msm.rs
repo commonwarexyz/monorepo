@@ -599,6 +599,8 @@ mod tests {
         let backend = crate::curve::test_backend();
         // `Manual` disables the adaptive serial/parallel policy, forcing every call through
         // actual Rayon dispatch (rather than the policy falling back to serial for small inputs).
+        // Planning parallelism above the pool size splits every width below into several term
+        // ranges, which the assertion inside the loop pins.
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
             .unwrap()
             .with_parallelism(commonware_utils::NZUsize!(32))
@@ -610,7 +612,9 @@ mod tests {
             .test(|u| {
                 for width in [6, 8, 10] {
                     let terms = arbitrary_terms(u, 1000, width)?;
-                    assert!(range_count(terms.len(), num_windows(width), 32) > 1);
+                    assert!(
+                        range_count(terms.len(), num_windows(width), strategy.parallelism()) > 1
+                    );
                     for n in [0, 1, 300, 600, 1000] {
                         let chunks =
                             split_terms(terms[..n].to_vec(), &[128, 128, 128, 128, 128, 128]);

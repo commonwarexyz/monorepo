@@ -46,8 +46,8 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 /// An Ed25519 signing key.
 ///
 /// Secret material is zeroized when the key is dropped.
-/// Serialization writes the raw secret seed; callers must protect the encoded bytes as secret
-/// key material.
+/// Serialization writes the raw secret seed, so callers must protect the encoded bytes as
+/// secret key material.
 #[derive(ZeroizeOnDrop)]
 pub struct SigningKey {
     /// When serializing, we want to just write the seed, so we keep it around.
@@ -434,7 +434,7 @@ pub struct BatchVerifier {
 impl BatchVerifier {
     /// Creates a verifier with space for `capacity` signatures.
     ///
-    /// `capacity` is a trusted allocation hint; bound externally supplied counts before passing
+    /// `capacity` is a trusted allocation hint. Bound externally supplied counts before passing
     /// them here.
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -484,9 +484,8 @@ impl BatchVerifier {
     /// combination, an invalid batch may be accepted when the random weights make the combined
     /// equation hold, an event of negligible probability (about `2^-128`).
     ///
-    /// This bound requires an RNG unpredictable to whoever assembled the batch. Each call draws
-    /// a fresh seed from `rng`; a predictable or reused seed can let an attacker construct an
-    /// invalid batch that passes verification.
+    /// This bound requires an RNG unpredictable to whoever assembled the batch. A predictable
+    /// `rng` lets an attacker construct an invalid batch that passes verification.
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
         let items = self

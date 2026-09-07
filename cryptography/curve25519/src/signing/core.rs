@@ -506,7 +506,7 @@ mod tests {
             });
     }
 
-    /// Batch verification's execution is a deterministic function of `(items, seed)` (see
+    /// Batch verification's verdict is a deterministic function of `(items, seed)` (see
     /// [`batch_coefficients`]), so serial and parallel strategies must agree on every batch --
     /// including invalid ones, where the accept/reject outcome depends on the derived
     /// coefficients.

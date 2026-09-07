@@ -4,7 +4,7 @@
 //! when independent operations are scheduled across a complete point formula; dividing one
 //! [`super::FVec`] operation between both domains adds setup and synchronization costs on Apple
 //! M-series CPUs. Products split radix-`2^51` limbs into digits at alternating 26/25-bit offsets
-//! only while multiplying; loose input digits can each occupy 26 bits. The surrounding group
+//! only while multiplying. Loose input digits can each occupy 26 bits. The surrounding group
 //! formulas keep their compact five-limb representation.
 
 use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51};
@@ -23,9 +23,6 @@ const TILES: usize = LANES / WIDTH;
 type Regs = [uint64x2_t; 5];
 
 /// The NEON backend token.
-///
-/// This module is compiled only when the AArch64 target enables NEON, so the token needs no
-/// runtime feature check.
 #[derive(Clone, Copy)]
 pub(super) struct Backend;
 
