@@ -707,10 +707,17 @@ fn validate_monotone<D: Digest>(base: &[BlockRef<D>], target: &[BlockRef<D>]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multimmit::{config::Limits, mocks::Committee};
+    use crate::multimmit::{
+        config::Limits,
+        machine::algebra::{FinalTips, PoolExtractor},
+        mocks::Committee,
+        types::{Extension, Position, VoteBody},
+    };
     use commonware_cryptography::{
         Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
     };
+    use commonware_parallel::Sequential;
+    use commonware_utils::Participant;
     use proptest::{collection::vec, prelude::*};
 
     fn reference(chain: u32, height: u64) -> BlockRef<Sha256Digest> {
@@ -853,7 +860,12 @@ mod tests {
     #[test]
     fn final_sweep_newest_first_is_exact_reverse() {
         for (base, target, proposed, settled) in [
-            (vec![2, 5, 1, 8], vec![6, 6, 4, 8], vec![2, 5, 1, 8], vec![true; 4]),
+            (
+                vec![2, 5, 1, 8],
+                vec![6, 6, 4, 8],
+                vec![2, 5, 1, 8],
+                vec![true; 4],
+            ),
             (
                 vec![2, 5, 1, 8],
                 vec![6, 6, 4, 8],
@@ -885,6 +897,76 @@ mod tests {
             let mut reverse = coordinates(stream.newest_first());
             reverse.reverse();
             assert_eq!(coordinates(stream), reverse);
+        }
+    }
+
+    #[test]
+    fn final_sweep_continues_after_branch_settlement() {
+        let committee = Committee::<MinPk>::new(17, 6, Limits::new(2, 1).unwrap());
+        let codec = committee.codec();
+        let signed = committee.leader_block(1);
+        let leader = signed.block();
+        let votes = (0..6)
+            .map(|signer| {
+                let mut extensions = vec![Extension::empty(); codec.chains()];
+                if signer < 2 {
+                    extensions[0] =
+                        Extension::new(vec![Sha256::hash(&[&[signer as u8]])], 1).unwrap();
+                }
+                extensions[1] = Extension::new(vec![Sha256::hash(&[b"ready"])], 1).unwrap();
+                let body = VoteBody::for_leader::<Sha256, MinPk>(
+                    leader,
+                    vec![Position::new(0); codec.chains()],
+                    extensions,
+                    codec,
+                )
+                .unwrap();
+                committee.signers[signer].sign_vote(body).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let genesis = committee.config.genesis().tips().to_vec();
+        let state = HistoryState::new(
+            Sha256::hash(&[b"history"]),
+            genesis.clone(),
+            genesis.clone(),
+        )
+        .unwrap();
+        let lqc = committee
+            .verifier
+            .assemble_lqc::<Sha256, _>(leader.clone(), &votes[..5], &Sequential)
+            .unwrap();
+        let certified = FinalTips::from_lqc::<Sha256, MinPk>(&lqc, codec).unwrap();
+        assert_eq!(certified.settled(ChainId::new(0)), Some(false));
+        assert!(
+            coordinates(
+                state
+                    .final_sweep::<Sha256, MinPk>(&lqc, codec, &genesis)
+                    .unwrap()
+            )
+            .is_empty()
+        );
+        for (size, expected) in [(5, vec![]), (6, vec![(1, 1)])] {
+            let mut pool = PoolExtractor::new::<Sha256, MinPk>(leader, codec).unwrap();
+            for (signer, vote) in votes[..size].iter().enumerate() {
+                pool.insert::<Sha256, MinPk>(leader, Participant::new(signer as u32), vote.body())
+                    .unwrap();
+            }
+            let tips = pool.final_tips().unwrap();
+            assert_eq!(tips.settled(ChainId::new(0)), Some(size == 6));
+            if size == 5 {
+                assert_eq!(tips, certified);
+            }
+            let settled = (0..codec.chains())
+                .map(|chain| tips.settled(ChainId::new(chain as u32)).unwrap())
+                .collect();
+            let sweep = FinalSweep::new(
+                &genesis,
+                tips.blocks().to_vec(),
+                &vec![Height::zero(); codec.chains()],
+                settled,
+            )
+            .unwrap();
+            assert_eq!(coordinates(sweep), expected);
         }
     }
 

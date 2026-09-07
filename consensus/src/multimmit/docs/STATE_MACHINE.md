@@ -472,7 +472,13 @@ These rules implement the paper's one-vote-per-height, contiguous-path, and dept
    post-GST convergence reaches a correct-leader view and a covering L-QC through the ordinary path.
 4. Per chain, the finalized proposal position is the `(3f + 1)`-th greatest position. Extension carry
    applies only when that position equals the proposed tip and at least `n - f` pool votes count for
-   the extension. Pool settledness uses `beta + (n - |pool|) <= f`.
+   the extension. At full proposal position, pool settledness uses
+   `max_child_support + (n - |pool|) <= f`, where `max_child_support` is the largest
+   retained-voter count for any exact immediate child of the current finalized tip, or zero
+   if no child is observed. Every future carry beyond that tip must support one such child.
+   Unseen voters and Byzantine replacements can add at most `(n - |pool|) + f` support,
+   leaving each child below the `2f + 1` carry threshold. The safe-extension lemma excludes
+   incompatible alternatives to the finalized tip.
 5. Finalized leader and chain-tip floors are monotone. Re-running finality as the pool grows may extend
    the same prefix but may never retract or choose an incompatible tip.
 6. L-QC aggregation and admission freeze the exact vote transcript. A late valid covering L-QC may

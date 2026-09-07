@@ -27,7 +27,7 @@ pub(crate) struct PoolExtractor<D: Digest> {
     position_counts: Vec<Vec<usize>>,
     support: Vec<BTreeMap<BlockRef<D>, usize>>,
     qualified: Vec<BTreeSet<BlockRef<D>>>,
-    extended: Vec<BTreeMap<BlockRef<D>, usize>>,
+    max_child_support: Vec<BTreeMap<BlockRef<D>, usize>>,
     ancestry: PathIndex<D>,
     len: usize,
 }
@@ -66,7 +66,7 @@ impl<D: Digest> PoolExtractor<D> {
             position_counts,
             support: vec![BTreeMap::new(); config.chains()],
             qualified: vec![BTreeSet::new(); config.chains()],
-            extended: vec![BTreeMap::new(); config.chains()],
+            max_child_support: vec![BTreeMap::new(); config.chains()],
             ancestry,
             len: 0,
         })
@@ -114,7 +114,9 @@ impl<D: Digest> PoolExtractor<D> {
                 }
             }
             for pair in path.windows(2) {
-                *self.extended[chain].entry(pair[0]).or_default() += 1;
+                let maximum = self.max_child_support[chain].entry(pair[0]).or_default();
+                // Sticky votes only increase child support, so maxima never need rescanning.
+                *maximum = (*maximum).max(self.support[chain][&pair[1]]);
             }
         }
         paths
@@ -164,7 +166,10 @@ impl<D: Digest> PoolExtractor<D> {
             } else {
                 base
             };
-            let beyond = self.extended[chain].get(&tip).copied().unwrap_or(0);
+            let beyond = self.max_child_support[chain]
+                .get(&tip)
+                .copied()
+                .unwrap_or(0);
             blocks.push(tip);
             positions.push(position);
             settled.push(position == proposal_tip && beyond + unseen <= faults);
@@ -434,7 +439,7 @@ impl<D: Digest> FinalTips<D> {
             } else {
                 base
             };
-            let beyond = prepared.count_beyond(chain, tip)?;
+            let beyond = prepared.max_child_support(chain, tip)?;
 
             blocks.push(tip);
             positions.push(position);
@@ -629,19 +634,17 @@ impl<D: Digest> PreparedVotes<D> {
         Ok(deepest)
     }
 
-    fn count_beyond(&self, chain: ChainId, tip: BlockRef<D>) -> Result<usize, Error> {
-        let mut count = 0usize;
+    fn max_child_support(&self, chain: ChainId, tip: BlockRef<D>) -> Result<usize, Error> {
+        let mut children = BTreeMap::<BlockRef<D>, usize>::new();
         for vote in &self.votes {
             let path = vote.paths.chain(chain)?;
-            if path
-                .iter()
-                .position(|block| *block == tip)
-                .is_some_and(|index| index + 1 < path.len())
-            {
-                count += 1;
+            if let Some(pair) = path.windows(2).find(|pair| pair[0] == tip) {
+                *children.entry(pair[1]).or_default() += 1;
             }
         }
-        Ok(count)
+        // Every future carry beyond this tip must support one exact immediate child.
+        // Unseen voters and Byzantine replacements can add at most unseen + f support.
+        Ok(children.into_values().max().unwrap_or(0))
     }
 }
 

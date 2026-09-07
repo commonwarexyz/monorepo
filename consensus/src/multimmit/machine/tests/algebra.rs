@@ -152,6 +152,21 @@ fn reference_safe(
         .collect()
 }
 
+fn reference_child_support<'a>(
+    paths: impl Iterator<Item = &'a [BlockRef<Digest>]>,
+    tip: BlockRef<Digest>,
+) -> usize {
+    let mut counts = BTreeMap::<_, usize>::new();
+    for path in paths {
+        if let Some(index) = path.iter().position(|block| *block == tip)
+            && let Some(child) = path.get(index + 1)
+        {
+            *counts.entry(*child).or_default() += 1;
+        }
+    }
+    counts.into_values().max().unwrap_or(0)
+}
+
 fn reference_final(
     leader: &LeaderBlock<MinSig, Digest>,
     votes: &[VoteBody<Digest>],
@@ -187,16 +202,8 @@ fn reference_final(
         } else {
             base
         };
-        let beyond = paths
-            .iter()
-            .filter(|path| {
-                path.chain(chain)
-                    .unwrap()
-                    .iter()
-                    .position(|block| *block == tip)
-                    .is_some_and(|tip_index| tip_index + 1 < path.chain(chain).unwrap().len())
-            })
-            .count();
+        let beyond =
+            reference_child_support(paths.iter().map(|path| path.chain(chain).unwrap()), tip);
         blocks.push(tip);
         final_positions.push(position);
         settled.push(position == proposal_tip && beyond + unseen <= faults);
@@ -359,15 +366,8 @@ impl ReferenceOrdering {
             } else {
                 base
             };
-            let beyond = votes
-                .iter()
-                .filter(|vote| {
-                    vote.paths[chain]
-                        .iter()
-                        .position(|block| *block == tip)
-                        .is_some_and(|index| index + 1 < vote.paths[chain].len())
-                })
-                .count();
+            let beyond =
+                reference_child_support(votes.iter().map(|vote| vote.paths[chain].as_slice()), tip);
             blocks.push(tip);
             positions.push(position);
             settled.push(position == proposal_tip && beyond + unseen <= faults);
@@ -580,6 +580,124 @@ fn final_tips_use_pool_support_and_generalized_settlement() {
     assert_eq!(tips.position(ChainId::new(0)), Some(Position::new(2)));
     assert_eq!(tips.settled(ChainId::new(0)), Some(false));
     assert_eq!(tips.blocks().len(), config.chains());
+}
+
+#[test]
+fn branch_settlement_tracks_exact_children_of_the_current_final_tip() {
+    let config = config(6);
+    let leader = leader(6);
+    let chain = ChainId::new(0);
+    let cases: &[(u32, &[&[u8]], u64, bool)] = &[
+        (2, &[b"a", b"b", b"", b"", b"", b""], 2, true),
+        (2, &[b"a", b"a", b"", b"", b"", b""], 2, false),
+        (2, &[b"a", b"", b"", b"", b"", b""], 2, true),
+        (2, &[b"a", b"b", b"", b"", b""], 2, false),
+        (2, &[b"", b"", b"", b"", b""], 2, true),
+        (1, &[b"", b"", b"", b"", b"", b""], 1, false),
+        (2, &[b"xa", b"xb", b"x", b"x", b"x", b""], 3, true),
+        (2, &[b"xa", b"xa", b"x", b"x", b"x", b""], 3, false),
+    ];
+    for &(position, extensions, height, settled) in cases {
+        let votes = extensions
+            .iter()
+            .map(|extension| {
+                vote_with_digests(
+                    &leader,
+                    position,
+                    extension.iter().map(|label| digest(&[*label])).collect(),
+                    config,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected =
+            FinalTips::from_pool::<Sha256, MinSig, _>(&leader, indexed(&votes), config).unwrap();
+        assert_eq!(expected.get(chain).unwrap().height(), Height::new(height));
+        assert_eq!(expected.settled(chain), Some(settled));
+        for reverse in [false, true] {
+            for rotation in 0..votes.len() {
+                let mut order = (0..votes.len()).collect::<Vec<_>>();
+                order.rotate_left(rotation);
+                if reverse {
+                    order.reverse();
+                }
+                let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+                let mut retained = Vec::new();
+                for signer in order {
+                    let participant = Participant::new(signer as u32);
+                    assert!(
+                        pool.insert::<Sha256, MinSig>(&leader, participant, &votes[signer])
+                            .unwrap()
+                    );
+                    retained.push((participant, &votes[signer]));
+                    let equivocation = vote(&leader, 2, &[b"equivocation"], config);
+                    assert!(
+                        !pool
+                            .insert::<Sha256, MinSig>(&leader, participant, &equivocation)
+                            .unwrap()
+                    );
+                    if pool.len() >= config.view_quorum() {
+                        assert_eq!(
+                            pool.final_tips().unwrap(),
+                            FinalTips::from_pool::<Sha256, MinSig, _>(
+                                &leader,
+                                retained.iter().copied(),
+                                config
+                            )
+                            .unwrap()
+                        );
+                    }
+                }
+                assert_eq!(pool.final_tips().unwrap(), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn branch_settlement_excludes_adversarial_future_carry() {
+    let config = config(6);
+    let leader = leader(6);
+    let options = [
+        vote(&leader, 2, &[], config),
+        vote(&leader, 2, &[b"a"], config),
+        vote(&leader, 2, &[b"b"], config),
+        vote(&leader, 2, &[b"unknown"], config),
+    ];
+    for observed in [[1, 2, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0], [0; 6]] {
+        for size in [5, 6] {
+            let pool = observed[..size]
+                .iter()
+                .map(|index| options[*index].clone())
+                .collect::<Vec<_>>();
+            let final_tips =
+                FinalTips::from_pool::<Sha256, MinSig, _>(&leader, indexed(&pool), config).unwrap();
+            if final_tips.settled(ChainId::new(0)) != Some(true) {
+                continue;
+            }
+            for unknown in 0..options.len() {
+                for faulty in 0..6 {
+                    for replacement in &options {
+                        for omitted in 0..6 {
+                            let future = (0..6).filter(|signer| *signer != omitted).map(|signer| {
+                                let body = if signer == faulty {
+                                    replacement
+                                } else if signer >= size {
+                                    &options[unknown]
+                                } else {
+                                    &options[observed[signer]]
+                                };
+                                (Participant::new(signer as u32), body)
+                            });
+                            let safe =
+                                Tips::from_votes::<Sha256, MinSig, _>(&leader, future, config)
+                                    .unwrap();
+                            assert_eq!(safe.get(ChainId::new(0)), final_tips.get(ChainId::new(0)));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
