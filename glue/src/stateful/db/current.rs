@@ -1621,6 +1621,51 @@ mod tests {
         });
     }
 
+    #[test]
+    fn managed_db_rewind_current_target_survives_crash() {
+        let (target, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let db = FixedDb::init(
+                    context.child("db"),
+                    fixed_config("rewind-current-crash", &context),
+                )
+                .await
+                .unwrap();
+                let db = Shared::new("test", db);
+                let batch = db
+                    .new_batch_for_test::<_>()
+                    .await
+                    .write(Sha256::hash(&[b"key"]), Some(Sha256::hash(&[b"value"])))
+                    .with_metadata(Sha256::hash(&[b"metadata"]));
+                let batch = crate::stateful::db::Unmerkleized::merkleize(batch)
+                    .await
+                    .unwrap();
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, batch)
+                    .await
+                    .unwrap();
+                let target = <FixedDb as ManagedDb<_>>::sync_target(&database);
+
+                // An unchanged target still needs to persist its unfinalized checkpoint
+                let database =
+                    <FixedDb as ManagedDb<_>>::rewind_to_target(database, target.clone())
+                        .await
+                        .unwrap();
+                slot.put(database);
+                target
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = FixedDb::init(
+                context.child("db"),
+                fixed_config("rewind-current-crash", &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), target);
+        });
+    }
+
     /// A rewind is durable on its own: after `rewind_to_target` and a crash with no further
     /// sync, the reopened database reports the rewound target.
     #[test]

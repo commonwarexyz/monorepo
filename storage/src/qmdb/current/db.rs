@@ -610,16 +610,18 @@ where
     /// this database handle after any `Err` from `rewind` and reopen from storage.
     ///
     /// The rewind of the operations journal and its Merkle structure is durable before this
-    /// method returns.
+    /// method returns. A `size` equal to the current size truncates nothing and instead makes the
+    /// applied state durable, so a completed rewind always leaves `size` durable.
     #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
         let current_size = *self.any.last_commit_loc + 1;
-        // No-op short-circuit. Avoids the post-rewind grafted-tree rebuild and the validation
-        // and journal-read overhead below. Validation runs after this on the non-no-op path.
+
+        // Nothing to truncate, but the applied state may still be unsynced. This also skips the
+        // grafted-tree rebuild and the validation and journal reads below.
         if rewind_size == current_size {
-            return Ok(self);
+            return self.sync().await;
         }
         // Reject zero / out-of-range up front: lines below compute `rewind_size - 1`, which
         // underflows when `rewind_size == 0`. `any::Db::rewind` would catch these, but it isn't

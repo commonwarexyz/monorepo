@@ -545,7 +545,8 @@ where
     /// from `rewind` and reopen from storage.
     ///
     /// The rewind of the operations journal and its Merkle structure is durable before this
-    /// method returns.
+    /// method returns. A `size` equal to the current size truncates nothing and instead makes the
+    /// applied state durable, so a completed rewind always leaves `size` durable.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -560,8 +561,9 @@ where
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
+        // Nothing to truncate, but the applied state may still be unsynced.
         if rewind_size == current_size {
-            return Ok(self);
+            return self.sync().await;
         }
         if rewind_size == 0 || rewind_size > current_size {
             return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
