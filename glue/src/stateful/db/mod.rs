@@ -409,12 +409,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Prune the database to a previously finalized sync target.
     ///
-    /// The caller resolves every handle returned by [`Self::finalize`] before pruning. Only history
-    /// older than `target` may be discarded: `target` and every sync target finalized after it
-    /// must remain valid for [`Self::rewind_to_target`], since startup reconciles a database that
-    /// persisted further than marshal by rewinding to marshal's anchor. Databases that do not
-    /// retain pruneable operation history can rely on the default no-op. Any pruning effects must
-    /// be durable before returning.
+    /// The caller resolves every handle returned by [`Self::finalize`] before pruning. Databases
+    /// that do not retain pruneable operation history can rely on the default no-op. Any pruning
+    /// effects must be durable before returning.
     fn prune(
         self,
         _target: &Self::SyncTarget,
