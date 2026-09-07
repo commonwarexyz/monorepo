@@ -2,6 +2,8 @@
 //!
 //! [`Runner`] polls ordinary tasks and drives their I/O on its calling thread.
 //! Dedicated and blocking tasks each receive a supervised thread and ring.
+//! Their ordinary descendants execute on the runner's calling thread. Task
+//! factories execute synchronously on the caller before their futures are placed.
 //! Resources can move between workers between operations. An operation binds
 //! to its current worker on first poll and stays there until completion.
 //!

@@ -640,7 +640,7 @@ fn creation_failure_in_caught_task_leaves_runner_usable() {
 }
 
 #[test]
-fn ready_future_destructor_uses_selected_worker_poll_panic_policy() {
+fn ready_future_destructor_closes_handle_and_leaves_runner_usable() {
     struct ReadyDrop {
         polls: Arc<AtomicUsize>,
         drops: Arc<AtomicUsize>,
@@ -670,30 +670,15 @@ fn ready_future_destructor_uses_selected_worker_poll_panic_policy() {
                 polls: polls.clone(),
                 drops: drops.clone(),
             };
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                Runner::new(config().with_catch_panics(catch)).start(|context| async move {
-                    let child = context.child("ready_drop");
-                    let child = if dedicated { child.dedicated() } else { child };
-                    // The selected-worker async wrapper destroys this completed
-                    // future inside its poll, where user panic policy applies.
-                    let result = child.spawn(move |_| future).await;
-                    if catch {
-                        assert!(matches!(result, Err(Error::Exited)));
-                        context.child("survivor").spawn(|_| async {}).await.unwrap();
-                    } else {
-                        futures::future::pending::<()>().await;
-                    }
-                });
-            }));
-            if catch {
-                assert!(result.is_ok());
-            } else {
-                let panic = result.expect_err("uncaught poll failure must fail the runner");
-                assert_eq!(
-                    extract_panic_message(&*panic),
-                    "ready future destructor failed"
-                );
-            }
+            Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                let child = context.child("ready_drop");
+                let child = if dedicated { child.dedicated() } else { child };
+                // Disposal escapes the shared wrapper's user-poll boundary
+                // before it publishes a result. Task disposal remains contained.
+                let result = child.spawn(move |_| future).await;
+                assert!(matches!(result, Err(Error::Closed)));
+                context.child("survivor").spawn(|_| async {}).await.unwrap();
+            });
             assert_eq!(polls.load(Ordering::SeqCst), 1);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
         }

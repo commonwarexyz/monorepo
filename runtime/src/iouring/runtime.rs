@@ -205,8 +205,7 @@ impl Config {
     /// Cancellation-time and task-disposal panics escaping the user-poll wrapper
     /// are contained with either setting. An unpublished result may resolve to
     /// [`Error::Closed`], while an already-published result remains available.
-    /// Destruction inside the selected-worker wrapper's poll follows the
-    /// configured user-panic policy.
+    /// Task factories execute synchronously and propagate panics to their caller.
     pub const fn with_catch_panics(mut self, catch: bool) -> Self {
         self.catch_panics = catch;
         self
@@ -519,13 +518,7 @@ pub(super) struct Shared {
 
 impl Shared {
     /// Transfer cleanup responsibility only after native thread creation succeeds.
-    fn launch(
-        self: &Arc<Self>,
-        task: Pin<Box<dyn Runnable>>,
-    ) -> Result<(), Pin<Box<dyn Runnable>>> {
-        let Some(active) = self.workers.admit() else {
-            return Err(task);
-        };
+    fn launch(self: &Arc<Self>, task: Pin<Box<dyn Runnable>>, active: ActiveWorker) {
         let payload = Launch {
             task,
             shared: self.clone(),
@@ -590,16 +583,16 @@ impl Shared {
                 .notify(Box::new("io_uring worker payload transfer failed"));
             drop(error.0);
         }
-        Ok(())
     }
 }
 
 /// Runtime capabilities and supervision context for the current task.
 ///
-/// Ordinary children target this context's origin worker. Dedicated and blocking
-/// tasks rebind their contexts before the user closure runs, so their ordinary
-/// descendants use that worker. Resources may move between workers between I/O
-/// operations. A polled operation or registered sleep stays bound to its worker.
+/// Ordinary children always target the runner's calling thread, including those
+/// spawned by dedicated and blocking tasks. Task factories run on their caller,
+/// while returned futures run on the selected worker. Resources may move between
+/// workers between I/O operations. A polled operation or registered sleep stays
+/// bound to its worker.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,
@@ -607,7 +600,7 @@ pub struct Context {
     attributes: Vec<(String, String)>,
     /// Shared services and runner-wide lifecycle state.
     shared: Arc<Shared>,
-    /// Origin for ordinary spawns, without extending worker lifetime.
+    /// Ordinary worker origin, without extending its lifetime.
     origin: Weak<Mailbox>,
     /// This context's node in the mandatory supervision tree.
     tree: Arc<Tree>,
@@ -650,23 +643,30 @@ impl crate::Spawner for Context {
         self.tree = child;
         let shared = self.shared.clone();
         let origin = self.origin.clone();
-        let future = async move {
-            // Construction belongs to the selected worker and is covered by
-            // the same panic boundary as the concrete user future's polls.
-            if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
-                let local = current().expect("dedicated task requires an io_uring worker");
-                self.origin = Arc::downgrade(&local.borrow().mailbox);
+        let active = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
+            let Some(active) = shared.workers.admit() else {
+                return Handle::closed(metric);
+            };
+            Some(active)
+        } else {
+            if !task::is_open(&origin) {
+                return Handle::closed(metric);
             }
-            f(self).await
+            None
         };
+        // User construction runs on the caller with no runtime borrow or lock.
+        // An admitted one-off remains counted through construction and launch,
+        // including when the factory unwinds or shutdown closes the registry.
+        let future = f(self);
         let (future, handle) =
             Handle::init(future, metric, shared.panicker.clone(), parent.clone());
         if let Some(aborter) = handle.aborter() {
             parent.register(aborter);
         }
         let cell = Task::boxed(future);
-        let result = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
-            shared.launch(cell)
+        let result = if let Some(active) = active {
+            shared.launch(cell, active);
+            Ok(())
         } else {
             task::register(&origin, cell)
         };
@@ -1839,33 +1839,66 @@ mod tests {
     }
 
     #[test]
-    fn execution_modes_rebind_ordinary_descendants() {
+    fn execution_modes_share_ordinary_descendants() {
         let ordinary = thread::current().id();
         Runner::new(config()).start(|context| async move {
             for mode in [
-                Execution::Shared(false),
-                Execution::Dedicated,
-                Execution::Shared(true),
+                None,
+                Some(Execution::Shared(false)),
+                Some(Execution::Dedicated),
+                Some(Execution::Shared(true)),
             ] {
                 let child = context.child("mode");
                 let child = match mode {
-                    Execution::Dedicated => child.dedicated(),
-                    Execution::Shared(blocking) => child.shared(blocking),
+                    None => child,
+                    Some(Execution::Dedicated) => child.dedicated(),
+                    Some(Execution::Shared(blocking)) => child.shared(blocking),
                 };
-                let (parent, nested) = child
-                    .spawn(|context| async move {
+                let parent = child
+                    .spawn(move |context| async move {
                         let parent = thread::current().id();
-                        let nested = context
-                            .child("ordinary_child")
-                            .spawn(|_| async { thread::current().id() })
-                            .await
-                            .unwrap();
-                        (parent, nested)
+                        for explicit in [false, true] {
+                            let child = context.child("ordinary_child");
+                            let child = if explicit { child.shared(false) } else { child };
+                            assert_eq!(
+                                child
+                                    .spawn(|_| async { thread::current().id() })
+                                    .await
+                                    .unwrap(),
+                                ordinary
+                            );
+                        }
+                        for blocking in [false, true] {
+                            let nested = context.child("one_off");
+                            let nested = if blocking {
+                                nested.shared(true)
+                            } else {
+                                nested.dedicated()
+                            };
+                            nested
+                                .spawn(move |context| async move {
+                                    assert_ne!(thread::current().id(), ordinary);
+                                    assert_ne!(thread::current().id(), parent);
+                                    assert_eq!(
+                                        context
+                                            .child("ordinary")
+                                            .spawn(|_| async { thread::current().id() })
+                                            .await
+                                            .unwrap(),
+                                        ordinary
+                                    );
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        parent
                     })
                     .await
                     .unwrap();
-                assert_eq!(parent, nested);
-                assert_eq!(parent == ordinary, matches!(mode, Execution::Shared(false)));
+                assert_eq!(
+                    parent == ordinary,
+                    matches!(mode, None | Some(Execution::Shared(false)))
+                );
             }
         });
     }
@@ -1959,17 +1992,95 @@ mod tests {
     }
 
     #[test]
-    fn closure_panics_are_caught_on_selected_workers() {
-        Runner::new(config().with_catch_panics(true)).start(|context| async move {
+    fn factories_execute_synchronously_on_the_caller() {
+        fn placed(context: Context, mode: Option<Execution>) -> Context {
+            match mode {
+                None => context,
+                Some(Execution::Dedicated) => context.dedicated(),
+                Some(Execution::Shared(blocking)) => context.shared(blocking),
+            }
+        }
+
+        let modes = [
+            None,
+            Some(Execution::Shared(false)),
+            Some(Execution::Dedicated),
+            Some(Execution::Shared(true)),
+        ];
+        for catch in [false, true] {
+            Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                for parent_mode in modes {
+                    placed(context.child("parent"), parent_mode)
+                        .spawn(move |context| async move {
+                            let caller = thread::current().id();
+                            for mode in modes {
+                                let invoked = Arc::new(AtomicBool::new(false));
+                                let observed = invoked.clone();
+                                let handle =
+                                    placed(context.child("factory"), mode).spawn(move |_| {
+                                        assert_eq!(thread::current().id(), caller);
+                                        invoked.store(true, Ordering::SeqCst);
+                                        async {}
+                                    });
+                                assert!(observed.load(Ordering::SeqCst));
+                                handle.await.unwrap();
+
+                                let result = catch_unwind(AssertUnwindSafe(|| {
+                                    placed(context.child("panic"), mode).spawn(
+                                        |_| -> std::future::Ready<()> {
+                                            panic!("task constructor failed");
+                                        },
+                                    )
+                                }));
+                                assert!(result.is_err());
+                                assert_eq!(
+                                    context
+                                        .child("sibling")
+                                        .spawn(|_| async { 7 })
+                                        .await
+                                        .unwrap(),
+                                    7
+                                );
+                            }
+                        })
+                        .await
+                        .unwrap();
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn blocking_parents_can_wait_for_ordinary_descendants() {
+        let ordinary = thread::current().id();
+        Runner::new(config()).start(|context| async move {
             for blocking in [false, true] {
-                let result = context
-                    .child("panic")
-                    .shared(blocking)
-                    .spawn(|_| -> std::future::Ready<()> {
-                        panic!("task constructor failed");
+                let parent = context.child("parent");
+                let parent = if blocking {
+                    parent.shared(true)
+                } else {
+                    parent.dedicated()
+                };
+                parent
+                    .spawn(move |context| async move {
+                        assert_ne!(thread::current().id(), ordinary);
+                        for explicit in [false, true] {
+                            let (sender, receiver) = mpsc::channel();
+                            let child = context.child("child");
+                            let child = if explicit { child.shared(false) } else { child };
+                            child.spawn(move |_| async move {
+                                sender.send(thread::current().id()).unwrap();
+                            });
+                            // The root awaits this parent asynchronously, leaving the ordinary
+                            // worker available while this dedicated thread blocks.
+                            assert_eq!(
+                                receiver.recv_timeout(Duration::from_secs(10)).unwrap(),
+                                ordinary
+                            );
+                        }
                     })
-                    .await;
-                assert!(matches!(result, Err(Error::Exited)));
+                    .await
+                    .unwrap();
             }
         });
     }
@@ -2355,3 +2466,7 @@ mod tests {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(all(test, not(feature = "loom")))]
+#[path = "admission_tests.rs"]
+mod admission_tests;

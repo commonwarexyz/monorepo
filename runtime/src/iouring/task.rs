@@ -99,6 +99,19 @@ impl ArcWake for Wake {
     }
 }
 
+/// Check admission before constructing a task, without reserving publication.
+pub(super) fn is_open(mailbox: &Weak<Mailbox>) -> bool {
+    if let Some(local) = runtime::current() {
+        let state = local.borrow();
+        if std::ptr::eq(Arc::as_ptr(&state.mailbox), mailbox.as_ptr()) {
+            return !state.closing;
+        }
+    }
+    // Foreign construction may race closure. Registration checks again after
+    // the factory returns, with no borrow or lock held while it runs.
+    mailbox.upgrade().is_some_and(|mailbox| mailbox.is_open())
+}
+
 /// Register on the origin worker, using direct insertion for a local spawn.
 ///
 /// The caller owns rejected task destruction and runs it outside all borrows.
