@@ -2728,6 +2728,20 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         let Artifact::Vqc(certificate) = artifact.as_ref() else {
             return Err(ViewError::Certificate);
         };
+        // A retained Arc owns the validation of this exact immutable certificate. Other
+        // allocations, including decoded copies, must establish their own validity.
+        if let Some(ids) = self.parents_by_view.get(&certificate.view()) {
+            for id in ids {
+                let parent = &self.parents[id];
+                if parent
+                    .certificate
+                    .as_ref()
+                    .is_some_and(|retained| Arc::ptr_eq(retained, artifact))
+                {
+                    return Ok(*id);
+                }
+            }
+        }
         let validated = validate_vqc::<H, V, D>(certificate, profile.protocol().codec_config())
             .map_err(|_| ViewError::Certificate)?;
         self.retain_validated_vqc_parent(artifact, validated)

@@ -9546,7 +9546,7 @@ fn vqc_parent_hashes_each_large_value_once() {
     let mut views = ViewState::new(&profile);
 
     HASH_CALLS.store(0, Ordering::Relaxed);
-    views
+    let id = views
         .retain_vqc_parent::<CountingHasher>(&parent, &profile)
         .unwrap();
     assert_eq!(
@@ -9554,6 +9554,56 @@ fn vqc_parent_hashes_each_large_value_once() {
         2,
         "parent retention should hash the certificate and leader exactly once each"
     );
+
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    assert_eq!(
+        views
+            .retain_vqc_parent::<CountingHasher>(&Arc::clone(&parent), &profile)
+            .unwrap(),
+        id
+    );
+    assert_eq!(HASH_CALLS.load(Ordering::Relaxed), 0);
+
+    let decoded = Arc::new(
+        Artifact::decode_cfg(
+            parent.encode(),
+            &DomainEventCodecConfig::from_profile(&profile),
+        )
+        .unwrap(),
+    );
+    assert_eq!(decoded, parent);
+    assert!(!Arc::ptr_eq(&decoded, &parent));
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    assert_eq!(
+        views
+            .retain_vqc_parent::<CountingHasher>(&decoded, &profile)
+            .unwrap(),
+        id
+    );
+    assert_eq!(HASH_CALLS.load(Ordering::Relaxed), 2);
+
+    assert_eq!(views.retire_parents_through(View::new(2), None), [id]);
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    assert_eq!(
+        views
+            .retain_vqc_parent::<CountingHasher>(&parent, &profile)
+            .unwrap(),
+        id
+    );
+    assert_eq!(HASH_CALLS.load(Ordering::Relaxed), 2);
+
+    let proposed = leader(&machine, 1);
+    let messages = (0..5)
+        .map(|signer| ViewMessage::Vote(view_vote(&machine, &proposed, signer)))
+        .collect::<Vec<_>>();
+    let other = Arc::new(Artifact::Vqc(vqc(&machine, proposed, &messages)));
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    let other_id = views
+        .retain_vqc_parent::<CountingHasher>(&other, &profile)
+        .unwrap();
+    assert_ne!(other_id, id);
+    assert_eq!(HASH_CALLS.load(Ordering::Relaxed), 2);
+    assert_eq!(views.retained_parents(), 3);
 }
 
 #[test]
@@ -9599,6 +9649,14 @@ fn verified_vqc_reuses_validation_derivations() {
         HASH_CALLS.load(Ordering::Relaxed),
         0,
         "ready V-QC observation should reuse off-thread validation derivations"
+    );
+    views
+        .retain_vqc_parent::<CountingHasher>(&parent, &profile)
+        .unwrap();
+    assert_eq!(
+        HASH_CALLS.load(Ordering::Relaxed),
+        0,
+        "anchor installation should reuse the observed certificate's validated parent"
     );
 }
 
