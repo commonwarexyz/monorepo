@@ -415,8 +415,8 @@ where
     ///
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::InvalidRewind`] if `size` is 0
     ///   or exceeds the current committed size.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if the operation at
-    ///   `size - 1` or any operation at or above the target's inactivity floor has been pruned.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any operation at
+    ///   or above the inactivity floor recorded by the commit at `size - 1` has been pruned.
     /// - Returns [`Error::UnexpectedData`] if the operation at `size - 1` is not a commit.
     ///
     /// Any error from this method is fatal for this handle. Rewind may mutate journal state
@@ -452,6 +452,7 @@ where
             let Operation::Commit(_, floor) = rewind_last_op else {
                 return Err(Error::UnexpectedData(rewind_last_loc));
             };
+
             // The target's active range starts at its floor, so every operation from the floor
             // onward must still be retained for the rewound state to serve reads and proofs.
             if *floor < bounds.start {
@@ -2572,45 +2573,6 @@ pub(crate) mod tests {
         assert_eq!(db.last_commit_loc(), commit_b);
         assert_eq!(db.inactivity_floor_loc(), floor_b);
         db.destroy().await.unwrap();
-    }
-
-    /// Reopening rejects a journal whose last commit declares a floor below the oldest retained
-    /// operation, since that state can never serve its active range.
-    #[boxed]
-    pub(crate) async fn run_init_rejects_pruned_floor<F: Family, V, C, H, S: Strategy>(
-        context: deterministic::Context,
-        db: TestKeyless<F, V, C, H, S>,
-        init: impl Fn(
-            deterministic::Context,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<TestKeyless<F, V, C, H, S>, Error<F>>> + Send>,
-        >,
-    ) where
-        V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
-        H: Hasher,
-        Operation<F, V>: EncodeShared,
-    {
-        // Retain only a suffix of the log.
-        let (db, _) = commit_appends(db, (0..16).map(V::Value::make), None).await;
-        let last_commit = db.last_commit_loc();
-        let mut db = db.prune(last_commit).await.unwrap();
-        assert!(db.bounds().start > Location::new(0));
-
-        // Persist a commit whose floor precedes the retained history, bypassing batch validation.
-        (db.journal, _) = db
-            .journal
-            .append(&Operation::Commit(None, Location::new(0)))
-            .await
-            .unwrap();
-        db.journal = db.journal.sync().await.unwrap();
-        drop(db);
-
-        let err = init(context.child("reopen")).await.unwrap_err();
-        assert!(
-            matches!(err, Error::DataCorrupted(_)),
-            "unexpected init error: {err:?}"
-        );
     }
 
     #[boxed]

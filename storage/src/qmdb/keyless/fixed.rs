@@ -157,21 +157,6 @@ mod tests {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
 
-    /// The init check is journal-agnostic, so one cell covers it.
-    #[test_traced]
-    fn test_keyless_fixed_init_rejects_pruned_floor() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.child("db")).await;
-            tests::run_init_rejects_pruned_floor(ctx, db, |ctx| {
-                Box::pin(async move {
-                    let cfg = db_config("partition", &ctx, Sequential);
-                    TestDb::<mmr::Family>::init(ctx, cfg).await
-                })
-            })
-            .await;
-        });
-    }
-
     /// A keyless db over a delayed-sync storage backend.
     type DelayedDb =
         Db<mmr::Family, DelayedSyncContext<deterministic::Context>, U64, Sha256, Sequential>;
@@ -217,6 +202,48 @@ mod tests {
             .await;
         let (db, range) = db.apply_batch(batch).await.unwrap();
         (db, range.start)
+    }
+
+    /// Reopening rejects a journal whose last commit declares a floor below the oldest retained
+    /// operation, since that state can never serve its active range. The check is journal agnostic,
+    /// so we test this only with one variant (fixed + mmr).
+    #[test_traced]
+    fn test_keyless_fixed_init_rejects_pruned_floor() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db_with_suffix::<mmr::Family>("init-floor", ctx.child("db")).await;
+
+            // Retain only a suffix of the log.
+            let mut batch = db.new_batch();
+            for i in 0..16 {
+                batch = batch.append(U64::new(i));
+            }
+            let commit_loc = Location::new(*db.bounds().end + 16);
+            let merkleized = batch.merkleize(&db, None, commit_loc).await;
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let last_commit = db.last_commit_loc();
+            let mut db = db.prune(last_commit).await.unwrap();
+            assert!(db.bounds().start > Location::new(0));
+
+            // Persist a commit whose floor precedes the retained history, bypassing batch
+            // validation.
+            (db.journal, _) = db
+                .journal
+                .append(&Operation::Commit(None, Location::new(0)))
+                .await
+                .unwrap();
+            db.journal = db.journal.sync().await.unwrap();
+            drop(db);
+
+            let cfg = db_config("init-floor", &ctx, Sequential);
+            let err = TestDb::<mmr::Family>::init(ctx.child("reopen"), cfg)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::DataCorrupted(_)),
+                "unexpected init error: {err:?}"
+            );
+        });
     }
 
     /// A sync handle must not block database use while the backend sync is pending.
