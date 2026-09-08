@@ -1464,11 +1464,11 @@ where
                     .map_into(|(annotation, _)| annotation)
                     .into_vec();
 
-                // Any `Finalized` or `Certified` subscriber authenticates the shared commitment
+                // Any `Certified` or `Finalized` subscriber authenticates the shared commitment
                 let expected = if annotations.iter().any(|annotation| {
                     matches!(
                         annotation,
-                        Annotation::Finalized(_) | Annotation::Certified { .. }
+                        Annotation::Certified { .. } | Annotation::Finalized(_)
                     )
                 }) {
                     ExpectedCommitment::Trusted(commitment)

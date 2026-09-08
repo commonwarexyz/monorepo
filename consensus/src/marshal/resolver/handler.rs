@@ -336,9 +336,9 @@ impl<D: Digest> Request<D> {
 
     pub(crate) fn above_height_floor(&self, floor: Height) -> bool {
         match self.kind {
-            RequestKind::Finalized { height }
-            | RequestKind::Untrusted { height, .. }
+            RequestKind::Untrusted { height, .. }
             | RequestKind::Certified { height, .. }
+            | RequestKind::Finalized { height }
             | RequestKind::FinalizedByHeight { height, .. } => height > floor,
             RequestKind::Notarized { .. } | RequestKind::FinalizedByRound { .. } => true,
         }
@@ -349,9 +349,9 @@ impl<D: Digest> Request<D> {
             RequestKind::Notarized { round } | RequestKind::FinalizedByRound { round, .. } => {
                 round > floor
             }
-            RequestKind::Finalized { .. }
-            | RequestKind::Untrusted { .. }
+            RequestKind::Untrusted { .. }
             | RequestKind::Certified { .. }
+            | RequestKind::Finalized { .. }
             | RequestKind::FinalizedByHeight { .. } => true,
         }
     }

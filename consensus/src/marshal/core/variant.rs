@@ -34,7 +34,7 @@ pub struct Retirement<C> {
 /// A block commitment and the evidence available when decoding it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExpectedCommitment<C> {
-    /// A finalized or locally certified block commitment, or an ancestor's.
+    /// A locally certified or finalized block commitment, or an ancestor's.
     ///
     /// Decoding may reuse commitment material. Notarization alone is insufficient.
     Trusted(C),
