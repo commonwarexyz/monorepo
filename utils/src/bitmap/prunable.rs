@@ -1,8 +1,8 @@
 //! A prunable wrapper around BitMap that tracks pruned chunks.
 
 use super::BitMap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
 use thiserror::Error;
 
 /// Errors that can occur when working with a prunable bitmap.
@@ -412,7 +412,7 @@ impl<const N: usize> Read for Prunable<N> {
     // Max length for the unpruned portion of the bitmap.
     type Cfg = u64;
 
-    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
         let pruned_chunks_u64 = u64::read(buf)?;
 
         // Validate that pruned_chunks * CHUNK_SIZE_BITS doesn't overflow u64
@@ -1001,9 +1001,9 @@ mod tests {
     #[test]
     fn test_write_read_empty() {
         let original: Prunable<4> = Prunable::new();
-        let encoded = original.encode();
+        let mut encoded = original.encode();
 
-        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded, &u64::MAX).unwrap();
         assert_eq!(decoded.len(), original.len());
         assert_eq!(decoded.pruned_chunks(), original.pruned_chunks());
         assert!(decoded.is_empty());
@@ -1018,8 +1018,8 @@ mod tests {
         original.push(false);
         original.push(true);
 
-        let encoded = original.encode();
-        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+        let mut encoded = original.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded, &u64::MAX).unwrap();
 
         assert_eq!(decoded.len(), original.len());
         assert_eq!(decoded.pruned_chunks(), original.pruned_chunks());
@@ -1043,8 +1043,8 @@ mod tests {
         assert_eq!(original.pruned_chunks(), 1);
         assert_eq!(original.len(), 96);
 
-        let encoded = original.encode();
-        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+        let mut encoded = original.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded, &u64::MAX).unwrap();
 
         assert_eq!(decoded.len(), original.len());
         assert_eq!(decoded.pruned_chunks(), original.pruned_chunks());
@@ -1076,8 +1076,8 @@ mod tests {
         assert_eq!(original.pruned_chunks(), 3);
         assert_eq!(original.len(), 160);
 
-        let encoded = original.encode();
-        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX).unwrap();
+        let mut encoded = original.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded, &u64::MAX).unwrap();
 
         assert_eq!(decoded.len(), original.len());
         assert_eq!(decoded.pruned_chunks(), 3);
@@ -1123,13 +1123,13 @@ mod tests {
             original.push(true);
         }
 
-        let encoded = original.encode();
+        let mut encoded = original.encode();
 
         // Should succeed with sufficient max_len
-        assert!(Prunable::<4>::read_cfg(&mut encoded.as_ref(), &100).is_ok());
+        assert!(Prunable::<4>::read_cfg(&mut encoded.clone(), &100).is_ok());
 
         // Should fail with insufficient max_len
-        let result = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &5);
+        let result = Prunable::<4>::read_cfg(&mut encoded, &5);
         assert!(result.is_err());
     }
 
@@ -1148,16 +1148,16 @@ mod tests {
         }
 
         // Roundtrip each
-        let encoded8 = p8.encode();
-        let decoded8 = Prunable::<8>::read_cfg(&mut encoded8.as_ref(), &u64::MAX).unwrap();
+        let mut encoded8 = p8.encode();
+        let decoded8 = Prunable::<8>::read_cfg(&mut encoded8, &u64::MAX).unwrap();
         assert_eq!(decoded8.len(), p8.len());
 
-        let encoded16 = p16.encode();
-        let decoded16 = Prunable::<16>::read_cfg(&mut encoded16.as_ref(), &u64::MAX).unwrap();
+        let mut encoded16 = p16.encode();
+        let decoded16 = Prunable::<16>::read_cfg(&mut encoded16, &u64::MAX).unwrap();
         assert_eq!(decoded16.len(), p16.len());
 
-        let encoded32 = p32.encode();
-        let decoded32 = Prunable::<32>::read_cfg(&mut encoded32.as_ref(), &u64::MAX).unwrap();
+        let mut encoded32 = p32.encode();
+        let decoded32 = Prunable::<32>::read_cfg(&mut encoded32, &u64::MAX).unwrap();
         assert_eq!(decoded32.len(), p32.len());
     }
 
@@ -1173,7 +1173,7 @@ mod tests {
         0u64.write(&mut buf); // len = 0
 
         // Try to read - should fail with overflow error
-        let result = Prunable::<4>::read_cfg(&mut buf.as_ref(), &u64::MAX);
+        let result = Prunable::<4>::read_cfg(&mut buf, &u64::MAX);
         match result {
             Err(CodecError::Invalid(type_name, msg)) => {
                 assert_eq!(type_name, "Prunable");
@@ -1210,7 +1210,7 @@ mod tests {
         }
 
         // Try to read - should fail because pruned_bits + bitmap_len overflows u64
-        let result = Prunable::<4>::read_cfg(&mut buf.as_ref(), &u64::MAX);
+        let result = Prunable::<4>::read_cfg(&mut buf, &u64::MAX);
         match result {
             Err(CodecError::Invalid(type_name, msg)) => {
                 assert_eq!(type_name, "Prunable");
@@ -1502,8 +1502,8 @@ mod tests {
         p.extend_to(35);
         p.set_chunk_by_index(1, &[0b0000_0101, 0, 0, 0]);
 
-        let encoded = p.encode();
-        let decoded = Prunable::<4>::read_cfg(&mut encoded.as_ref(), &u64::MAX)
+        let mut encoded = p.encode();
+        let decoded = Prunable::<4>::read_cfg(&mut encoded, &u64::MAX)
             .expect("valid chunk should round-trip");
         assert_eq!(decoded.len(), 35);
         assert_eq!(decoded.get_chunk(1), &[0b0000_0101, 0, 0, 0]);

@@ -19,13 +19,13 @@
 //!   endian ambiguity.
 
 use crate::{
-    BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
+    BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadBuf, ReadExt, Write,
     util::{at_least, at_least_items, read_fixed_vec},
     varint::UInt,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 #[cfg(feature = "std")]
 use std::vec::Vec;
@@ -43,7 +43,7 @@ macro_rules! impl_numeric {
         impl Read for $type {
             type Cfg = ();
             #[inline]
-            fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
                 at_least(buf, core::mem::size_of::<$type>())?;
                 Ok(buf.$read_method())
             }
@@ -51,7 +51,7 @@ macro_rules! impl_numeric {
             // Since the upfront size check guarantees the buffer contains every requested
             // value, elements are read directly without per-element bounds checks.
             #[inline]
-            fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
+            fn read_vec(buf: &mut impl ReadBuf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
                 at_least_items(buf, len, Self::SIZE)?;
                 let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
@@ -61,7 +61,10 @@ macro_rules! impl_numeric {
             }
 
             #[inline]
-            fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
+            fn read_array<const N: usize>(
+                buf: &mut impl ReadBuf,
+                _: &(),
+            ) -> Result<[Self; N], Error> {
                 at_least_items(buf, N, Self::SIZE)?;
                 Ok(core::array::from_fn(|_| buf.$read_method()))
             }
@@ -106,13 +109,13 @@ impl Read for u8 {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         at_least(buf, 1)?;
         Ok(buf.get_u8())
     }
 
     #[inline]
-    fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
+    fn read_vec(buf: &mut impl ReadBuf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
         at_least(buf, len)?;
         let mut values = vec![0; len];
         buf.copy_to_slice(&mut values);
@@ -120,7 +123,7 @@ impl Read for u8 {
     }
 
     #[inline]
-    fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
+    fn read_array<const N: usize>(buf: &mut impl ReadBuf, _: &()) -> Result<[Self; N], Error> {
         at_least(buf, N)?;
         let mut values = [0; N];
         buf.copy_to_slice(&mut values);
@@ -144,13 +147,13 @@ macro_rules! impl_nonzero {
         impl Read for $nz {
             type Cfg = ();
             #[inline]
-            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl ReadBuf, cfg: &()) -> Result<Self, Error> {
                 let v = <$inner>::read_cfg(buf, cfg)?;
                 <$nz>::new(v).ok_or(Error::Invalid($name, "value must not be zero"))
             }
 
             #[inline]
-            fn read_vec(buf: &mut impl Buf, len: usize, cfg: &()) -> Result<Vec<Self>, Error> {
+            fn read_vec(buf: &mut impl ReadBuf, len: usize, cfg: &()) -> Result<Vec<Self>, Error> {
                 read_fixed_vec(buf, len, cfg)
             }
         }
@@ -178,7 +181,7 @@ impl Read for usize {
     type Cfg = RangeCfg<Self>;
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
         let self_as_u32: u32 = UInt::read(buf)?.into();
         let result = Self::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
         if !range.contains(&result) {
@@ -208,7 +211,7 @@ impl Write for bool {
 impl Read for bool {
     type Cfg = ();
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         match u8::read(buf)? {
             0 => Ok(false),
             1 => Ok(true),
@@ -242,7 +245,7 @@ impl<T: Read, const N: usize> Read for [T; N] {
     type Cfg = T::Cfg;
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
         T::read_array(buf, cfg)
     }
 }
@@ -287,7 +290,7 @@ impl<T: Read> Read for Option<T> {
     type Cfg = T::Cfg;
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
         if bool::read(buf)? {
             Ok(Some(T::read_cfg(buf, cfg)?))
         } else {
@@ -302,7 +305,7 @@ mod tests {
         super::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
         *,
     };
-    use crate::{CodecFixed, Decode, DecodeExt, Encode, EncodeFixed};
+    use crate::{CodecFixed, Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use bytes::{Buf, Bytes, BytesMut};
     use paste::paste;
 
@@ -362,7 +365,7 @@ mod tests {
     #[test]
     fn test_numeric_read_vec_bounds() {
         // A length whose byte size exceeds the buffer fails before decoding any elements.
-        let mut buf = [0u8; 8].as_slice();
+        let mut buf = Copying([0u8; 8].as_slice());
         assert!(matches!(
             u64::read_vec(&mut buf, 2, &()),
             Err(Error::EndOfBuffer)
@@ -370,28 +373,28 @@ mod tests {
         assert_eq!(buf.remaining(), 8);
 
         // A length whose byte size overflows usize fails the same way.
-        let mut buf = [0u8; 8].as_slice();
+        let mut buf = Copying([0u8; 8].as_slice());
         assert!(matches!(
             u64::read_vec(&mut buf, usize::MAX, &()),
             Err(Error::EndOfBuffer)
         ));
 
         // A valid read decodes big-endian values and consumes the exact bytes.
-        let mut buf = [0x00, 0x01, 0x00, 0x02, 0x00, 0x03].as_slice();
+        let mut buf = Copying([0x00, 0x01, 0x00, 0x02, 0x00, 0x03].as_slice());
         assert_eq!(u16::read_vec(&mut buf, 2, &()).unwrap(), vec![1u16, 2]);
         assert_eq!(buf.remaining(), 2);
     }
 
     #[test]
     fn test_numeric_read_array_bounds() {
-        let mut buf = [0u8; 8].as_slice();
+        let mut buf = Copying([0u8; 8].as_slice());
         assert!(matches!(
             u64::read_array::<2>(&mut buf, &()),
             Err(Error::EndOfBuffer)
         ));
         assert_eq!(buf.remaining(), 8);
 
-        let mut buf = [0x00, 0x01, 0x00, 0x02].as_slice();
+        let mut buf = Copying([0x00, 0x01, 0x00, 0x02].as_slice());
         assert_eq!(u16::read_array::<2>(&mut buf, &()).unwrap(), [1u16, 2]);
         assert_eq!(buf.remaining(), 0);
     }
@@ -399,7 +402,7 @@ mod tests {
     #[test]
     fn test_nonzero_read_vec_bounds() {
         // The upfront size check rejects a length larger than the buffer.
-        let mut buf = [0u8; 4].as_slice();
+        let mut buf = Copying([0u8; 4].as_slice());
         assert!(matches!(
             NonZeroU32::read_vec(&mut buf, 2, &()),
             Err(Error::EndOfBuffer)
@@ -407,14 +410,14 @@ mod tests {
         assert_eq!(buf.remaining(), 4);
 
         // Per-element validation still runs after the size check.
-        let mut buf = [0u8; 4].as_slice();
+        let mut buf = Copying([0u8; 4].as_slice());
         assert!(matches!(
             NonZeroU32::read_vec(&mut buf, 1, &()),
             Err(Error::Invalid("NonZeroU32", _))
         ));
 
         // A valid read decodes all values.
-        let mut buf = [0, 0, 0, 1, 0, 0, 0, 2].as_slice();
+        let mut buf = Copying([0, 0, 0, 1, 0, 0, 0, 2].as_slice());
         assert_eq!(
             NonZeroU32::read_vec(&mut buf, 2, &()).unwrap(),
             vec![NonZeroU32::new(1).unwrap(), NonZeroU32::new(2).unwrap()]
@@ -476,11 +479,11 @@ mod tests {
 
         // Fixed-size array decoding must reject both truncated payloads and trailing data.
         assert!(matches!(
-            <[u8; 3]>::decode([0x01, 0x02].as_slice()),
+            <[u8; 3]>::decode(Copying([0x01, 0x02].as_slice())),
             Err(Error::EndOfBuffer)
         ));
         assert!(matches!(
-            <[u8; 3]>::decode([0x01, 0x02, 0x03, 0x04].as_slice()),
+            <[u8; 3]>::decode(Copying([0x01, 0x02, 0x03, 0x04].as_slice())),
             Err(Error::ExtraData(1))
         ));
 

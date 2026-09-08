@@ -7,7 +7,7 @@ use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{
-    EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
+    EncodeSize, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write,
     varint::{MAX_U64_VARINT_SIZE, UInt},
 };
 use commonware_math::algebra::Random;
@@ -536,7 +536,7 @@ impl Write for Summary {
 impl Read for Summary {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             hash: blake3::Hash::from_bytes(ReadExt::read(buf)?),
         })

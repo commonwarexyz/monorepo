@@ -1,6 +1,6 @@
 use crate::types::Height;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Codec, EncodeSize, Error, Read, ReadBuf, ReadExt, Write, varint::UInt};
 use commonware_cryptography::{Digest, Digestible, Hasher};
 use std::fmt::Debug;
 
@@ -68,7 +68,7 @@ impl<H: Hasher> Write for EmptyBlock<H> {
 impl<H: Hasher> Read for EmptyBlock<H> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, Error> {
         let parent = H::Digest::read(reader)?;
         let height = Height::read(reader)?;
         let timestamp = UInt::read(reader)?.into();
@@ -185,7 +185,7 @@ impl<D: Digest, C: Write> Write for Block<D, C> {
 impl<D: Digest, C: Read<Cfg = ()>> Read for Block<D, C> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, Error> {
         let context = C::read(reader)?;
         let parent = D::read(reader)?;
         let height = Height::read(reader)?;

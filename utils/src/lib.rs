@@ -57,9 +57,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod probability;
     pub use probability::Probability;
     pub mod range;
-
-    use bytes::Buf;
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt};
+    use commonware_codec::{ReadBuf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt};
 
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///
@@ -112,7 +110,7 @@ commonware_macros::stability_scope!(BETA {
     impl Read for Participant {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
             let value: u32 = UInt::read(buf)?.into();
             Ok(Self(value))
         }

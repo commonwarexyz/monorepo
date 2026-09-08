@@ -201,8 +201,8 @@ mod tests {
         marshal::{coding::types::StoredCodedBlock, mocks::block::Block},
         types::{Epoch, Height, View},
     };
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, Error, Read, Write};
+    use bytes::BufMut;
+    use commonware_codec::{EncodeSize, Error, Read, ReadBuf, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Digest as _, Digestible, Signer as _,
@@ -236,7 +236,7 @@ mod tests {
     impl Read for NoCloneBlock {
         type Cfg = ();
 
-        fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
             Ok(Self {
                 inner: InnerBlock::read_cfg(reader, cfg)?,
             })

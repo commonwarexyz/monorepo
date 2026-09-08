@@ -2,9 +2,9 @@ use crate::{
     merkle::{Family, Location},
     qmdb::sync::error::EngineError,
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::{non_empty_range, range::NonEmptyRange};
 
 /// Target state to sync to.
@@ -70,7 +70,7 @@ impl<F: Family, D: Digest> EncodeSize for Target<F, D> {
 impl<F: Family, D: Digest> Read for Target<F, D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
         let range = NonEmptyRange::<Location<F>>::read(buf)?;
         if !range.start().is_valid() || !range.end().is_valid() {
@@ -161,7 +161,7 @@ impl<F: Family, D: Digest> EncodeSize for CompactTarget<F, D> {
 impl<F: Family, D: Digest> Read for CompactTarget<F, D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
         let size = Location::<F>::read(buf)?;
         if !size.is_valid() || size == 0 {
@@ -193,10 +193,10 @@ where
 mod tests {
     use super::*;
     use crate::merkle::mmr::Family as MmrFamily;
+    use bytes::Bytes;
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::sha256;
     use commonware_utils::non_empty_range;
-    use std::io::Cursor;
 
     fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
         Target::new(
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(buffer.len(), target.encode_size());
 
         // Deserialize
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         let deserialized = Target::read(&mut cursor).unwrap();
 
         // Verify
@@ -234,7 +234,7 @@ mod tests {
         Location::<MmrFamily>::new(100).write(&mut buffer); // start
         Location::<MmrFamily>::new(50).write(&mut buffer); // end (< start = invalid)
 
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         assert!(matches!(
             Target::<MmrFamily, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
@@ -247,7 +247,7 @@ mod tests {
         Location::<MmrFamily>::new(100).write(&mut buffer);
         Location::<MmrFamily>::new(100).write(&mut buffer);
 
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         assert!(matches!(
             Target::<MmrFamily, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
@@ -299,7 +299,7 @@ mod tests {
         target.write(&mut buffer);
         assert_eq!(buffer.len(), target.encode_size());
 
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         let deserialized = CompactTarget::read(&mut cursor).unwrap();
         assert_eq!(target, deserialized);
         assert_eq!(target.root, deserialized.root);
@@ -312,7 +312,7 @@ mod tests {
         sha256::Digest::from([42; 32]).write(&mut buffer);
         Location::<MmrFamily>::new(*MmrFamily::MAX_LEAVES + 1).write(&mut buffer);
 
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         assert!(matches!(
             CompactTarget::<MmrFamily, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid(_, _))

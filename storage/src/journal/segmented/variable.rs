@@ -88,14 +88,13 @@ use crate::journal::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use std::{
     collections::{BTreeSet, VecDeque},
-    io::Cursor,
     num::NonZeroUsize,
 };
 use tracing::{trace, warn};
@@ -270,7 +269,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         if !blob.try_read_sync_into(&mut header[..header_len], offset) {
             return None;
         }
-        let mut cursor = Cursor::new(&header[..header_len]);
+        let mut cursor = Copying(&header[..header_len]);
         let (_, frame_info) = find_frame(&mut cursor, offset).ok()?;
         let (varint_len, data_len) = match frame_info {
             FrameInfo::Complete {
@@ -292,7 +291,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         let compressed = self.compression.is_some();
         if item_len <= header_len {
             return decode_item::<V>(
-                &header[varint_len..varint_len + data_len],
+                Copying(&header[varint_len..varint_len + data_len]),
                 &self.codec_config,
                 compressed,
             )

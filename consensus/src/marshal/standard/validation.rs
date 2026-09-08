@@ -234,8 +234,8 @@ where
 mod tests {
     use super::*;
     use crate::types::Height;
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use bytes::BufMut;
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
     use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,7 +262,7 @@ mod tests {
     impl Read for TestBlock {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
             let digest = Sha256Digest::read(buf)?;
             let parent = Sha256Digest::read(buf)?;
             let height = Height::read(buf)?;

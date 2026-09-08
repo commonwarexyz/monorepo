@@ -19,8 +19,8 @@
 //! distributes).
 
 use crate::dkg::{SecretStore, network::Directory, types::EpochInfo};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
@@ -98,7 +98,7 @@ impl<V: Variant, P: PublicKey> Write for Event<V, P> {
 impl<V: Variant, P: PublicKey> Read for Event<V, P> {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Self::Dealing(
                 ReadExt::read(reader)?,
@@ -724,7 +724,7 @@ mod tests {
 
     fn summary(seed: u8) -> Summary {
         let bytes = [seed; Summary::SIZE];
-        Summary::read(&mut bytes.as_ref()).expect("valid summary")
+        Summary::read(&mut commonware_codec::Copying(&bytes)).expect("valid summary")
     }
 
     fn output(seed: u64) -> Output<MinPk, PublicKey> {

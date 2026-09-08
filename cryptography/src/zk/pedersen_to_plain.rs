@@ -97,8 +97,8 @@
 //! ```
 
 use crate::transcript::Transcript;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Encode, EncodeSize, Error, Read, ReadBuf, Write};
 use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space},
     synthetic::Synthetic,
@@ -136,7 +136,7 @@ where
 {
     type Cfg = G::Cfg;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             value_generator: G::read_cfg(buf, cfg)?,
             blinding_generator: G::read_cfg(buf, cfg)?,
@@ -201,7 +201,7 @@ where
 {
     type Cfg = G::Cfg;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             plain: G::read_cfg(buf, cfg)?,
             pedersen: G::read_cfg(buf, cfg)?,
@@ -256,7 +256,7 @@ where
 {
     type Cfg = (G::Cfg, F::Cfg);
 
-    fn read_cfg(buf: &mut impl Buf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             plain_mask: G::read_cfg(buf, g_cfg)?,
             pedersen_mask: G::read_cfg(buf, g_cfg)?,

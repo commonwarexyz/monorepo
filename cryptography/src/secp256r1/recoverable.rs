@@ -9,8 +9,8 @@ use super::common::{
     CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
     impl_private_key_wrapper, impl_public_key_wrapper,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_utils::{Array, Span, union_unique};
 use core::{
@@ -149,7 +149,7 @@ impl Write for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let recovery_id = RecoveryId::from_byte(raw[0])
             .ok_or_else(|| CodecError::Invalid(CURVE_NAME, "RecoveryId out of range"))?;
@@ -245,8 +245,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 mod tests {
     use super::*;
     use crate::{Recoverable, Signer as _, Verifier as _, secp256r1::common::tests::*};
-    use bytes::Bytes;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode};
     use ecdsa::RecoveryId;
     use p256::elliptic_curve::scalar::IsHigh;
     use rstest::rstest;
@@ -354,7 +353,7 @@ mod tests {
     #[test]
     fn test_codec_signature_invalid() {
         let (_, sig, ..) = vector_sig_verification_5();
-        let result = Signature::decode(Bytes::from(sig));
+        let result = Signature::decode(sig);
         assert!(result.is_err());
     }
 
@@ -364,8 +363,7 @@ mod tests {
             commonware_formatting::from_hex(
                 "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464",
             )
-            .unwrap()
-            .as_ref(),
+            .unwrap(),
         )
         .unwrap();
         let public_key: PublicKey = private_key.clone().into();
@@ -382,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_decode_zero_signature_fails() {
-        let result = Signature::decode(vec![0u8; SIGNATURE_LENGTH].as_ref());
+        let result = Signature::decode(vec![0u8; SIGNATURE_LENGTH]);
         assert!(result.is_err());
     }
 
@@ -394,7 +392,7 @@ mod tests {
         let signature = private_key.sign(NAMESPACE, message);
         let mut bad_signature = signature.to_vec();
         bad_signature[33] |= 0x80;
-        assert!(Signature::decode(bad_signature.as_ref()).is_err());
+        assert!(Signature::decode(bad_signature).is_err());
     }
 
     #[test]
@@ -408,7 +406,7 @@ mod tests {
             *b = 0x00;
         }
         bad_signature[33] = 1;
-        assert!(Signature::decode(bad_signature.as_ref()).is_err());
+        assert!(Signature::decode(bad_signature).is_err());
     }
 
     #[test]
@@ -417,8 +415,7 @@ mod tests {
             commonware_formatting::from_hex(
                 "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721",
             )
-            .unwrap()
-            .as_ref(),
+            .unwrap(),
         )
         .unwrap();
 
@@ -464,16 +461,16 @@ mod tests {
         let qy_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
 
         let uncompressed_public_key = parse_public_key_as_uncompressed_vector(qx_hex, qy_hex);
-        let public_key = PublicKey::decode(uncompressed_public_key.as_ref());
+        let public_key = PublicKey::decode(uncompressed_public_key);
         assert!(matches!(public_key, Err(CodecError::Invalid(_, _))));
 
         let mut compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
         compressed_public_key.push(0u8);
-        let public_key = PublicKey::decode(compressed_public_key.as_ref());
+        let public_key = PublicKey::decode(compressed_public_key);
         assert!(matches!(public_key, Err(CodecError::ExtraData(1))));
 
         let compressed_public_key = parse_public_key_as_compressed_vector(qx_hex, qy_hex);
-        let public_key = PublicKey::decode(compressed_public_key.as_ref());
+        let public_key = PublicKey::decode(compressed_public_key);
         assert!(public_key.is_ok());
     }
 
@@ -483,8 +480,7 @@ mod tests {
             commonware_formatting::from_hex(
                 "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
             )
-            .unwrap()
-            .as_ref(),
+            .unwrap(),
         )
         .unwrap();
         let message = b"sample";
@@ -492,7 +488,7 @@ mod tests {
         let mut signature = signature.to_vec();
         signature[1..33].fill(0);
 
-        assert!(Signature::decode(signature.as_ref()).is_err());
+        assert!(Signature::decode(signature).is_err());
     }
 
     #[test]
@@ -501,8 +497,7 @@ mod tests {
             commonware_formatting::from_hex(
                 "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
             )
-            .unwrap()
-            .as_ref(),
+            .unwrap(),
         )
         .unwrap();
         let message = b"sample";
@@ -510,7 +505,7 @@ mod tests {
         let mut signature = signature.to_vec();
         signature[33..].fill(0);
 
-        assert!(Signature::decode(signature.as_ref()).is_err());
+        assert!(Signature::decode(signature).is_err());
     }
 
     #[rstest]
@@ -547,7 +542,7 @@ mod tests {
         #[case] n: usize,
         #[case] (public_key, exp_valid): (Vec<u8>, bool),
     ) {
-        let res = PublicKey::decode(public_key.as_ref());
+        let res = PublicKey::decode(public_key);
         assert_eq!(exp_valid, res.is_ok(), "vector_public_key_validation_{n}");
     }
 
@@ -663,8 +658,8 @@ mod tests {
         let expected = if expected {
             let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig[1..]).unwrap();
             if ecdsa_signature.s().is_high().into() {
-                assert!(Signature::decode(sig.as_ref()).is_err());
-                assert!(Signature::decode(Bytes::from(sig)).is_err());
+                assert!(Signature::decode(Copying(sig.as_ref())).is_err());
+                assert!(Signature::decode(sig).is_err());
 
                 ecdsa_signature = ecdsa_signature.normalize_s();
             }
@@ -674,8 +669,8 @@ mod tests {
             let signature = Signature::new(ecdsa_signature, recovery_id);
             public_key.verify_inner(None, &message, &signature)
         } else {
-            let tf_res = Signature::decode(sig.as_ref());
-            let dc_res = Signature::decode(Bytes::from(sig));
+            let tf_res = Signature::decode(Copying(sig.as_ref()));
+            let dc_res = Signature::decode(sig);
             if tf_res.is_err() && dc_res.is_err() {
                 true
             } else {

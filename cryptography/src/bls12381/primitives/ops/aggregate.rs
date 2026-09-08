@@ -14,8 +14,8 @@ use super::{
     super::{Error, variant::Variant},
     hash_with_namespace,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
@@ -59,7 +59,7 @@ impl<V: Variant> Write for PublicKey<V> {
 impl<V: Variant> Read for PublicKey<V> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(V::Public::read(reader)?))
     }
 }
@@ -111,7 +111,7 @@ impl<V: Variant> Write for Signature<V> {
 impl<V: Variant> Read for Signature<V> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(V::Signature::read(reader)?))
     }
 }
@@ -168,7 +168,7 @@ impl<V: Variant> Write for Message<V> {
 impl<V: Variant> Read for Message<V> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(V::Signature::read(reader)?))
     }
 }

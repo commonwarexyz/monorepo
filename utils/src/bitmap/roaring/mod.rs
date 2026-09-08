@@ -75,8 +75,8 @@ mod prunable;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, Write};
 use container::Container;
 use core::ops::Range;
 pub use prunable::Prunable;
@@ -350,7 +350,7 @@ impl Read for Bitmap {
     /// Use `RangeCfg::new(..=max_containers)` to limit memory allocation.
     type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         // Use BTreeMap's codec which validates sorted/unique keys and bounds count.
         let containers = BTreeMap::<u64, Container>::read_cfg(buf, &(*cfg, ((), ())))?;
         Self::from_containers(containers)

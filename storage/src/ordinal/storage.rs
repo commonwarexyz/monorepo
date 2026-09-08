@@ -1,10 +1,12 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
-use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    CodecFixed, Copying, FixedSize, Read, ReadBuf, ReadExt, Write as CodecWrite,
+};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, Error as RError, WriteOptions,
+    Blob, BufMut, Error as RError, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -36,9 +38,9 @@ impl<V: CodecFixed<Cfg = ()>> Record<V> {
 
     /// Deserialize a record, returning the value only if the stored CRC matches the raw
     /// value bytes.
-    fn decode_valid(mut buf: &[u8]) -> Option<V> {
+    fn decode_valid(buf: &[u8]) -> Option<V> {
         let crc = Crc32::checksum(buf.get(..V::SIZE)?);
-        let record = Self::read(&mut buf).ok()?;
+        let record = Self::read(&mut Copying(buf)).ok()?;
         (record.crc == crc).then_some(record.value)
     }
 }
@@ -57,7 +59,7 @@ impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
 impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let value = V::read(buf)?;
         let crc = u32::read(buf)?;
 

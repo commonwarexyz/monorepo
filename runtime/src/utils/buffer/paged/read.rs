@@ -1,6 +1,7 @@
 use super::Checksum;
 use crate::{Blob, Buf, Error, IoBuf, ReadOptions};
-use commonware_codec::FixedSize;
+use bytes::{BufMut, Bytes, BytesMut};
+use commonware_codec::{FixedSize, ReadBuf};
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
 
@@ -239,7 +240,28 @@ impl ReplayBuf {
     }
 }
 
+impl ReadBuf for ReplayBuf {}
+
 impl Buf for ReplayBuf {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        assert!(len <= self.remaining, "copy_to_bytes out of bounds");
+        if len == 0 {
+            return Bytes::new();
+        }
+        if len <= self.chunk().len() {
+            let buffer = &self.buffers.front().expect("readable buffer").buffer;
+            let start = self.current_page * self.physical_page_size + self.offset_in_page;
+            let bytes = Bytes::from(buffer.slice(start..start + len));
+            self.advance(len);
+            return bytes;
+        }
+
+        // A field spanning pages must be coalesced around the interleaved checksums
+        let mut bytes = BytesMut::with_capacity(len);
+        bytes.put(self.take(len));
+        bytes.freeze()
+    }
+
     fn remaining(&self) -> usize {
         self.remaining
     }
@@ -369,7 +391,13 @@ impl<B: Blob> Replay<B> {
     }
 }
 
+impl<B: Blob> ReadBuf for Replay<B> {}
+
 impl<B: Blob> Buf for Replay<B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        self.buffer.copy_to_bytes(len)
+    }
+
     fn remaining(&self) -> usize {
         self.buffer.remaining()
     }
@@ -389,6 +417,34 @@ mod tests {
     use crate::{Runner as _, Storage as _, deterministic};
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize};
+
+    #[test]
+    fn test_replay_buf_bytes_share_pages() {
+        let source = bytes::Bytes::from_static(b"abcd............efgh............");
+        let range = source.as_ptr_range();
+        let mut replay = ReplayBuf::new(16, 4);
+        replay.push(
+            BufferState {
+                buffer: IoBuf::from(source),
+                num_pages: 2,
+                last_page_len: 4,
+            },
+            8,
+        );
+
+        let first = replay.copy_to_bytes(3);
+        assert_eq!(first.as_ref(), b"abc");
+        assert!(range.contains(&first.as_ptr()));
+
+        let crossing = replay.copy_to_bytes(3);
+        assert_eq!(crossing.as_ref(), b"def");
+        assert!(!range.contains(&crossing.as_ptr()));
+
+        let last = replay.copy_to_bytes(2);
+        assert_eq!(last.as_ref(), b"gh");
+        assert!(range.contains(&last.as_ptr()));
+        assert_eq!(replay.remaining(), 0);
+    }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_PAGES: usize = 2;

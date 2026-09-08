@@ -38,8 +38,8 @@
 //! to prevent accidental type misuse.
 
 use crate::{Epochable, Viewable};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Error, Read, ReadBuf, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
@@ -123,7 +123,7 @@ impl Display for Epoch {
 impl Read for Epoch {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let value: u64 = UInt::read(buf)?.into();
         Ok(Self(value))
     }
@@ -228,7 +228,7 @@ impl Display for Height {
 impl Read for Height {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let value: u64 = UInt::read(buf)?.into();
         Ok(Self(value))
     }
@@ -456,7 +456,7 @@ impl TracedExt for View {
 impl Read for View {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let value: u64 = UInt::read(buf)?.into();
         Ok(Self(value))
     }
@@ -821,7 +821,7 @@ impl Epocher for FixedEpocher {
 impl Read for Round {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             epoch: Epoch::read(buf)?,
             view: View::read(buf)?,
@@ -1019,7 +1019,7 @@ commonware_macros::stability_scope!(ALPHA {
             }
 
             fn field<T: ReadExt + FixedSize>(&self, offset: usize) -> T {
-                T::read(&mut &self.0[offset..offset + T::SIZE])
+                T::read(&mut commonware_codec::Copying(&self.0[offset..offset + T::SIZE]))
                     .expect("fields are validated on decode and typed construction")
             }
 
@@ -1031,7 +1031,7 @@ commonware_macros::stability_scope!(ALPHA {
             ) -> Result<(), commonware_codec::Error> {
                 let field_end = offset + T::SIZE;
                 let padding_end = offset + COMMITMENT_DIGEST_SIZE;
-                T::read(&mut &bytes[offset..field_end])
+                T::read(&mut commonware_codec::Copying(&bytes[offset..field_end]))
                     .map_err(|_| commonware_codec::Error::Invalid("Commitment", reason))?;
                 if bytes[field_end..padding_end].iter().any(|byte| *byte != 0) {
                     return Err(commonware_codec::Error::Invalid(
@@ -1099,7 +1099,7 @@ commonware_macros::stability_scope!(ALPHA {
             type Cfg = ();
 
             fn read_cfg(
-                buf: &mut impl bytes::Buf,
+                buf: &mut impl commonware_codec::ReadBuf,
                 _cfg: &Self::Cfg,
             ) -> Result<Self, commonware_codec::Error> {
                 const { Self::assert_layout() };
@@ -1120,7 +1120,7 @@ commonware_macros::stability_scope!(ALPHA {
                     Self::CONTEXT_OFFSET,
                     "invalid context digest",
                 )?;
-                let mut cursor = &arr[Self::CONFIG_OFFSET..];
+                let mut cursor = commonware_codec::Copying(&arr[Self::CONFIG_OFFSET..]);
                 CodingConfig::read(&mut cursor).map_err(|_| {
                     commonware_codec::Error::Invalid("Commitment", "invalid embedded CodingConfig")
                 })?;
@@ -2275,7 +2275,7 @@ mod tests {
             type Cfg = ();
 
             fn read_cfg(
-                _: &mut impl bytes::Buf,
+                _: &mut impl commonware_codec::ReadBuf,
                 _: &Self::Cfg,
             ) -> Result<Self, commonware_codec::Error> {
                 Err(commonware_codec::Error::Invalid(
@@ -2401,7 +2401,7 @@ mod tests {
         ] {
             let mut malformed = encoded.to_vec();
             malformed[offset] = 1;
-            assert!(CrcCommitment::decode(malformed.as_ref()).is_err());
+            assert!(CrcCommitment::decode(malformed).is_err());
         }
     }
 

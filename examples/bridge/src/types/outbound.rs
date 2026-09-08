@@ -1,9 +1,9 @@
 use super::block::BlockFormat;
 use crate::Scheme;
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadBuf, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 
 /// Enum representing responses from the indexer to validators.
 ///
@@ -42,7 +42,7 @@ impl<D: Digest> Write for Outbound<D> {
 impl<D: Digest> Read for Outbound<D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         match tag {
             0 => {
@@ -75,7 +75,7 @@ impl<D: Digest> EncodeSize for Outbound<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode, FixedSize};
+    use commonware_codec::{DecodeExt, DecodeFixed, Encode, FixedSize};
     use commonware_consensus::{
         simplex::types::Proposal,
         types::{Epoch, Round, View},
@@ -95,7 +95,7 @@ mod tests {
     }
 
     fn new_digest() -> Sha256Digest {
-        Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
+        Sha256Digest::decode_fixed([123u8; Sha256Digest::SIZE]).unwrap()
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {

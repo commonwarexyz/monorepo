@@ -3,8 +3,8 @@
 //! For portability and consistency between architectures,
 //! the length of the [Bytes] must fit within a [u32].
 
-use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
-use bytes::{Buf, BufMut, Bytes};
+use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, ReadBuf, Write, util::at_least};
+use bytes::{BufMut, Bytes};
 
 impl Write for Bytes {
     #[inline]
@@ -36,7 +36,7 @@ impl Read for Bytes {
     type Cfg = RangeCfg<usize>;
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         at_least(buf, len)?;
         Ok(buf.copy_to_bytes(len))
@@ -46,7 +46,7 @@ impl Read for Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Decode, Encode};
+    use crate::{Copying, Decode, Encode};
     use bytes::Bytes;
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
         assert!(decoded.iter().all(|b| range.contains(&b.as_ptr())));
 
         // Decoding from a slice of it copies every field
-        let copied = Vec::<Bytes>::decode_cfg(source.as_ref(), &cfg).unwrap();
+        let copied = Vec::<Bytes>::decode_cfg(Copying(source.as_ref()), &cfg).unwrap();
         assert_eq!(copied, value);
         assert!(copied.iter().all(|b| !range.contains(&b.as_ptr())));
     }
@@ -134,7 +134,7 @@ mod tests {
         impl Read for Bytes {
             type Cfg = RangeCfg<usize>;
 
-            fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
                 Ok(Self(super::Bytes::read_cfg(buf, cfg)?))
             }
         }

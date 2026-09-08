@@ -2,10 +2,10 @@
 
 use crate::merkle::{Family, Location};
 use commonware_codec::{
-    CodecShared, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    CodecShared, EncodeSize, Error as CodecError, FixedSize, Read, ReadBuf, ReadExt as _, Write,
     util::ensure_zeros,
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use core::{fmt::Debug, hash::Hash, ops::Deref};
 
 /// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys
@@ -73,7 +73,7 @@ pub(crate) fn write_commit_fixed<F: Family, V: Write + FixedSize>(
 
 /// Reads a commit's optional metadata and inactivity floor from the fixed encoding.
 pub(crate) fn read_commit_fixed<F: Family, V: Read<Cfg = ()> + FixedSize>(
-    buf: &mut impl Buf,
+    buf: &mut impl ReadBuf,
 ) -> Result<(Option<V>, Location<F>), CodecError> {
     let metadata = if bool::read(buf)? {
         Some(V::read(buf)?)
@@ -111,7 +111,7 @@ pub(crate) fn write_commit_variable<F: Family, V: Write>(
 
 /// Reads a commit's optional metadata and inactivity floor from the variable encoding.
 pub(crate) fn read_commit_variable<F: Family, V: Read>(
-    buf: &mut impl Buf,
+    buf: &mut impl ReadBuf,
     value_cfg: &V::Cfg,
 ) -> Result<(Option<V>, Location<F>), CodecError> {
     let metadata = Option::<V>::read_cfg(buf, value_cfg)?;

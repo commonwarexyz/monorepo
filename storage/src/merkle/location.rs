@@ -1,6 +1,6 @@
 use super::{Family, position::Position};
-use bytes::{Buf, BufMut};
-use commonware_codec::{ReadExt, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{ReadBuf, ReadExt, varint::UInt};
 use core::{
     convert::TryFrom,
     fmt,
@@ -201,7 +201,7 @@ impl<F: Family> commonware_codec::Read for Location<F> {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
         let loc = Self::new(UInt::read(buf)?.into());
         if loc.is_valid() {
             Ok(loc)

@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use cfg_if::cfg_if;
 use commonware_codec::{
-    EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode,
+    EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadBuf, ReadExt, Write, mode,
 };
 use commonware_macros::stability;
 #[stability(ALPHA)]
@@ -271,7 +271,7 @@ impl Read for Mode {
     type Cfg = ModeVersion;
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl ReadBuf,
         version: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let tag: u8 = ReadExt::read(buf)?;
@@ -437,7 +437,7 @@ impl<V: Variant> Read for Sharing<V> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl ReadBuf,
         (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let mode = Read::read_cfg(buf, max_supported_mode)?;
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn test_mode_read_rejects_mode_above_max_supported_mode() {
         let encoded = [1];
-        Mode::read_cfg(&mut &encoded[..], &ModeVersion::v0())
+        Mode::read_cfg(&mut commonware_codec::Copying(&encoded), &ModeVersion::v0())
             .expect_err("roots mode must be rejected when max mode is counter");
     }
 

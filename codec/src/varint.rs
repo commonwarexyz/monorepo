@@ -29,8 +29,8 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
-use bytes::{Buf, BufMut};
+use crate::{EncodeSize, Error, FixedSize, Read, ReadBuf, ReadExt, Write};
+use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
 
@@ -292,7 +292,7 @@ impl<U: UPrim> Write for UInt<U> {
 
 impl<U: UPrim> Read for UInt<U> {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         read(buf).map(UInt)
     }
 }
@@ -342,7 +342,7 @@ impl<S: SPrim> Write for SInt<S> {
 
 impl<S: SPrim> Read for SInt<S> {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         read_signed::<S>(buf).map(SInt)
     }
 }
@@ -389,7 +389,7 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
 /// Returns an error if:
 /// - The varint is invalid (too long or malformed)
 /// - The buffer ends while reading
-fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
+fn read<T: UPrim>(buf: &mut impl ReadBuf) -> Result<T, Error> {
     let mut decoder = Decoder::<T>::new();
     loop {
         // Read the next byte.
@@ -414,7 +414,7 @@ fn write_signed<S: SPrim>(value: S, buf: &mut impl BufMut) {
 }
 
 /// Decodes a signed integer from varint ZigZag encoding.
-fn read_signed<S: SPrim>(buf: &mut impl Buf) -> Result<S, Error> {
+fn read_signed<S: SPrim>(buf: &mut impl ReadBuf) -> Result<S, Error> {
     Ok(S::un_zigzag(read(buf)?))
 }
 
@@ -426,7 +426,7 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeExt, Encode, error::Error};
+    use crate::{Copying, DecodeExt, Encode, error::Error};
     use bytes::Bytes;
 
     #[test]
@@ -508,10 +508,10 @@ mod tests {
             assert_eq!(buf.len(), size(value));
 
             // decode matches original value
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf[..]);
             let decoded: T = read(&mut slice).unwrap();
             assert_eq!(decoded, value);
-            assert!(slice.is_empty());
+            assert!(slice.0.is_empty());
 
             // UInt wrapper
             let encoded = UInt(value).encode();
@@ -563,10 +563,10 @@ mod tests {
             assert_eq!(buf.len(), size_signed(value));
 
             // decode matches original value
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf[..]);
             let decoded: T = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value);
-            assert!(slice.is_empty());
+            assert!(slice.0.is_empty());
 
             // SInt wrapper
             let encoded = SInt(value).encode();
@@ -671,11 +671,11 @@ mod tests {
             );
 
             // Verify we can decode it back correctly
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf[..]);
             let decoded: i16 = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value, "Decode mismatch for value {value}");
             assert!(
-                slice.is_empty(),
+                slice.0.is_empty(),
                 "Buffer not fully consumed for value {value}",
             );
         }

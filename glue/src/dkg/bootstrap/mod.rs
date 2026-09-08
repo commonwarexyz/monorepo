@@ -18,7 +18,9 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write,
+};
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -49,7 +51,7 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+    BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef, spawn_cell,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
@@ -184,7 +186,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> EncodeSize for Block<V, D> {
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
     type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,

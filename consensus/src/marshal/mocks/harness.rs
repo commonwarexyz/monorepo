@@ -24,9 +24,9 @@ use crate::{
     },
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_broadcast::buffered;
-use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, Write};
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digestible, Hasher, Signer,
@@ -104,7 +104,7 @@ impl Write for CodingB {
 impl Read for CodingB {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Block::read_cfg(reader, cfg).map(Self)
     }
 }

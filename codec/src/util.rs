@@ -1,6 +1,6 @@
 //! Codec utility functions
 
-use crate::{Error, FixedSize, Read};
+use crate::{Error, FixedSize, Read, ReadBuf};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::Buf;
@@ -31,7 +31,7 @@ pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Resu
 /// override for [FixedSize] element types.
 #[inline]
 pub fn read_fixed_vec<T: Read + FixedSize>(
-    buf: &mut impl Buf,
+    buf: &mut impl ReadBuf,
     len: usize,
     cfg: &T::Cfg,
 ) -> Result<Vec<T>, Error> {

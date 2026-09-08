@@ -6,8 +6,8 @@ use crate::{
         operation::{commit_variable_payload_size, read_commit_variable, write_commit_variable},
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
-use commonware_runtime::{Buf, BufMut};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write};
+use commonware_runtime::BufMut;
 
 impl<V: VariableValue> Codec for VariableEncoding<V> {
     type ReadCfg = <V as Read>::Cfg;
@@ -26,7 +26,7 @@ impl<V: VariableValue> Codec for VariableEncoding<V> {
     }
 
     fn read_operation<F: Family>(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         cfg: &Self::ReadCfg,
     ) -> Result<Operation<F, Self>, CodecError> {
         match u8::read(buf)? {
@@ -53,7 +53,7 @@ impl<F: Family, V: VariableValue> EncodeSize for Operation<F, VariableEncoding<V
 mod tests {
     use super::*;
     use crate::merkle::{Location, mmr};
-    use commonware_codec::{DecodeExt, Encode, EncodeSize};
+    use commonware_codec::{Copying, DecodeExt, Encode, EncodeSize};
     use commonware_utils::sequence::U64;
 
     // Use U64 as the value type: it implements VariableValue and has Cfg = ().
@@ -99,14 +99,14 @@ mod tests {
         let mut buf: Vec<u8> = op.encode().to_vec();
         buf[0] = 0xFF;
         assert!(matches!(
-            Op::decode(buf.as_ref()).unwrap_err(),
+            Op::decode(buf).unwrap_err(),
             CodecError::InvalidEnum(0xFF)
         ));
     }
 
     #[test]
     fn empty_input_rejected() {
-        assert!(Op::decode(&[] as &[u8]).is_err());
+        assert!(Op::decode(Copying(&[])).is_err());
     }
 
     #[test]
@@ -133,7 +133,7 @@ mod tests {
         Option::<U64>::None.write(&mut buf);
         UInt(u64::MAX).write(&mut buf);
         assert!(matches!(
-            Op::decode(buf.as_ref()).unwrap_err(),
+            Op::decode(buf).unwrap_err(),
             CodecError::Invalid(_, _)
         ));
     }

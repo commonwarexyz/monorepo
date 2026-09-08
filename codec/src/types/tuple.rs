@@ -1,7 +1,7 @@
 //! Codec implementation for tuples.
 
-use crate::{BufsMut, EncodeSize, Error, Read, Write};
-use bytes::{Buf, BufMut};
+use crate::{BufsMut, EncodeSize, Error, Read, ReadBuf, Write};
+use bytes::BufMut;
 use paste::paste;
 
 // Tuple implementation
@@ -36,7 +36,7 @@ macro_rules! impl_codec_for_tuple {
             impl <$( [<T $index>]: Read ),*> Read for ( $( [<T $index>], )* ) {
                 type Cfg = ( $( [<T $index>]::Cfg, )* );
                 #[inline]
-                fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+                fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
                     Ok(( $( [<T $index>]::read_cfg(buf, &cfg.$index)?, )* ))
                 }
             }

@@ -6,9 +6,9 @@ use crate::{
     },
     rmap::RMap,
 };
-use commonware_codec::{CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{CodecShared, EncodeSize, Read, ReadBuf, ReadExt, Write, varint::UInt};
 use commonware_runtime::{
-    Buf, BufMut, Metrics, ReadOptions, Storage,
+    BufMut, Metrics, ReadOptions, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,7 +37,7 @@ impl<V: CodecShared> Write for Record<V> {
 impl<V: CodecShared> Read for Record<V> {
     type Cfg = V::Cfg;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let index = UInt::read(buf)?.into();
         let value = V::read_cfg(buf, cfg)?;
         Ok(Self { index, value })

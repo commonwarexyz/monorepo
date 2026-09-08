@@ -13,10 +13,10 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
+    Codec, CodecFixed, Error as CodecError, FixedSize, ReadBuf, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::Array;
 
 /// `max(a, b)` in a const context.
@@ -70,7 +70,7 @@ where
     }
 
     fn read_operation(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         cfg: &Self::ReadCfg,
     ) -> Result<Operation<F, S>, CodecError> {
         let total = total_op_size::<S::Key, V, S>();

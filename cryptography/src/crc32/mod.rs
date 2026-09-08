@@ -27,8 +27,8 @@
 //! ```
 
 use crate::Hasher;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -138,7 +138,7 @@ impl Write for Digest {
 impl Read for Digest {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let array = <[u8; SIZE]>::read(buf)?;
         Ok(Self(array))
     }
@@ -199,7 +199,7 @@ impl Random for Digest {
 mod tests {
     use super::*;
     use crate::Hasher;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode};
     use crc::{CRC_32_ISCSI, Crc};
 
     /// Reference CRC32C implementation from the [`crc`](https://crates.io/crates/crc) crate.
@@ -382,7 +382,7 @@ mod tests {
         let mut hasher = Crc32::default();
         hasher.update(msg);
         let (hasher, digest) = hasher.finalize();
-        assert!(Digest::decode(digest.as_ref()).is_ok());
+        assert!(Digest::decode(Copying(digest.as_ref())).is_ok());
 
         // Verify against reference
         let expected = CRC32C_REF.checksum(msg);

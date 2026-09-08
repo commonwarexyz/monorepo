@@ -4,13 +4,12 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
-use bytes::Bytes;
 use commonware_codec::{
-    Codec, EncodeSize, ReadExt as _, Write as _,
+    Codec, EncodeSize, ReadBuf, ReadExt as _, Write as _,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs, buffer::paged::Writer};
-use std::{future::Future, io::Cursor};
+use std::future::Future;
 use zstd::{bulk::compress, decode_all};
 
 /// Read access needed to decode a frame at a known offset.
@@ -53,7 +52,7 @@ impl<B: Blob> FrameReader for Writer<B> {
 /// Decodes a varint length prefix from a buffer.
 /// Returns (item_size, varint_len).
 #[inline]
-pub(super) fn decode_length_prefix(buf: &mut impl Buf) -> Result<(usize, usize), Error> {
+pub(super) fn decode_length_prefix(buf: &mut impl ReadBuf) -> Result<(usize, usize), Error> {
     let initial = buf.remaining();
     let size = UInt::<u32>::read(buf)?.0 as usize;
     let varint_len = initial - buf.remaining();
@@ -83,7 +82,7 @@ pub(super) enum FrameInfo {
 /// Find the frame at `offset` in a buffer by decoding its length prefix.
 ///
 /// Returns (next_offset, frame_info). The buffer is advanced past the varint.
-pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameInfo), Error> {
+pub(super) fn find_frame(buf: &mut impl ReadBuf, offset: u64) -> Result<(u64, FrameInfo), Error> {
     let available = buf.remaining();
     let (size, varint_len) = decode_length_prefix(buf)?;
     let next_offset = offset
@@ -111,14 +110,14 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
 
 /// Decode a frame's payload into an item, decompressing if needed.
 pub(super) fn decode_item<V: Codec>(
-    item_data: impl Buf,
+    item_data: impl ReadBuf,
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<V, Error> {
     if compressed {
         let decompressed =
             decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
-        V::decode_cfg(Bytes::from(decompressed), cfg).map_err(Error::Codec)
+        V::decode_cfg(decompressed, cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
     }
@@ -139,7 +138,7 @@ pub(super) async fn read_frame_at<V: Codec>(
         )
         .await?;
     let buf = buf.freeze();
-    let mut cursor = Cursor::new(buf.slice(..available));
+    let mut cursor = buf.slice(..available);
     let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
 
     let (item_size, decoded) = match item_info {
@@ -227,8 +226,8 @@ pub(super) fn encode_frame_into<V: Codec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BufMut;
-    use commonware_codec::{Read, Write};
+    use bytes::{BufMut, Bytes};
+    use commonware_codec::{Copying, Read, Write};
 
     /// Frame a single item and return the raw frame bytes.
     fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
@@ -240,7 +239,7 @@ mod tests {
     #[test]
     fn test_roundtrip_uncompressed() {
         let buf = frame(None, &42u64);
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         let (next_offset, info) = find_frame(&mut cursor, 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
@@ -252,14 +251,15 @@ mod tests {
         assert_eq!(varint_len, 1);
         assert_eq!(data_len, 8);
         assert_eq!(next_offset, 9);
-        let item: u64 = decode_item(&buf[varint_len..varint_len + data_len], &(), false).unwrap();
+        let item: u64 =
+            decode_item(Copying(&buf[varint_len..varint_len + data_len]), &(), false).unwrap();
         assert_eq!(item, 42);
     }
 
     #[test]
     fn test_roundtrip_compressed() {
         let buf = frame(Some(3), &42u64);
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         let (_, info) = find_frame(&mut cursor, 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
@@ -268,7 +268,8 @@ mod tests {
         else {
             panic!("expected complete frame");
         };
-        let item: u64 = decode_item(&buf[varint_len..varint_len + data_len], &(), true).unwrap();
+        let item: u64 =
+            decode_item(Copying(&buf[varint_len..varint_len + data_len]), &(), true).unwrap();
         assert_eq!(item, 42);
     }
 
@@ -280,23 +281,23 @@ mod tests {
         encode_frame_into(None, &2u64, &mut buf).unwrap();
 
         // Walk both frames out of the accumulated buffer.
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         let (first_end, _) = find_frame(&mut cursor, 0).unwrap();
         assert_eq!(first_end as usize, first_frame_len);
-        let first: u64 = decode_item(&buf[1..9], &(), false).unwrap();
+        let first: u64 = decode_item(Copying(&buf[1..9]), &(), false).unwrap();
         assert_eq!(first, 1);
 
-        let mut cursor = &buf[first_frame_len..];
+        let mut cursor = Copying(&buf[first_frame_len..]);
         let (second_end, _) = find_frame(&mut cursor, first_end).unwrap();
         assert_eq!(second_end as usize, buf.len());
-        let second: u64 = decode_item(&buf[first_frame_len + 1..], &(), false).unwrap();
+        let second: u64 = decode_item(Copying(&buf[first_frame_len + 1..]), &(), false).unwrap();
         assert_eq!(second, 2);
     }
 
     #[test]
     fn test_find_frame_zero_length_payload() {
         let buf = [0x00u8];
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         let (next_offset, info) = find_frame(&mut cursor, 7).unwrap();
         let FrameInfo::Complete {
             varint_len,
@@ -313,7 +314,7 @@ mod tests {
     fn test_find_frame_incomplete_payload() {
         // Prefix declares 5 payload bytes; only 3 are buffered.
         let buf = [0x05u8, 1, 2, 3];
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         let (next_offset, info) = find_frame(&mut cursor, 100).unwrap();
         let FrameInfo::Incomplete {
             varint_len,
@@ -333,14 +334,14 @@ mod tests {
     fn test_find_frame_payload_boundary() {
         // Exactly filling the buffer is complete; one byte short is incomplete.
         let buf = [0x03u8, 1, 2, 3];
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         assert!(matches!(
             find_frame(&mut cursor, 0).unwrap().1,
             FrameInfo::Complete { data_len: 3, .. }
         ));
 
         let buf = [0x03u8, 1, 2];
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         assert!(matches!(
             find_frame(&mut cursor, 0).unwrap().1,
             FrameInfo::Incomplete {
@@ -353,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_find_frame_empty_buffer() {
-        let mut cursor = &[][..];
+        let mut cursor = Copying(&[][..]);
         assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
     }
 
@@ -361,7 +362,7 @@ mod tests {
     fn test_find_frame_truncated_varint() {
         // A lone continuation byte is an incomplete varint, not a frame.
         let buf = [0x80u8];
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
     }
 
@@ -369,14 +370,14 @@ mod tests {
     fn test_find_frame_varint_exceeds_u32() {
         // 5-byte varint encoding a value larger than u32::MAX.
         let buf = [0xFFu8, 0xFF, 0xFF, 0xFF, 0x7F];
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
     }
 
     #[test]
     fn test_find_frame_offset_overflow() {
         let buf = frame(None, &42u64);
-        let mut cursor = &buf[..];
+        let mut cursor = Copying(&buf[..]);
         assert!(matches!(
             find_frame(&mut cursor, u64::MAX),
             Err(Error::OffsetOverflow)
@@ -388,7 +389,7 @@ mod tests {
         // 9 bytes for a u64: decode must consume exactly the payload.
         let buf = [0u8; 9];
         assert!(matches!(
-            decode_item::<u64>(&buf[..], &(), false),
+            decode_item::<u64>(Copying(&buf[..]), &(), false),
             Err(Error::Codec(commonware_codec::Error::ExtraData(_)))
         ));
     }
@@ -398,7 +399,7 @@ mod tests {
         let value: Vec<Bytes> = (0..64).map(|_| Bytes::from(vec![7u8; 17])).collect();
         let cfg = ((..).into(), (..).into());
         let buf = Bytes::from(frame(None, &value));
-        let (_, info) = find_frame(&mut buf.as_ref(), 0).unwrap();
+        let (_, info) = find_frame(&mut buf.clone(), 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
             data_len,
@@ -416,9 +417,12 @@ mod tests {
         assert!(decoded.iter().all(|b| range.contains(&b.as_ptr())));
 
         // Decoding from a slice of it copies every field
-        let copied =
-            decode_item::<Vec<Bytes>>(&buf[varint_len..varint_len + data_len], &cfg, false)
-                .unwrap();
+        let copied = decode_item::<Vec<Bytes>>(
+            Copying(&buf[varint_len..varint_len + data_len]),
+            &cfg,
+            false,
+        )
+        .unwrap();
         assert_eq!(copied, value);
         assert!(copied.iter().all(|b| !range.contains(&b.as_ptr())));
 
@@ -426,7 +430,7 @@ mod tests {
         // views of one allocation: consecutive 17-byte fields sit 18 bytes apart (one length
         // byte between them), a stride no two aligned allocations have
         let buf = Bytes::from(frame(Some(3), &value));
-        let (_, info) = find_frame(&mut buf.as_ref(), 0).unwrap();
+        let (_, info) = find_frame(&mut buf.clone(), 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
             data_len,
@@ -451,7 +455,7 @@ mod tests {
         // Corrupt the zstd magic number (first payload byte, after the 1-byte varint).
         buf[1] ^= 0xFF;
         assert!(matches!(
-            decode_item::<u64>(&buf[1..], &(), true),
+            decode_item::<u64>(Copying(&buf[1..]), &(), true),
             Err(Error::DecompressionFailed)
         ));
     }
@@ -475,7 +479,7 @@ mod tests {
     impl Read for Oversized {
         type Cfg = ();
 
-        fn read_cfg(_: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(_: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             unreachable!("never decoded")
         }
     }

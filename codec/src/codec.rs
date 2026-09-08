@@ -1,6 +1,6 @@
 //! Core traits for encoding and decoding.
 
-use crate::error::Error;
+use crate::{Copying, DecodeInput, ReadBuf, error::Error};
 #[cfg(not(feature = "std"))]
 use alloc::{sync::Arc, vec::Vec};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -193,7 +193,7 @@ impl<T: Write + ?Sized> Write for Arc<T> {
     }
 }
 
-/// Trait for types that can be read (decoded) from a byte buffer.
+/// Trait for types that can be read (decoded) from a [ReadBuf].
 pub trait Read: Sized {
     /// The `Cfg` type parameter allows passing configuration during the read process. This is
     /// crucial for safely decoding untrusted data, for example, by providing size limits for
@@ -213,7 +213,7 @@ pub trait Read: Sized {
     /// # Warning
     ///
     /// Parsing a message (often untrusted) should never result in a panic.
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error>;
 
     /// Reads `len` values from the buffer into a vector.
     ///
@@ -228,7 +228,7 @@ pub trait Read: Sized {
     /// implement [Read::read_cfg] instead.
     #[doc(hidden)]
     #[inline]
-    fn read_vec(buf: &mut impl Buf, len: usize, cfg: &Self::Cfg) -> Result<Vec<Self>, Error> {
+    fn read_vec(buf: &mut impl ReadBuf, len: usize, cfg: &Self::Cfg) -> Result<Vec<Self>, Error> {
         let mut values = Vec::with_capacity(len.min(buf.remaining()));
         for _ in 0..len {
             values.push(Self::read_cfg(buf, cfg)?);
@@ -247,7 +247,10 @@ pub trait Read: Sized {
     /// This is hidden from generated documentation for the same reason as [Read::read_vec].
     #[doc(hidden)]
     #[inline]
-    fn read_array<const N: usize>(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<[Self; N], Error> {
+    fn read_array<const N: usize>(
+        buf: &mut impl ReadBuf,
+        cfg: &Self::Cfg,
+    ) -> Result<[Self; N], Error> {
         Ok(Self::read_vec(buf, N, cfg)?
             .try_into()
             .unwrap_or_else(|_| unreachable!("array length should match capacity")))
@@ -309,9 +312,13 @@ impl<T: Encode + Send + Sync> EncodeShared for T {}
 pub trait Decode: Read {
     /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is consumed.
     ///
+    /// Accepts [ReadBuf] inputs and owned [`Vec<u8>`] values through [DecodeInput]. Borrowed
+    /// slices require an explicit [Copying] adapter.
+    ///
     /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes in
     /// `buf` after reading.
-    fn decode_cfg(mut buf: impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn decode_cfg(buf: impl DecodeInput, cfg: &Self::Cfg) -> Result<Self, Error> {
+        let mut buf = buf.into_buf();
         let result = Self::read_cfg(&mut buf, cfg)?;
 
         // Check that the buffer is fully consumed.
@@ -381,7 +388,7 @@ pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
             Self::SIZE
         );
 
-        Self::decode_cfg(bytes.as_ref(), &())
+        Self::decode_cfg(Copying(bytes.as_ref()), &())
     }
 }
 
@@ -446,7 +453,7 @@ mod tests {
     fn test_encode_fixed() {
         let value = 42u32;
         let encoded: [u8; 4] = value.encode_fixed();
-        let decoded = <u32>::decode(&encoded[..]).unwrap();
+        let decoded = <u32>::decode(Copying(&encoded[..])).unwrap();
         assert_eq!(value, decoded);
     }
 
@@ -476,7 +483,7 @@ mod tests {
     impl Read for FixedBytes {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
             Ok(Self(<[u8; Self::SIZE]>::read(buf)?))
         }
     }
@@ -534,7 +541,7 @@ mod tests {
     impl Read for InfallibleFixedBytes {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
             Ok(Self(<[u8; Self::SIZE]>::read(buf)?))
         }
     }
@@ -580,7 +587,7 @@ mod tests {
     impl<const N: usize> Read for GenericFixed<N> {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
             Ok(Self(<[u8; N]>::read(buf)?))
         }
     }
@@ -622,7 +629,7 @@ mod tests {
     impl<const N: usize> Read for GenericInfallible<N> {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
             Ok(Self(<[u8; N]>::read(buf)?))
         }
     }
@@ -674,7 +681,7 @@ mod tests {
     impl<T: FixedArrayBound> Read for BoundedGeneric<T> {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
             Ok(Self {
                 marker: PhantomData,
                 raw: <[u8; 2]>::read(buf)?,
@@ -727,7 +734,7 @@ mod tests {
     impl Read for LifetimeFixed<'_> {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
             Ok(Self {
                 marker: PhantomData,
                 raw: <[u8; 2]>::read(buf)?,

@@ -1,6 +1,6 @@
 use super::{Family, location::Location};
-use bytes::{Buf, BufMut};
-use commonware_codec::{ReadExt, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{ReadBuf, ReadExt, varint::UInt};
 use core::{
     fmt,
     marker::PhantomData,
@@ -340,7 +340,7 @@ impl<F: Family> commonware_codec::Read for Position<F> {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
         let pos = Self::new(UInt::read(buf)?.into());
         if pos.is_valid() {
             Ok(pos)
@@ -571,26 +571,26 @@ mod tests {
 
         // Test zero
         let pos = Position::new(0);
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
 
         // Test middle value
         let pos = Position::new(12345);
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
 
         // MAX_NODES is a valid value (inclusive bound), so it should decode successfully
         let pos = mmr::Family::MAX_NODES;
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
 
         // MAX_NODES - 1 is also valid
         let pos = mmr::Family::MAX_NODES - 1;
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
     }
 
@@ -600,8 +600,8 @@ mod tests {
 
         // Encode MAX_NODES + 1 as a raw varint, then try to decode as Position
         let invalid_value = *mmr::Family::MAX_NODES + 1;
-        let encoded = UInt(invalid_value).encode();
-        let result = Position::read(&mut encoded.as_ref());
+        let mut encoded = UInt(invalid_value).encode();
+        let result = Position::read(&mut encoded);
         assert!(result.is_err());
         assert!(matches!(
             result,
@@ -609,8 +609,8 @@ mod tests {
         ));
 
         // Encode u64::MAX as a raw varint
-        let encoded = UInt(u64::MAX).encode();
-        let result = Position::read(&mut encoded.as_ref());
+        let mut encoded = UInt(u64::MAX).encode();
+        let result = Position::read(&mut encoded);
         assert!(result.is_err());
         assert!(matches!(
             result,

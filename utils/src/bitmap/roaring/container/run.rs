@@ -11,8 +11,8 @@
 use super::{array, bitmap};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, Write};
 use core::ops::Range;
 
 /// Maximum number of runs in a Run container.
@@ -359,7 +359,7 @@ impl EncodeSize for Run {
 impl Read for Run {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         // Read as Vec of (start, end) pairs with bounded count to prevent OOM.
         let runs = Vec::<(u16, u16)>::read_cfg(buf, &(RangeCfg::new(..=MAX_RUNS), ((), ())))?;
         Self::from_runs_checked(runs)

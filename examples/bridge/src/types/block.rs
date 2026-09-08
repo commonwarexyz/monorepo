@@ -1,8 +1,8 @@
 use crate::Scheme;
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, Read, ReadBuf, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 
 /// Enum representing the valid formats for blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +33,7 @@ impl<D: Digest> Write for BlockFormat<D> {
 impl<D: Digest> Read for BlockFormat<D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         match tag {
             0 => {
@@ -61,7 +61,7 @@ impl<D: Digest> EncodeSize for BlockFormat<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode, FixedSize};
+    use commonware_codec::{DecodeExt, DecodeFixed, Encode, FixedSize};
     use commonware_consensus::{
         simplex::types::Proposal,
         types::{Epoch, Round, View},
@@ -80,7 +80,7 @@ mod tests {
     use commonware_utils::test_rng;
 
     fn new_digest() -> Sha256Digest {
-        Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
+        Sha256Digest::decode_fixed([123u8; Sha256Digest::SIZE]).unwrap()
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
@@ -113,7 +113,7 @@ mod tests {
 
         // Invalid tag
         let buf = [2u8];
-        let result = BlockFormat::<Sha256Digest>::decode(&buf[..]);
+        let result = BlockFormat::<Sha256Digest>::decode(commonware_codec::Copying(&buf));
         assert!(matches!(result, Err(Error::InvalidEnum(2))));
     }
 }

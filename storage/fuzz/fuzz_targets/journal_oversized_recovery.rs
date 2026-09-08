@@ -10,11 +10,10 @@
 //! nothing, and that sentinel appends land at the repaired tail and reopen intact.
 
 use arbitrary::Arbitrary;
-use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
+use commonware_codec::{Copying, DecodeExt as _, FixedSize, Read, ReadBuf, ReadExt as _, Write};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob as _, Buf, BufMut, BufferPooler, Handle, ReadOptions, Runner, Storage as _,
-    Supervisor as _,
+    Blob as _, BufMut, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
@@ -74,7 +73,7 @@ impl Read for TestEntry {
     type Cfg = ();
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         _: &Self::Cfg,
     ) -> std::result::Result<Self, commonware_codec::Error> {
         let id = u64::read(buf)?;
@@ -287,7 +286,9 @@ async fn recover_expected(
             .as_chunks::<{ TestEntry::SIZE }>()
             .0
             .iter()
-            .map(|record| TestEntry::decode(&record[..]).expect("oracle index record failed"))
+            .map(|record| {
+                TestEntry::decode(Copying(&record[..])).expect("oracle index record failed")
+            })
             .collect();
 
         let mut validity = Vec::with_capacity(records.len());

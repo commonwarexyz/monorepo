@@ -42,10 +42,12 @@
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf, ReadOptions};
+use crate::{Blob, BufMut, Error, IoBuf, ReadOptions};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{Storage, WriteOptions};
-use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
+use commonware_codec::{
+    Copying, EncodeFixed, FixedSize, Read as CodecRead, ReadBuf, ReadExt, Write,
+};
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
 
@@ -402,7 +404,7 @@ impl Checksum {
         // Decode the CRC record from the page footer. The size guard above guarantees all of its
         // bytes are present, and every bit pattern decodes, so the read cannot fail.
         let crc_start_idx = (physical_page_size - CHECKSUM_SIZE) as usize;
-        let mut crc_bytes = &buf[crc_start_idx..];
+        let mut crc_bytes = Copying(&buf[crc_start_idx..]);
         let crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
 
         // Prefer the authoritative slot: when both slots are valid, it covers the most recently
@@ -502,7 +504,7 @@ impl Write for Checksum {
 impl CodecRead for Checksum {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             len1: u16::read(buf)?,
             crc1: u32::read(buf)?,
@@ -612,7 +614,7 @@ mod tests {
         };
 
         let bytes = record.to_bytes();
-        let restored = Checksum::read(&mut &bytes[..]).unwrap();
+        let restored = Checksum::read(&mut Copying(&bytes[..])).unwrap();
 
         assert_eq!(restored.len1, 0x1234);
         assert_eq!(restored.crc1, 0xAABBCCDD);

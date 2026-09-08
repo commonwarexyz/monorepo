@@ -13,8 +13,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Error, Read, ReadBuf, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant,
@@ -361,7 +361,7 @@ impl EncodeSize for Certificate {
 impl Read for Certificate {
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl ReadBuf, participants: &usize) -> Result<Self, Error> {
         let signers = Signers::read_cfg(reader, participants)?;
         if signers.count() == 0 {
             return Err(Error::Invalid(
@@ -1000,7 +1000,7 @@ mod tests {
             .collect();
 
         let signer = attestations[0].signer;
-        let mut truncated = &[0u8; 3][..];
+        let mut truncated = Bytes::from_static(&[0u8; 3]);
         attestations[0].signature = Lazy::deferred(&mut truncated, ());
 
         assert_eq!(

@@ -12,7 +12,9 @@ use super::{
     pool::BufferPool,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
-use commonware_codec::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
+use commonware_codec::{
+    BufsMut, DecodeInput, EncodeSize, Error, RangeCfg, Read, ReadBuf, Write, util::at_least,
+};
 use std::{
     mem::ManuallyDrop,
     num::NonZeroUsize,
@@ -332,6 +334,8 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBuf {
     }
 }
 
+impl ReadBuf for IoBuf {}
+
 impl Buf for IoBuf {
     #[inline(always)]
     fn remaining(&self) -> usize {
@@ -535,7 +539,7 @@ impl Read for IoBuf {
     type Cfg = RangeCfg<usize>;
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         at_least(buf, len)?;
         Ok(Self::from(buf.copy_to_bytes(len)))
@@ -851,6 +855,14 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBufMut {
     #[inline]
     fn eq(&self, other: &&[u8; N]) -> bool {
         self.as_ref() == *other
+    }
+}
+
+impl DecodeInput for IoBufMut {
+    type Buf = IoBuf;
+
+    fn into_buf(self) -> Self::Buf {
+        self.freeze()
     }
 }
 
@@ -1705,6 +1717,16 @@ mod tests {
         assert!(recovered.capacity() > recovered.len());
         recovered.put_slice(b"!");
         assert_eq!(recovered.as_ref(), b"adopted payload!");
+    }
+
+    #[test]
+    fn test_iobufmut_decode_preserves_byte_fields() {
+        let values = vec![Bytes::from_static(b"abc"), Bytes::from_static(b"def")];
+        let source = IoBufMut::from(values.encode());
+        let range = source.as_ref().as_ptr_range();
+        let decoded = Vec::<Bytes>::decode_cfg(source, &((..).into(), (..).into())).unwrap();
+        assert_eq!(decoded, values);
+        assert!(decoded.iter().all(|field| range.contains(&field.as_ptr())));
     }
 
     #[test]

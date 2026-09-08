@@ -1,6 +1,6 @@
 use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadBuf, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
@@ -140,7 +140,10 @@ impl<D: Digest> Read for Chunk<D> {
     /// The maximum size of the shard.
     type Cfg = crate::CodecConfig;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(
+        reader: &mut impl ReadBuf,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
         let shard = Bytes::read_cfg(reader, &RangeCfg::new(..=cfg.maximum_shard_size))?;
         let index = u16::read(reader)?;
         let proof = bmt::Proof::<D>::read_cfg(reader, &1)?;

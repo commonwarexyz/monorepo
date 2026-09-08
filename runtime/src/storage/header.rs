@@ -1,6 +1,7 @@
 //! Blob header layouts shared by every storage backend: the on-disk prelude, the per-layout
 //! geometry, and reopen-time resolution (including torn-creation recovery).
 
+use commonware_codec::{Copying, ReadBuf};
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
@@ -344,7 +345,7 @@ stability_scope!(BETA {
             layouts: &RangeInclusive<Layout>,
             versions: &RangeInclusive<BlobVersion>,
         ) -> Result<(u64, BlobVersion, u64), HeaderError> {
-            let header: Self = Self::decode(&raw[..Self::PRELUDE_SIZE])
+            let header: Self = Self::decode(Copying(&raw[..Self::PRELUDE_SIZE]))
                 .expect("header decode should never fail for correct size input");
             let layout = header.validate()?;
             layout.validate_region(raw, raw_len)?;
@@ -409,7 +410,7 @@ stability_scope!(BETA {
 
     impl CodecRead for Header {
         type Cfg = ();
-        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             if buf.remaining() < Self::PRELUDE_SIZE {
                 return Err(commonware_codec::Error::EndOfBuffer);
             }
@@ -1055,7 +1056,7 @@ pub(crate) mod tests {
     fn test_header_bytes_round_trip() {
         let header = v0_header(123);
         let bytes = header.encode();
-        let decoded: Header = Header::decode(bytes.as_ref()).unwrap();
+        let decoded: Header = Header::decode(bytes).unwrap();
         assert_eq!(header, decoded);
     }
 

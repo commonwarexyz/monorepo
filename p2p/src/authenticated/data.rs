@@ -1,6 +1,8 @@
 use crate::Channel;
-use commonware_codec::{EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
-use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
+use commonware_codec::{
+    EncodeSize, Error, RangeCfg, Read, ReadBuf, ReadExt as _, Write, varint::UInt,
+};
+use commonware_runtime::{BufMut, BufferPool, IoBuf, IoBufs};
 use std::collections::HashMap;
 
 /// Data is an arbitrary message sent between peers.
@@ -31,7 +33,7 @@ impl Write for Data {
 impl Read for Data {
     type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
         let message = IoBuf::read_cfg(buf, range)?;
         Ok(Self { channel, message })
@@ -143,7 +145,7 @@ mod tests {
     #[test]
     fn test_decode_invalid() {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let result = Data::decode_cfg(&invalid_payload[..], &(..).into());
+        let result = Data::decode_cfg(commonware_codec::Copying(&invalid_payload), &(..).into());
         assert!(result.is_err());
     }
 

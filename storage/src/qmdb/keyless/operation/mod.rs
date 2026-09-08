@@ -5,9 +5,9 @@ use crate::{
         operation::{Committable, Floored},
     },
 };
-use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_codec::{Encode as _, Error as CodecError, Read, ReadBuf, Write};
 use commonware_formatting::hex;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use core::fmt::Display;
 
 pub(crate) mod fixed;
@@ -28,7 +28,7 @@ pub trait Codec: ValueEncoding + Sized {
 
     fn write_operation<F: Family>(op: &Operation<F, Self>, buf: &mut impl BufMut);
     fn read_operation<F: Family>(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         cfg: &Self::ReadCfg,
     ) -> Result<Operation<F, Self>, CodecError>;
 }
@@ -83,7 +83,7 @@ impl<F: Family, V: ValueEncoding> Floored<F> for Operation<F, V> {
 impl<F: Family, V: Codec> Read for Operation<F, V> {
     type Cfg = <V as Codec>::ReadCfg;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         V::read_operation(buf, cfg)
     }
 }

@@ -5,8 +5,8 @@ use crate::{
     aggregation::scheme,
     types::{Epoch, Height},
 };
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
 use commonware_cryptography::{
     Digest,
     certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
@@ -119,7 +119,7 @@ impl<D: Digest> Write for Item<D> {
 impl<D: Digest> Read for Item<D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let height = Height::read(reader)?;
         let digest = D::read(reader)?;
         Ok(Self { height, digest })
@@ -219,7 +219,7 @@ impl<S: Scheme, D: Digest> Write for Ack<S, D> {
 impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let epoch = Epoch::read(reader)?;
         let attestation = Attestation::read(reader)?;
@@ -276,7 +276,7 @@ impl<S: Scheme, D: Digest> Write for TipAck<S, D> {
 impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let tip = Height::read(reader)?;
         let ack = Ack::read(reader)?;
         Ok(Self { tip, ack })
@@ -354,7 +354,7 @@ impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
 impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let item = Item::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
         Ok(Self { item, certificate })
@@ -417,7 +417,7 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
 impl<S: Scheme, D: Digest> Read for Activity<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Self::Ack(Ack::read(reader)?)),
             1 => Ok(Self::Certified(Certificate::read_cfg(reader, cfg)?)),
@@ -608,7 +608,7 @@ mod tests {
         3u8.write(&mut buf); // Invalid discriminant
 
         let cfg = fixture.schemes[0].certificate_codec_config();
-        let result = Activity::<S, Sha256Digest>::read_cfg(&mut &buf[..], &cfg);
+        let result = Activity::<S, Sha256Digest>::read_cfg(&mut buf, &cfg);
         assert!(matches!(
             result,
             Err(CodecError::Invalid(

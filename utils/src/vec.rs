@@ -3,8 +3,8 @@
 use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec, vec::Vec};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, RangeCfg, Read, ReadBuf, Write};
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
@@ -394,7 +394,7 @@ impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
 impl<T: Read> Read for NonEmptyVec<T> {
     type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let items = Vec::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?;
         if items.is_empty() {
             return Err(commonware_codec::Error::Invalid(
@@ -888,7 +888,7 @@ mod tests {
         v.write(&mut buf);
 
         let decoded = NonEmptyVec::<u8>::read_cfg(
-            &mut buf.as_slice(),
+            &mut bytes::Bytes::from(buf),
             &(RangeCfg::from(NZUsize!(1)..=NZUsize!(10)), ()),
         )
         .unwrap();
@@ -902,17 +902,10 @@ mod tests {
         let mut buf = Vec::new();
         empty.write(&mut buf);
 
-        let result = NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(..), ()));
-        assert!(matches!(
-            result,
-            Err(CodecError::Invalid(
-                "NonEmptyVec",
-                "cannot decode empty vector"
-            ))
-        ));
-
-        let result =
-            NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(..NZUsize!(10)), ()));
+        let result = NonEmptyVec::<u8>::read_cfg(
+            &mut bytes::Bytes::from(buf.clone()),
+            &(RangeCfg::from(..), ()),
+        );
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
@@ -922,7 +915,19 @@ mod tests {
         ));
 
         let result = NonEmptyVec::<u8>::read_cfg(
-            &mut buf.as_slice(),
+            &mut bytes::Bytes::from(buf.clone()),
+            &(RangeCfg::from(..NZUsize!(10)), ()),
+        );
+        assert!(matches!(
+            result,
+            Err(CodecError::Invalid(
+                "NonEmptyVec",
+                "cannot decode empty vector"
+            ))
+        ));
+
+        let result = NonEmptyVec::<u8>::read_cfg(
+            &mut bytes::Bytes::from(buf),
             &(RangeCfg::from(NZUsize!(1)..NZUsize!(10)), ()),
         );
         assert!(matches!(result, Err(CodecError::InvalidLength(0))));

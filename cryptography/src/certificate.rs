@@ -70,9 +70,10 @@ pub use crate::secp256r1::certificate as secp256r1;
 use crate::{Digest, PublicKey};
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write, types::lazy::Lazy,
+    Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write,
+    types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
@@ -122,7 +123,7 @@ impl<S: Scheme> EncodeSize for Attestation<S> {
 impl<S: Scheme> Read for Attestation<S> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let signer = Participant::read(reader)?;
         let signature = ReadExt::read(reader)?;
 
@@ -625,7 +626,7 @@ impl EncodeSize for Signers {
 impl Read for Signers {
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, max_participants: &usize) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl ReadBuf, max_participants: &usize) -> Result<Self, CodecError> {
         let bitmap = BitMap::read_cfg(reader, &(*max_participants as u64))?;
         // The participant count is treated as an upper bound for decoding flexibility, e.g. one
         // might use `Scheme::certificate_codec_config_unbounded` for decoding certificates from

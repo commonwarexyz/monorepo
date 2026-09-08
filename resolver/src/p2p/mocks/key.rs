@@ -1,5 +1,5 @@
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_utils::Span;
 use std::fmt;
 
@@ -22,7 +22,7 @@ impl Write for Key {
 impl Read for Key {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         u8::read(buf).map(Self)
     }
 }

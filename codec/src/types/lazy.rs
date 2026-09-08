@@ -1,6 +1,6 @@
 //! This module exports the [`Lazy`] type.
 
-use crate::{BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
+use crate::{BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, ReadBuf, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
@@ -106,7 +106,7 @@ impl<T: Read> Lazy<T> {
     /// some bytes.
     ///
     /// Use [`Self::get`] to access the actual value, by decoding these bytes.
-    pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
+    pub fn deferred(buf: &mut impl ReadBuf, cfg: T::Cfg) -> Self {
         let bytes = buf.copy_to_bytes(buf.remaining());
         cfg_if::cfg_if! {
             if #[cfg(feature = "std")] {
@@ -209,7 +209,7 @@ impl<T: Read + Write> Write for Lazy<T> {
 impl<T: Read + FixedSize> Read for Lazy<T> {
     type Cfg = T::Cfg;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
         // In this case, we can be a bit more helpful, and fail earlier, rather
         // than deferring this error until later.
         if buf.remaining() < T::SIZE {
@@ -260,7 +260,7 @@ impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
 mod test {
     use super::Lazy;
     use crate::{
-        Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
+        Copying, Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
     };
     use proptest::prelude::*;
 
@@ -281,7 +281,7 @@ mod test {
     impl Read for Small {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl bytes::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+        fn read_cfg(buf: &mut impl crate::ReadBuf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
             let byte = u8::read_cfg(buf, &())?;
             if byte > 100 {
                 return Err(crate::Error::Invalid("Small", "value > 100"));
@@ -357,7 +357,7 @@ mod test {
         assert!(buf.pushed.iter().all(|b| range.contains(&b.as_ptr())));
 
         // Decoding from a slice of it copies every element
-        let copied = Vec::<Lazy<Small>>::decode_cfg(source.as_ref(), &cfg).unwrap();
+        let copied = Vec::<Lazy<Small>>::decode_cfg(Copying(source.as_ref()), &cfg).unwrap();
         assert_eq!(copied, value);
         let mut buf = TrackingWriteBuf::new();
         copied.write_bufs(&mut buf);

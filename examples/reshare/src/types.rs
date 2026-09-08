@@ -1,10 +1,10 @@
 //! Types, constants, and storage config shared across the example.
 
 use crate::config::NetworkConfig;
-use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_codec::{
-    Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
+    Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, Read, ReadBuf,
+    ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Epochable, Heightable, Reporter,
@@ -32,7 +32,7 @@ use commonware_glue::{
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Buf, BufMut, Quota, buffer::paged::CacheRef};
+use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
@@ -164,7 +164,7 @@ impl EncodeSize for Block {
 impl Read for Block {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,
@@ -409,7 +409,7 @@ impl dkg::SecretStore for FileSecretStore {
     async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {
         let raw = self.inner.lock().shares.get(&epoch.get()).cloned()?;
         let bytes = from_hex(&raw)?;
-        Share::decode(Bytes::from(bytes)).ok()
+        Share::decode(bytes).ok()
     }
 
     async fn put_seed(&mut self, epoch: Epoch, seed: Summary) {
@@ -423,7 +423,7 @@ impl dkg::SecretStore for FileSecretStore {
     async fn get_seed(&mut self, epoch: Epoch) -> Option<Summary> {
         let raw = self.inner.lock().seeds.get(&epoch.get()).cloned()?;
         let bytes = from_hex(&raw)?;
-        Summary::decode(bytes.as_slice()).ok()
+        Summary::decode(bytes).ok()
     }
 
     async fn put_dealing<P: commonware_cryptography::PublicKey>(
@@ -448,7 +448,7 @@ impl dkg::SecretStore for FileSecretStore {
         let key = Self::dealing_key(epoch, dealer);
         let raw = self.inner.lock().dealings.get(&key).cloned()?;
         let bytes = from_hex(&raw)?;
-        DealerPrivMsg::decode(Bytes::from(bytes)).ok()
+        DealerPrivMsg::decode(bytes).ok()
     }
 
     async fn prune(&mut self, min: Epoch) {
@@ -572,11 +572,8 @@ mod epoch_info_hex {
     ) -> Result<dkg::types::EpochInfo<MinSig, ed25519::PublicKey>, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        dkg::types::EpochInfo::decode_cfg(
-            Bytes::from(bytes),
-            &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
-        )
-        .map_err(D::Error::custom)
+        dkg::types::EpochInfo::decode_cfg(bytes, &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))
+            .map_err(D::Error::custom)
     }
 }
 

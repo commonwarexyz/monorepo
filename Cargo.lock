@@ -1207,7 +1207,6 @@ dependencies = [
 name = "commonware-bridge"
 version = "2026.7.0"
 dependencies = [
- "bytes",
  "clap",
  "commonware-actor",
  "commonware-codec",
@@ -1832,7 +1831,6 @@ name = "commonware-reshare"
 version = "2026.7.0"
 dependencies = [
  "anyhow",
- "bytes",
  "clap",
  "commonware-actor",
  "commonware-broadcast",

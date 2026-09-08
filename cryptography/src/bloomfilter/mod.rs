@@ -4,9 +4,9 @@
 mod conformance;
 
 use crate::{Hasher, sha256::Sha256};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize, FixedSize,
+    EncodeSize, FixedSize, ReadBuf,
     codec::{Read, Write},
     error::Error as CodecError,
 };
@@ -275,7 +275,7 @@ impl<H: Hasher> Read for BloomFilter<H> {
     type Cfg = (NonZeroU8, NonZeroU64);
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         (hashers_cfg, bits_cfg): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         if !bits_cfg.get().is_power_of_two() {

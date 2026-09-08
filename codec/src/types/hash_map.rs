@@ -4,7 +4,7 @@
 //! the size of the map must fit within a [u32].
 
 use crate::{
-    RangeCfg,
+    RangeCfg, ReadBuf,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_map,
@@ -74,7 +74,10 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V
 impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> {
     type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
-    fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(
+        buf: &mut impl ReadBuf,
+        (range, (k_cfg, v_cfg)): &Self::Cfg,
+    ) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
         let mut map = Self::with_capacity(len.min(buf.remaining()));

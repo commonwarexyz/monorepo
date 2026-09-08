@@ -3041,7 +3041,7 @@ mod tests {
         // minimum_shards=0, extra_shards=0). Serialize it and attempt to
         // deserialize -- this must fail.
         let malformed_bytes = [0u8; <TestCommitment as FixedSize>::SIZE];
-        let result = TestCommitment::read(&mut &malformed_bytes[..]);
+        let result = TestCommitment::read(&mut commonware_codec::Copying(&malformed_bytes));
         assert!(
             result.is_err(),
             "deserialization of Commitment with zeroed CodingConfig must fail"
@@ -3055,9 +3055,9 @@ mod tests {
             Sha256::hash(&[b"context"]),
             coding_config,
         ));
-        let encoded = valid.encode();
+        let mut encoded = valid.encode();
         let decoded =
-            TestCommitment::read(&mut &encoded[..]).expect("valid Commitment must deserialize");
+            TestCommitment::read(&mut encoded).expect("valid Commitment must deserialize");
         assert_eq!(valid, decoded);
     }
 

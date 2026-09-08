@@ -1,7 +1,7 @@
 //! Shared address types for p2p networking.
 
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Resolver};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_runtime::{BufMut, Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
 
@@ -120,7 +120,7 @@ impl EncodeSize for Ingress {
 impl Read for Ingress {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let prefix = u8::read(buf)?;
         match prefix {
             INGRESS_SOCKET_PREFIX => {
@@ -214,7 +214,7 @@ impl EncodeSize for Address {
 impl Read for Address {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let prefix = u8::read(buf)?;
         match prefix {
             ADDRESS_SYMMETRIC_PREFIX => {

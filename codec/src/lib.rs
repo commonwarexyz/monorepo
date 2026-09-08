@@ -32,6 +32,17 @@
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
+//! # Decode Inputs
+//!
+//! Readers accept [ReadBuf] inputs so decoded byte fields can share the input allocation.
+//! Pass owned buffers such as [::bytes::Bytes] directly, or clone a shared buffer to retain
+//! a separate cursor. Decoders also accept owned [`Vec<u8>`] values through [DecodeInput],
+//! transferring their allocation without copying the payload.
+//!
+//! Borrowed slices require [Copying]. Creating this adapter does not allocate, so scalar
+//! and byte-array reads can use reusable scratch storage. Fields that retain bytes copy
+//! their contents when decoded through the adapter.
+//!
 //! # Specialization
 //!
 //! Byte-oriented container paths use hidden trait hooks on [Write], [Read], and [EncodeSize] to
@@ -82,8 +93,8 @@
 //! ## Example 1. Fixed-Size Type
 //!
 //! ```
-//! use bytes::{Buf, BufMut};
-//! use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
+//! use bytes::BufMut;
+//! use commonware_codec::{ReadBuf, Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -110,7 +121,7 @@
 //! // 3. Implement Read: How to deserialize the struct (uses default Cfg = ())
 //! impl Read for Point {
 //!     type Cfg = ();
-//!     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+//!     fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
 //!         // Use ReadExt::read for ergonomic reading when Cfg is ()
 //!         let x = u32::read(buf)?;
 //!         let y = u32::read(buf)?;
@@ -133,8 +144,8 @@
 //! ## Example 2. Variable-Size Type
 //!
 //! ```
-//! use bytes::{Buf, BufMut};
-//! use commonware_codec::{
+//! use bytes::BufMut;
+//! use commonware_codec::{ReadBuf,
 //!     Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
 //!     ReadRangeExt, Write, RangeCfg
 //! };
@@ -177,7 +188,7 @@
 //! // 3. Implement Read
 //! impl Read for Item {
 //!     type Cfg = ItemConfig;
-//!     fn read_cfg(buf: &mut impl Buf, cfg: &ItemConfig) -> Result<Self, Error> {
+//!     fn read_cfg(buf: &mut impl ReadBuf, cfg: &ItemConfig) -> Result<Self, Error> {
 //!         // u64 requires Cfg = (), uses ReadExt::read
 //!         let id = <u64>::read(buf)?;
 //!
@@ -217,6 +228,9 @@
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
+
+    mod buf;
+    pub use buf::{Copying, DecodeInput, ReadBuf};
 
     pub mod codec;
     pub mod config;

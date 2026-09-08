@@ -27,8 +27,8 @@
 //! `< pruned_below`. The [`Read`] impl validates this on decode.
 
 use super::Bitmap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, ReadExt, Write};
 use core::ops::Range;
 
 /// Number of values per container. Pruning aligns to multiples of this value.
@@ -219,7 +219,7 @@ impl Read for Prunable {
     /// the underlying [`Bitmap`]).
     type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let pruned_below = u64::read(buf)?;
         if pruned_below & CONTAINER_MASK != 0 {
             return Err(CodecError::Invalid(

@@ -2,7 +2,7 @@ use crate::stateful::{
     Application, Input, Proposed,
     db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     convert::Infallible,
@@ -234,7 +234,7 @@ impl EncodeSize for TestBlock {
 impl Read for TestBlock {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let context = SimplexContext::read(buf)?;
         let height = Height::new(buf.get_u64());
         let mut digest = [0u8; 32];

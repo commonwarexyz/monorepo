@@ -7,8 +7,10 @@
 //! beyond the synced epoch.
 
 use crate::dkg::{network::Directory, types::EpochInfo};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{
+    Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, ReadBuf, Write,
+};
 use commonware_consensus::{
     Epochable as _,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -161,7 +163,7 @@ where
     type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(
-        reader: &mut impl Buf,
+        reader: &mut impl ReadBuf,
         (epoch_info, certificate): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         Ok(Self {

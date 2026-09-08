@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, ReadRangeExt,
-    Write,
+    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadBuf, ReadExt,
+    ReadRangeExt, Write,
 };
 use commonware_collector::{
     Handler, Monitor, Originator,
@@ -17,7 +17,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{
-    Buf, BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
+    BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
 };
 use commonware_utils::{
     TestRng,
@@ -57,7 +57,7 @@ impl Write for FuzzRequest {
 
 impl Read for FuzzRequest {
     type Cfg = RangeCfg<usize>;
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let data = Vec::read_range(buf, *cfg)?;
         Ok(Self { id, data })
@@ -99,7 +99,7 @@ impl Write for FuzzResponse {
 
 impl Read for FuzzResponse {
     type Cfg = RangeCfg<usize>;
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let result = Vec::read_range(buf, *cfg)?;
         Ok(Self { id, result })

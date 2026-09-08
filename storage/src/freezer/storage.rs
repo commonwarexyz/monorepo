@@ -5,10 +5,12 @@ use crate::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
 };
-use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    CodecShared, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write as CodecWrite,
+};
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
+    Blob, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -59,7 +61,7 @@ impl Cursor {
 impl Read for Cursor {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         <[u8; u64::SIZE + u64::SIZE + u32::SIZE]>::read(buf).map(Self)
     }
 }
@@ -151,7 +153,7 @@ impl Checkpoint {
 
 impl Read for Checkpoint {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let oversized_size = u64::read(buf)?;
@@ -267,7 +269,7 @@ impl CodecWrite for Entry {
 
 impl Read for Entry {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let position = u64::read(buf)?;
@@ -344,7 +346,7 @@ impl<K: Array> CodecWrite for Record<K> {
 
 impl<K: Array> Read for Record<K> {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
         let next_section = u64::read(buf)?;
         let next_position = u64::read(buf)?;
@@ -441,7 +443,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     }
 
     /// Parse table entries from a buffer.
-    fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
+    fn parse_entries(mut buf: impl ReadBuf) -> Result<(Entry, Entry), Error> {
         let entry1 = Entry::read(&mut buf)?;
         let entry2 = Entry::read(&mut buf)?;
         Ok((entry1, entry2))
@@ -454,7 +456,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .read_at(offset, Entry::FULL_SIZE, ReadOptions::default())
             .await?;
 
-        Self::parse_entries(read_buf)
+        Self::parse_entries(read_buf.freeze())
     }
 
     /// Recover a single table entry and update tracking.
@@ -1027,7 +1029,8 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let mut read_buf = self
             .table
             .read_at(read_offset, chunk_bytes, ReadOptions::default())
-            .await?;
+            .await?
+            .freeze();
 
         // Process each entry in the chunk
         let mut writes = self.context.storage_buffer_pool().alloc(chunk_bytes);
@@ -1261,7 +1264,7 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
+    use commonware_codec::{Copying, DecodeExt};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Runner, Storage, Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
@@ -1277,7 +1280,7 @@ mod tests {
         let key = key.as_bytes();
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(buf.as_ref()).unwrap()
+        FixedBytes::decode(Copying(buf.as_ref())).unwrap()
     }
 
     fn test_key_at_index(table_size: u32, table_index: u32) -> FixedBytes<64> {
@@ -1361,7 +1364,7 @@ mod tests {
                 let offset = entry_idx * Entry::FULL_SIZE;
                 let buf = &table_data.as_ref()[offset..offset + Entry::FULL_SIZE];
                 let (slot0, slot1) =
-                    Inner::<Context, FixedBytes<64>, i32>::parse_entries(buf).unwrap();
+                    Inner::<Context, FixedBytes<64>, i32>::parse_entries(Copying(buf)).unwrap();
                 if slot0.is_empty() && slot1.is_empty() {
                     both_empty_count += 1;
                 }

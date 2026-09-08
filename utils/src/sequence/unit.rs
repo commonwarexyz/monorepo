@@ -1,6 +1,6 @@
 use crate::{Array, Span};
-use bytes::{Buf, BufMut};
-use commonware_codec::{FixedArray, FixedSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{FixedArray, FixedSize, Read, ReadBuf, Write};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
@@ -22,7 +22,7 @@ impl FixedSize for Unit {
 impl Read for Unit {
     type Cfg = ();
 
-    fn read_cfg(_buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(_buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
         Ok(Self)
     }
 }

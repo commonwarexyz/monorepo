@@ -16,8 +16,8 @@ use crate::{
         operation::Key,
     },
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadExt as _, Write};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, Read, ReadBuf, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 
 pub mod db;
@@ -103,7 +103,7 @@ where
     type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         (max_digests, update_cfg, value_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         match u8::read(buf)? {
@@ -965,7 +965,7 @@ pub mod tests {
     fn test_exclusion_proof_rejects_unknown_tag() {
         let mut bytes = vec![42u8]; // unknown tag
         bytes.extend_from_slice(&[0u8; 32]); // garbage
-        let result = CodecExclusionProof::decode_cfg(bytes.as_slice(), &(MAX_DIGESTS, (), ()));
+        let result = CodecExclusionProof::decode_cfg(bytes, &(MAX_DIGESTS, (), ()));
         assert!(result.is_err());
     }
 

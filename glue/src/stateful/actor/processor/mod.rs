@@ -1658,7 +1658,7 @@ mod tests {
         type Cfg = ();
 
         fn read_cfg(
-            buf: &mut impl commonware_runtime::Buf,
+            buf: &mut impl commonware_codec::ReadBuf,
             _: &Self::Cfg,
         ) -> Result<Self, CodecError> {
             Ok(Self {

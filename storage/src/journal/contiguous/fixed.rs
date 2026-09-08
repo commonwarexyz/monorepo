@@ -145,7 +145,7 @@ use crate::{
         durability::Barrier,
     },
 };
-use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Writer},
@@ -1464,7 +1464,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 
         #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
         for slice in reusable_buf.chunks_exact(A::SIZE) {
-            result.push(A::decode(slice).map_err(Error::Codec)?);
+            result.push(A::decode(Copying(slice)).map_err(Error::Codec)?);
         }
 
         self.metrics.cache_hits.inc_by(hits);
@@ -1545,7 +1545,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 }
                 // A decode failure declines to a miss: the async completion re-reads the
                 // item and bubbles the failure as [Error::Codec], like every async read path.
-                if let Ok(item) = A::decode(slice) {
+                if let Ok(item) = A::decode(Copying(slice)) {
                     out[base + idx] = Some(item);
                     hits += 1;
                 }
@@ -1594,7 +1594,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         let mut buf = vec![0u8; A::SIZE];
         let item = match self.locate(pos) {
             Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => {
-                A::decode(&buf[..]).ok()
+                A::decode(Copying(&buf[..])).ok()
             }
             _ => None,
         };

@@ -8,9 +8,9 @@ use crate::{
     },
     rmap::RMap,
 };
-use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{CodecShared, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut, Handle,
+    BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
@@ -54,7 +54,7 @@ impl<K: Array> Write for Record<K> {
 impl<K: Array> Read for Record<K> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let index = u64::read(buf)?;
         let key = K::read(buf)?;
         let value_offset = u64::read(buf)?;

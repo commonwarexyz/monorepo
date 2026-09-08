@@ -41,8 +41,8 @@ use crate::{
         },
     },
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Codec, EncodeSize, Read, ReadBuf, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
@@ -113,7 +113,7 @@ impl<F: Graftable, D: Digest> EncodeSize for OpsRootWitness<F, D> {
 impl<F: Graftable, D: Digest> Read for OpsRootWitness<F, D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let grafted_root = D::read(buf)?;
         let pending_chunk_digest = F::PendingChunk::<D>::read(buf)?;
         let partial_chunk = if bool::read(buf)? {
@@ -498,7 +498,7 @@ impl<F: Graftable, D: Digest> Read for RangeProof<F, D> {
     type Cfg = usize;
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = Proof::<F, D>::read_cfg(buf, max_digests)?;
@@ -609,7 +609,7 @@ impl<F: Graftable, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
     type Cfg = usize;
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let loc = Location::<F>::read(buf)?;

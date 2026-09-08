@@ -1,6 +1,6 @@
 use crate::{Array, Span};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display, Formatter},
@@ -38,7 +38,7 @@ impl Write for U64 {
 impl Read for U64 {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         <[u8; Self::SIZE]>::read(buf).map(Self)
     }
 }
@@ -97,17 +97,20 @@ impl Display for U64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode};
 
     #[test]
     fn test_u64() {
         let value = 42u64;
         let array = U64::new(value);
-        assert_eq!(value, u64::from(U64::decode(array.as_ref()).unwrap()));
+        assert_eq!(
+            value,
+            u64::from(U64::decode(Copying(array.as_ref())).unwrap())
+        );
         assert_eq!(value, u64::from(U64::from(array.0)));
 
         let vec = array.to_vec();
-        assert_eq!(value, u64::from(U64::decode(vec.as_ref()).unwrap()));
+        assert_eq!(value, u64::from(U64::decode(vec).unwrap()));
     }
 
     #[test]

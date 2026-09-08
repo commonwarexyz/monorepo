@@ -135,8 +135,8 @@ use crate::{
     },
     transcript::{Summary, Transcript, Version},
 };
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadBuf, ReadExt, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Space},
     poly::{Interpolator, Poly},
@@ -271,7 +271,7 @@ impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let max_usize = max_participants.get() as usize;
@@ -747,7 +747,7 @@ impl EncodeSize for SignedDealerLog {
 impl Read for SignedDealerLog {
     type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let dealer: PublicKey = ReadExt::read(buf)?;
         let signature: Signature = ReadExt::read(buf)?;
         let log = Read::read_cfg(buf, cfg)?;
@@ -820,7 +820,7 @@ impl EncodeSize for DealerLog {
 impl Read for DealerLog {
     type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let dealing = Read::read_cfg(buf, cfg)?;
         let commitments = Read::read_cfg(buf, &cfg.0)?;
         Ok(Self {
@@ -899,7 +899,7 @@ impl Read for Dealing {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         (max_players, _mode_version): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let nonce = ReadExt::read(buf)?;
@@ -1929,10 +1929,10 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        let encoded = signed.encode();
+        let mut encoded = signed.encode();
         let max_players = NonZeroU32::new(7).unwrap();
         let cfg = (max_players, ModeVersion::v0());
-        let decoded = SignedDealerLog::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        let decoded = SignedDealerLog::read_cfg(&mut encoded, &cfg).unwrap();
 
         // The decoded log should identify successfully and produce a valid DKG.
         let (pk, log) = decoded
@@ -1965,10 +1965,10 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        let encoded = output.encode();
+        let mut encoded = output.encode();
         let max_players = NonZeroU32::new(7).unwrap();
         let cfg = (max_players, ModeVersion::v0());
-        let decoded: Output<PublicKey> = Read::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        let decoded: Output<PublicKey> = Read::read_cfg(&mut encoded, &cfg).unwrap();
 
         assert_eq!(output, decoded);
         assert_eq!(output.public(), decoded.public());

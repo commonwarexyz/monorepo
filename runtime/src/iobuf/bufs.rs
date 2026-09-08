@@ -10,7 +10,7 @@ use super::{
     pool::BufferPool,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{BufsMut, EncodeSize, Write};
+use commonware_codec::{BufsMut, DecodeInput, EncodeSize, ReadBuf, Write};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize};
 
 /// Container for one or more immutable buffers.
@@ -456,6 +456,8 @@ impl IoBufs {
         }
     }
 }
+
+impl ReadBuf for IoBufs {}
 
 impl Buf for IoBufs {
     #[inline]
@@ -1003,6 +1005,14 @@ impl IoBufsMut {
             buf.as_mut().copy_from_slice(&src[offset..offset + len]);
             offset += len;
         });
+    }
+}
+
+impl DecodeInput for IoBufsMut {
+    type Buf = IoBufs;
+
+    fn into_buf(self) -> Self::Buf {
+        self.freeze()
     }
 }
 
@@ -1620,7 +1630,7 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 mod tests {
     use super::{super::pool::BufferPoolConfig, *};
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{Encode, types::lazy::Lazy};
+    use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
     use std::collections::{BTreeMap, HashMap};
 
@@ -1979,6 +1989,25 @@ mod tests {
         let coalesced = bufs.coalesce_with_pool(&pool);
         assert_eq!(coalesced, b"abcdefgh");
         assert!(coalesced.is_pooled());
+    }
+
+    #[test]
+    fn test_iobufsmut_decode_preserves_byte_fields() {
+        let first = IoBufMut::from(&b"\x02\x03abc"[..]);
+        let second = IoBufMut::from(&b"\x03def"[..]);
+        let ranges = [
+            first.as_ref().as_ptr_range(),
+            second.as_ref().as_ptr_range(),
+        ];
+        let source = IoBufsMut::from(vec![first, second]);
+        let decoded = Vec::<Bytes>::decode_cfg(source, &((..).into(), (..).into())).unwrap();
+        assert_eq!(
+            decoded,
+            [Bytes::from_static(b"abc"), Bytes::from_static(b"def")]
+        );
+        for (field, range) in decoded.iter().zip(ranges) {
+            assert!(range.contains(&field.as_ptr()));
+        }
     }
 
     #[test]

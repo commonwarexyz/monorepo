@@ -1,6 +1,6 @@
 use crate::Secret;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -65,7 +65,7 @@ impl Write for PrivateKeyInner {
 impl Read for PrivateKeyInner {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::read(buf)?);
         let key = SigningKey::from_slice(raw.as_ref());
         #[cfg(feature = "std")]
@@ -140,7 +140,7 @@ impl Write for PublicKeyInner {
 impl Read for PublicKeyInner {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(buf)?;
         let key = VerifyingKey::from_sec1_bytes(&raw)
             .map_err(|_| CodecError::Invalid(CURVE_NAME, "Invalid PublicKey"))?;
@@ -225,10 +225,7 @@ macro_rules! impl_private_key_wrapper {
         impl commonware_codec::Read for $name {
             type Cfg = ();
 
-            fn read_cfg(
-                buf: &mut impl bytes::Buf,
-                cfg: &(),
-            ) -> Result<Self, commonware_codec::Error> {
+            fn read_cfg(buf: &mut impl ReadBuf, cfg: &()) -> Result<Self, commonware_codec::Error> {
                 PrivateKeyInner::read_cfg(buf, cfg).map(Self)
             }
         }
@@ -271,10 +268,7 @@ macro_rules! impl_public_key_wrapper {
         impl commonware_codec::Read for $name {
             type Cfg = ();
 
-            fn read_cfg(
-                buf: &mut impl bytes::Buf,
-                cfg: &(),
-            ) -> Result<Self, commonware_codec::Error> {
+            fn read_cfg(buf: &mut impl ReadBuf, cfg: &()) -> Result<Self, commonware_codec::Error> {
                 PublicKeyInner::read_cfg(buf, cfg).map(Self)
             }
         }
@@ -338,7 +332,7 @@ pub(crate) mod tests {
 
     pub fn create_private_key() -> PrivateKeyInner {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
-        PrivateKeyInner::decode(commonware_formatting::from_hex(HEX).unwrap().as_ref()).unwrap()
+        PrivateKeyInner::decode(commonware_formatting::from_hex(HEX).unwrap()).unwrap()
     }
 
     pub fn parse_vector_keypair(
@@ -348,18 +342,13 @@ pub(crate) mod tests {
     ) -> (PrivateKeyInner, PublicKeyInner) {
         let public_key = parse_public_key_as_compressed(qx, qy);
         (
-            PrivateKeyInner::decode(
-                commonware_formatting::from_hex(private_key)
-                    .unwrap()
-                    .as_ref(),
-            )
-            .unwrap(),
+            PrivateKeyInner::decode(commonware_formatting::from_hex(private_key).unwrap()).unwrap(),
             public_key,
         )
     }
 
     pub fn parse_public_key_as_compressed(qx: &str, qy: &str) -> PublicKeyInner {
-        PublicKeyInner::decode(parse_public_key_as_compressed_vector(qx, qy).as_ref()).unwrap()
+        PublicKeyInner::decode(parse_public_key_as_compressed_vector(qx, qy)).unwrap()
     }
 
     pub fn parse_public_key_as_compressed_vector(qx: &str, qy: &str) -> Vec<u8> {

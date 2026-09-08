@@ -10,8 +10,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{EncodeSize, ReadBuf, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -99,7 +99,7 @@ impl<F: Family, D: Digest> commonware_codec::Read for Proof<F, D> {
     type Cfg = usize;
 
     fn read_cfg(
-        buf: &mut impl Buf,
+        buf: &mut impl ReadBuf,
         max_digests: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let leaves = Location::<F>::read(buf)?;

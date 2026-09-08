@@ -11,7 +11,7 @@
 
 commonware_macros::stability_scope!(ALPHA {
     use bytes::Buf;
-    use commonware_codec::{Codec, FixedSize, Read, Write};
+    use commonware_codec::{ReadBuf, Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
@@ -57,7 +57,7 @@ commonware_macros::stability_scope!(ALPHA {
     impl Read for Config {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             Ok(Self {
                 minimum_shards: NonZeroU16::read_cfg(buf, cfg)?,
                 extra_shards: NonZeroU16::read_cfg(buf, cfg)?,

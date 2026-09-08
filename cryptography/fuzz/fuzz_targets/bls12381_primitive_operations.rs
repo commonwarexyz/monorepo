@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{Read, ReadExt, Write};
+use commonware_codec::{Copying, DecodeInput, Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, ScalarReadCfg, Share},
     ops,
@@ -317,7 +317,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
     let bytes: [u8; 48] = u.arbitrary()?;
 
-    match G1::read(&mut bytes.as_slice()) {
+    match G1::read(&mut Copying(bytes.as_slice())) {
         Ok(point) => Ok(point),
         Err(_) => {
             if u.arbitrary()? {
@@ -332,7 +332,7 @@ fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
 fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     let bytes: [u8; 96] = u.arbitrary()?;
 
-    match G2::read(&mut bytes.as_slice()) {
+    match G2::read(&mut Copying(bytes.as_slice())) {
         Ok(point) => Ok(point),
         Err(_) => {
             if u.arbitrary()? {
@@ -605,7 +605,7 @@ fn fuzz(op: FuzzOperation) {
             let mut encoded = Vec::new();
             scalar.write(&mut encoded);
             if let Ok(decoded) =
-                Scalar::read_cfg(&mut encoded.as_slice(), &ScalarReadCfg::RejectZero)
+                Scalar::read_cfg(&mut encoded.into_buf(), &ScalarReadCfg::RejectZero)
             {
                 assert_eq!(scalar, decoded);
             }
@@ -614,7 +614,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::SerializeG1 { point } => {
             let mut encoded = Vec::new();
             point.write(&mut encoded);
-            if let Ok(decoded) = G1::read(&mut encoded.as_slice()) {
+            if let Ok(decoded) = G1::read(&mut encoded.into_buf()) {
                 assert_eq!(point, decoded);
             }
         }
@@ -622,7 +622,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::SerializeG2 { point } => {
             let mut encoded = Vec::new();
             point.write(&mut encoded);
-            if let Ok(decoded) = G2::read(&mut encoded.as_slice()) {
+            if let Ok(decoded) = G2::read(&mut encoded.into_buf()) {
                 assert_eq!(point, decoded);
             }
         }

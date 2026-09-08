@@ -2,9 +2,9 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write as CodecWrite,
+    EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, ReadBuf, Write as CodecWrite,
 };
 use thiserror::Error;
 
@@ -157,7 +157,7 @@ impl CodecRead for Hostname {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let bytes = Vec::<u8>::read_cfg(buf, &(RangeCfg::new(..=MAX_HOSTNAME_LEN), ()))?;
         let hostname = String::from_utf8(bytes)
             .map_err(|_| CodecError::Invalid("Hostname", "invalid UTF-8"))?;

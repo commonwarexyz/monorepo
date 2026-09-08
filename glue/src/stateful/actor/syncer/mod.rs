@@ -2,7 +2,7 @@ use crate::stateful::{
     Application,
     db::{Anchor, DatabaseSet},
 };
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
@@ -13,7 +13,7 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
+use commonware_runtime::{BufMut, Clock, Metrics, Spawner};
 use commonware_storage::{
     Context,
     metadata::{self, Metadata},
@@ -100,7 +100,7 @@ where
 {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(reader)? {
             0 => Ok(Self::InProgress(Finalization::read_cfg(reader, cfg)?)),
             1 => Ok(Self::Complete(Height::read(reader)?)),

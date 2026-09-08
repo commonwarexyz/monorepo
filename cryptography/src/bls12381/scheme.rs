@@ -35,9 +35,10 @@ use super::primitives::{
 use crate::{BatchVerifier, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
+    Copying, DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read, ReadBuf,
+    ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -77,10 +78,10 @@ impl Write for PrivateKey {
 impl Read for PrivateKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key =
-            Private::decode(raw.as_ref()).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let key = Private::decode(Copying(raw.as_ref()))
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self {
             raw: Secret::new(*raw),
             key,
@@ -178,9 +179,9 @@ impl Write for PublicKey {
 impl Read for PublicKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = <MinPk as Variant>::Public::decode(raw.as_ref())
+        let key = <MinPk as Variant>::Public::decode(Copying(raw.as_ref()))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, key })
     }
@@ -280,9 +281,9 @@ impl Write for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = <MinPk as Variant>::Signature::decode(raw.as_ref())
+        let signature = <MinPk as Variant>::Signature::decode(Copying(raw.as_ref()))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, signature })
     }
@@ -444,23 +445,15 @@ mod tests {
     }
 
     fn parse_private_key(private_key: &str) -> Result<PrivateKey, CodecError> {
-        PrivateKey::decode(
-            commonware_formatting::from_hex(private_key)
-                .unwrap()
-                .as_ref(),
-        )
+        PrivateKey::decode(commonware_formatting::from_hex(private_key).unwrap())
     }
 
     fn parse_public_key(public_key: &str) -> Result<PublicKey, CodecError> {
-        PublicKey::decode(
-            commonware_formatting::from_hex(public_key)
-                .unwrap()
-                .as_ref(),
-        )
+        PublicKey::decode(commonware_formatting::from_hex(public_key).unwrap())
     }
 
     fn parse_signature(signature: &str) -> Result<Signature, CodecError> {
-        Signature::decode(commonware_formatting::from_hex(signature).unwrap().as_ref())
+        Signature::decode(commonware_formatting::from_hex(signature).unwrap())
     }
 
     #[test]

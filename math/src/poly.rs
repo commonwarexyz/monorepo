@@ -3,7 +3,7 @@ use crate::algebra::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, RangeCfg, Read, ReadBuf, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{TryCollect, non_empty_vec, ordered::Map, vec::NonEmptyVec};
 use core::{
@@ -206,10 +206,7 @@ impl<K: Write> Write for Poly<K> {
 impl<K: Read> Read for Poly<K> {
     type Cfg = (RangeCfg<NonZeroU32>, <K as Read>::Cfg);
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             coeffs: NonEmptyVec::<K>::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?,
         })

@@ -32,11 +32,11 @@ use blst::{
     blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
     blst_scalar_from_fr,
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
     EncodeSize,
     Error::{self, Invalid},
-    FixedArray, FixedSize, Read, ReadExt, Write,
+    FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
@@ -539,7 +539,7 @@ impl Write for Private {
 impl Read for Private {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
         Ok(Self::new(scalar))
     }
@@ -755,7 +755,7 @@ impl Write for Scalar {
 impl Read for Scalar {
     type Cfg = ScalarReadCfg;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
         // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates in-range.
@@ -1011,7 +1011,7 @@ impl Write for Share {
 impl Read for Share {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         let index = Participant::read(buf)?;
         let private = Private::read(buf)?;
         Ok(Self { index, private })
@@ -1261,7 +1261,7 @@ impl Write for G1 {
 impl Read for G1 {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
         // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
@@ -1684,7 +1684,7 @@ impl Write for G2 {
 impl Read for G2 {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
         // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
@@ -1910,7 +1910,7 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
+    use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{Random, test_suites};
@@ -2055,16 +2055,24 @@ mod tests {
         let s = Scalar::random(test_rng());
         let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
         assert_eq!(
-            Scalar::decode_cfg(bytes.as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::decode_cfg(Copying(bytes.as_ref()), &ScalarReadCfg::AllowZero).unwrap(),
             s
         );
         assert_eq!(
-            Scalar::decode_cfg([0u8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::decode_cfg(
+                Copying([0u8; Scalar::SIZE].as_ref()),
+                &ScalarReadCfg::AllowZero
+            )
+            .unwrap(),
             Scalar::zero()
         );
         // Non-canonical encodings (>= r) are rejected.
         assert!(
-            Scalar::decode_cfg([0xffu8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).is_err()
+            Scalar::decode_cfg(
+                Copying([0xffu8; Scalar::SIZE].as_ref()),
+                &ScalarReadCfg::AllowZero
+            )
+            .is_err()
         );
     }
 

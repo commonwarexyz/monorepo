@@ -24,7 +24,7 @@ use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
-use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
@@ -414,7 +414,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let mut items = Vec::with_capacity(positions.len());
         for i in 0..positions.len() {
             let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
-            items.push(A::decode(slice).map_err(Error::Codec)?);
+            items.push(A::decode(Copying(slice)).map_err(Error::Codec)?);
         }
         Ok((items, hits))
     }
@@ -431,7 +431,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
-        A::decode(&buf[..]).ok()
+        A::decode(Copying(&buf[..])).ok()
     }
 
     /// See [Journal::last].

@@ -18,8 +18,8 @@
 //! ```
 
 use crate::curve::{F, montgomery};
-use bytes::{Buf, BufMut};
-use commonware_codec::{FixedSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{FixedSize, Read, ReadBuf, Write};
 use commonware_math::algebra::Random;
 use subtle::ConstantTimeEq;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -115,7 +115,7 @@ impl FixedSize for PublicKey {
 impl Read for PublicKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
         })

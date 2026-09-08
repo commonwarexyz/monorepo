@@ -19,8 +19,7 @@
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
-use bytes::Buf;
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
@@ -112,7 +111,7 @@ impl<P: PublicKey> Read for Addresses<P> {
     /// from the union of its dealers, players, and next players.
     type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self(Map::read_cfg(buf, &(*cfg, (), ()))?))
     }
 }

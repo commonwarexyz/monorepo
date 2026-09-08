@@ -1,6 +1,6 @@
 use crate::{Array, Span};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
 use commonware_formatting::Hex;
 use core::{
     cmp::{Ord, PartialOrd},
@@ -41,7 +41,7 @@ impl<const N: usize> Write for FixedBytes<N> {
 impl<const N: usize> Read for FixedBytes<N> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
         Ok(Self(<[u8; N]>::read(buf)?))
     }
 }
@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use crate::fixed_bytes;
     use bytes::{Buf, BytesMut};
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode};
 
     #[test]
     fn test_codec() {
@@ -105,23 +105,23 @@ mod tests {
         assert_eq!(bytes, bytes_into);
 
         let slice = [1, 2, 3, 4];
-        let bytes_from_slice = FixedBytes::decode(slice.as_ref()).unwrap();
+        let bytes_from_slice = FixedBytes::decode(Copying(slice.as_ref())).unwrap();
         assert_eq!(bytes_from_slice, bytes);
 
         let vec = vec![1, 2, 3, 4];
-        let bytes_from_vec = FixedBytes::decode(vec.as_ref()).unwrap();
+        let bytes_from_vec = FixedBytes::decode(vec).unwrap();
         assert_eq!(bytes_from_vec, bytes);
 
         // Test with incorrect length
         let slice_too_short = [1, 2, 3];
         assert!(matches!(
-            FixedBytes::<4>::decode(slice_too_short.as_ref()),
+            FixedBytes::<4>::decode(Copying(slice_too_short.as_ref())),
             Err(CodecError::EndOfBuffer)
         ));
 
         let vec_too_long = vec![1, 2, 3, 4, 5];
         assert!(matches!(
-            FixedBytes::<4>::decode(vec_too_long.as_ref()),
+            FixedBytes::<4>::decode(vec_too_long),
             Err(CodecError::ExtraData(1))
         ));
     }
