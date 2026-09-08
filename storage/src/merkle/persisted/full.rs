@@ -171,9 +171,6 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// True while the journal may contain flushed nodes that have not yet been made durable.
-    pub(crate) journal_dirty: bool,
-
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
 }
@@ -302,7 +299,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 pruned_to_pos: Position::new(0),
                 journal,
                 metadata,
-                journal_dirty: false,
                 strategy: cfg.strategy,
             });
         }
@@ -442,7 +438,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             pruned_to_pos: effective_prune_pos,
             journal,
             metadata,
-            journal_dirty: false,
             strategy: cfg.strategy,
         })
     }
@@ -592,7 +587,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             pruned_to_pos: prune_pos,
             journal,
             metadata,
-            journal_dirty: false,
             strategy: cfg.config.strategy,
         })
     }
@@ -712,12 +706,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
 
-        // Sync the journal to ensure durability before returning. This covers nodes appended by
-        // the flush above as well as nodes left non-durable by earlier [Self::flush] calls.
-        if self.journal_dirty {
-            self.journal = self.journal.sync().await?;
-            self.journal_dirty = false;
-        }
+        // The journal tracks pending data, recovery metadata, and unobserved sync failures
+        self.journal = self.journal.sync().await?;
 
         Ok(self)
     }
@@ -728,8 +718,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// The handle covers only nodes flushed so far. A later [Self::sync] still performs a full
     /// durable sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        // `journal_dirty` is deliberately not cleared: the started sync covers only nodes
-        // flushed so far, and sync() remains the durability authority.
         self = self.flush_internal().await?;
         let (journal, handle) = self.journal.start_sync().await?;
         self.journal = journal;
@@ -737,8 +725,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Append nodes cached in the in-memory structure that are missing from the journal, then
-    /// prune them from the in-memory structure. Sets [Self::journal_dirty] when nodes are
-    /// appended.
+    /// prune them from the in-memory structure.
     async fn flush_internal(mut self) -> Result<Self, Error<F>> {
         let journal_size = Position::<F>::new(self.journal.size());
 
@@ -774,7 +761,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Append missing nodes to the journal.
         (self.journal, _) = self.journal.append_prepared(encoded).await?;
-        self.journal_dirty = true;
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
         // the mem. We prune to the previously captured leaf count.
@@ -973,7 +959,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Err(Error::ElementPruned(new_size));
         }
 
-        // Rewind the journal if needed.
+        // Sync retained nodes and advance the recovery watermark after truncation
         let journal_size = Position::<F>::new(self.journal.size());
         if new_size < journal_size {
             self.journal = self.journal.rewind(*new_size).await?.sync().await?;
@@ -1175,7 +1161,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
     use std::{
@@ -1612,6 +1601,35 @@ mod tests {
         mmr = mmr.sync().await.unwrap();
 
         mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_sync_observes_clean_start_sync_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let cfg = test_config(&context);
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let merkle = drive_pending_syncs(
+                &pending,
+                Merkle::<mmr::Family, _, Digest, Sequential>::init(context, &hasher, cfg),
+            )
+            .await
+            .unwrap();
+
+            // No nodes were appended, but the opened journal can still start a blob sync
+            let (merkle, handle) = merkle.start_sync().await.unwrap();
+            assert!(!pending.lock().is_empty());
+            fail_pending_syncs(&pending);
+            drop(handle);
+
+            // A full sync must observe the unobserved failure even with nothing new to flush
+            let error = merkle.sync().await.expect_err("sync failure was lost");
+            assert!(matches!(error, Error::Journal(JError::Runtime(_))));
+        });
     }
 
     #[test_traced]

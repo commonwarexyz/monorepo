@@ -128,6 +128,46 @@ mod tests {
         TestDb::init(context, cfg).await.unwrap()
     }
 
+    /// Apply an uncommitted batch, rewind to its size, then crash without another sync.
+    /// Recovery must retain the batch's state.
+    #[test_traced]
+    fn test_keyless_fixed_rewind_current_size_makes_applied_state_durable() {
+        // Avoid rollover so sealing cannot hide a missing rewind sync
+        async fn open(context: deterministic::Context) -> TestDb<mmr::Family> {
+            let mut cfg = db_config("rcs", &context, Sequential);
+            cfg.log.items_per_blob = NZU64!(1000);
+            cfg.merkle.items_per_blob = NZU64!(1000);
+            TestDb::init(context, cfg).await.unwrap()
+        }
+
+        let ((size, root), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let db = open(context.child("db")).await;
+
+                // Leave the batch uncommitted so the equal-size rewind must persist it
+                let merkleized = db
+                    .new_batch()
+                    .append(U64::new(7))
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await;
+                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                let size = db.bounds().end;
+                let root = db.root();
+                let db = db.rewind(size).await.unwrap();
+                assert_eq!(db.root(), root);
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = open(context.child("reopen")).await;
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(U64::new(7)));
+            db.destroy().await.unwrap();
+        });
+    }
+
     async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
         let strategy = context.strategy(NZUsize!(2));
         let cfg = db_config("rayon", &context, strategy);

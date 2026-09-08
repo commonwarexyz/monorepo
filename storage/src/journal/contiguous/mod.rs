@@ -291,10 +291,10 @@ pub trait Mutable: Contiguous + Sized {
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during rewinding
     ///
-    /// # Warnings
+    /// # Durability
     ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
+    /// The truncation is durable when this returns. Items appended afterward are not durable
+    /// until the next commit or sync completes.
     ///
     /// # Errors
     ///
@@ -340,10 +340,9 @@ pub trait Mutable: Contiguous + Sized {
     /// size. If no item matches, the journal is rewound to the pruning boundary, discarding
     /// all unpruned items.
     ///
-    /// # Warnings
+    /// # Durability
     ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
+    /// The rewind, if any, is durable when this returns.
     fn rewind_to<P>(
         mut self,
         predicate: P,

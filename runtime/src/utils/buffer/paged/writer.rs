@@ -1134,11 +1134,13 @@ impl<B: Blob> Writer<B> {
     /// This truncates the blob to contain only `size` logical bytes. The physical blob size will
     /// be adjusted to include the necessary CRC records for the remaining pages.
     ///
+    /// A shrink, and every byte it retains, is durable when this returns. Growth appends zeros
+    /// that are not durable until the next sync.
+    ///
     /// # Warning
     ///
     /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
     /// - Concurrent readers which try to read past the new size during the resize may error.
-    /// - The resize is not guaranteed durable until the next sync.
     pub async fn resize(&mut self, size: u64) -> Result<(), Error> {
         let current_size = self.buffer.size();
         if size == current_size {
@@ -1212,7 +1214,9 @@ impl<B: Blob> Writer<B> {
                 .await;
         }
 
-        // Shrink the blob to a page boundary, which requires no CRC-slot rewrite.
+        // A page-aligned shrink has no CRC-slot rewrite to persist the truncation. Sync before
+        // reuse so a crash cannot join new pages with an old suffix into a checksum-valid history.
+        self.sync_state.sync(&self.blob).await?;
         self.partial_page_state = None;
         self.durable_page_state = None;
         self.current_page = full_pages;
@@ -5557,11 +5561,16 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            // Shrinking to a page boundary resizes the blob but does not rewrite CRC metadata.
+            // A page-aligned shrink persists the resize with a full sync, without rewriting
+            // CRC metadata
             append.resize(PAGE_SIZE.get() as u64).await.unwrap();
-            append.sync().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 1);
 
-            // Only the resize needs a full sync, no additional writes are emitted by the shrink.
+            // A subsequent sync has no remaining work
+            append.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 2);

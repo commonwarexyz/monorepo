@@ -1635,6 +1635,52 @@ pub(crate) mod test {
         (db, range)
     }
 
+    /// Apply an uncommitted batch, rewind to its size, then crash without another sync.
+    /// Recovery must retain the batch's state.
+    #[test_traced("INFO")]
+    fn test_any_rewind_current_size_makes_applied_state_durable() {
+        // Avoid rollover so sealing cannot hide a missing rewind sync
+        fn config(ctx: &Context) -> VariableConfig<OneCap, ((), ()), Sequential> {
+            let mut config = variable_db_config::<OneCap>("rcs", ctx);
+            config.journal_config.items_per_section = NZU64!(1000);
+            config.merkle_config.items_per_blob = NZU64!(1000);
+            config
+        }
+
+        let ((size, root), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let ctx = context.child("db");
+                let db: UnorderedVariable =
+                    UnorderedVariableDb::init(ctx.child("storage"), config(&ctx))
+                        .await
+                        .unwrap();
+                let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+
+                // Leave the batch uncommitted so the equal-size rewind must persist it
+                let batch = db.new_batch().write(key(1), Some(val(1)));
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                let size = db.bounds().end;
+                let root = db.root();
+                let db = db.rewind(size).await.unwrap();
+                assert_eq!(db.root(), root);
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.child("reopen"), config(&ctx))
+                    .await
+                    .unwrap();
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// An empty batch (no mutations) still produces a valid commit.
     #[test_traced("INFO")]
     fn test_any_batch_empty() {

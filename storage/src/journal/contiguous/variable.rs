@@ -1119,7 +1119,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
             warn!(blob, valid, size, "truncating to last well-formed page");
             writer.resize(valid).await?;
-            writer.sync().await?;
         }
 
         // Validate and align the offsets journal to match the data blobs.
@@ -1722,7 +1721,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                     "crash repair: truncating trailing bytes"
                 );
                 writer.resize(scan.valid_size).await?;
-                writer.sync().await?;
             }
             if scan.items > 0 {
                 items_in_newest = scan.items;
@@ -2071,7 +2069,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                         "crash repair: truncating trailing bytes"
                     );
                     writer.resize(valid_size).await?;
-                    writer.sync().await?;
                 }
                 // A short blob ends the contiguous data-backed prefix: any newer blobs are
                 // unreachable and removed.
@@ -2234,11 +2231,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns [Error::InvalidRewind] if `size` is larger than current size.
     /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
+    ///
+    /// # Durability
+    ///
+    /// The truncation is durable when this returns. Items appended afterward are not durable
+    /// until `commit` or `sync`.
+    ///
     /// # Warning
     ///
-    /// - This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
-    /// - Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
-    ///   rewind truncates into their range.
+    /// Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
+    /// rewind truncates into their range.
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
         self.0 = self.0.rewind(size).await?;
         Ok(self)

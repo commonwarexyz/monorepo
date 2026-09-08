@@ -579,7 +579,9 @@ where
         Ok(self)
     }
 
-    /// Rewind the journal and Merkle structure.
+    /// Rewind the journal and Merkle structure to `size` items.
+    ///
+    /// The truncation of both structures is durable when this returns.
     #[boxed]
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error<F>> {
         self.journal = self.journal.rewind(size).await?;

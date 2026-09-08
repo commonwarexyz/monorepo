@@ -327,8 +327,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         .await
     }
 
-    /// Shared body of [`Self::commit`] and [`Self::sync`]: apply the current state, then make
-    /// every uncommitted witness durable according to `durability`.
+    /// Shared body of [`Self::commit`] and [`Self::sync`]: apply the current state, then persist
+    /// the journal according to `durability`.
     async fn persist<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
@@ -346,19 +346,19 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .apply::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
 
-        // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
+        // Sync must persist recovery metadata even when a commit already made every witness durable
         match durability {
             Durability::Commit if self.uncommitted => {
                 self.journal = self.journal.commit().await?;
                 self.uncommitted = false;
             }
-            Durability::Sync if self.uncommitted || self.pending_sync.is_some() => {
+            Durability::Sync => {
                 let journal = self.journal.sync().await?;
                 self.pending_sync = None;
                 self.uncommitted = false;
                 self.journal = journal;
             }
-            Durability::Commit | Durability::Sync => {}
+            Durability::Commit => {}
         }
         Ok(self)
     }

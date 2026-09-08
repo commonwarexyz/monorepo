@@ -426,8 +426,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Rewind applied state to `target`.
     ///
-    /// Implementations must ensure rewind effects are durable before returning
-    /// the database (for example by committing after rewind).
+    /// The target must be durable before returning the database, including when it already
+    /// matches the applied state.
     fn rewind_to_target(
         self,
         target: Self::SyncTarget,

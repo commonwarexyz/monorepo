@@ -507,7 +507,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 "truncating to recoverable item prefix"
             );
             writer.resize(valid).await?;
-            writer.sync().await?;
         }
 
         let RecoveredBounds {
@@ -531,9 +530,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             )
             .await?;
 
-        // Apply repair (if any). The short blob becomes the new tail; blobs strictly newer
-        // than it are removed (newest-first) and the truncation is synced, so the repair is
-        // durable before sealing.
+        // Make the short blob the new tail, removing newer blobs newest-first. Its resize
+        // makes the repair durable before sealing.
         let tail_blob = super::position_to_blob(size, cfg.items_per_blob.get());
         if let Some(truncate_to) = repair {
             while let Some((&newest, _)) = pending.last_key_value() {
@@ -547,7 +545,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 && truncate_to < writer.size()
             {
                 writer.resize(truncate_to).await?;
-                writer.sync().await?;
             }
         }
 
@@ -1334,9 +1331,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Returns [Error::InvalidRewind] if `size` is larger than current size.
     /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
     ///
+    /// # Durability
+    ///
+    /// The truncation is durable when this returns. Items appended afterward are not durable
+    /// until `commit` or `sync`.
+    ///
     /// # Warnings
     ///
-    /// * This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
     /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
     ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
     /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
@@ -2968,6 +2969,93 @@ mod tests {
                 "stale blobs beyond the repair point should be removed"
             );
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Repair a short non-tail blob, then crash without another sync.
+    /// The repaired blob must reopen at the truncated size.
+    #[test_traced]
+    fn test_fixed_journal_repair_truncation_survives_crash() {
+        // A 64-byte page makes the four-item repair target page aligned
+        const PAGE_SIZE: NonZeroU16 = NZU16!(64);
+        const REPAIRED: u64 = 4 * Digest::SIZE as u64;
+        fn cfg(pooler: &impl BufferPooler) -> Config {
+            Config {
+                partition: "repair-truncation-crash".into(),
+                items_per_blob: NZU64!(5),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let cfg = cfg(&context);
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let mut journal = journal.sync().await.unwrap();
+
+            // Lower the watermark to what the repair will recover, as a crash between the
+            // checkpoint persist and the repair would leave it.
+            journal.0.checkpoint = journal
+                .0
+                .checkpoint
+                .persist(cfg.items_per_blob.get(), 0, 9)
+                .await
+                .unwrap();
+            drop(journal);
+
+            // Leave blob 1 with four items and a valid 10-byte prefix of a fifth, so recovery
+            // repairs it to four.
+            {
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let (blob, blob_size) = context
+                    .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let mut writer = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
+                writer.resize(REPAIRED + 10).await.unwrap();
+                writer.sync().await.unwrap();
+            }
+
+            // Drop unsynced resizes at the crash
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            let journal = Journal::<_, Digest>::init(context.child("repair"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..9);
+            drop(journal);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = cfg(&context);
+            {
+                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let (blob, blob_size) = context
+                    .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let writer = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
+                assert_eq!(writer.size(), REPAIRED, "repair truncation did not survive");
+            }
+            let journal = Journal::<_, Digest>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..9);
+            assert_eq!(journal.test_newest_blob(), Some(1));
             journal.destroy().await.unwrap();
         });
     }
@@ -5496,6 +5584,70 @@ mod tests {
             for i in 3..8u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewind and append two replacements, then crash with the second only partly written.
+    /// Old bytes must neither complete it nor restore the discarded tail.
+    #[test_traced]
+    fn test_fixed_journal_rewind_truncation_survives_crash() {
+        // A 24-byte page splits 32-byte digests across pages, and the two-page write buffer
+        // floor sends a two-item append down the direct path: two full pages are written and
+        // the 16-byte suffix stays buffered.
+        const PAGE_SIZE: NonZeroU16 = NZU16!(24);
+        fn cfg(pooler: &impl BufferPooler) -> Config {
+            Config {
+                partition: "rewind-truncation-crash".into(),
+                items_per_blob: NZU64!(10),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(2048),
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg(&context))
+                .await
+                .unwrap();
+            for i in 0..3u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Keep unsynced writes and drop unsynced resizes at the crash
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            let journal = journal.rewind(0).await.unwrap();
+            let (journal, _) = journal
+                .append_many(Many::Flat(&[test_digest(10), test_digest(11)]))
+                .await
+                .unwrap();
+            drop(journal);
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal = Journal::<_, Digest>::init(context.child("recover"), cfg(&context))
+                .await
+                .unwrap();
+            assert_eq!(
+                journal.bounds(),
+                0..1,
+                "pre-rewind bytes survived the rewind"
+            );
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(10));
             journal.destroy().await.unwrap();
         });
     }

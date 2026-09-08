@@ -32,10 +32,11 @@
 //!
 //! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
 //! guaranteed-durable prefix plus size/pruning ceilings), not an exact state. Retained positions
-//! above the durable prefix are still content-checked: every readable frame is CRC-gated and
-//! composed of old or new bytes only, so a recovered item must be one of the values recorded at
-//! that position (see `candidates`). `assert_matches_expected` checks recovery falls within
-//! them. `to_expected` then snapshots it as the next cycle's start.
+//! above the durable prefix are still content-checked: every readable frame is CRC-gated, and a
+//! rewind's truncation is durable before an append can reuse its range, so a recovered item must
+//! be the latest value appended at that position or a failed append that persisted (see
+//! `candidates`). `assert_matches_expected` checks recovery falls within them. `to_expected`
+//! then snapshots it as the next cycle's start.
 //!
 //! # Faults
 //!
@@ -244,9 +245,8 @@ struct Expected {
     max_prune: u64,
     /// Latest value appended at each position (index == position).
     values: Vec<Item>,
-    /// Alternate values a crash may legally retain at a position: values displaced by a rewind
-    /// whose truncation is not yet durable, and values whose append failed after possibly
-    /// persisting. Cleared by every barrier that pins content exactly.
+    /// Alternate values a crash may legally retain at a position: values whose append failed
+    /// after possibly persisting. Cleared by every barrier that pins content exactly.
     candidates: HashMap<u64, Vec<Item>>,
 }
 
@@ -285,8 +285,7 @@ impl Expected {
         self.durable_prune = bounds.start;
         self.max_prune = bounds.start;
 
-        // The barrier makes prior truncations durable and every recorded value exact, so no
-        // alternate values remain admissible.
+        // The barrier pins recorded values exactly, ruling out failed-append alternatives
         self.candidates.clear();
     }
 
@@ -296,26 +295,18 @@ impl Expected {
         self.durable_len = size;
         self.max_size = size;
 
-        // The barrier makes prior truncations durable and every recorded value exact, so no
-        // alternate values remain admissible.
+        // The barrier pins recorded values exactly, ruling out failed-append alternatives
         self.candidates.clear();
     }
 
-    /// Successful rewind: the truncated tail may or may not persist, so recovered size is in
-    /// `[target, prev]`. Until a durability barrier a crash can resurface the pre-rewind bytes,
-    /// so each truncated value stays admissible at the position it held.
-    fn rewound(&mut self, target: u64, prev_size: u64) {
+    /// A successful rewind durably caps recovery at `target` until later appends.
+    fn rewound(&mut self, target: u64) {
         self.durable_len = self.durable_len.min(target);
-        self.max_size = self.max_size.max(prev_size);
-        for (offset, item) in self.values.drain(target as usize..).enumerate() {
-            self.candidates
-                .entry(target + offset as u64)
-                .or_default()
-                .push(item);
-        }
+        self.max_size = target;
+        self.values.truncate(target as usize);
     }
 
-    /// Failed rewind: like a successful one it may or may not have truncated, but no value was
+    /// Failed rewind: the truncation may or may not have become durable, but no value was
     /// recorded afterward (the cycle ends), so surviving positions keep their exact content.
     fn rewind_failed(&mut self, target: u64, prev_size: u64) {
         self.durable_len = self.durable_len.min(target);
@@ -591,8 +582,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 
     // Within [boundary, size) every position is readable. The durable prefix must hold exactly
     // the recorded content. Every retained position above it must hold a value the run actually
-    // wrote there: the latest recorded append, or an alternate the crash may legally surface (a
-    // value displaced by a non-durable rewind, or a failed append that persisted). Items are
+    // wrote there: the latest recorded append, or a failed append that persisted. Items are
     // saved for the replay cross-check below.
     let mut read_items = Vec::with_capacity((size - boundary) as usize);
     for pos in boundary..size {
@@ -815,7 +805,7 @@ async fn run_ops<J: FuzzJournal>(
                     };
                     match journal.rewind(target).await {
                         Ok(journal) => {
-                            expected.rewound(target, bounds.end);
+                            expected.rewound(target);
                             journal
                         }
                         // Any error ends the cycle. Validation errors reject before

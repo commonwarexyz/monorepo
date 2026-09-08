@@ -110,18 +110,28 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
+        journal::contiguous::fixed::Config as JournalConfig,
+        merkle::full::Config as MerkleConfig,
         mmr,
         qmdb::current::{
+            FixedConfig,
             tests::{fixed_config, fixed_config_partitioned},
             unordered::tests as shared,
         },
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::TestRng;
+    use commonware_runtime::{
+        Metrics, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic::{
+            self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
+        },
+    };
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
     use rand::Rng as _;
     use std::collections::HashMap;
 
@@ -533,6 +543,127 @@ pub mod test {
                 &[1, 2, 3, 5],
             )
             .await;
+        });
+    }
+
+    /// Rewind a committed branch, apply a shorter replacement without committing, then crash.
+    /// Recovery must yield the replacement without splicing in the discarded branch's tail.
+    #[test_traced]
+    fn test_current_unordered_fixed_rewind_then_rebranch_crash_recovers_branch() {
+        fn key(i: u8) -> Digest {
+            Digest::from([i; 32])
+        }
+        fn value(branch: u8, i: u8) -> Digest {
+            let mut bytes = [branch; 32];
+            bytes[31] = i;
+            Digest::from(bytes)
+        }
+        // Align rewind targets to pages and keep both branches in one blob so their writes overlap
+        fn db_config(ctx: &deterministic::Context) -> FixedConfig<TwoCap, Sequential> {
+            let page_size = std::num::NonZeroU16::new(
+                <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
+            )
+            .unwrap();
+            FixedConfig {
+                merkle_config: MerkleConfig {
+                    journal_partition: "rebranch-merkle-journal".into(),
+                    metadata_partition: "rebranch-merkle-metadata".into(),
+                    items_per_blob: NZU64!(100_000),
+                    write_buffer: NZUsize!(4096),
+                    replay_buffer: NZUsize!(4096),
+                    strategy: Sequential,
+                    page_cache: CacheRef::from_pooler(ctx, NZU16!(1024), NZUsize!(64)),
+                },
+                journal_config: JournalConfig {
+                    partition: "rebranch-ops-journal".into(),
+                    items_per_blob: NZU64!(100_000),
+                    page_cache: CacheRef::from_pooler(ctx, page_size, NZUsize!(64)),
+                    write_buffer: NZUsize!(1300),
+                    replay_buffer: NZUsize!(4096),
+                },
+                grafted_metadata_partition: "rebranch-current-metadata".into(),
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 16),
+                init_concurrency: (),
+            }
+        }
+
+        // Keep unsynced writes and drop unsynced resizes at the crash
+        let runtime = DeterministicConfig::default().with_storage_fault_config(
+            FaultConfig::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }),
+        );
+        let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
+            .start_and_recover(|ctx| async move {
+                let db = CurrentTest::init(ctx.child("initial"), db_config(&ctx))
+                    .await
+                    .unwrap();
+
+                // A: create k1..k100 and commit
+                let mut batch = db.new_batch();
+                for i in 1..=100 {
+                    batch = batch.write(key(i), Some(value(1, i)));
+                }
+                let batch = batch.merkleize(&db, None).await.unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 103);
+                let root_a = db.root();
+
+                // B: update k2..k50 and commit
+                let mut batch = db.new_batch();
+                for i in 2..=50 {
+                    batch = batch.write(key(i), Some(value(2, i)));
+                }
+                let batch = batch.merkleize(&db, None).await.unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 203);
+                let root_b = db.root();
+
+                // Rewind to A, append the shorter branch N over B, then crash without committing
+                let db = db.rewind(Location::new(103)).await.unwrap();
+                assert_eq!(db.root(), root_a);
+                let mut batch = db.new_batch();
+                for i in 68..=100 {
+                    batch = batch.write(key(i), Some(value(3, i)));
+                }
+                for i in 1..=20 {
+                    batch = batch.write(key(100 + i), Some(value(4, i)));
+                }
+                let batch = batch.merkleize(&db, None).await.unwrap();
+                let root_n = batch.root();
+                let (db, range) = db.apply_batch(batch).await.unwrap();
+                assert_eq!((*range.start, *range.end), (103, 191));
+                drop(db);
+
+                (root_a, root_b, root_n)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|ctx| async move {
+            let db = CurrentTest::init(ctx.child("reopen"), db_config(&ctx))
+                .await
+                .unwrap();
+
+            // Recover N without B's discarded tail
+            assert_eq!(*db.bounds().end, 191);
+            assert_eq!(db.root(), root_n);
+            assert_ne!(db.root(), root_a);
+            assert_ne!(db.root(), root_b);
+            for i in 1..=67 {
+                assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(1, i)));
+            }
+            for i in 68..=100 {
+                assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(3, i)));
+            }
+            for i in 1..=20 {
+                assert_eq!(db.get(&key(100 + i)).await.unwrap(), Some(value(4, i)));
+            }
+            db.destroy().await.unwrap();
         });
     }
 }

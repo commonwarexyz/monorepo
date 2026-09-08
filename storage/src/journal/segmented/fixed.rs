@@ -298,8 +298,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
         if let Some((section, size)) = restore {
-            // The checkpoint preflight authorized this exact truncation. Make it durable before
-            // the paired value journal can release any corresponding bytes.
+            // Persist the authorized index boundary before releasing paired values. Rewind
+            // persists any truncation; sync covers the retained section even without a shrink.
             manager.rewind(section, size).await?;
             manager.sync(section).await?;
             return Ok(Self {
@@ -791,7 +791,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Rewind the journal to a specific section and byte size.
     ///
     /// This truncates the section to the given size. All sections
-    /// after `section` are removed.
+    /// after `section` are removed. The rewind is durable when this returns.
     pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind(section, size).await?;
         Ok(self)
@@ -799,7 +799,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Rewind only the given section to a specific byte offset.
     ///
-    /// Unlike `rewind`, this does not affect other sections.
+    /// Unlike `rewind`, this does not affect other sections. The truncation is durable when
+    /// this returns.
     pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind_section(section, size).await?;
         Ok(self)
@@ -1034,15 +1035,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     }
 }
 
-/// Truncate a replayed section and make the repair durable before allowing new appends.
+/// Durably truncate `section`'s blob to `size`.
 async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
     journal: &mut Journal<E, A>,
     section: u64,
     size: u64,
 ) -> Result<(), Error> {
-    let blob = journal.0.writer(section);
-    blob.resize(size).await?;
-    blob.sync().await?;
+    journal.0.writer(section).resize(size).await?;
     Ok(())
 }
 

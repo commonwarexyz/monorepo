@@ -212,12 +212,11 @@ impl<B: Blob> Write<B> {
 
     /// Resize the logical blob to `len`.
     ///
-    /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
-    /// before resizing the underlying blob.
+    /// Resizing to the current size or larger flushes buffered data to the blob first.
+    ///
+    /// Call [Self::sync] to make the resize and retained data durable.
     pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        // Flush buffered data to the underlying blob.
-        //
-        // This can only happen if the new size is greater than the current size.
+        // Equal-size resizes and growth flush the entire buffer
         if let Some((buf, offset)) = self.buffer.resize(len) {
             self.sync_state
                 .write_at(&self.blob, offset, buf, WriteOptions::default())
@@ -225,7 +224,6 @@ impl<B: Blob> Write<B> {
         }
 
         self.sync_state.resize(&self.blob, len).await?;
-
         Ok(())
     }
 

@@ -124,6 +124,51 @@ mod tests {
         Db::init(context, cfg).await.unwrap()
     }
 
+    /// Apply an uncommitted batch, rewind to its size, then crash without another sync.
+    /// Recovery must retain the batch's state.
+    #[test_traced]
+    fn test_immutable_fixed_rewind_current_size_makes_applied_state_durable() {
+        // Avoid rollover so sealing cannot hide a missing rewind sync
+        async fn open(
+            context: deterministic::Context,
+        ) -> Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>
+        {
+            let mut cfg = config("rcs", &context);
+            cfg.log.items_per_blob = NZU64!(1000);
+            cfg.merkle_config.items_per_blob = NZU64!(1000);
+            Db::init(context, cfg).await.unwrap()
+        }
+
+        let key = Sha256::hash(&[b"key"]);
+        let value = Sha256::fill(7u8);
+        let ((size, root), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let db = open(context.child("db")).await;
+
+                // Leave the batch uncommitted so the equal-size rewind must persist it
+                let merkleized = db
+                    .new_batch()
+                    .set(key, value)
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await;
+                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                let size = db.bounds().end;
+                let root = db.root();
+                let db = db.rewind(size).await.unwrap();
+                assert_eq!(db.root(), root);
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = open(context.child("reopen")).await;
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
+    }
+
     async fn open_compact<F: Family>(
         context: deterministic::Context,
     ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {

@@ -544,9 +544,7 @@ where
     /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
     /// from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
-    /// completes.
+    /// The state at `size` is durable on return, including when `size` already matches.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -561,8 +559,9 @@ where
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
+        // An equal target may still have unsynced applied state
         if rewind_size == current_size {
-            return Ok(self);
+            return self.sync().await;
         }
         if rewind_size == 0 || rewind_size > current_size {
             return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
@@ -641,8 +640,7 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
-        // Journal rewind happens before in-memory undo application. This step is not
-        // restart-stable until a later commit/sync.
+        // Persist the log rewind before applying undo; recovery rebuilds state from the log
         self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below

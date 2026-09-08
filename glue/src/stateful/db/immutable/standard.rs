@@ -354,7 +354,6 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -450,7 +449,6 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(

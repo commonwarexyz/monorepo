@@ -571,7 +571,6 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -676,7 +675,6 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -857,7 +855,6 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -967,7 +964,6 @@ where
 
     async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
         let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
 
         let rewound_target = db.sync_target();
         assert_eq!(
@@ -1175,6 +1171,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
     use commonware_parallel::Sequential;
@@ -1186,9 +1183,12 @@ mod tests {
             fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
         },
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::current::{
-            ordered::{fixed as ordered_fixed, variable as ordered_variable},
-            unordered::{fixed, variable},
+        qmdb::{
+            any::unordered::fixed::Operation as FixedOperation,
+            current::{
+                ordered::{fixed as ordered_fixed, variable as ordered_variable},
+                unordered::{fixed, variable},
+            },
         },
         translator::TwoCap,
     };
@@ -1618,6 +1618,136 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::sync_target(&guard)
             };
             assert_eq!(target_after_rewind, target_after_first);
+        });
+    }
+
+    /// Apply without finalizing, rewind to the same target, then crash without another sync.
+    /// Recovery must retain the applied target.
+    #[test]
+    fn managed_db_rewind_current_target_survives_crash() {
+        let (target, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let db = FixedDb::init(
+                    context.child("db"),
+                    fixed_config("rewind-current-crash", &context),
+                )
+                .await
+                .unwrap();
+                let db = Shared::new("test", db);
+                let batch = db
+                    .new_batch_for_test::<_>()
+                    .await
+                    .write(Sha256::hash(&[b"key"]), Some(Sha256::hash(&[b"value"])))
+                    .with_metadata(Sha256::hash(&[b"metadata"]));
+                let batch = crate::stateful::db::Unmerkleized::merkleize(batch)
+                    .await
+                    .unwrap();
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, batch)
+                    .await
+                    .unwrap();
+                let target = <FixedDb as ManagedDb<_>>::sync_target(&database);
+
+                // Rewind the applied target without finalizing it
+                let database =
+                    <FixedDb as ManagedDb<_>>::rewind_to_target(database, target.clone())
+                        .await
+                        .unwrap();
+                slot.put(database);
+                target
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = FixedDb::init(
+                context.child("db"),
+                fixed_config("rewind-current-crash", &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), target);
+        });
+    }
+
+    /// Finalize two batches, rewind to the first, then crash without another sync.
+    /// Recovery must report the first batch's target.
+    #[test]
+    fn managed_db_rewind_to_target_survives_crash() {
+        // One operation per page makes the rewind target page aligned
+        type FixedOp = FixedOperation<mmr::Family, Digest, Digest>;
+        fn config(pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
+            let page_size = NonZeroU16::new(<FixedOp as FixedSize>::SIZE as u16).unwrap();
+            let mut config = fixed_config("rewind-crash", pooler);
+            config.journal_config.page_cache =
+                CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE);
+            config
+        }
+
+        let (target_after_first, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let db = FixedDb::init(context.child("db"), config(&context))
+                    .await
+                    .unwrap();
+                let db = Shared::new("test", db);
+
+                let key1 = Sha256::hash(&[b"key1"]);
+                let value1 = Sha256::hash(&[b"value1"]);
+                let metadata1 = Sha256::hash(&[b"metadata1"]);
+                let batch1 = db
+                    .new_batch_for_test::<_>()
+                    .await
+                    .write(key1, Some(value1))
+                    .with_metadata(metadata1);
+                let merkleized1 = crate::stateful::db::Unmerkleized::merkleize(batch1)
+                    .await
+                    .unwrap();
+                {
+                    let (slot, database) = db.write().await;
+                    slot.put(apply_and_finalize::<FixedDb>(database, merkleized1).await);
+                }
+                let target_after_first = {
+                    let guard = db.read().await;
+                    <FixedDb as ManagedDb<_>>::sync_target(&guard)
+                };
+
+                let key2 = Sha256::hash(&[b"key2"]);
+                let value2 = Sha256::hash(&[b"value2"]);
+                let metadata2 = Sha256::hash(&[b"metadata2"]);
+                let batch2 = db
+                    .new_batch_for_test::<_>()
+                    .await
+                    .write(key2, Some(value2))
+                    .with_metadata(metadata2);
+                let merkleized2 = crate::stateful::db::Unmerkleized::merkleize(batch2)
+                    .await
+                    .unwrap();
+                {
+                    let (slot, database) = db.write().await;
+                    slot.put(apply_and_finalize::<FixedDb>(database, merkleized2).await);
+                }
+
+                // Crash after rewind without another sync
+                {
+                    let (slot, database) = db.write().await;
+                    slot.put(
+                        <FixedDb as ManagedDb<_>>::rewind_to_target(
+                            database,
+                            target_after_first.clone(),
+                        )
+                        .await
+                        .unwrap(),
+                    );
+                }
+                target_after_first
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = FixedDb::init(context.child("db"), config(&context))
+                .await
+                .unwrap();
+            assert_eq!(
+                <FixedDb as ManagedDb<_>>::sync_target(&db),
+                target_after_first
+            );
         });
     }
 

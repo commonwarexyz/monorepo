@@ -427,8 +427,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
-        let mut rewound_index = Vec::new();
-        let mut rewound_values = Vec::new();
         for section in sections {
             let index_size = self.index.size(section)?;
             let glob_size = match self.values.size(section) {
@@ -456,7 +454,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                     index_size, aligned_size, "trailing bytes detected: truncating"
                 );
                 self.index = self.index.rewind_section(section, aligned_size).await?;
-                rewound_index.push(section);
             }
 
             // Values are reachable only through index entries.
@@ -464,7 +461,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 if glob_size > 0 {
                     debug!(section, glob_size, "truncating orphaned value bytes");
                     self.values = self.values.rewind_section(section, 0).await?;
-                    rewound_values.push(section);
                 }
                 continue;
             }
@@ -479,7 +475,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 let valid_size = valid_count * chunk_size;
                 debug!(section, entry_count, valid_count, "rewinding index");
                 self.index = self.index.rewind_section(section, valid_size).await?;
-                rewound_index.push(section);
             }
 
             // Truncate glob trailing garbage (can occur when value was written but
@@ -490,17 +485,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                     glob_size, glob_target, "truncating glob trailing garbage"
                 );
                 self.values = self.values.rewind_section(section, glob_target).await?;
-                rewound_values.push(section);
             }
         }
-
-        // Make the truncations durable before appends can reuse the freed value ranges. A
-        // dropped index entry that stayed durable would be adopted by a later recovery
-        // referencing whatever bytes a subsequent append placed at its offsets, and stale
-        // glob bytes that stayed durable would satisfy a later entry's range with another
-        // record's frame.
-        self.values = self.values.sync(&rewound_values).await?;
-        self.index = self.index.sync(&rewound_index).await?;
 
         // Clean up orphan value sections that don't exist in index
         self.cleanup_orphan_value_sections().await
@@ -598,7 +584,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Truncate value suffixes that became unreachable while fixed replay repaired index pages.
     async fn align_values_to_index(mut self) -> Result<Self, Error> {
         let sections = self.index.sections().collect::<Vec<_>>();
-        let mut rewound = Vec::new();
         for section in sections {
             let target = Self::boundary_value_end(section, &self.index.last(section).await?)?;
             let retained = self.values.size(section)?;
@@ -609,10 +594,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             }
             if retained > target {
                 self.values = self.values.rewind_section(section, target).await?;
-                rewound.push(section);
             }
         }
-        self.values = self.values.sync(&rewound).await?;
         self.cleanup_orphan_value_sections().await
     }
 
@@ -661,6 +644,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             .take()
             .expect("tracked replay preserves its recovery state");
 
+        // Startup-readable bytes are durable by the runtime contract, and recovery
+        // truncations are durable before their retained boundaries are published.
         let mut dirty = false;
         for section in self.index.sections() {
             let items = self.index.section_len(section)?;
@@ -991,26 +976,22 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// This rewinds the section to the given index size and removes all sections
     /// after the given section. The value size is derived from the last entry.
     ///
-    /// Both of `section`'s truncations are durable before this returns: a crash recovers
-    /// `section` to either its pre-rewind or its post-rewind state. Each journal removes
-    /// its later sections (newest first) before truncating `section`, and those removals
-    /// carry the storage layer's removal durability.
+    /// The retained section is durable on return, including when its size already matches.
+    /// Each journal removes later sections newest-first before truncating `section`, with the
+    /// storage layer's removal durability.
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, true).await?;
 
-        // Rewind index first (this also removes sections after `section`)
+        // Rewind the index before deriving the retained value boundary
         self.index = self.index.rewind(section, index_size).await?;
 
-        // Derive value size from last entry (section may not exist if empty)
+        // Keep values through the last retained index entry, or none for an empty section
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // Make the index truncation durable before the values are rewound: rewinding the
-        // values frees their ranges for reuse by later appends, and a dropped index entry
-        // that stayed durable would be adopted referencing whatever bytes a later append
-        // placed at its offsets.
+        // Persist the index before freeing values, even if its size did not change
         self.index = self.index.sync(section).await?;
 
-        // Rewind values (this also removes sections after `section`)
+        // Persist retained value bytes even if the rewind does not truncate
         self.values = self.values.rewind(section, value_size).await?;
         self.values = self.values.sync(section).await?;
         Ok(self)
@@ -1021,20 +1002,20 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Unlike `rewind`, this does not affect other sections.
     /// The value size is derived from the last entry after rewinding the index.
     ///
-    /// Both truncations are made durable before returning (see [Self::rewind]).
+    /// The retained section is durable on return, including when its size already matches.
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, false).await?;
 
-        // Rewind index first
+        // Rewind the index before deriving the retained value boundary
         self.index = self.index.rewind_section(section, index_size).await?;
 
-        // Derive value size from last entry (section may not exist if empty)
+        // Keep values through the last retained index entry, or none for an empty section
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // Make the index truncation durable before the values are rewound (see Self::rewind).
+        // Persist the index before freeing values, even if its size did not change
         self.index = self.index.sync(section).await?;
 
-        // Rewind values
+        // Persist retained value bytes even if the rewind does not truncate
         self.values = self.values.rewind_section(section, value_size).await?;
         self.values = self.values.sync(section).await?;
         Ok(self)
@@ -1217,6 +1198,7 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
     use commonware_utils::{NZU16, NZUsize};
+    use rstest::rstest;
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -1519,6 +1501,62 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    #[rstest]
+    #[case::all_sections(true)]
+    #[case::single_section(false)]
+    fn test_oversized_rewind_current_size_is_durable(#[case] all_sections: bool) {
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(move |context| async move {
+                let mut journal: Oversized<_, TestEntry, TestValue> =
+                    Oversized::init(context.child("initial"), test_cfg(&context))
+                        .await
+                        .unwrap();
+                for section in 1..=2 {
+                    (journal, _, _, _) = journal
+                        .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                        .await
+                        .unwrap();
+                }
+
+                // Keep the target section buffered while making the later section durable
+                journal = journal.sync(2).await.unwrap();
+                let size = journal.size(1).unwrap();
+                journal = if all_sections {
+                    journal.rewind(1, size).await.unwrap()
+                } else {
+                    journal.rewind_section(1, size).await.unwrap()
+                };
+                assert_eq!(journal.size(1).unwrap(), size);
+                drop(journal);
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("reopen"), test_cfg(&context))
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
+            assert_eq!(
+                journal.size(2).unwrap(),
+                if all_sections {
+                    0
+                } else {
+                    TestEntry::SIZE as u64
+                }
+            );
+            let entry = journal.get(1, 0).await.unwrap();
+            assert_eq!(entry.id, 1);
+            assert_eq!(
+                journal
+                    .get_value(1, entry.value_offset, entry.value_size)
+                    .await
+                    .unwrap(),
+                [1; 16]
+            );
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]

@@ -1172,6 +1172,84 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_write_resize_requires_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let mut writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+            writer.write_at(0, b"abcdefgh").await.unwrap();
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdefgh");
+            assert_eq!(full_syncs, 1);
+
+            // Shrink with an empty buffer, then explicitly persist the truncation
+            writer.resize(4).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdefgh");
+            assert_eq!(full_syncs, 1);
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(full_syncs, 2);
+
+            // A subsequent sync has no remaining work
+            writer.sync().await.unwrap();
+            let (_, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(full_syncs, 2);
+
+            // Shrink within the buffer and persist its retained prefix with the truncation
+            writer.write_at(4, b"wxyz").await.unwrap();
+            writer.resize(6).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(full_syncs, 2);
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdwx");
+            assert_eq!(full_syncs, 3);
+            assert_eq!(writer.size(), 6);
+
+            // Shrink below the buffer, discarding it while still persisting the truncation
+            writer.write_at(6, b"pq").await.unwrap();
+            writer.resize(2).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdwx");
+            assert_eq!(full_syncs, 3);
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"ab");
+            assert_eq!(full_syncs, 4);
+            assert_eq!(writer.size(), 2);
+            writer.sync().await.unwrap();
+            let (_, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(full_syncs, 4);
+
+            // An equal-size resize flushes buffered bytes without making them durable
+            writer.write_at(2, b"cd").await.unwrap();
+            writer.resize(4).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"ab");
+            assert_eq!(full_syncs, 4);
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(full_syncs, 5);
+
+            // Growth needs a sync for both the buffered bytes and the zero-filled extension
+            writer.write_at(4, b"ef").await.unwrap();
+            writer.resize(8).await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcd");
+            assert_eq!(full_syncs, 5);
+            writer.sync().await.unwrap();
+            let (durable, _, full_syncs, _) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abcdef\0\0");
+            assert_eq!(full_syncs, 6);
+        });
+    }
+
+    #[test_traced]
     fn test_write_read_at_on_writer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
