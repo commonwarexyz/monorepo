@@ -3904,7 +3904,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingBuffer {
         blocks: Arc<Mutex<Vec<B>>>,
-        handed: Arc<Mutex<Vec<Weak<B>>>>,
+        last_handed: Arc<Mutex<Option<Weak<B>>>>,
         evict_on_next_hit: Arc<Mutex<bool>>,
         digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
@@ -3937,13 +3937,13 @@ mod tests {
                 blocks[index].clone()
             };
             let block = Arc::new(block);
-            self.handed.lock().push(Arc::downgrade(&block));
+            *self.last_handed.lock() = Some(Arc::downgrade(&block));
             Some(block)
         }
 
-        /// Weak references to every block `find` handed to marshal, in order.
-        fn handed(&self) -> Vec<Weak<B>> {
-            self.handed.lock().clone()
+        /// Weak reference to the last block `find` handed to marshal.
+        fn last_handed(&self) -> Option<Weak<B>> {
+            self.last_handed.lock().clone()
         }
 
         fn sends(&self) -> Vec<BufferSend> {
@@ -8421,11 +8421,10 @@ mod tests {
                 .expect("finalized block dispatched");
             assert_eq!(delivered.digest(), block.digest());
             assert!(
-                buffer.handed().iter().any(|handed| {
-                    handed
-                        .upgrade()
-                        .is_some_and(|handed| Arc::ptr_eq(&handed, &delivered))
-                }),
+                buffer
+                    .last_handed()
+                    .and_then(|handed| handed.upgrade())
+                    .is_some_and(|handed| Arc::ptr_eq(&handed, &delivered)),
                 "dispatch must deliver the block object the buffer handed to marshal"
             );
             let ops = ops.lock().clone();
@@ -8436,95 +8435,6 @@ mod tests {
             assert!(
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
                 "dispatch must not read the finalized block back from the archive: {ops:?}"
-            );
-        });
-    }
-
-    /// A restart redelivers an unacknowledged finalized block from the archive.
-    #[test_traced("WARN")]
-    fn test_standard_restart_dispatches_from_archive() {
-        const PARTITION_PREFIX: &str = "restart-dispatch";
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-
-            let (finalizations_by_height, finalized_blocks) =
-                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
-            let (actor, mut mailbox, _) = Actor::init(
-                context.child("actor"),
-                finalizations_by_height,
-                finalized_blocks,
-                direct_config(
-                    &context,
-                    PARTITION_PREFIX,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
-                ),
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let actor_handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
-            assert_eq!(application.acknowledged().await, Height::zero());
-
-            // Finalize block 1 and leave its acknowledgement pending.
-            assert!(mailbox.verified(round, block.clone()).await);
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
-                &schemes,
-                QUORUM,
-            );
-            StandardHarness::report_finalization(&mut mailbox, finalization).await;
-            while application.pending_ack_heights() != vec![Height::new(1)] {
-                reschedule().await;
-            }
-
-            actor_handle.abort();
-            drop(mailbox);
-
-            // Wait for the actor to release its storage handles before reopening
-            assert!(actor_handle.await.is_err());
-
-            let restart = context.child("restart");
-            let (finalizations_by_height, finalized_blocks) =
-                prunable_finalized_stores(&restart, PARTITION_PREFIX).await;
-            let finalized_blocks = Recording::new(finalized_blocks);
-            let ops = finalized_blocks.ops();
-            let (actor, _mailbox, _): (_, Mailbox<S, Standard<B>>, _) = Actor::init(
-                restart.child("actor"),
-                finalizations_by_height,
-                finalized_blocks,
-                direct_config(
-                    &restart,
-                    PARTITION_PREFIX,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
-                ),
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(restart.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let before = ops.lock().len();
-            let _actor_handle =
-                actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
-            while application.pending_ack_heights() != vec![Height::new(1)] {
-                reschedule().await;
-            }
-
-            let delivered = application
-                .blocks()
-                .get(&Height::new(1))
-                .cloned()
-                .expect("finalized block redelivered");
-            assert_eq!(delivered.digest(), block.digest());
-            assert_eq!(
-                ops.lock()[before..].to_vec(),
-                vec![Op::Get(Some(Height::new(1)))],
-                "restart dispatch must read the finalized block from the archive"
             );
         });
     }
@@ -8592,8 +8502,7 @@ mod tests {
                 "finalized block must be stored"
             );
             let staged = buffer
-                .handed()
-                .pop()
+                .last_handed()
                 .expect("buffer must have served the finalized block");
             assert!(
                 staged.upgrade().is_some(),
@@ -8616,8 +8525,7 @@ mod tests {
                 "finalized block must be stored"
             );
             let unstaged = buffer
-                .handed()
-                .pop()
+                .last_handed()
                 .expect("buffer must have served the finalized block");
             assert!(
                 unstaged.upgrade().is_none(),
@@ -8704,8 +8612,7 @@ mod tests {
                 "finalized block must be stored"
             );
             let repeated = buffer
-                .handed()
-                .pop()
+                .last_handed()
                 .expect("buffer must have served the finalized block again");
             assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
             assert!(

@@ -824,9 +824,9 @@ where
                     let next_height = self
                         .pending_acks
                         .next_dispatch_height(self.stream.next_height());
-                    let staged = (height >= next_height
-                        && self.staged.len() < self.pending_acks.capacity())
-                    .then(|| Arc::clone(&block));
+                    if height >= next_height && self.staged.len() < self.pending_acks.capacity() {
+                        self.staged.insert(height, Arc::clone(&block));
+                    }
                     let stored;
                     (self, stored) = self
                         .store_finalization(
@@ -838,10 +838,6 @@ where
                         )
                         .await;
                     if stored {
-                        if let Some(block) = staged {
-                            self.staged.insert(height, block);
-                        }
-
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
                         (self, _) = self.try_repair_gaps(buffer, resolver, application).await;
@@ -1421,6 +1417,10 @@ where
             .previous()
             .expect("floor anchor above processed height must have predecessor");
         self.update_processed_height(dispatch_floor, resolver);
+
+        // Release staged blocks skipped by the floor transition
+        self.staged = self.staged.split_off(&height);
+
         self = self
             .update_processed_round_floor(dispatch_floor, round, buffer, application, resolver)
             .await;
@@ -2455,9 +2455,6 @@ where
         let _ = self
             .processed_height
             .try_set(self.floor.processed_height().get());
-
-        // Release staged blocks skipped by a floor transition
-        self.staged = self.staged.split_off(&height.next());
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
