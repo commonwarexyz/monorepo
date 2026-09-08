@@ -51,7 +51,7 @@ impl PrivateKey {
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
-        let signature: p256::ecdsa::Signature = self.0.key.expose(|key| key.sign(&payload));
+        let signature: p256::ecdsa::Signature = self.0.key.access(|key| key.sign(&payload));
         let signature = signature.normalize_s();
         Signature::try_from(signature).expect("freshly signed signature is valid")
     }

@@ -1505,6 +1505,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.4.3",
  "hashbrown 0.17.1",
+ "libc",
  "num-rational",
  "num-traits",
  "once_cell",

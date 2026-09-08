@@ -72,7 +72,9 @@ commonware_macros::stability_scope!(BETA {
     use rand_core::{CryptoRng, SeedableRng as _};
 
     pub mod secret;
-    pub use crate::secret::Secret;
+    pub use crate::secret::{HardenError, Secret};
+    #[cfg(all(target_os = "linux", feature = "std"))]
+    mod hardened_secret;
 
     pub mod certificate;
     pub mod transcript;

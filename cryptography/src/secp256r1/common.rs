@@ -1,4 +1,4 @@
-use crate::Secret;
+use crate::{HardenError, Secret};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -44,9 +44,17 @@ impl PrivateKeyInner {
         }
     }
 
+    /// Protects both the cached key bytes and the private signing state.
+    pub fn try_harden(self) -> Result<Self, HardenError> {
+        Ok(Self {
+            raw: self.raw.try_harden()?,
+            key: self.key.try_harden()?,
+        })
+    }
+
     /// Returns the `VerifyingKey` corresponding to this private key.
     pub fn verifying_key(&self) -> VerifyingKey {
-        self.key.expose(|key| *key.verifying_key())
+        self.key.access(|key| *key.verifying_key())
     }
 }
 
@@ -58,7 +66,7 @@ impl Random for PrivateKeyInner {
 
 impl Write for PrivateKeyInner {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose(|raw| raw.write(buf));
+        self.raw.access(|raw| raw.write(buf));
     }
 }
 
@@ -208,6 +216,18 @@ impl arbitrary::Arbitrary<'_> for PublicKeyInner {
 /// Macro to implement newtype wrapper traits for PrivateKey.
 macro_rules! impl_private_key_wrapper {
     ($name:ident) => {
+        impl $name {
+            /// Moves the private key into hardened storage.
+            ///
+            /// Clones share storage, erased when its last owner drops. Already hardened
+            /// keys are unchanged. Earlier copies and exported material remain unprotected.
+            ///
+            /// Returns an error if hardening is unsupported or its protections cannot be established.
+            pub fn try_harden(self) -> Result<Self, crate::secret::HardenError> {
+                self.0.try_harden().map(Self)
+            }
+        }
+
         impl crate::PrivateKey for $name {}
 
         impl commonware_math::algebra::Random for $name {

@@ -1,5 +1,5 @@
 use crate::{
-    BatchVerifier, Secret,
+    BatchVerifier, HardenError, Secret,
     ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
@@ -42,19 +42,34 @@ impl crate::Signer for PrivateKey {
     }
 
     fn public_key(&self) -> Self::PublicKey {
-        self.key.expose(|key| Self::PublicKey {
+        self.key.access(|key| Self::PublicKey {
             key: key.verification_key().to_owned(),
         })
     }
 }
 
 impl PrivateKey {
+    /// Moves the private material into locked, non-dumpable memory that is
+    /// inaccessible between operations.
+    ///
+    /// Clones of a hardened key share its protected allocation. Existing copies
+    /// are unaffected. Repeated calls preserve the existing allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if hardening is unsupported or protection cannot be established.
+    pub fn try_harden(self) -> Result<Self, HardenError> {
+        Ok(Self {
+            key: self.key.try_harden()?,
+        })
+    }
+
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        self.key.expose(|key| Signature::from(key.sign(&payload)))
+        self.key.access(|key| Signature::from(key.sign(&payload)))
     }
 }
 
@@ -69,7 +84,7 @@ impl Random for PrivateKey {
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.expose(|key| key.as_bytes().write(buf));
+        self.key.access(|key| key.as_bytes().write(buf));
     }
 }
 
@@ -117,7 +132,7 @@ impl arbitrary::Arbitrary<'_> for PrivateKey {
 impl PartialEq for PrivateKey {
     fn eq(&self, other: &Self) -> bool {
         self.key
-            .expose(|key1| other.key.expose(|key2| key1.as_bytes() == key2.as_bytes()))
+            .access(|key1| other.key.access(|key2| key1.as_bytes() == key2.as_bytes()))
     }
 }
 
@@ -129,7 +144,7 @@ pub struct PublicKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        value.key.expose(|key| Self {
+        value.key.access(|key| Self {
             key: key.verification_key(),
         })
     }

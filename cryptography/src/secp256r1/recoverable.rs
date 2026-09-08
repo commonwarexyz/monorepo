@@ -50,7 +50,7 @@ impl PrivateKey {
             Cow::Owned(union_unique(namespace, msg))
         });
         let (mut signature, mut recovery_id) =
-            self.0.key.expose(|key| key.sign_recoverable(&payload));
+            self.0.key.access(|key| key.sign_recoverable(&payload));
 
         // The signing algorithm generates k, then calculates r <- x(k * G). Normalizing s by negating it is equivalent
         // to negating k. This has no effect on x(k * G) but y(-k * G) = -y(k * G), hence the need to flip the bit if

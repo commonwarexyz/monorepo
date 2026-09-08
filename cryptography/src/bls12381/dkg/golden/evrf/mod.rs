@@ -1,7 +1,7 @@
 mod banderwagon;
 
 use crate::{
-    Secret,
+    HardenError, Secret,
     bls12381::primitives::group::{G1, Scalar, ScalarReadCfg},
     transcript::{Summary, Transcript, Version},
     zk::{
@@ -172,7 +172,7 @@ impl crate::Signer for PrivateKey {
 
     fn public_key(&self) -> Self::PublicKey {
         self.inner
-            .expose(|x| PublicKey::from_point(G::generator() * x))
+            .access(|x| PublicKey::from_point(G::generator() * x))
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
@@ -181,7 +181,7 @@ impl crate::Signer for PrivateKey {
         t.commit(namespace).commit(msg).commit(pk.raw.as_slice());
 
         // Derive deterministic nonce from secret key + public transcript state
-        let k = self.inner.expose(|x| {
+        let k = self.inner.access(|x| {
             let mut nonce_t = t.fork(b"nonce");
             let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
             nonce_t.commit(x_bytes.as_slice());
@@ -194,7 +194,7 @@ impl crate::Signer for PrivateKey {
         let e = F::random(t.noise(b"challenge"));
 
         // s = k + e * x
-        let s = self.inner.expose(|x| e * x + &k);
+        let s = self.inner.access(|x| e * x + &k);
 
         let mut raw = [0u8; Signature::SIZE];
         raw[..G::SIZE].copy_from_slice(&k_big_bytes);
@@ -204,6 +204,18 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKey {
+    /// Moves the private scalar into hardened storage.
+    ///
+    /// Clones share storage, erased when its last owner drops. Already hardened
+    /// keys are unchanged. Earlier copies and exported material remain unprotected.
+    ///
+    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    pub fn try_harden(self) -> Result<Self, HardenError> {
+        Ok(Self {
+            inner: self.inner.try_harden()?,
+        })
+    }
+
     /// Get the [`PublicKey`] associated with this private key.
     pub fn public(&self) -> PublicKey {
         crate::Signer::public_key(self)
@@ -219,7 +231,7 @@ impl PrivateKey {
     /// a random value.
     pub(super) fn vrf_recv(&self, msg: &Summary, sender: &PublicKey) -> Scalar {
         self.inner
-            .expose(|inner| vrf_recv(msg, &sender.point, inner))
+            .access(|inner| vrf_recv(msg, &sender.point, inner))
     }
 
     /// Compute the VRF output for each receiver, along with [`VrfCommitments`]
@@ -243,7 +255,7 @@ impl PrivateKey {
         }));
         let (circuit, witness) = self
             .inner
-            .expose(|x| vrf_batch_checked(msg, x, receivers.values()));
+            .access(|x| vrf_batch_checked(msg, x, receivers.values()));
         let claim = witness.claim(setup.inner());
         let circuit_proof = prove(
             &mut *rng,
@@ -302,7 +314,7 @@ impl PrivateKey {
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.inner
-            .expose(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
+            .access(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
     }
 }
 

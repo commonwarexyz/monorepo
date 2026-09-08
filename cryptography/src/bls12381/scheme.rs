@@ -32,7 +32,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{BatchVerifier, Secret, Signer as _};
+use crate::{BatchVerifier, HardenError, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
@@ -60,6 +60,21 @@ pub struct PrivateKey {
     key: Private,
 }
 
+impl PrivateKey {
+    /// Moves the serialized private key and its scalar into hardened storage.
+    ///
+    /// Clones share storage, erased when its last owner drops. Already hardened
+    /// keys are unchanged. Earlier copies and exported material remain unprotected.
+    ///
+    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    pub fn try_harden(self) -> Result<Self, HardenError> {
+        Ok(Self {
+            raw: self.raw.try_harden()?,
+            key: self.key.try_harden()?,
+        })
+    }
+}
+
 impl PartialEq for PrivateKey {
     fn eq(&self, other: &Self) -> bool {
         self.raw == other.raw
@@ -70,7 +85,7 @@ impl Eq for PrivateKey {}
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose(|raw| raw.write(buf));
+        self.raw.access(|raw| raw.write(buf));
     }
 }
 
@@ -94,7 +109,7 @@ impl FixedSize for PrivateKey {
 
 impl From<Private> for PrivateKey {
     fn from(key: Private) -> Self {
-        let raw = Zeroizing::new(key.expose(|s| s.encode_fixed()));
+        let raw = Zeroizing::new(key.access(|s| s.encode_fixed()));
         Self {
             raw: Secret::new(*raw),
             key,

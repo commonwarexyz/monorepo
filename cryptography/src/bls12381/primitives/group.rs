@@ -14,7 +14,7 @@
 //! at its own boundary.
 
 use super::variant::Variant;
-use crate::Secret;
+use crate::{HardenError, Secret};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
@@ -515,24 +515,37 @@ impl Private {
         }
     }
 
-    /// Temporarily exposes the inner scalar to a closure.
+    /// Moves the scalar into hardened storage.
     ///
-    /// See [`Secret::expose`](crate::Secret::expose) for more details.
-    pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
-        self.scalar.expose(f)
+    /// Clones share storage, erased when its last owner drops. Already hardened
+    /// keys are unchanged. Earlier copies and exported material remain unprotected.
+    ///
+    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    pub fn try_harden(self) -> Result<Self, HardenError> {
+        Ok(Self {
+            scalar: self.scalar.try_harden()?,
+        })
     }
 
-    /// Consumes the private key and returns the inner scalar.
+    /// Grants temporary access to the inner scalar through a closure.
     ///
-    /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
-    pub fn expose_unwrap(self) -> Scalar {
-        self.scalar.expose_unwrap()
+    /// See [`Secret::access`](crate::Secret::access) for more details.
+    pub fn access<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
+        self.scalar.access(f)
+    }
+
+    /// Consumes the private key, moving out its scalar or cloning it if shared.
+    ///
+    /// The returned scalar is unprotected and zeroized on drop. Other handles to
+    /// shared hardened storage retain their protection. See [Secret::extract_or_clone].
+    pub fn extract_or_clone(self) -> Scalar {
+        self.scalar.extract_or_clone()
     }
 }
 
 impl Write for Private {
     fn write(&self, buf: &mut impl BufMut) {
-        self.expose(|scalar| scalar.write(buf));
+        self.access(|scalar| scalar.write(buf));
     }
 }
 
@@ -992,19 +1005,32 @@ impl Share {
         Self { index, private }
     }
 
+    /// Moves the private scalar into hardened storage.
+    ///
+    /// Clones share storage, erased when its last owner drops. Already hardened
+    /// shares are unchanged. Earlier copies and exported material remain unprotected.
+    ///
+    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    pub fn try_harden(self) -> Result<Self, HardenError> {
+        Ok(Self {
+            index: self.index,
+            private: self.private.try_harden()?,
+        })
+    }
+
     /// Returns the public key corresponding to the share.
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
         self.private
-            .expose(|private| V::Public::generator() * private)
+            .access(|private| V::Public::generator() * private)
     }
 }
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
-        self.private.expose(|private| private.write(buf));
+        self.private.access(|private| private.write(buf));
     }
 }
 
@@ -1020,7 +1046,7 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.expose(|private| private.encode_size())
+        self.index.encode_size() + self.private.access(|private| private.encode_size())
     }
 }
 

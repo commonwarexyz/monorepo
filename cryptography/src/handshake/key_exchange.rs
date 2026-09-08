@@ -72,7 +72,7 @@ impl SecretKey {
 
     /// Derives the corresponding public key.
     pub fn public(&self) -> EphemeralPublicKey {
-        self.inner.expose(|secret| EphemeralPublicKey {
+        self.inner.access(|secret| EphemeralPublicKey {
             inner: x25519_dalek::PublicKey::from(secret),
         })
     }
@@ -80,7 +80,10 @@ impl SecretKey {
     /// Performs X25519 key exchange with another public key.
     /// Returns None if the exchange is non-contributory.
     pub fn exchange(self, other: &EphemeralPublicKey) -> Option<SharedSecret> {
-        let secret = self.inner.expose_unwrap();
+        let secret = self
+            .inner
+            .try_extract()
+            .expect("ephemeral secret is uniquely owned");
         let out = secret.diffie_hellman(&other.inner);
         if !out.was_contributory() {
             return None;

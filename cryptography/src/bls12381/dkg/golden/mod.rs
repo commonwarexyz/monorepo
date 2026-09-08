@@ -496,7 +496,7 @@ pub fn deal(
         // `Poly::new_with_constant` requires an owned value. The extracted scalar is
         // scoped to this function and will be zeroized on drop (i.e. the secret is
         // only exposed for the duration of this function).
-        share.map(|x| x.private.expose_unwrap()),
+        share.map(|x| x.private.extract_or_clone()),
     )?;
     let poly = Poly::new_with_constant(&mut *rng, info.degree(), share);
 
@@ -1332,7 +1332,7 @@ mod test_plan {
                         let constant = info
                             .unwrap_or_random_share(
                                 &mut rng,
-                                share.as_ref().map(|s| s.private.clone().expose_unwrap()),
+                                share.as_ref().map(|s| s.private.clone().extract_or_clone()),
                             )
                             .expect("share should be available");
                         let poly = Poly::new_with_constant(&mut rng, new_degree, constant);
