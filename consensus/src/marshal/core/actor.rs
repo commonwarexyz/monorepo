@@ -1423,6 +1423,7 @@ where
         // Release staged blocks skipped by the floor transition
         self.staged = self.staged.split_off(&height);
 
+        // Advance the round floor and persist the dispatch floor before pruning finalized data
         self = self
             .update_processed_round_floor(dispatch_floor, round, buffer, application, resolver)
             .await;
