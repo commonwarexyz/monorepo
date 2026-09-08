@@ -10181,6 +10181,10 @@ mod tests {
                 !certified_before_sync,
                 "resolver observed certification before the section sync completed"
             );
+            assert!(
+                !reporter.certifications.lock().contains_key(&target_view),
+                "reporter observed certification before the section sync completed"
+            );
 
             let mut finalize_constructed = false;
             while let Some(msg) = batcher_receiver.recv().now_or_never().flatten() {
@@ -10262,6 +10266,15 @@ mod tests {
                     },
                 }
             }
+            assert_eq!(
+                reporter
+                    .certifications
+                    .lock()
+                    .get(&target_view)
+                    .map(|certification| &certification.proposal),
+                Some(&proposal),
+                "reporter should receive successful certification"
+            );
 
             // The durable finalize should be broadcast, without another section sync.
             let deadline = context.current() + Duration::from_secs(5);
@@ -10401,6 +10414,15 @@ mod tests {
                 .and_then(|payloads| payloads.get(&proposal.payload))
                 .expect("coalesced finalize should replay after restart");
             assert!(signers.contains(&me));
+            assert_eq!(
+                replay_reporter
+                    .certifications
+                    .lock()
+                    .get(&target_view)
+                    .map(|certification| &certification.proposal),
+                Some(&proposal),
+                "reporter should receive replayed successful certification"
+            );
         });
     }
 
@@ -10555,6 +10577,10 @@ mod tests {
                     },
                 }
             }
+            assert!(
+                !reporter.certifications.lock().contains_key(&target_view),
+                "reporter should not receive failed certification"
+            );
 
             // Let the journal sync.
             context.sleep(Duration::from_millis(50)).await;
@@ -10584,7 +10610,7 @@ mod tests {
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
-                reporter,
+                reporter: reporter.clone(),
                 partition,
                 epoch,
                 floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
@@ -10654,6 +10680,10 @@ mod tests {
             assert!(
                 replayed_certified,
                 "resolver should receive Certified(false) during replay for view {target_view}"
+            );
+            assert!(
+                !reporter.certifications.lock().contains_key(&target_view),
+                "reporter should not receive replayed failed certification"
             );
         });
     }
