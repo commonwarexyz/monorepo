@@ -982,6 +982,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, true).await?;
 
+        // Rewind the index before deriving the retained value boundary
         self.index = self.index.rewind(section, index_size).await?;
 
         // Keep values through the last retained index entry, or none for an empty section
@@ -1005,6 +1006,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, false).await?;
 
+        // Rewind the index before deriving the retained value boundary
         self.index = self.index.rewind_section(section, index_size).await?;
 
         // Keep values through the last retained index entry, or none for an empty section
