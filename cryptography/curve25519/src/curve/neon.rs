@@ -728,7 +728,7 @@ impl msm::Backend for Backend {
         terms: &[T],
         term: impl Fn(&T) -> (GAffine, i16),
     ) {
-        msm::fill_buckets::<{ Self::STRIPES }, T>(g_add_mixed_pair, buckets, nb, terms, term);
+        msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
     }
 
     /// Returns lanes whose sum is the weighted sum of all bucket stripes.

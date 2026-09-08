@@ -31,7 +31,6 @@ pub trait Backend: GBackend {
         terms: &[T],
         term: impl Fn(&T) -> (GAffine, i16),
     ) {
-        const { assert!(Self::STRIPES == LANES) };
         fill_buckets(
             |current, incoming, negative| {
                 self.g_add_mixed(
@@ -136,7 +135,6 @@ pub fn fold_buckets<B: Backend>(
     nb: usize,
     used: usize,
 ) -> GVec {
-    const { assert!(B::STRIPES <= LANES) };
     let mut sum = GVec::identity();
     let mut window_sum = GVec::identity();
     for d in (0..used).rev() {
