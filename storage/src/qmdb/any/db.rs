@@ -642,6 +642,8 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
+        // Make the log rewind durable before applying in-memory undo so recovery can
+        // rebuild the derived state from the retained log
         self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below
