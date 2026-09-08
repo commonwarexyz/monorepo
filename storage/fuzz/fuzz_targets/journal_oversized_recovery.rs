@@ -10,7 +10,7 @@
 //! nothing, and that sentinel appends land at the repaired tail and reopen intact.
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Copying, DecodeExt as _, FixedSize, Read, ReadBuf, ReadExt as _, Write};
+use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
     Blob as _, BufMut, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
@@ -73,7 +73,7 @@ impl Read for TestEntry {
     type Cfg = ();
 
     fn read_cfg(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         _: &Self::Cfg,
     ) -> std::result::Result<Self, commonware_codec::Error> {
         let id = u64::read(buf)?;

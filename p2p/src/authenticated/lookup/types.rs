@@ -1,5 +1,5 @@
 use crate::authenticated::data::Data;
-use commonware_codec::{EncodeSize, Error, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_runtime::BufMut;
 
 /// Prefix that identifies the message as a Data message.
@@ -47,7 +47,7 @@ impl Write for Message {
 impl Read for Message {
     type Cfg = usize; // Maximum amount of data to read
 
-    fn read_cfg(buf: &mut impl ReadBuf, max_data_length: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, max_data_length: &Self::Cfg) -> Result<Self, Error> {
         let message_type = <u8>::read(buf)?;
         match message_type {
             DATA_PREFIX => {

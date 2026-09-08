@@ -1,7 +1,7 @@
 use crate::types::{Height, Round};
 use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
 use commonware_runtime::Metrics;
@@ -394,7 +394,7 @@ impl<D: Digest> Write for Key<D> {
 impl<D: Digest> Read for Key<D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request = match u8::read(buf)? {
             BLOCK_REQUEST => Self::Block(D::read(buf)?),
             FINALIZED_REQUEST => Self::Finalized {

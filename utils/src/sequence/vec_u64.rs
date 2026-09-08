@@ -1,7 +1,7 @@
 //! A `u64` encoded with the same framing as a `Vec<u8>` of its big-endian bytes.
 
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadBuf, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, Write};
 
 /// A `u64` encoded with the same framing as a `Vec<u8>` of its big-endian bytes.
 ///
@@ -54,7 +54,7 @@ impl EncodeSize for VecU64 {
 impl Read for VecU64 {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let len = usize::read_cfg(buf, &(u64::SIZE..=u64::SIZE).into())?;
         if buf.remaining() < len {
             return Err(CodecError::EndOfBuffer);

@@ -1,6 +1,6 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
-use commonware_codec::{CodecFixed, FixedSize, Read, ReadBuf, ReadExt, Write as CodecWrite};
+use commonware_codec::{Buf, CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
@@ -57,7 +57,7 @@ impl<V: CodecFixed<Cfg = ()>> CodecWrite for Record<V> {
 impl<V: CodecFixed<Cfg = ()>> Read for Record<V> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let value = V::read(buf)?;
         let crc = u32::read(buf)?;
 

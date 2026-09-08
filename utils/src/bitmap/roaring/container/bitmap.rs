@@ -15,7 +15,7 @@
 
 use super::{array, run};
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::ops::Range;
 
 /// Number of 64-bit words needed to store 65536 bits.
@@ -477,7 +477,7 @@ impl EncodeSize for Bitmap {
 impl Read for Bitmap {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let bytes = <[u8; ENCODED_BYTES]>::read(buf)?;
 
         let mut words = [0u64; WORDS];

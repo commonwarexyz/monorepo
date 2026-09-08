@@ -1,8 +1,6 @@
 //! Mock implementations for testing.
 
-use commonware_codec::{
-    EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, ReadRangeExt, Write,
-};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadRangeExt, Write};
 use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest};
 use commonware_runtime::BufMut;
 
@@ -53,7 +51,7 @@ impl EncodeSize for TestMessage {
 impl Read for TestMessage {
     type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
         let commitment = Vec::<u8>::read_range(buf, *range)?;
         let content = Vec::<u8>::read_range(buf, *range)?;
         Ok(Self {

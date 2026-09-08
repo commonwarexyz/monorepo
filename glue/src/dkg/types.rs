@@ -2,7 +2,7 @@
 
 use crate::dkg::network::Directory;
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     PublicKey, Signer,
@@ -71,7 +71,7 @@ impl EncodeSize for EpochOutcome {
 impl Read for EpochOutcome {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Self::Success),
             1 => Ok(Self::Failure),
@@ -235,7 +235,7 @@ impl<P: PublicKey> Read for Participants<P> {
     /// Maximum number of participants accepted in any single set.
     type Cfg = NonZeroU32;
 
-    fn read_cfg(reader: &mut impl ReadBuf, max: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, max: &Self::Cfg) -> Result<Self, CodecError> {
         let cfg = (RangeCfg::new(0..=max.get() as usize), ());
         Ok(Self {
             dealers: Set::read_cfg(reader, &cfg)?,
@@ -546,7 +546,7 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         let outcome = EpochOutcome::read(buf)?;
@@ -669,7 +669,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D
     /// sharing mode version.
     type Cfg = (NonZeroU32, ModeVersion);
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
             0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(reader, &cfg.0)?)),
             1 => Ok(Self::EpochInfo(EpochInfo::read_cfg(reader, cfg)?)),
@@ -730,7 +730,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
 impl<V: Variant, P: PublicKey> Read for Message<V, P> {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let tag = u8::read(reader)?;
         match tag {
             0 => {

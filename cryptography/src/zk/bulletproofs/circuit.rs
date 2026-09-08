@@ -134,7 +134,7 @@
 use super::ipa;
 use crate::transcript::Transcript;
 use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadBuf, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space, powers},
     synthetic::Synthetic,
@@ -1068,7 +1068,7 @@ where
 {
     type Cfg = (usize, G::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
         let ipa = ipa::Setup::read_cfg(buf, &(*max_len, cfg.clone()))?;
         let value_generator = G::read_cfg(buf, cfg)?;
         let blinding_generator = G::read_cfg(buf, cfg)?;
@@ -1231,10 +1231,7 @@ where
     /// `(max_len, (g_cfg, f_cfg))` where `max_len` bounds the IPA round count.
     type Cfg = (usize, (G::Cfg, F::Cfg));
 
-    fn read_cfg(
-        buf: &mut impl ReadBuf,
-        cfg @ (_, (g_cfg, f_cfg)): &Self::Cfg,
-    ) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg @ (_, (g_cfg, f_cfg)): &Self::Cfg) -> Result<Self, Error> {
         let m_big = G::read_cfg(buf, g_cfg)?;
         let o_big = G::read_cfg(buf, g_cfg)?;
         let m_big_tilde = G::read_cfg(buf, g_cfg)?;

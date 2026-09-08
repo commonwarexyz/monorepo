@@ -13,7 +13,7 @@
 //! and reopen.
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Copying, DecodeExt as _, FixedSize, Read, ReadBuf, ReadExt as _};
+use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
     Blob as _, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
@@ -86,7 +86,7 @@ struct IndexRecord {
 impl Read for IndexRecord {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             index: u64::read(buf)?,
             key: Key::read(buf)?,

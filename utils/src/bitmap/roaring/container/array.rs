@@ -6,7 +6,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use core::ops::Range;
 
 /// Maximum cardinality before converting to a bitmap container.
@@ -498,7 +498,7 @@ impl EncodeSize for Array {
 impl Read for Array {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let values = Vec::<u16>::read_cfg(buf, &(RangeCfg::new(..=MAX_CARDINALITY), ()))?;
 
         validate_values(&values)?;

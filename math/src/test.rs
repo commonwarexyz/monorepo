@@ -1,5 +1,5 @@
 use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space};
-use commonware_codec::{FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
@@ -34,7 +34,7 @@ impl Write for F {
 impl Read for F {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let value = u64::read(buf)?;
         if value >= P {
             return Err(commonware_codec::Error::Invalid("F", "out of range"));
@@ -164,7 +164,7 @@ impl Write for G {
 impl Read for G {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let value = u64::read(buf)?;
         if value >= Q {
             return Err(commonware_codec::Error::Invalid("G", "out of range"));

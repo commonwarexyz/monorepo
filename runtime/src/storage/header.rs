@@ -1,11 +1,11 @@
 //! Blob header layouts shared by every storage backend: the on-disk prelude, the per-layout
 //! geometry, and reopen-time resolution (including torn-creation recovery).
 
-use commonware_codec::{Copying, ReadBuf};
+use commonware_codec::{Buf, Copying};
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use crate::{BlobLayout as Layout, BlobVersion, Buf, BufMut};
+    use crate::{BlobLayout as Layout, BlobVersion, Buf as _, BufMut};
     use commonware_codec::{DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
@@ -410,7 +410,7 @@ stability_scope!(BETA {
 
     impl CodecRead for Header {
         type Cfg = ();
-        fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             if buf.remaining() < Self::PRELUDE_SIZE {
                 return Err(commonware_codec::Error::EndOfBuffer);
             }

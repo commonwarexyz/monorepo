@@ -11,9 +11,9 @@ use super::{
     panic_advance,
     pool::BufferPool,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
+use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{
-    BufsMut, DecodeInput, EncodeSize, Error, RangeCfg, Read, ReadBuf, Write, util::at_least,
+    Buf, BufsMut, DecodeInput, EncodeSize, Error, RangeCfg, Read, Write, util::at_least,
 };
 use std::{
     mem::ManuallyDrop,
@@ -334,9 +334,9 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBuf {
     }
 }
 
-impl ReadBuf for IoBuf {}
+impl Buf for IoBuf {}
 
-impl Buf for IoBuf {
+impl bytes::Buf for IoBuf {
     #[inline(always)]
     fn remaining(&self) -> usize {
         self.len
@@ -539,7 +539,7 @@ impl Read for IoBuf {
     type Cfg = RangeCfg<usize>;
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         at_least(buf, len)?;
         Ok(Self::from(buf.copy_to_bytes(len)))
@@ -866,7 +866,7 @@ impl DecodeInput for IoBufMut {
     }
 }
 
-impl Buf for IoBufMut {
+impl bytes::Buf for IoBufMut {
     #[inline(always)]
     fn remaining(&self) -> usize {
         self.len
@@ -997,7 +997,7 @@ unsafe impl BufMut for IoBufMut {
     }
 
     #[inline]
-    fn put<T: Buf>(&mut self, mut src: T)
+    fn put<T: bytes::Buf>(&mut self, mut src: T)
     where
         Self: Sized,
     {
@@ -1131,7 +1131,7 @@ mod tests {
         super::{bufs::IoBufs, pool::BufferPoolConfig},
         *,
     };
-    use bytes::{Bytes, BytesMut};
+    use bytes::{Buf as _, Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, RangeCfg};
     use core::ops::Bound;
     use std::mem::size_of;
@@ -1750,7 +1750,7 @@ mod tests {
         // larger than its reported remaining(). `put` must bound each copy by
         // its own capacity and panic instead of overflowing the buffer.
         struct LyingBuf;
-        impl Buf for LyingBuf {
+        impl bytes::Buf for LyingBuf {
             fn remaining(&self) -> usize {
                 1
             }

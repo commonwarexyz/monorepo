@@ -1,5 +1,5 @@
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{marshal::core::Variant, simplex::types::Finalization};
 use commonware_cryptography::certificate::Scheme;
 
@@ -29,7 +29,7 @@ impl Write for Tag {
 impl Read for Tag {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
         match u8::read(reader)? {
             0 => Ok(Self::Request),
             1 => Ok(Self::Response),
@@ -88,7 +88,7 @@ where
 {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         match Tag::read(reader)? {
             Tag::Request => Ok(Self::Request),
             Tag::Response => Ok(Self::Response(Finalization::read_cfg(reader, cfg)?)),

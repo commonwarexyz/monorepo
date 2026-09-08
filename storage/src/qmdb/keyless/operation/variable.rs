@@ -6,7 +6,7 @@ use crate::{
         operation::{commit_variable_payload_size, read_commit_variable, write_commit_variable},
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::BufMut;
 
 impl<V: VariableValue> Codec for VariableEncoding<V> {
@@ -26,7 +26,7 @@ impl<V: VariableValue> Codec for VariableEncoding<V> {
     }
 
     fn read_operation<F: Family>(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         cfg: &Self::ReadCfg,
     ) -> Result<Operation<F, Self>, CodecError> {
         match u8::read(buf)? {

@@ -5,7 +5,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
 use bytes::BufMut;
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -76,7 +76,7 @@ impl Write for PrivateKey {
 impl Read for PrivateKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let key = ed_core::SigningKey::from(*raw);
         Ok(Self {
@@ -166,7 +166,7 @@ impl Write for PublicKey {
 impl Read for PublicKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let result = VerificationKey::try_from(raw);
         #[cfg(feature = "std")]
@@ -252,7 +252,7 @@ impl Write for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         Ok(Self { raw })
     }

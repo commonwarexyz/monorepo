@@ -5,10 +5,10 @@ use crate::{
     journal::{Error, frame::FrameReader},
 };
 use bytes::Bytes;
-use commonware_codec::ReadBuf;
+use commonware_codec::Buf;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
+    Blob as RBlob, Buf as _, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -681,9 +681,9 @@ impl<'a, B: RBlob> Replay<'a, B> {
     }
 }
 
-impl<B: RBlob> ReadBuf for Replay<'_, B> {}
+impl<B: RBlob> Buf for Replay<'_, B> {}
 
-impl<B: RBlob> Buf for Replay<'_, B> {
+impl<B: RBlob> bytes::Buf for Replay<'_, B> {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         match &mut self.inner {
             ReplayInner::Paged(replay) => replay.copy_to_bytes(len),
@@ -748,7 +748,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
         self.exhausted
     }
 
-    /// Ensure at least `n` bytes are available through the [`Buf`] implementation.
+    /// Ensure at least `n` bytes are available through the [`bytes::Buf`] implementation.
     async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.remaining() < n && !self.exhausted {
             let blob_size = self.blob.size();
@@ -784,9 +784,9 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
     }
 }
 
-impl<B: RBlob> ReadBuf for ViewReplay<'_, B> {}
+impl<B: RBlob> Buf for ViewReplay<'_, B> {}
 
-impl<B: RBlob> Buf for ViewReplay<'_, B> {
+impl<B: RBlob> bytes::Buf for ViewReplay<'_, B> {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         self.buf.copy_to_bytes(len)
     }

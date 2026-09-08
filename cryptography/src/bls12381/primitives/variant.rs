@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
 use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, Read, ReadBuf, ReadExt as _, Write,
+    Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Space};
 use commonware_parallel::Strategy;
@@ -308,7 +308,7 @@ impl<V: Variant> Write for PartialSignature<V> {
 impl<V: Variant> Read for PartialSignature<V> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let index = Participant::read(buf)?;
         let value = V::Signature::read(buf)?;
         Ok(Self { index, value })

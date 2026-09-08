@@ -140,7 +140,7 @@ pub struct Config {
 mod tests {
     use super::*;
     use crate::utils::bits_for_indices;
-    use commonware_codec::{FixedSize, Read, ReadBuf, ReadExt, Write};
+    use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
@@ -2132,10 +2132,7 @@ mod tests {
     impl Read for DummyValue {
         type Cfg = ();
 
-        fn read_cfg(
-            buf: &mut impl ReadBuf,
-            _: &Self::Cfg,
-        ) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             let value = u64::read(buf)?;
             if value == 0 {
                 return Err(commonware_codec::Error::Invalid(

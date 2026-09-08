@@ -30,7 +30,7 @@ use ::core::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{FixedSize, Read, ReadBuf, Write};
+use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -157,7 +157,7 @@ impl FixedSize for SigningKey {
 impl Read for SigningKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let seed = Zeroizing::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?);
         Ok(Self::from_seed(*seed))
     }
@@ -269,7 +269,7 @@ impl FixedSize for VerifyingKey {
 impl Read for VerifyingKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
             point: None,
@@ -381,7 +381,7 @@ impl FixedSize for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
         })

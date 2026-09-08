@@ -1,7 +1,7 @@
 use super::service::Service;
 use crate::stateful::probe::{mailbox::Message, sample::Sample, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Decode, Encode, Error as CodecError, ReadBuf, ReadExt};
+use commonware_codec::{Buf, Decode, Encode, Error as CodecError, ReadExt};
 use commonware_consensus::{
     Epochable,
     marshal::core::Variant,
@@ -177,7 +177,7 @@ where
     /// the [`Proposal`] to look up the appropriate certificate scheme for decoding.
     fn decode_finalization(
         &self,
-        mut message: impl ReadBuf,
+        mut message: impl Buf,
     ) -> Result<Option<Finalization<S, V::Commitment>>, CodecError> {
         let tag = wire::Tag::read(&mut message)?;
         if tag != wire::Tag::Response {

@@ -34,7 +34,7 @@
 //!
 //! # Decode Inputs
 //!
-//! Readers accept [ReadBuf] inputs so decoded byte fields can share the input allocation.
+//! Readers accept [Buf] inputs so decoded byte fields can share the input allocation.
 //! Pass owned buffers such as [::bytes::Bytes] directly, or clone a shared buffer to retain
 //! a separate cursor. Decoders also accept owned [`Vec<u8>`] values through [DecodeInput],
 //! transferring their allocation without copying the payload.
@@ -94,7 +94,7 @@
 //!
 //! ```
 //! use bytes::BufMut;
-//! use commonware_codec::{ReadBuf, Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
+//! use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -121,7 +121,7 @@
 //! // 3. Implement Read: How to deserialize the struct (uses default Cfg = ())
 //! impl Read for Point {
 //!     type Cfg = ();
-//!     fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+//!     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
 //!         // Use ReadExt::read for ergonomic reading when Cfg is ()
 //!         let x = u32::read(buf)?;
 //!         let y = u32::read(buf)?;
@@ -145,7 +145,7 @@
 //!
 //! ```
 //! use bytes::BufMut;
-//! use commonware_codec::{ReadBuf,
+//! use commonware_codec::{Buf,
 //!     Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
 //!     ReadRangeExt, Write, RangeCfg
 //! };
@@ -188,7 +188,7 @@
 //! // 3. Implement Read
 //! impl Read for Item {
 //!     type Cfg = ItemConfig;
-//!     fn read_cfg(buf: &mut impl ReadBuf, cfg: &ItemConfig) -> Result<Self, Error> {
+//!     fn read_cfg(buf: &mut impl Buf, cfg: &ItemConfig) -> Result<Self, Error> {
 //!         // u64 requires Cfg = (), uses ReadExt::read
 //!         let id = <u64>::read(buf)?;
 //!
@@ -230,7 +230,7 @@ commonware_macros::stability_scope!(BETA {
     extern crate alloc;
 
     mod buf;
-    pub use buf::{Copying, DecodeInput, ReadBuf};
+    pub use buf::{Buf, Copying, DecodeInput};
 
     pub mod codec;
     pub mod config;

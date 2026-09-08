@@ -5,7 +5,7 @@ use crate::journal::{
     contiguous::{fixed, variable},
     segmented::{fixed as segmented_fixed, glob, oversized, variable as segmented_variable},
 };
-use commonware_codec::{FixedSize, RangeCfg, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_conformance::conformance_tests;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
@@ -276,7 +276,7 @@ impl Write for TestEntry {
 impl Read for TestEntry {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let id = u64::read(buf)?;
         let value_offset = u64::read(buf)?;
         let value_size = u32::read(buf)?;

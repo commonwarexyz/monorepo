@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use cfg_if::cfg_if;
 use commonware_codec::{
-    EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadBuf, ReadExt, Write, mode,
+    Buf, EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode,
 };
 use commonware_macros::stability;
 #[stability(ALPHA)]
@@ -270,10 +270,7 @@ impl ModeVersion {
 impl Read for Mode {
     type Cfg = ModeVersion;
 
-    fn read_cfg(
-        buf: &mut impl ReadBuf,
-        version: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, version: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag: u8 = ReadExt::read(buf)?;
         let mode = match tag {
             0 => Self::NonZeroCounter,
@@ -437,7 +434,7 @@ impl<V: Variant> Read for Sharing<V> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let mode = Read::read_cfg(buf, max_supported_mode)?;

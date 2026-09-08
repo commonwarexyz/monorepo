@@ -1,6 +1,6 @@
 //! Codec implementations for network-related types
 
-use crate::{EncodeSize, Error, FixedSize, Read, ReadBuf, ReadExt, Write};
+use crate::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::BufMut;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -15,7 +15,7 @@ impl Read for Ipv4Addr {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         Ok(Self::from_bits(u32::read(buf)?))
     }
 }
@@ -35,7 +35,7 @@ impl Read for Ipv6Addr {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         Ok(Self::from_bits(u128::read(buf)?))
     }
 }
@@ -56,7 +56,7 @@ impl Read for SocketAddrV4 {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let ip = Ipv4Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(Self::new(ip, port))
@@ -79,7 +79,7 @@ impl Read for SocketAddrV6 {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let address = Ipv6Addr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(Self::new(address, port, 0, 0))
@@ -121,7 +121,7 @@ impl Read for IpAddr {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let version = u8::read(buf)?;
         match version {
             4 => Ok(Self::V4(Ipv4Addr::read(buf)?)),
@@ -151,7 +151,7 @@ impl Read for SocketAddr {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let ip = IpAddr::read(buf)?;
         let port = u16::read(buf)?;
         Ok(Self::new(ip, port))

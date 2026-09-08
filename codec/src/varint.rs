@@ -29,7 +29,7 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{EncodeSize, Error, FixedSize, Read, ReadBuf, ReadExt, Write};
+use crate::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
@@ -292,7 +292,7 @@ impl<U: UPrim> Write for UInt<U> {
 
 impl<U: UPrim> Read for UInt<U> {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read(buf).map(UInt)
     }
 }
@@ -342,7 +342,7 @@ impl<S: SPrim> Write for SInt<S> {
 
 impl<S: SPrim> Read for SInt<S> {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         read_signed::<S>(buf).map(SInt)
     }
 }
@@ -389,7 +389,7 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
 /// Returns an error if:
 /// - The varint is invalid (too long or malformed)
 /// - The buffer ends while reading
-fn read<T: UPrim>(buf: &mut impl ReadBuf) -> Result<T, Error> {
+fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
     let mut decoder = Decoder::<T>::new();
     loop {
         // Read the next byte.
@@ -414,7 +414,7 @@ fn write_signed<S: SPrim>(value: S, buf: &mut impl BufMut) {
 }
 
 /// Decodes a signed integer from varint ZigZag encoding.
-fn read_signed<S: SPrim>(buf: &mut impl ReadBuf) -> Result<S, Error> {
+fn read_signed<S: SPrim>(buf: &mut impl Buf) -> Result<S, Error> {
     Ok(S::un_zigzag(read(buf)?))
 }
 

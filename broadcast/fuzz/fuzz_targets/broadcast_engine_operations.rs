@@ -5,7 +5,7 @@ use commonware_broadcast::{
     Broadcaster,
     buffered::{Config, Engine, Mailbox},
 };
-use commonware_codec::{Encode, RangeCfg, ReadBuf, ReadRangeExt};
+use commonware_codec::{Buf, Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
     Digestible, Hasher, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
@@ -74,10 +74,7 @@ impl commonware_codec::EncodeSize for FuzzMessage {
 
 impl commonware_codec::Read for FuzzMessage {
     type Cfg = RangeCfg<usize>;
-    fn read_cfg(
-        buf: &mut impl ReadBuf,
-        range: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let commitment = Vec::<u8>::read_range(buf, *range)?;
         let content = Vec::<u8>::read_range(buf, *range)?;
         Ok(Self {

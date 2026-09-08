@@ -19,7 +19,7 @@
 //!   endian ambiguity.
 
 use crate::{
-    BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadBuf, ReadExt, Write,
+    Buf, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
     util::{at_least, at_least_items, read_fixed_vec},
     varint::UInt,
 };
@@ -43,7 +43,7 @@ macro_rules! impl_numeric {
         impl Read for $type {
             type Cfg = ();
             #[inline]
-            fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
                 at_least(buf, core::mem::size_of::<$type>())?;
                 Ok(buf.$read_method())
             }
@@ -51,7 +51,7 @@ macro_rules! impl_numeric {
             // Since the upfront size check guarantees the buffer contains every requested
             // value, elements are read directly without per-element bounds checks.
             #[inline]
-            fn read_vec(buf: &mut impl ReadBuf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
+            fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
                 at_least_items(buf, len, Self::SIZE)?;
                 let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
@@ -61,10 +61,7 @@ macro_rules! impl_numeric {
             }
 
             #[inline]
-            fn read_array<const N: usize>(
-                buf: &mut impl ReadBuf,
-                _: &(),
-            ) -> Result<[Self; N], Error> {
+            fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
                 at_least_items(buf, N, Self::SIZE)?;
                 Ok(core::array::from_fn(|_| buf.$read_method()))
             }
@@ -109,13 +106,13 @@ impl Read for u8 {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         at_least(buf, 1)?;
         Ok(buf.get_u8())
     }
 
     #[inline]
-    fn read_vec(buf: &mut impl ReadBuf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
+    fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
         at_least(buf, len)?;
         let mut values = vec![0; len];
         buf.copy_to_slice(&mut values);
@@ -123,7 +120,7 @@ impl Read for u8 {
     }
 
     #[inline]
-    fn read_array<const N: usize>(buf: &mut impl ReadBuf, _: &()) -> Result<[Self; N], Error> {
+    fn read_array<const N: usize>(buf: &mut impl Buf, _: &()) -> Result<[Self; N], Error> {
         at_least(buf, N)?;
         let mut values = [0; N];
         buf.copy_to_slice(&mut values);
@@ -147,13 +144,13 @@ macro_rules! impl_nonzero {
         impl Read for $nz {
             type Cfg = ();
             #[inline]
-            fn read_cfg(buf: &mut impl ReadBuf, cfg: &()) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, Error> {
                 let v = <$inner>::read_cfg(buf, cfg)?;
                 <$nz>::new(v).ok_or(Error::Invalid($name, "value must not be zero"))
             }
 
             #[inline]
-            fn read_vec(buf: &mut impl ReadBuf, len: usize, cfg: &()) -> Result<Vec<Self>, Error> {
+            fn read_vec(buf: &mut impl Buf, len: usize, cfg: &()) -> Result<Vec<Self>, Error> {
                 read_fixed_vec(buf, len, cfg)
             }
         }
@@ -181,7 +178,7 @@ impl Read for usize {
     type Cfg = RangeCfg<Self>;
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let self_as_u32: u32 = UInt::read(buf)?.into();
         let result = Self::try_from(self_as_u32).map_err(|_| Error::InvalidUsize)?;
         if !range.contains(&result) {
@@ -211,7 +208,7 @@ impl Write for bool {
 impl Read for bool {
     type Cfg = ();
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         match u8::read(buf)? {
             0 => Ok(false),
             1 => Ok(true),
@@ -245,7 +242,7 @@ impl<T: Read, const N: usize> Read for [T; N] {
     type Cfg = T::Cfg;
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         T::read_array(buf, cfg)
     }
 }
@@ -290,7 +287,7 @@ impl<T: Read> Read for Option<T> {
     type Cfg = T::Cfg;
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         if bool::read(buf)? {
             Ok(Some(T::read_cfg(buf, cfg)?))
         } else {
@@ -306,7 +303,7 @@ mod tests {
         *,
     };
     use crate::{CodecFixed, Copying, Decode, DecodeExt, Encode, EncodeFixed};
-    use bytes::{Buf, Bytes, BytesMut};
+    use bytes::{Buf as _, Bytes, BytesMut};
     use paste::paste;
 
     // Float tests

@@ -77,7 +77,7 @@ use crate::{
     blake3::{Blake3, CoreBlake3, Digest},
 };
 use bytes::BufMut;
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 
 /// Size of the internal [LtHash] state in bytes.
 const LTHASH_SIZE: usize = 2048;
@@ -192,7 +192,7 @@ impl Write for LtHash {
 impl Read for LtHash {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let mut state = [0u16; LTHASH_ELEMENTS];
         for val in state.iter_mut() {
             *val = u16::read(buf)?;

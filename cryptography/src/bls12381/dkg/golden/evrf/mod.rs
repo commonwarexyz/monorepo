@@ -12,8 +12,8 @@ use crate::{
 use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read,
-    ReadBuf, ReadExt, Write,
+    Buf, Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize,
+    Read, ReadExt, Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
@@ -136,10 +136,7 @@ impl Read for Setup {
     /// the encoded value does not match.
     type Cfg = NonZeroU32;
 
-    fn read_cfg(
-        buf: &mut impl ReadBuf,
-        expected_max_players: &Self::Cfg,
-    ) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, expected_max_players: &Self::Cfg) -> Result<Self, CodecError> {
         let max_players_raw = u32::read(buf)?;
         let max_players = NonZeroU32::new(max_players_raw)
             .ok_or(CodecError::Invalid("Setup", "max_players must be nonzero"))?;
@@ -312,7 +309,7 @@ impl Write for PrivateKey {
 impl Read for PrivateKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
         Ok(Self {
@@ -342,7 +339,7 @@ impl Write for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         Ok(Self { raw })
     }
@@ -438,7 +435,7 @@ impl Write for PublicKey {
 impl Read for PublicKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let point: G = ReadExt::read(&mut Copying(raw.as_slice()))?;
         Ok(Self { raw, point })
@@ -532,7 +529,7 @@ impl Read for Proof {
     /// the number of IPA rounds admissible in the inner circuit proof.
     type Cfg = NonZeroU32;
 
-    fn read_cfg(buf: &mut impl ReadBuf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
         let max_proof_len = 1usize << lg_len_for_players(max_players.get());
         let circuit_proof = circuit::Proof::<Scalar, G1>::read_cfg(
             buf,
@@ -566,7 +563,7 @@ impl EncodeSize for VrfCommitments {
 impl Read for VrfCommitments {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(buf: &mut impl ReadBuf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
         let proof = Proof::read_cfg(buf, max_players)?;
         let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
         let commitments = Read::read_cfg(buf, &(range, (), ()))?;

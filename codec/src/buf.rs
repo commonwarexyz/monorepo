@@ -3,14 +3,14 @@
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec::Vec};
 use bytes::{
-    Buf, Bytes, BytesMut,
+    Bytes, BytesMut,
     buf::{Chain, Take},
 };
 
 /// A buffer accepted by codec readers.
 ///
 /// Implementations backed by shared storage must preserve that ownership in
-/// [`Buf::copy_to_bytes`] whenever the requested range can be represented without copying.
+/// [`bytes::Buf::copy_to_bytes`] whenever the requested range can be represented without copying.
 /// This lets decoded byte fields retain views of the input allocation. Implement this trait
 /// for custom buffers that meet this contract.
 ///
@@ -28,19 +28,19 @@ use bytes::{
 ///     let _ = Bytes::read_cfg(alias, &(..).into());
 /// }
 /// ```
-pub trait ReadBuf: Buf {}
+pub trait Buf: bytes::Buf {}
 
-impl ReadBuf for Bytes {}
-impl ReadBuf for BytesMut {}
-impl<B: ReadBuf + ?Sized> ReadBuf for &mut B {}
-impl<B: ReadBuf + ?Sized> ReadBuf for Box<B> {}
-impl<B: ReadBuf> ReadBuf for Take<B> {}
-impl<A: ReadBuf, B: ReadBuf> ReadBuf for Chain<A, B> {}
+impl Buf for Bytes {}
+impl Buf for BytesMut {}
+impl<B: Buf + ?Sized> Buf for &mut B {}
+impl<B: Buf + ?Sized> Buf for Box<B> {}
+impl<B: Buf> Buf for Take<B> {}
+impl<A: Buf, B: Buf> Buf for Chain<A, B> {}
 
 /// An input that can be consumed by a decoder.
 ///
-/// [`ReadBuf`] inputs pass through unchanged. A [`Vec<u8>`] transfers its allocation to
-/// [`Bytes`] without copying its payload. Custom inputs can convert into a [`ReadBuf`].
+/// [`Buf`] inputs pass through unchanged. A [`Vec<u8>`] transfers its allocation to
+/// [`Bytes`] without copying its payload. Custom inputs can convert into a [`Buf`].
 ///
 /// Borrowing an owned buffer as a slice discards its ability to share decoded byte fields,
 /// so slices require an explicit [`Copying`] adapter:
@@ -82,13 +82,13 @@ impl<A: ReadBuf, B: ReadBuf> ReadBuf for Chain<A, B> {}
 /// ```
 pub trait DecodeInput {
     /// The buffer used by the decoder.
-    type Buf: ReadBuf;
+    type Buf: Buf;
 
     /// Converts this input into its readable buffer.
     fn into_buf(self) -> Self::Buf;
 }
 
-impl<B: ReadBuf> DecodeInput for B {
+impl<B: Buf> DecodeInput for B {
     type Buf = B;
 
     #[inline]
@@ -139,7 +139,7 @@ pub struct Copying<'a>(
     pub &'a [u8],
 );
 
-impl Buf for Copying<'_> {
+impl bytes::Buf for Copying<'_> {
     #[inline]
     fn remaining(&self) -> usize {
         self.0.remaining()
@@ -161,12 +161,13 @@ impl Buf for Copying<'_> {
     }
 }
 
-impl ReadBuf for Copying<'_> {}
+impl Buf for Copying<'_> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Decode, DecodeExt, Encode, Read, ReadExt};
+    use bytes::Buf as _;
 
     #[test]
     fn test_vec_preserves_payload() {

@@ -1,7 +1,7 @@
 //! Fixed-size retained bytes for checking storage decode ownership.
 
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Error, FixedSize, Read, ReadBuf, Write, util::at_least};
+use commonware_codec::{Buf, Error, FixedSize, Read, Write, util::at_least};
 
 #[derive(Clone, Debug)]
 pub(crate) struct FixedByteView {
@@ -35,7 +35,7 @@ impl Write for FixedByteView {
 impl Read for FixedByteView {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         at_least(buf, Self::SIZE)?;
         let source = buf.chunk().as_ptr() as usize;
         Ok(Self {

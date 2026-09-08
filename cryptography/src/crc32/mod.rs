@@ -28,7 +28,7 @@
 
 use crate::Hasher;
 use bytes::BufMut;
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -138,7 +138,7 @@ impl Write for Digest {
 impl Read for Digest {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let array = <[u8; SIZE]>::read(buf)?;
         Ok(Self(array))
     }

@@ -1,5 +1,5 @@
 use crate::Scheme;
-use commonware_codec::{EncodeSize, Error, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::Digest;
 use commonware_runtime::BufMut;
@@ -33,7 +33,7 @@ impl<D: Digest> Write for BlockFormat<D> {
 impl<D: Digest> Read for BlockFormat<D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = u8::read(buf)?;
         match tag {
             0 => {

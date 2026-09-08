@@ -19,7 +19,7 @@ use crate::{
     },
 };
 use bytes::BufMut;
-use commonware_codec::{Codec, EncodeSize, Read, ReadBuf, Write};
+use commonware_codec::{Buf, Codec, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
@@ -52,7 +52,7 @@ impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueP
     type Cfg = (usize, <K as Read>::Cfg);
 
     fn read_cfg(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         (max_digests, key_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;

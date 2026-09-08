@@ -14,7 +14,7 @@ use crate::{
         },
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::BufMut;
 
 impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>
@@ -46,7 +46,7 @@ where
     }
 
     fn read_operation(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         cfg: &Self::ReadCfg,
     ) -> Result<Operation<F, S>, CodecError> {
         match u8::read(buf)? {

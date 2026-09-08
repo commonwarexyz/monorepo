@@ -1,5 +1,5 @@
 use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
-use commonware_codec::{FixedSize, Read, ReadBuf, Write};
+use commonware_codec::{Buf, FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use rand_core::CryptoRng;
 
@@ -25,7 +25,7 @@ impl Write for F {
 impl Read for F {
     type Cfg = <u64 as Read>::Cfg;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let x = u64::read_cfg(buf, cfg)?;
         if x >= P {
             return Err(commonware_codec::Error::Invalid("F", "out of range"));

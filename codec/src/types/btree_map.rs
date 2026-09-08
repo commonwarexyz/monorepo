@@ -6,7 +6,7 @@
 extern crate alloc;
 
 use crate::{
-    RangeCfg, ReadBuf,
+    Buf, RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_map,
@@ -69,10 +69,7 @@ impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
 impl<K: Read + Clone + Ord + Eq, V: Read + Clone> Read for BTreeMap<K, V> {
     type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
-    fn read_cfg(
-        buf: &mut impl ReadBuf,
-        (range, (k_cfg, v_cfg)): &Self::Cfg,
-    ) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
         let mut map = Self::new();

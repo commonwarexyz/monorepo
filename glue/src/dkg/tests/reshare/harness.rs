@@ -30,7 +30,7 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
@@ -177,7 +177,7 @@ impl EncodeSize for TestDirectory {
 impl Read for TestDirectory {
     type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         Option::<Addresses<PublicKey>>::read_cfg(buf, cfg).map(Self)
     }
 }
@@ -275,7 +275,7 @@ impl EncodeSize for Block {
 impl Read for Block {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,

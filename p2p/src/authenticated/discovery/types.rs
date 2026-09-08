@@ -1,6 +1,6 @@
 use crate::{Ingress, authenticated::data::Data};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write, config::RangeCfg,
+    Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, config::RangeCfg,
     varint::UInt,
 };
 use commonware_cryptography::{PublicKey, Signer};
@@ -108,7 +108,7 @@ impl<C: PublicKey> Write for Payload<C> {
 impl<C: PublicKey> Read for Payload<C> {
     type Cfg = PayloadConfig;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let PayloadConfig {
             max_bit_vec,
             max_peers,
@@ -185,7 +185,7 @@ impl Write for BitVec {
 impl Read for BitVec {
     type Cfg = u64;
 
-    fn read_cfg(buf: &mut impl ReadBuf, max_bits: &u64) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_bits: &u64) -> Result<Self, CodecError> {
         let index = UInt::read(buf)?.into();
         let bits = BitMap::read_cfg(buf, max_bits)?;
         Ok(Self { index, bits })
@@ -270,7 +270,7 @@ impl<C: PublicKey> Write for Info<C> {
 impl<C: PublicKey> Read for Info<C> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let ingress = Ingress::read(buf)?;
         let timestamp = UInt::read(buf)?.into();
         let public_key = C::read(buf)?;

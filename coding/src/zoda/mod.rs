@@ -116,7 +116,7 @@
 
 use crate::{Config, PhasedScheme, ValidatingScheme};
 use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
     transcript::{Summary, Transcript, Version},
@@ -236,7 +236,7 @@ impl<D: Digest> Write for StrongShard<D> {
 impl<D: Digest> Read for StrongShard<D> {
     type Cfg = crate::CodecConfig;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let data_bytes = usize::read_cfg(buf, &RangeCfg::from(..=cfg.maximum_shard_size))?;
         let max_els = cfg.maximum_shard_size / F::SIZE;
         Ok(Self {
@@ -295,7 +295,7 @@ impl<D: Digest> Write for WeakShard<D> {
 impl<D: Digest> Read for WeakShard<D> {
     type Cfg = crate::CodecConfig;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let max_data_bits = cfg.maximum_shard_size.saturating_mul(8);
         let max_data_els = F::bits_to_elements(max_data_bits).max(1);
         Ok(Self {

@@ -1207,7 +1207,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{FixedSize, Read, ReadBuf, ReadExt, Write};
+    use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -1252,10 +1252,7 @@ mod tests {
     impl Read for TestEntry {
         type Cfg = ();
 
-        fn read_cfg(
-            buf: &mut impl ReadBuf,
-            _: &Self::Cfg,
-        ) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             let id = u64::read(buf)?;
             let value_offset = u64::read(buf)?;
             let value_size = u32::read(buf)?;

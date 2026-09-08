@@ -10,7 +10,7 @@ use super::common::{
     impl_private_key_wrapper, impl_public_key_wrapper,
 };
 use bytes::BufMut;
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_utils::{Array, Span, union_unique};
 use core::{
@@ -149,7 +149,7 @@ impl Write for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let recovery_id = RecoveryId::from_byte(raw[0])
             .ok_or_else(|| CodecError::Invalid(CURVE_NAME, "RecoveryId out of range"))?;

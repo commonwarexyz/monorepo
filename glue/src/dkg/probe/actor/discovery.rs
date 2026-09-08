@@ -9,7 +9,7 @@ use crate::{
     stateful::probe::sample::Sample,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Encode as _, Error as CodecError, Read, ReadBuf};
+use commonware_codec::{Buf, Encode as _, Error as CodecError, Read};
 use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
@@ -267,7 +267,7 @@ where
     fn handle_boundary_response(
         &mut self,
         peer: S::PublicKey,
-        message: impl ReadBuf,
+        message: impl Buf,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) -> bool {
         let response = match wire::read_response::<S, V, _>(
@@ -471,7 +471,7 @@ where
         &mut self,
         peer: S::PublicKey,
         epoch: Epoch,
-        body: impl ReadBuf,
+        body: impl Buf,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) -> bool {
         let mut pending = self.pending.take().expect("pending checked by caller");
@@ -589,7 +589,7 @@ where
 fn authenticate_boundary_block<V: Variant>(
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
     commitment: V::Commitment,
-    body: impl ReadBuf,
+    body: impl Buf,
 ) -> Result<V::Block, BoundaryBlockError> {
     let block = wire::read_block::<V>(body, commitment, block_codec_config)
         .map_err(BoundaryBlockError::Decode)?;
@@ -657,7 +657,7 @@ mod tests {
     impl Read for CodingBlock {
         type Cfg = ();
 
-        fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
             mocks::MockBlock::read_cfg(reader, cfg).map(Self)
         }
     }

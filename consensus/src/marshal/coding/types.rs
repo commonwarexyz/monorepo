@@ -96,7 +96,7 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
     type Cfg = commonware_coding::CodecConfig;
 
     fn read_cfg(
-        buf: &mut impl commonware_codec::ReadBuf,
+        buf: &mut impl commonware_codec::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let commitment = Commitment::<B, C, H>::read(buf)?;
@@ -328,7 +328,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
     type Cfg = CodedBlockCfg<B, C, H>;
 
     fn read_cfg(
-        buf: &mut impl commonware_codec::ReadBuf,
+        buf: &mut impl commonware_codec::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, &cfg.inner)?;
@@ -507,7 +507,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
     type Cfg = B::Cfg;
 
     fn read_cfg(
-        buf: &mut impl commonware_codec::ReadBuf,
+        buf: &mut impl commonware_codec::Buf,
         block_cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, block_cfg)?;
@@ -577,7 +577,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 mod test {
     use super::*;
     use crate::marshal::mocks::block::EmptyBlock;
-    use bytes::Buf;
+    use bytes::Buf as _;
     use commonware_codec::{Decode, Encode, Error};
     use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};

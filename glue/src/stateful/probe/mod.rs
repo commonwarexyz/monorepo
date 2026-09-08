@@ -134,7 +134,7 @@ mod test {
     use bytes::BufMut;
     use commonware_actor::Feedback;
     use commonware_codec::{
-        Encode, EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write,
+        Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
     };
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
@@ -233,7 +233,7 @@ mod test {
     impl Read for Block {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
             let context = SimplexContext::read(buf)?;
             let height = Height::new(buf.get_u64());
             let mut digest = [0u8; 32];

@@ -9,8 +9,7 @@ use crate::dkg::{
 use bytes::BufMut;
 use commonware_actor::Feedback;
 use commonware_codec::{
-    Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write,
-    varint::UInt,
+    Buf, Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
 };
 use commonware_consensus::{
     Automaton, Block, CertifiableAutomaton, Heightable, Relay, Reporter,
@@ -323,7 +322,7 @@ impl EncodedPayload {
         writer.put_slice(&self.bytes);
     }
 
-    fn read(reader: &mut impl ReadBuf) -> Result<Self, CodecError> {
+    fn read(reader: &mut impl Buf) -> Result<Self, CodecError> {
         let max_participants = NonZeroU32::new(UInt::<u32>::read(reader)?.into()).ok_or(
             CodecError::Invalid("EncodedPayload", "max participants must be non-zero"),
         )?;
@@ -436,7 +435,7 @@ impl<D: Digest, C: Write, Dir> Write for MockBlock<D, C, Dir> {
 impl<D: Digest, C: Read<Cfg = ()>, Dir> Read for MockBlock<D, C, Dir> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             context: C::read(reader)?,
             parent: D::read(reader)?,

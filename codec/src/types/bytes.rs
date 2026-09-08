@@ -3,7 +3,7 @@
 //! For portability and consistency between architectures,
 //! the length of the [Bytes] must fit within a [u32].
 
-use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, ReadBuf, Write, util::at_least};
+use crate::{Buf, BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
 use bytes::{BufMut, Bytes};
 
 impl Write for Bytes {
@@ -36,7 +36,7 @@ impl Read for Bytes {
     type Cfg = RangeCfg<usize>;
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         at_least(buf, len)?;
         Ok(buf.copy_to_bytes(len))
@@ -134,7 +134,7 @@ mod tests {
         impl Read for Bytes {
             type Cfg = RangeCfg<usize>;
 
-            fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+            fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
                 Ok(Self(super::Bytes::read_cfg(buf, cfg)?))
             }
         }

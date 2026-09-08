@@ -1,5 +1,5 @@
 use bytes::{BufMut, Bytes};
-use commonware_codec::{BufsMut, EncodeSize, Error, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::Span;
 
 /// Represents a message sent between peers.
@@ -38,7 +38,7 @@ impl<Key: Span> EncodeSize for Message<Key> {
 impl<Key: Span> Read for Message<Key> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let id = u64::read(buf)?;
         let payload = Payload::read(buf)?;
         Ok(Self { id, payload })
@@ -127,7 +127,7 @@ impl<Key: Span> EncodeSize for Payload<Key> {
 impl<Key: Span> Read for Payload<Key> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let payload_type = u8::read(buf)?;
         match payload_type {
             0 => {
@@ -176,7 +176,7 @@ where
 mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
-    use bytes::Buf;
+    use bytes::Buf as _;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
 

@@ -5,10 +5,10 @@
 
 use super::Error;
 use commonware_codec::{
-    Codec, EncodeSize, ReadBuf, ReadExt as _, Write as _,
+    Buf, Codec, EncodeSize, ReadExt as _, Write as _,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs, buffer::paged::Writer};
+use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
 use std::future::Future;
 use zstd::{bulk::compress, decode_all};
 
@@ -52,7 +52,7 @@ impl<B: Blob> FrameReader for Writer<B> {
 /// Decodes a varint length prefix from a buffer.
 /// Returns (item_size, varint_len).
 #[inline]
-pub(super) fn decode_length_prefix(buf: &mut impl ReadBuf) -> Result<(usize, usize), Error> {
+pub(super) fn decode_length_prefix(buf: &mut impl Buf) -> Result<(usize, usize), Error> {
     let initial = buf.remaining();
     let size = UInt::<u32>::read(buf)?.0 as usize;
     let varint_len = initial - buf.remaining();
@@ -82,7 +82,7 @@ pub(super) enum FrameInfo {
 /// Find the frame at `offset` in a buffer by decoding its length prefix.
 ///
 /// Returns (next_offset, frame_info). The buffer is advanced past the varint.
-pub(super) fn find_frame(buf: &mut impl ReadBuf, offset: u64) -> Result<(u64, FrameInfo), Error> {
+pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameInfo), Error> {
     let available = buf.remaining();
     let (size, varint_len) = decode_length_prefix(buf)?;
     let next_offset = offset
@@ -110,7 +110,7 @@ pub(super) fn find_frame(buf: &mut impl ReadBuf, offset: u64) -> Result<(u64, Fr
 
 /// Decode a frame's payload into an item, decompressing if needed.
 pub(super) fn decode_item<V: Codec>(
-    item_data: impl ReadBuf,
+    item_data: impl Buf,
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<V, Error> {
@@ -479,7 +479,7 @@ mod tests {
     impl Read for Oversized {
         type Cfg = ();
 
-        fn read_cfg(_: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(_: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             unreachable!("never decoded")
         }
     }

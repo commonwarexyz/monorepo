@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Read, ReadBuf, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 
 pub mod db;
@@ -103,7 +103,7 @@ where
     type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
 
     fn read_cfg(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         (max_digests, update_cfg, value_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         match u8::read(buf)? {

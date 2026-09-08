@@ -1,6 +1,6 @@
 //! Compact encoding for ordered, extensible mode values.
 
-use crate::{EncodeSize, Error, Read, ReadBuf, ReadExt, Write};
+use crate::{Buf, EncodeSize, Error, Read, ReadExt, Write};
 use bytes::BufMut;
 
 // The high bit is packet framing rather than mode value data.
@@ -201,7 +201,7 @@ impl<const N: usize> EncodeSize for Modes<N> {
 impl<const N: usize> Read for Modes<N> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         const {
             assert!(N > 0, "N must be greater than 0");
         }

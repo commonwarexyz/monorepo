@@ -25,7 +25,7 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Decode as _, EncodeSize, Read, ReadBuf, Write};
+use commonware_codec::{Buf, Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
@@ -62,7 +62,7 @@ impl<F: Family, D: Digest> Write for Witness<F, D> {
 impl<F: Family, D: Digest> Read for Witness<F, D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let op_bytes = Bytes::read_cfg(buf, &(..).into())?;
         let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;

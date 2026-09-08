@@ -41,7 +41,7 @@ use alloc::{boxed::Box, vec::Vec};
 pub use array::Array;
 pub use bitmap::Bitmap;
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::ops::Range;
 pub use run::Run;
 
@@ -676,7 +676,7 @@ impl EncodeSize for Container {
 impl Read for Container {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let container_type = u8::read(buf)?;
         let container = match container_type {
             CONTAINER_TYPE_ARRAY => Ok(Self::Array(Array::read(buf)?)),

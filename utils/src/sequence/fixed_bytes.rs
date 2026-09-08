@@ -1,6 +1,6 @@
 use crate::{Array, Span};
 use bytes::BufMut;
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use core::{
     cmp::{Ord, PartialOrd},
@@ -41,7 +41,7 @@ impl<const N: usize> Write for FixedBytes<N> {
 impl<const N: usize> Read for FixedBytes<N> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self(<[u8; N]>::read(buf)?))
     }
 }
@@ -83,7 +83,7 @@ impl<const N: usize> Zeroize for FixedBytes<N> {
 mod tests {
     use super::*;
     use crate::fixed_bytes;
-    use bytes::{Buf, BytesMut};
+    use bytes::{Buf as _, BytesMut};
     use commonware_codec::{Copying, DecodeExt, Encode};
 
     #[test]

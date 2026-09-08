@@ -2,7 +2,7 @@ use crate::stateful::{
     Application, Input, Proposed,
     db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
@@ -234,7 +234,7 @@ impl EncodeSize for TestBlock {
 impl Read for TestBlock {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let context = SimplexContext::read(buf)?;
         let height = Height::new(buf.get_u64());
         let mut digest = [0u8; 32];

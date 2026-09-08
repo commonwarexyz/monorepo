@@ -7,7 +7,7 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Error as CodecError, FixedSize, ReadBuf, ReadExt as _, Write,
+    Buf, Error as CodecError, FixedSize, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
 };
 use commonware_runtime::BufMut;
@@ -38,7 +38,7 @@ impl<V: FixedValue> Codec for FixedEncoding<V> {
     }
 
     fn read_operation<F: Family>(
-        buf: &mut impl ReadBuf,
+        buf: &mut impl Buf,
         _cfg: &Self::ReadCfg,
     ) -> Result<Operation<F, Self>, CodecError> {
         let total = op_size::<V>();

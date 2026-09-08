@@ -1,7 +1,7 @@
 //! Non-empty [`Range`] type that guarantees at least one element.
 
 use bytes::BufMut;
-use commonware_codec::{BufsMut, EncodeSize, Error as CodecError, Read, ReadBuf, Write};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, Read, Write};
 use core::{fmt, ops::Range};
 
 /// Error returned when attempting to create a non-empty range from an empty range.
@@ -96,7 +96,7 @@ impl<Idx: Read + PartialOrd> Read for NonEmptyRange<Idx> {
     type Cfg = Idx::Cfg;
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let start = Idx::read_cfg(buf, cfg)?;
         let end = Idx::read_cfg(buf, cfg)?;
         if !start.partial_cmp(&end).is_some_and(|o| o.is_lt()) {

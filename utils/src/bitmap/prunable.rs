@@ -2,7 +2,7 @@
 
 use super::BitMap;
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use thiserror::Error;
 
 /// Errors that can occur when working with a prunable bitmap.
@@ -412,7 +412,7 @@ impl<const N: usize> Read for Prunable<N> {
     // Max length for the unpruned portion of the bitmap.
     type Cfg = u64;
 
-    fn read_cfg(buf: &mut impl ReadBuf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
         let pruned_chunks_u64 = u64::read(buf)?;
 
         // Validate that pruned_chunks * CHUNK_SIZE_BITS doesn't overflow u64

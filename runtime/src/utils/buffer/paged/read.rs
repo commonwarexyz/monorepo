@@ -1,7 +1,7 @@
 use super::Checksum;
-use crate::{Blob, Buf, Error, IoBuf, ReadOptions};
+use crate::{Blob, Error, IoBuf, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_codec::{FixedSize, ReadBuf};
+use commonware_codec::{Buf, FixedSize};
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
 
@@ -240,9 +240,9 @@ impl ReplayBuf {
     }
 }
 
-impl ReadBuf for ReplayBuf {}
+impl Buf for ReplayBuf {}
 
-impl Buf for ReplayBuf {
+impl bytes::Buf for ReplayBuf {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         assert!(len <= self.remaining, "copy_to_bytes out of bounds");
         if len == 0 {
@@ -391,9 +391,9 @@ impl<B: Blob> Replay<B> {
     }
 }
 
-impl<B: Blob> ReadBuf for Replay<B> {}
+impl<B: Blob> Buf for Replay<B> {}
 
-impl<B: Blob> Buf for Replay<B> {
+impl<B: Blob> bytes::Buf for Replay<B> {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         self.buffer.copy_to_bytes(len)
     }
@@ -415,6 +415,7 @@ impl<B: Blob> Buf for Replay<B> {
 mod tests {
     use super::{super::writer::Writer, *};
     use crate::{Runner as _, Storage as _, deterministic};
+    use bytes::Buf as _;
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize};
 

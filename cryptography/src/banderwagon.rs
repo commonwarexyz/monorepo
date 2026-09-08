@@ -6,7 +6,7 @@ use crate::{
 use alloc::vec::Vec;
 use blst::blst_fr;
 use bytes::BufMut;
-use commonware_codec::{Copying, Error as CodecError, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Copying, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
     msm_naive,
@@ -222,7 +222,7 @@ impl Write for F {
 impl Read for F {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let bytes = <[u8; 32]>::read(buf)?;
         let limbs =
             array::from_fn(|i| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()));
@@ -697,7 +697,7 @@ impl HashToGroup for G {
 impl Read for G {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let bytes = <[u8; 32]>::read(buf)?;
         let mut bytes = Copying(bytes.as_ref());
         let x = Scalar::read_cfg(&mut bytes, &ScalarReadCfg::AllowZero)

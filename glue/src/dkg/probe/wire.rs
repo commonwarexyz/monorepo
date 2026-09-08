@@ -1,6 +1,6 @@
 use bytes::BufMut;
 use commonware_codec::{
-    Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadBuf, ReadExt, Write,
+    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
 };
 use commonware_consensus::{
     marshal::core::Variant,
@@ -46,7 +46,7 @@ impl Write for Tag {
 impl Read for Tag {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         match u8::read(reader)? {
             0 => Ok(Self::BoundaryRequest),
             1 => Ok(Self::BoundaryResponse),
@@ -192,7 +192,7 @@ where
 }
 
 /// Decode a boundary protocol request.
-pub(crate) fn read_request(mut reader: impl ReadBuf) -> Result<Option<Request>, Error> {
+pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Error> {
     let tag = Tag::read(&mut reader)?;
     match tag {
         Tag::BoundaryRequest => Ok(Some(Request::Boundary(Epoch::decode(reader)?))),
@@ -210,7 +210,7 @@ pub(crate) fn read_response<S, V, R>(
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    R: ReadBuf,
+    R: Buf,
 {
     let tag = Tag::read(&mut reader)?;
     match tag {
@@ -232,7 +232,7 @@ where
 
 /// Decode the body of a block response using its authenticated commitment.
 pub(crate) fn read_block<V>(
-    reader: impl ReadBuf,
+    reader: impl Buf,
     commitment: V::Commitment,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
 ) -> Result<V::Block, Error>

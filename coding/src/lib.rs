@@ -10,8 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(ALPHA {
-    use bytes::Buf;
-    use commonware_codec::{ReadBuf, Codec, FixedSize, Read, Write};
+    use commonware_codec::{Buf, Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
@@ -57,7 +56,7 @@ commonware_macros::stability_scope!(ALPHA {
     impl Read for Config {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
             Ok(Self {
                 minimum_shards: NonZeroU16::read_cfg(buf, cfg)?,
                 extra_shards: NonZeroU16::read_cfg(buf, cfg)?,
@@ -176,7 +175,7 @@ commonware_macros::stability_scope!(ALPHA {
         #[allow(clippy::type_complexity)]
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
@@ -317,7 +316,7 @@ commonware_macros::stability_scope!(ALPHA {
         fn encode(
             namespace: &[u8],
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
 
@@ -422,7 +421,7 @@ commonware_macros::stability_scope!(ALPHA {
 
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             P::encode(b"", config, data, strategy).map_err(PhasedAsSchemeError::Scheme)

@@ -4,7 +4,7 @@ use crate::TryFromIterator;
 #[cfg(not(feature = "std"))]
 use alloc::{collections::VecDeque, vec, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, RangeCfg, Read, ReadBuf, Write};
+use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
 use core::{
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
@@ -394,7 +394,7 @@ impl<T: EncodeSize> EncodeSize for NonEmptyVec<T> {
 impl<T: Read> Read for NonEmptyVec<T> {
     type Cfg = (RangeCfg<NonZeroUsize>, T::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let items = Vec::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?;
         if items.is_empty() {
             return Err(commonware_codec::Error::Invalid(

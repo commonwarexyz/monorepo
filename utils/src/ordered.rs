@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, RangeCfg, Read, ReadBuf, Write};
+use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
     hash::Hash,
@@ -107,7 +107,7 @@ impl<T: EncodeSize> EncodeSize for Set<T> {
 impl<T: Read + Ord> Read for Set<T> {
     type Cfg = (RangeCfg<usize>, T::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let items = Vec::<T>::read_cfg(buf, cfg)?;
         for i in 1..items.len() {
             if items[i - 1] >= items[i] {
@@ -546,7 +546,7 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for Map<K, V> {
 impl<K: Read + Ord, V: Read> Read for Map<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let (range_cfg, key_cfg, value_cfg) = cfg;
         let keys = Set::<K>::read_cfg(buf, &(*range_cfg, key_cfg.clone()))?;
         let values = Vec::<V>::read_cfg(buf, &(RangeCfg::exact(keys.len()), value_cfg.clone()))?;
@@ -828,7 +828,7 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for BiMap<K, V> {
 impl<K: Read + Ord, V: Eq + Hash + Read> Read for BiMap<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let inner = Map::<K, V>::read_cfg(buf, cfg)?;
         Self::try_from(inner).map_err(|_| {
             commonware_codec::Error::Invalid(

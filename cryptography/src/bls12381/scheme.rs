@@ -37,7 +37,7 @@ use crate::{BatchVerifier, Secret, Signer as _};
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{
-    Copying, DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read, ReadBuf,
+    Buf, Copying, DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read,
     ReadExt, Write,
 };
 use commonware_formatting::Hex;
@@ -78,7 +78,7 @@ impl Write for PrivateKey {
 impl Read for PrivateKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let key = Private::decode(Copying(raw.as_ref()))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
@@ -179,7 +179,7 @@ impl Write for PublicKey {
 impl Read for PublicKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let key = <MinPk as Variant>::Public::decode(Copying(raw.as_ref()))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
@@ -281,7 +281,7 @@ impl Write for Signature {
 impl Read for Signature {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
         let signature = <MinPk as Variant>::Signature::decode(Copying(raw.as_ref()))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;

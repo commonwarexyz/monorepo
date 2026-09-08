@@ -1,6 +1,6 @@
 //! Codec implementations for common types
 
-use crate::{Error, Read, ReadBuf};
+use crate::{Buf, Error, Read};
 use core::cmp::Ordering;
 
 pub mod btree_map;
@@ -17,9 +17,9 @@ pub mod primitives;
 pub mod tuple;
 pub mod vec;
 
-/// Read keyed items from [ReadBuf] in ascending order.
+/// Read keyed items from [Buf] in ascending order.
 pub(crate) fn read_ordered_map<K, V, F>(
-    buf: &mut impl ReadBuf,
+    buf: &mut impl Buf,
     len: usize,
     k_cfg: &K::Cfg,
     v_cfg: &V::Cfg,
@@ -63,9 +63,9 @@ where
     Ok(())
 }
 
-/// Read items from [ReadBuf] in ascending order.
+/// Read items from [Buf] in ascending order.
 pub(crate) fn read_ordered_set<K, F>(
-    buf: &mut impl ReadBuf,
+    buf: &mut impl Buf,
     len: usize,
     cfg: &K::Cfg,
     mut insert: F,
@@ -106,8 +106,8 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{BufsMut, Error, Read, ReadBuf, Write};
-    use bytes::{Buf, BufMut, Bytes, BytesMut, buf::UninitSlice};
+    use crate::{Buf, BufsMut, Error, Read, Write};
+    use bytes::{BufMut, Bytes, BytesMut, buf::UninitSlice};
 
     /// One-byte test type that uses the default aggregate hooks.
     ///
@@ -125,7 +125,7 @@ pub(crate) mod tests {
     impl Read for Byte {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
             Ok(Self(<u8 as Read>::read_cfg(buf, &())?))
         }
     }
@@ -198,11 +198,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// Test [`Buf`] implementation that records how values are read.
+    /// Test [`bytes::Buf`] implementation that records how values are read.
     ///
     /// Specialization-selection tests use this to assert whether a container
-    /// read its payload with one aggregate [`Buf::copy_to_slice`] call or with
-    /// per-element [`Buf::get_u8`] calls.
+    /// read its payload with one aggregate [`bytes::Buf::copy_to_slice`] call or with
+    /// per-element [`bytes::Buf::get_u8`] calls.
     pub struct TrackingReadBuf {
         inner: Bytes,
         /// Number of aggregate slice reads.
@@ -221,9 +221,9 @@ pub(crate) mod tests {
         }
     }
 
-    impl ReadBuf for TrackingReadBuf {}
+    impl Buf for TrackingReadBuf {}
 
-    impl Buf for TrackingReadBuf {
+    impl bytes::Buf for TrackingReadBuf {
         fn remaining(&self) -> usize {
             self.inner.remaining()
         }

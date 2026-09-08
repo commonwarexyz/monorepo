@@ -146,7 +146,7 @@ mod tests {
         types::{Epoch, FixedEpocher, Height, Round, View},
     };
     use bytes::BufMut;
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write};
+    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         Committable, Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest,
@@ -187,7 +187,7 @@ mod tests {
     impl Read for TestBlock {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, CodecError> {
             let digest = Sha256Digest::read(buf)?;
             let parent = Sha256Digest::read(buf)?;
             let height = Height::read(buf)?;

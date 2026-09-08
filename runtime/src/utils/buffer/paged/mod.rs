@@ -45,9 +45,7 @@
 use crate::{Blob, BufMut, Error, IoBuf, ReadOptions};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{Storage, WriteOptions};
-use commonware_codec::{
-    Copying, EncodeFixed, FixedSize, Read as CodecRead, ReadBuf, ReadExt, Write,
-};
+use commonware_codec::{Buf, Copying, EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
 
@@ -504,7 +502,7 @@ impl Write for Checksum {
 impl CodecRead for Checksum {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             len1: u16::read(buf)?,
             crc1: u32::read(buf)?,

@@ -7,7 +7,7 @@ use crate::qmdb::{
     operation::Key,
 };
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadBuf, ReadExt as _, Write,
+    Buf, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_formatting::hex;
 use commonware_runtime::BufMut;
@@ -99,7 +99,7 @@ where
 impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let key = K::read(buf)?;
         let value = V::read_cfg(buf, cfg)?;
         let next_key = K::read(buf)?;
@@ -128,7 +128,7 @@ where
 {
     type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let key = K::read_cfg(buf, &cfg.0)?;
         let value = V::read_cfg(buf, &cfg.1)?;
         let next_key = K::read_cfg(buf, &cfg.0)?;

@@ -48,7 +48,7 @@ use alloc::{
     vec::Vec,
 };
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Read, ReadBuf, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
@@ -337,7 +337,7 @@ impl<D: Digest> Read for Proof<D> {
     type Cfg = usize;
 
     fn read_cfg(
-        reader: &mut impl ReadBuf,
+        reader: &mut impl Buf,
         max_items: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let leaf_count = u32::read(reader)?;

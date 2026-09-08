@@ -9,7 +9,7 @@
 use crate::dkg::{network::Directory, types::EpochInfo};
 use bytes::BufMut;
 use commonware_codec::{
-    Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, ReadBuf, Write,
+    Buf, Decode as _, Encode as _, EncodeSize, Error as CodecError, Read, Write,
 };
 use commonware_consensus::{
     Epochable as _,
@@ -163,7 +163,7 @@ where
     type Cfg = (EpochInfoCodecConfig, <S::Certificate as Read>::Cfg);
 
     fn read_cfg(
-        reader: &mut impl ReadBuf,
+        reader: &mut impl Buf,
         (epoch_info, certificate): &Self::Cfg,
     ) -> Result<Self, CodecError> {
         Ok(Self {

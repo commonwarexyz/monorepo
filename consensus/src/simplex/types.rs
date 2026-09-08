@@ -6,9 +6,7 @@ use crate::{
     types::{Epoch, Participant, Round, View},
 };
 use bytes::BufMut;
-use commonware_codec::{
-    EncodeSize, Error, Read, ReadBuf, ReadExt, ReadRangeExt, Write, varint::UInt,
-};
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
     Digest, PublicKey,
     certificate::{AssemblyError, Attestation, Scheme},
@@ -67,7 +65,7 @@ impl<D: Digest, P: PublicKey> EncodeSize for Context<D, P> {
 impl<D: Digest, P: PublicKey> Read for Context<D, P> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
         let leader = P::read(reader)?;
         let parent = <(View, D)>::read_cfg(reader, &((), ()))?;
@@ -691,7 +689,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Vote<S, D> {
 impl<S: Scheme, D: Digest> Read for Vote<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -833,7 +831,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
 impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -990,7 +988,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Artifact<S, D> {
 impl<S: Scheme, D: Digest> Read for Artifact<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -1156,7 +1154,7 @@ impl<D: Digest> Write for Proposal<D> {
 impl<D: Digest> Read for Proposal<D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
         let parent = View::read(reader)?;
         let payload = D::read(reader)?;
@@ -1283,7 +1281,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
 impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let attestation = Attestation::read(reader)?;
 
@@ -1458,7 +1456,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Notarization<S, D> {
 impl<S: Scheme, D: Digest> Read for Notarization<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
@@ -1571,7 +1569,7 @@ impl<S: Scheme> EncodeSize for Nullify<S> {
 impl<S: Scheme> Read for Nullify<S> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
         let attestation = Attestation::read(reader)?;
 
@@ -1713,7 +1711,7 @@ impl<S: Scheme> EncodeSize for Nullification<S> {
 impl<S: Scheme> Read for Nullification<S> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let round = Round::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
@@ -1827,7 +1825,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
 impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let attestation = Attestation::read(reader)?;
 
@@ -1984,7 +1982,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Finalization<S, D> {
 impl<S: Scheme, D: Digest> Read for Finalization<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let proposal = Proposal::read(reader)?;
         let certificate = S::Certificate::read_cfg(reader, cfg)?;
 
@@ -2060,7 +2058,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Backfiller<S, D> {
 impl<S: Scheme, D: Digest> Read for Backfiller<S, D> {
     type Cfg = (usize, <S::Certificate as Read>::Cfg);
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -2145,7 +2143,7 @@ impl EncodeSize for Request {
 impl Read for Request {
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl ReadBuf, max_len: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, max_len: &usize) -> Result<Self, Error> {
         let id = UInt::read(reader)?.into();
         let mut views = HashSet::new();
         let notarizations = Vec::<View>::read_range(reader, ..=*max_len)?;
@@ -2255,7 +2253,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Response<S, D> {
 impl<S: Scheme, D: Digest> Read for Response<S, D> {
     type Cfg = (usize, <S::Certificate as Read>::Cfg);
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let (max_len, certificate_cfg) = cfg;
         let id = UInt::read(reader)?.into();
         let mut views = HashSet::new();
@@ -2527,7 +2525,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
 impl<S: Scheme, D: Digest> Read for Activity<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
-    fn read_cfg(reader: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let tag = <u8>::read(reader)?;
         match tag {
             0 => {
@@ -2752,7 +2750,7 @@ impl<S: Scheme, D: Digest> Write for ConflictingNotarize<S, D> {
 impl<S: Scheme, D: Digest> Read for ConflictingNotarize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let notarize_1 = Notarize::read(reader)?;
         let notarize_2 = Notarize::read(reader)?;
 
@@ -2880,7 +2878,7 @@ impl<S: Scheme, D: Digest> Write for ConflictingFinalize<S, D> {
 impl<S: Scheme, D: Digest> Read for ConflictingFinalize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let finalize_1 = Finalize::read(reader)?;
         let finalize_2 = Finalize::read(reader)?;
 
@@ -2996,7 +2994,7 @@ impl<S: Scheme, D: Digest> Write for NullifyFinalize<S, D> {
 impl<S: Scheme, D: Digest> Read for NullifyFinalize<S, D> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let nullify = Nullify::read(reader)?;
         let finalize = Finalize::read(reader)?;
 

@@ -1,6 +1,6 @@
 use crate::Secret;
 use bytes::BufMut;
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -65,7 +65,7 @@ impl Write for PrivateKeyInner {
 impl Read for PrivateKeyInner {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::read(buf)?);
         let key = SigningKey::from_slice(raw.as_ref());
         #[cfg(feature = "std")]
@@ -140,7 +140,7 @@ impl Write for PublicKeyInner {
 impl Read for PublicKeyInner {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(buf)?;
         let key = VerifyingKey::from_sec1_bytes(&raw)
             .map_err(|_| CodecError::Invalid(CURVE_NAME, "Invalid PublicKey"))?;
@@ -225,7 +225,7 @@ macro_rules! impl_private_key_wrapper {
         impl commonware_codec::Read for $name {
             type Cfg = ();
 
-            fn read_cfg(buf: &mut impl ReadBuf, cfg: &()) -> Result<Self, commonware_codec::Error> {
+            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, commonware_codec::Error> {
                 PrivateKeyInner::read_cfg(buf, cfg).map(Self)
             }
         }
@@ -268,7 +268,7 @@ macro_rules! impl_public_key_wrapper {
         impl commonware_codec::Read for $name {
             type Cfg = ();
 
-            fn read_cfg(buf: &mut impl ReadBuf, cfg: &()) -> Result<Self, commonware_codec::Error> {
+            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, commonware_codec::Error> {
                 PublicKeyInner::read_cfg(buf, cfg).map(Self)
             }
         }

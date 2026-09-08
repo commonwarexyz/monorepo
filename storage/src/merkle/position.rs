@@ -1,6 +1,6 @@
 use super::{Family, location::Location};
 use bytes::BufMut;
-use commonware_codec::{ReadBuf, ReadExt, varint::UInt};
+use commonware_codec::{Buf, ReadExt, varint::UInt};
 use core::{
     fmt,
     marker::PhantomData,
@@ -340,7 +340,7 @@ impl<F: Family> commonware_codec::Read for Position<F> {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let pos = Self::new(UInt::read(buf)?.into());
         if pos.is_valid() {
             Ok(pos)

@@ -1,4 +1,4 @@
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Committable, Digestible, Hasher, Sha256, sha256::Digest};
 use commonware_runtime::BufMut;
 
@@ -18,7 +18,7 @@ impl Write for Request {
 
 impl Read for Request {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let data = u32::read(buf)?;
         Ok(Self { id, data })
@@ -62,7 +62,7 @@ impl Write for Response {
 impl Read for Response {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &()) -> Result<Self, CodecError> {
         let id = u64::read(buf)?;
         let result = u64::read(buf)?;
         Ok(Self { id, result })

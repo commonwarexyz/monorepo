@@ -38,7 +38,7 @@ use crate::{
     PublicKey, Signature, Signer, Verifier,
     transcript::{Summary, Transcript, Version},
 };
-use commonware_codec::{Encode, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Encode, FixedSize, Read, ReadExt, Write};
 use core::ops::Range;
 use rand_core::CryptoRng;
 
@@ -88,7 +88,7 @@ impl<S: Signature + Write> Write for Syn<S> {
 impl<S: Signature + Read> Read for Syn<S> {
     type Cfg = S::Cfg;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             time_ms: ReadExt::read(buf)?,
             epk: ReadExt::read(buf)?,
@@ -137,7 +137,7 @@ impl<S: Signature + Write> Write for SynAck<S> {
 impl<S: Signature + Read> Read for SynAck<S> {
     type Cfg = S::Cfg;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             time_ms: ReadExt::read(buf)?,
             epk: ReadExt::read(buf)?,
@@ -183,7 +183,7 @@ impl Write for Ack {
 impl Read for Ack {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             confirmation: ReadExt::read(buf)?,
         })

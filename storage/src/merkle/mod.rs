@@ -28,7 +28,7 @@ pub mod verification;
 
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Read, ReadBuf, Write};
+use commonware_codec::{Buf, EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
@@ -176,7 +176,7 @@ impl Read for Unused {
     type Cfg = ();
 
     #[inline]
-    fn read_cfg(_: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(_: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self)
     }
 }

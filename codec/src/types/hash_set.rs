@@ -4,12 +4,12 @@
 //! the size of the set must fit within a [u32].
 
 use crate::{
-    RangeCfg, ReadBuf,
+    Buf, RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_set,
 };
-use bytes::{Buf, BufMut};
+use bytes::{Buf as _, BufMut};
 use std::{collections::HashSet, hash::Hash};
 
 const HASHSET_TYPE: &str = "HashSet";
@@ -63,7 +63,7 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
 impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
         let mut set = Self::with_capacity(len.min(buf.remaining()));

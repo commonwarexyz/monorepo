@@ -8,7 +8,7 @@ use crate::{
         },
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::BufMut;
 
 impl<F: Family, K: Key, V: VariableValue> EncodeSize for Operation<F, K, VariableEncoding<V>> {
@@ -39,7 +39,7 @@ impl<F: Family, K: Key, V: VariableValue> Write for Operation<F, K, VariableEnco
 impl<F: Family, K: Key, V: VariableValue> Read for Operation<F, K, VariableEncoding<V>> {
     type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             SET_CONTEXT => {
                 let key = K::read_cfg(buf, &cfg.0)?;

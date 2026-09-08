@@ -39,7 +39,7 @@
 
 use crate::{Epochable, Viewable};
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, Error, Read, ReadBuf, ReadExt, Write, varint::UInt};
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
@@ -123,7 +123,7 @@ impl Display for Epoch {
 impl Read for Epoch {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let value: u64 = UInt::read(buf)?.into();
         Ok(Self(value))
     }
@@ -228,7 +228,7 @@ impl Display for Height {
 impl Read for Height {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let value: u64 = UInt::read(buf)?.into();
         Ok(Self(value))
     }
@@ -456,7 +456,7 @@ impl TracedExt for View {
 impl Read for View {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         let value: u64 = UInt::read(buf)?.into();
         Ok(Self(value))
     }
@@ -821,7 +821,7 @@ impl Epocher for FixedEpocher {
 impl Read for Round {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             epoch: Epoch::read(buf)?,
             view: View::read(buf)?,
@@ -1099,7 +1099,7 @@ commonware_macros::stability_scope!(ALPHA {
             type Cfg = ();
 
             fn read_cfg(
-                buf: &mut impl commonware_codec::ReadBuf,
+                buf: &mut impl commonware_codec::Buf,
                 _cfg: &Self::Cfg,
             ) -> Result<Self, commonware_codec::Error> {
                 const { Self::assert_layout() };
@@ -2275,7 +2275,7 @@ mod tests {
             type Cfg = ();
 
             fn read_cfg(
-                _: &mut impl commonware_codec::ReadBuf,
+                _: &mut impl commonware_codec::Buf,
                 _: &Self::Cfg,
             ) -> Result<Self, commonware_codec::Error> {
                 Err(commonware_codec::Error::Invalid(

@@ -1,7 +1,7 @@
 //! This module exports the [`Lazy`] type.
 
-use crate::{BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, ReadBuf, Write};
-use bytes::{Buf, Bytes};
+use crate::{Buf, BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
+use bytes::{Buf as _, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
 use std::sync::OnceLock;
@@ -106,7 +106,7 @@ impl<T: Read> Lazy<T> {
     /// some bytes.
     ///
     /// Use [`Self::get`] to access the actual value, by decoding these bytes.
-    pub fn deferred(buf: &mut impl ReadBuf, cfg: T::Cfg) -> Self {
+    pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
         let bytes = buf.copy_to_bytes(buf.remaining());
         cfg_if::cfg_if! {
             if #[cfg(feature = "std")] {
@@ -209,7 +209,7 @@ impl<T: Read + Write> Write for Lazy<T> {
 impl<T: Read + FixedSize> Read for Lazy<T> {
     type Cfg = T::Cfg;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, crate::Error> {
         // In this case, we can be a bit more helpful, and fail earlier, rather
         // than deferring this error until later.
         if buf.remaining() < T::SIZE {
@@ -281,7 +281,7 @@ mod test {
     impl Read for Small {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl crate::ReadBuf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+        fn read_cfg(buf: &mut impl crate::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
             let byte = u8::read_cfg(buf, &())?;
             if byte > 100 {
                 return Err(crate::Error::Invalid("Small", "value > 100"));

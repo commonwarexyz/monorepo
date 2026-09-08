@@ -133,7 +133,7 @@
 
 use crate::transcript::{Summary, Transcript};
 use bytes::BufMut;
-use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space, powers},
     synthetic::Synthetic,
@@ -183,7 +183,7 @@ impl<G: EncodeSize> EncodeSize for Setup<G> {
 impl<G: Read> Read for Setup<G> {
     type Cfg = (usize, G::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
         let product_generator = G::read_cfg(buf, cfg)?;
         let len = usize::read_cfg(buf, &RangeCfg::new(..=*max_len))?;
         let mut g = Vec::with_capacity(len);
@@ -313,7 +313,7 @@ impl<F: EncodeSize, G: EncodeSize> EncodeSize for Claim<F, G> {
 impl<F: Read, G: Read> Read for Claim<F, G> {
     type Cfg = (G::Cfg, F::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
         Ok(Self {
             commitment: G::read_cfg(buf, g_cfg)?,
             product: F::read_cfg(buf, f_cfg)?,
@@ -441,10 +441,7 @@ impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
 impl<F: Read, G: Read> Read for Proof<F, G> {
     type Cfg = (usize, (G::Cfg, F::Cfg));
 
-    fn read_cfg(
-        buf: &mut impl ReadBuf,
-        (max_len, (g_cfg, f_cfg)): &Self::Cfg,
-    ) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (max_len, (g_cfg, f_cfg)): &Self::Cfg) -> Result<Self, Error> {
         let max_rounds = if *max_len == 0 {
             0
         } else {

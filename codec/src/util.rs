@@ -1,15 +1,15 @@
 //! Codec utility functions
 
-use crate::{Error, FixedSize, Read, ReadBuf};
+use crate::{Buf, Error, FixedSize, Read};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::Buf;
+use bytes::Buf as _;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
 /// Checks if the buffer has at least `len` bytes remaining. Returns an [Error::EndOfBuffer] if not.
 #[inline]
-pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
+pub fn at_least<B: bytes::Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
     let rem = buf.remaining();
     if rem < len {
         return Err(Error::EndOfBuffer);
@@ -20,7 +20,11 @@ pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
 /// Checks if the buffer has at least `len * item_size` bytes remaining, treating multiplication
 /// overflow as insufficient. Returns an [Error::EndOfBuffer] if not.
 #[inline]
-pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Result<(), Error> {
+pub fn at_least_items<B: bytes::Buf>(
+    buf: &mut B,
+    len: usize,
+    item_size: usize,
+) -> Result<(), Error> {
     at_least(buf, len.checked_mul(item_size).ok_or(Error::EndOfBuffer)?)
 }
 
@@ -31,7 +35,7 @@ pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Resu
 /// override for [FixedSize] element types.
 #[inline]
 pub fn read_fixed_vec<T: Read + FixedSize>(
-    buf: &mut impl ReadBuf,
+    buf: &mut impl Buf,
     len: usize,
     cfg: &T::Cfg,
 ) -> Result<Vec<T>, Error> {
@@ -46,7 +50,7 @@ pub fn read_fixed_vec<T: Read + FixedSize>(
 /// Ensures the next `size` bytes are all zeroes in the provided buffer, returning an [Error]
 /// otherwise.
 #[inline]
-pub fn ensure_zeros<B: Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
+pub fn ensure_zeros<B: bytes::Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
     at_least(buf, size)?;
     let mut remaining = size;
     while remaining > 0 {

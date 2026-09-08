@@ -6,7 +6,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    EncodeShared, EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt as _, ReadRangeExt as _,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _,
     Write,
 };
 use commonware_cryptography::{Digest, Hasher};
@@ -181,7 +181,7 @@ impl<F: Family> EncodeSize for Request<F> {
 impl<F: Family> Read for Request<F> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request = match u8::read(buf)? {
             0 => Self::Operations {
                 size: Location::<F>::read(buf)?,
@@ -338,7 +338,7 @@ impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
     /// The `max_ops` the request asked for, and the configuration for decoding one operation.
     type Cfg = (usize, Op::Cfg);
 
-    fn read_cfg(buf: &mut impl ReadBuf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             0 => {
                 let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);

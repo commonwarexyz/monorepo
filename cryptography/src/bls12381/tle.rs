@@ -93,7 +93,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{EncodeSize, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{Additive, CryptoGroup};
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
@@ -145,7 +145,7 @@ impl<V: Variant> Write for Ciphertext<V> {
 impl<V: Variant> Read for Ciphertext<V> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let u = V::Public::read(buf)?;
         let v = Block::read(buf)?;
         let w = Block::read(buf)?;

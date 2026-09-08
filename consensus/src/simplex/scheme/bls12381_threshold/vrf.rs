@@ -60,7 +60,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Encode, EncodeSize, Error, FixedSize, Read, ReadBuf, ReadExt, Write, types::lazy::Lazy,
+    Buf, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
 };
 #[commonware_macros::stability(ALPHA)]
 use commonware_cryptography::bls12381::tle;
@@ -377,7 +377,7 @@ impl<V: Variant> Write for Signature<V> {
 impl<V: Variant> Read for Signature<V> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let vote_signature = V::Signature::read(reader)?;
         let seed_signature = V::Signature::read(reader)?;
 
@@ -438,7 +438,7 @@ impl<V: Variant> Write for Certificate<V> {
 impl<V: Variant> Read for Certificate<V> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let signature = Lazy::<Signature<V>>::read(reader)?;
         Ok(Self { signature })
     }
@@ -534,7 +534,7 @@ impl<V: Variant> Write for Seed<V> {
 impl<V: Variant> Read for Seed<V> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let round = Round::read(reader)?;
         let signature = V::Signature::read(reader)?;
 

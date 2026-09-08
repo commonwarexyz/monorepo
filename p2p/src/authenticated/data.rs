@@ -1,7 +1,5 @@
 use crate::Channel;
-use commonware_codec::{
-    EncodeSize, Error, RangeCfg, Read, ReadBuf, ReadExt as _, Write, varint::UInt,
-};
+use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
 use commonware_runtime::{BufMut, BufferPool, IoBuf, IoBufs};
 use std::collections::HashMap;
 
@@ -33,7 +31,7 @@ impl Write for Data {
 impl Read for Data {
     type Cfg = RangeCfg<usize>;
 
-    fn read_cfg(buf: &mut impl ReadBuf, range: &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let channel = UInt::read(buf)?.into();
         let message = IoBuf::read_cfg(buf, range)?;
         Ok(Self { channel, message })

@@ -1,6 +1,6 @@
 //! Test support for detached strategy jobs.
 
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadBuf, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, Write};
 use commonware_parallel::{Rayon, Strategy as _};
 use commonware_runtime::BufMut;
 use commonware_utils::sync::Mutex;
@@ -79,7 +79,7 @@ impl<T: Write> Write for DropMonitor<T> {
 impl<T: Read> Read for DropMonitor<T> {
     type Cfg = T::Cfg;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         T::read_cfg(buf, cfg).map(Self::untracked)
     }
 }

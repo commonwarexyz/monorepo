@@ -5,7 +5,7 @@ use crate::{
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
 };
-use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadBuf, ReadExt, Write};
+use commonware_codec::{Buf, CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
     BufMut,
     telemetry::metrics::{Counter, MetricsExt as _},
@@ -63,7 +63,7 @@ impl Write for Record {
 
 impl Read for Record {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Freezer(Checkpoint::read(buf)?)),

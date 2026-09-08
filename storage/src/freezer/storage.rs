@@ -6,7 +6,7 @@ use crate::{
     },
 };
 use commonware_codec::{
-    CodecShared, FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write as CodecWrite,
+    Buf, CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
@@ -61,7 +61,7 @@ impl Cursor {
 impl Read for Cursor {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         <[u8; u64::SIZE + u64::SIZE + u32::SIZE]>::read(buf).map(Self)
     }
 }
@@ -153,7 +153,7 @@ impl Checkpoint {
 
 impl Read for Checkpoint {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let oversized_size = u64::read(buf)?;
@@ -269,7 +269,7 @@ impl CodecWrite for Entry {
 
 impl Read for Entry {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let epoch = u64::read(buf)?;
         let section = u64::read(buf)?;
         let position = u64::read(buf)?;
@@ -346,7 +346,7 @@ impl<K: Array> CodecWrite for Record<K> {
 
 impl<K: Array> Read for Record<K> {
     type Cfg = ();
-    fn read_cfg(buf: &mut impl ReadBuf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let key = K::read(buf)?;
         let next_section = u64::read(buf)?;
         let next_position = u64::read(buf)?;
@@ -443,7 +443,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     }
 
     /// Parse table entries from a buffer.
-    fn parse_entries(mut buf: impl ReadBuf) -> Result<(Entry, Entry), Error> {
+    fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
         let entry1 = Entry::read(&mut buf)?;
         let entry2 = Entry::read(&mut buf)?;
         Ok((entry1, entry2))

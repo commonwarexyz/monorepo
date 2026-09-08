@@ -5,7 +5,7 @@
 //! with non-zero-sized `T` cannot allocate more than `isize::MAX` bytes. Callers should use
 //! [`RangeCfg`] to choose a decoded length limit that works on all supported targets.
 
-use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, ReadBuf, Write};
+use crate::{Buf, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
@@ -64,7 +64,7 @@ impl<T: Read> Read for Vec<T> {
     type Cfg = (RangeCfg<usize>, T::Cfg);
 
     #[inline]
-    fn read_cfg(buf: &mut impl ReadBuf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         T::read_vec(buf, len, cfg)
     }

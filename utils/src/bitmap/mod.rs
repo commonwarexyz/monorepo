@@ -7,7 +7,7 @@
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize, Error as CodecError, Read, ReadBuf, ReadExt, Write, util::at_least,
+    Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, util::at_least,
 };
 use core::{
     fmt::{self, Formatter, Write as _},
@@ -872,7 +872,7 @@ impl<const N: usize> Write for BitMap<N> {
 impl<const N: usize> Read for BitMap<N> {
     type Cfg = u64; // Max bitmap length
 
-    fn read_cfg(buf: &mut impl ReadBuf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
         // Parse length in bits
         let len = u64::read(buf)?;
         if len > *max_len {

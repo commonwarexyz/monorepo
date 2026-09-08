@@ -34,9 +34,9 @@ use blst::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize,
+    Buf, EncodeSize,
     Error::{self, Invalid},
-    FixedArray, FixedSize, Read, ReadBuf, ReadExt, Write,
+    FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
@@ -539,7 +539,7 @@ impl Write for Private {
 impl Read for Private {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
         Ok(Self::new(scalar))
     }
@@ -755,7 +755,7 @@ impl Write for Scalar {
 impl Read for Scalar {
     type Cfg = ScalarReadCfg;
 
-    fn read_cfg(buf: &mut impl ReadBuf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
         // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates in-range.
@@ -1011,7 +1011,7 @@ impl Write for Share {
 impl Read for Share {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let index = Participant::read(buf)?;
         let private = Private::read(buf)?;
         Ok(Self { index, private })
@@ -1261,7 +1261,7 @@ impl Write for G1 {
 impl Read for G1 {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p1::default();
         // SAFETY: bytes is a valid 48-byte array. blst_p1_uncompress validates encoding.
@@ -1684,7 +1684,7 @@ impl Write for G2 {
 impl Read for G2 {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl ReadBuf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let bytes = <[u8; Self::SIZE]>::read(buf)?;
         let mut ret = blst_p2::default();
         // SAFETY: bytes is a valid 96-byte array. blst_p2_uncompress validates encoding.
