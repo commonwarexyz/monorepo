@@ -162,9 +162,9 @@ use std::{
 };
 use tracing::warn;
 
-// Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the
-// thread. Probes run per shard on the hot read path, where a fresh zeroed allocation per call
-// contends under the pool's fan-out.
+// Reusable scratch for the synchronous read paths ([`Reader::try_read_sync`] and
+// [`Reader::probe_items`]), grown to the largest probe served on the thread. Both run on the
+// hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
@@ -1591,12 +1591,17 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
-        let mut buf = vec![0u8; A::SIZE];
-        let item = match self.locate(pos) {
-            Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => {
-                A::decode(&buf[..]).ok()
-            }
-            _ => None,
+        let (blob, offset) = self.locate(pos).ok()?;
+        let mut scratch =
+            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        if scratch.len() < A::SIZE {
+            scratch.resize(A::SIZE, 0);
+        }
+        let buf = &mut scratch[..A::SIZE];
+        let item = if blob.try_read_sync_into(buf, offset) {
+            A::decode(&buf[..]).ok()
+        } else {
+            None
         };
         if item.is_some() {
             self.metrics.cache_hits.inc();

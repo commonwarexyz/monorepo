@@ -102,7 +102,6 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
-use commonware_utils::Array;
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
@@ -157,7 +156,7 @@ impl<K: Key, V: CodecShared + Clone, const N: usize> From<[(K, Option<V>); N]> f
 pub struct Batch<'a, E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -168,7 +167,7 @@ where
 impl<'a, E, K, V, T> Batch<'a, E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -213,7 +212,7 @@ where
 pub struct Db<E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -238,20 +237,13 @@ where
 
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
-    pub inactivity_floor_loc: Location,
-
-    /// The location of the last commit operation.
-    pub last_commit_loc: Location,
-
-    /// The number of _steps_ to raise the inactivity floor. Each step involves moving exactly one
-    /// active operation to tip.
-    pub steps: u64,
+    inactivity_floor_loc: Location,
 }
 
 impl<E, K, V, T> std::fmt::Debug for Db<E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -266,7 +258,7 @@ where
 impl<E, K, V, T> Db<E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -326,8 +318,8 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        let Operation::CommitFloor(metadata, _) = self.log.read(*self.last_commit_loc).await?
-        else {
+        // The log always ends with a commit operation.
+        let Operation::CommitFloor(metadata, _) = self.log.read(*self.size() - 1).await? else {
             unreachable!("last commit should be a commit floor operation");
         };
 
@@ -428,8 +420,6 @@ where
             snapshot,
             active_keys,
             inactivity_floor_loc,
-            last_commit_loc,
-            steps: 0,
         })
     }
 
@@ -459,9 +449,10 @@ where
         mut self,
         batch: Changeset<K, V>,
     ) -> Result<(Self, Range<Location>), Error> {
-        let start_loc = self.last_commit_loc + 1;
+        let start_loc = self.size();
         let (diff, metadata) = batch.into_parts();
 
+        let mut steps = 0u64;
         for (key, value) in diff {
             if let Some(value) = value {
                 let updated = {
@@ -476,7 +467,7 @@ where
                     .await?
                 };
                 if updated.is_some() {
-                    self.steps += 1;
+                    steps += 1;
                 } else {
                     self.active_keys += 1;
                 }
@@ -494,19 +485,19 @@ where
                 .await?;
                 if deleted.is_some() {
                     (self.log, _) = self.log.append(&Operation::Delete(key)).await?;
-                    self.steps += 1;
+                    steps += 1;
                     self.active_keys -= 1;
                 }
             }
         }
 
-        // Raise the inactivity floor by `self.steps` steps, plus 1 to account for the previous
+        // Raise the inactivity floor by `steps` steps, plus 1 to account for the previous
         // commit becoming inactive.
         if self.is_empty() {
             self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
-            let steps_to_take = self.steps + 1;
+            let steps_to_take = steps + 1;
             let mut helper = FloorHelper {
                 snapshot: &mut self.snapshot,
                 log: self.log,
@@ -520,14 +511,10 @@ where
         }
 
         // Append the commit operation with the new inactivity floor.
-        let commit_loc;
-        (self.log, commit_loc) = self
+        (self.log, _) = self
             .log
             .append(&Operation::CommitFloor(metadata, self.inactivity_floor_loc))
             .await?;
-        self.last_commit_loc = Location::new(commit_loc);
-
-        self.steps = 0;
 
         let end_loc = self.size();
         Ok((self, start_loc..end_loc))
@@ -1361,6 +1348,59 @@ mod test {
             assert_eq!(fetched_value.unwrap(), value);
 
             // Destroy the store
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A [Db] keyed by variable-length byte keys.
+    type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap>;
+
+    #[test_traced("DEBUG")]
+    fn test_store_variable_length_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Configure the operation codec for variable-length keys.
+            let cfg = Config {
+                log: JournalConfig {
+                    partition: "journal".into(),
+                    write_buffer: NZUsize!(64 * 1024),
+                    replay_buffer: NZUsize!(64 * 1024),
+                    compression: None,
+                    codec_config: (((0..=64).into(), ()), ((0..=10000).into(), ())),
+                    items_per_section: NZU64!(7),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+            };
+
+            // Commit two keys of different lengths that share a translated prefix.
+            let db = VecKeyStore::init(
+                context.child("store").with_attribute("index", 0),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            let short = b"key".to_vec();
+            let long = b"key-extended".to_vec();
+            let batch = db
+                .new_batch()
+                .update(short.clone(), vec![1])
+                .update(long.clone(), vec![2])
+                .finalize(None);
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.commit().await.unwrap();
+            assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
+            assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
+            drop(db);
+
+            // Reopen the store and verify both committed values.
+            let db = VecKeyStore::init(context.child("store").with_attribute("index", 1), cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
+            assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
             db.destroy().await.unwrap();
         });
     }
