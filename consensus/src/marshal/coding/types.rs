@@ -181,12 +181,8 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
     ///
-    /// The caller must know that `commitment` was produced by encoding `inner`,
-    /// for example because a quorum decoded the block under it. That inference
-    /// relies on the unique-commitment guarantee of [`Scheme`]: only the
-    /// commitment produced by [`Scheme::encode`] passes [`Scheme::decode`].
-    /// Shards are generated on demand by [`Self::shards`], which panics if the
-    /// commitment does not encode `inner`.
+    /// `commitment` must encode `inner`. [`Self::shards`] generates shards on
+    /// demand and panics if the coding root does not match.
     pub fn new_trusted(inner: B, commitment: Commitment<B, C, H>) -> Self {
         Self::new_trusted_shared(Arc::new(inner), commitment)
     }
