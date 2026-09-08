@@ -38,11 +38,11 @@
 //! ```text
 //! SETUP RW
 //!   establish required protections before sensitive writes
-//!   mark data dirty before moving T or invoking an initializer
-//!   install typed owner as soon as T is valid
-//!   for zeroed byte arrays, install owner before initializer callback
+//!   mark data dirty before copying T or invoking an initializer
+//!   inline source owns T until the copied bytes are sealed
+//!   zeroed byte arrays have a typed owner before the initializer callback
 //!        |
-//!        | protect(NONE), then publish
+//!        | protect(NONE), commit ownership, then publish
 //!        v
 //! IDLE NONE, readers = 0
 //!        |
@@ -77,11 +77,14 @@
 //! including unused bytes and uninitialized padding, then unmaps while still
 //! locked. It never interprets bytes as `T`.
 //!
-//! Setup, including final sealing, can return an error if cleanup succeeds. The
-//! typed owner is installed before final sealing, so its failure destroys `T`
-//! before raw erasure. A failed seal does not inherently imply abort. Published
-//! access or extraction permission failures, count overflow, and cleanup failures
-//! abort. Abort does not run destructors or guarantee erasure.
+//! Setup, including final sealing, can return an error if cleanup succeeds.
+//! Hardening stages a raw copy while the inline source still owns `T`. On error,
+//! raw cleanup erases the copy without destroying `T`, leaving the source intact.
+//! On success, ownership transfers to the sealed allocation and the caller erases
+//! the source without destroying it. Byte-array initialization instead installs a
+//! typed owner before invoking user code. Published access or extraction permission
+//! failures, count overflow, and cleanup failures abort. Abort does not run
+//! destructors or guarantee erasure.
 //!
 //! # Fork identity
 //!
@@ -139,14 +142,38 @@ pub(crate) struct HardenedSecret<T> {
 }
 
 impl<T> HardenedSecret<T> {
-    /// Moves the inline value into protected storage, erasing its consumed source.
+    /// Copies the inline value into protected storage, preserving it on error.
     ///
-    /// Layout and OS failures consume the input. Setup can fail before transfer,
-    /// or final sealing can fail after the typed owner has taken responsibility
-    /// for destruction. Ordinary `Arc` allocation follows Rust allocator policy.
-    pub(crate) fn try_from_inline(value: InlineSecret<T>) -> Result<Self, HardenError> {
-        ProtectedAllocation::try_new(value).map(|inner| Self {
-            inner: Arc::new(inner),
+    /// # Safety
+    ///
+    /// On success, the returned allocation owns `T`. The caller must immediately
+    /// erase and retire the source without accessing or dropping its value, and
+    /// without an intervening operation that can panic. On error, the source
+    /// remains its sole owner and is unchanged.
+    pub(crate) unsafe fn try_from_inline(value: &mut InlineSecret<T>) -> Result<Self, HardenError> {
+        let (mut mapping, destination) = Mapping::allocate::<T>()?;
+        // Allocate metadata and prepare the reader mutex before transferring ownership.
+        let mut inner = Arc::<ProtectedAllocation<T>>::new_uninit();
+        let slot = Arc::get_mut(&mut inner).unwrap();
+        let readers = Mutex::new(0);
+        mapping.dirty = true;
+        value.access(|source| {
+            // SAFETY: The destination is writable, aligned, and disjoint from the
+            // initialized source. This is only a raw copy. Until sealing succeeds,
+            // Mapping owns cleanup and never accesses or destroys it as T.
+            unsafe { ptr::copy_nonoverlapping(source, destination.as_ptr(), 1) };
+        });
+        mapping.protect(libc::PROT_NONE)?;
+        // No fallible or panicking operations may follow the ownership transfer.
+        slot.write(ProtectedAllocation {
+            mapping,
+            value: destination,
+            readers,
+        });
+        Ok(Self {
+            // SAFETY: The Arc's unique slot was initialized above. The caller
+            // retires the inline source as required by this function's contract.
+            inner: unsafe { inner.assume_init() },
         })
     }
 
@@ -474,26 +501,6 @@ unsafe impl<T: Send> Send for ProtectedAllocation<T> {}
 unsafe impl<T: Sync> Sync for ProtectedAllocation<T> {}
 
 impl<T> ProtectedAllocation<T> {
-    /// Transfers the inline value after setup succeeds, then revokes access.
-    fn try_new(value: InlineSecret<T>) -> Result<Self, HardenError> {
-        let (mut mapping, destination) = Mapping::allocate::<T>()?;
-        // Cleanup must erase even if a later permission change fails.
-        mapping.dirty = true;
-        // SAFETY: The mapping is writable, aligned for T, and disjoint from the
-        // source. Ownership transfers into its previously uninitialized storage.
-        unsafe {
-            value.move_into(destination.as_ptr());
-        }
-        // Transfer cleanup to the typed owner before protection can fail.
-        let allocation = Self {
-            mapping,
-            value: destination,
-            readers: Mutex::new(0),
-        };
-        allocation.mapping.protect(libc::PROT_NONE)?;
-        Ok(allocation)
-    }
-
     /// Holds one reader slot across the callback, including panic unwinding.
     fn access<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
         // A fork child can inherit a held mutex. Reject it before locking or
@@ -602,6 +609,29 @@ mod tests {
 
     const CHILD_ENV: &str = "COMMONWARE_HARDENED_SECRET_TEST";
 
+    /// Creates an allocation whose mappings can be inspected by backend tests.
+    fn harden<T>(value: InlineSecret<T>) -> Result<HardenedSecret<T>, HardenError> {
+        let mut value = ManuallyDrop::new(value);
+        // SAFETY: Success immediately retires the source without dropping T.
+        // Failure leaves it initialized, so only that path runs its destructor.
+        unsafe {
+            match HardenedSecret::try_from_inline(&mut value) {
+                Ok(hardened) => {
+                    core::slice::from_raw_parts_mut(
+                        (&raw mut *value).cast::<MaybeUninit<u8>>(),
+                        size_of::<InlineSecret<T>>(),
+                    )
+                    .zeroize();
+                    Ok(hardened)
+                }
+                Err(error) => {
+                    ManuallyDrop::drop(&mut value);
+                    Err(error)
+                }
+            }
+        }
+    }
+
     /// Runs deliberate memory faults in a subprocess so the test runner survives.
     fn child(case: &str, signal: Option<i32>) -> Output {
         let output = Command::new(std::env::current_exe().unwrap())
@@ -630,7 +660,7 @@ mod tests {
         child("exit_failure", Some(libc::SIGABRT));
         child("cleanup_failure", Some(libc::SIGABRT));
         child("final_seal_failure", None);
-        child("post_move_failure", None);
+        child("harden_seal_failure", None);
     }
 
     #[test]
@@ -668,7 +698,7 @@ mod tests {
 
     #[test]
     fn nested_and_concurrent_access() {
-        let secret = HardenedSecret::try_from_inline(InlineSecret::new([42u8; 32])).unwrap();
+        let secret = harden(InlineSecret::new([42u8; 32])).unwrap();
         let cloned = secret.clone();
         assert!(Arc::ptr_eq(&secret.inner, &cloned.inner));
         secret.access(|value| {
@@ -725,18 +755,17 @@ mod tests {
                 check_layout::<{ $page + 1 }>(2);
                 #[repr(align($page))]
                 struct Aligned([u8; 1]);
-                let value =
-                    HardenedSecret::try_from_inline(InlineSecret::new(Aligned([73]))).unwrap();
+                let value = harden(InlineSecret::new(Aligned([73]))).unwrap();
                 assert_eq!(value.inner.value.as_ptr().addr() % $page, 0);
                 assert_eq!(value.inner.mapping.data_len, $page);
                 value.access(|value| assert_eq!(value.0, [73]));
                 drop(value);
                 #[repr(align($over))]
-                struct OverAligned;
-                assert!(matches!(
-                    HardenedSecret::try_from_inline(InlineSecret::new(OverAligned)),
-                    Err(HardenError::Layout)
-                ));
+                struct OverAligned([u8; 1]);
+                let mut value = Secret::new(OverAligned([73]));
+                assert!(matches!(value.try_harden(), Err(HardenError::Layout)));
+                assert!(!value.is_hardened());
+                value.access(|value| assert_eq!(value.0, [73]));
             }};
         }
         match page_size() {
@@ -798,8 +827,7 @@ mod tests {
                 panic!("destructor panic");
             }
         }
-        let secret =
-            HardenedSecret::try_from_inline(InlineSecret::new(PanicOnDrop([99; 32]))).unwrap();
+        let secret = harden(InlineSecret::new(PanicOnDrop([99; 32]))).unwrap();
         let data = secret.inner.mapping.data.as_ptr();
         let marker = secret.inner.mapping.identity.address.as_ptr();
         assert!(catch_unwind(AssertUnwindSafe(|| drop(secret))).is_err());
@@ -809,12 +837,12 @@ mod tests {
 
     #[test]
     fn redaction_and_storage_conversion() {
-        let secret = Secret::new([42u8; 32]);
+        let mut secret = Secret::new([42u8; 32]);
         assert!(!secret.is_hardened());
-        let secret = secret.try_harden().unwrap();
+        secret.try_harden().unwrap();
         assert!(secret.is_hardened());
         let address = secret.access(|value| value as *const _);
-        let secret = secret.try_harden().unwrap();
+        secret.try_harden().unwrap();
         secret.access(|value| assert_eq!(value as *const _, address));
         assert_eq!(format!("{secret:?}"), "Secret([REDACTED])");
         let cloned = secret.clone();
@@ -839,9 +867,76 @@ mod tests {
     }
 
     #[test]
+    fn harden_nonclone_value_in_place() {
+        let drops = AtomicUsize::new(0);
+        let mut secret = Secret::new(Tracked {
+            bytes: [42; 32],
+            drops: &drops,
+        });
+        let result: Result<(), HardenError> = secret.try_harden();
+        result.unwrap();
+        assert!(secret.is_hardened());
+        secret.access(|value| assert_eq!(value.bytes, [42; 32]));
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(secret);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    /// A failed attempt must not destroy or replace the original owning value.
+    fn assert_harden_failure(operation: &str) {
+        struct Value<'a> {
+            bytes: Box<[u8; 32]>,
+            drops: &'a AtomicUsize,
+        }
+        impl Drop for Value<'_> {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = AtomicUsize::new(0);
+        let mut secret = Secret::new(Value {
+            bytes: Box::new([42; 32]),
+            drops: &drops,
+        });
+        let address = secret.access(ptr::from_ref);
+        let locked = locked_kib();
+        // A second attempt must also preserve ownership and release its mapping.
+        for _ in 0..2 {
+            let error = secret.try_harden().unwrap_err();
+            assert!(
+                matches!(error, HardenError::System { operation: failed, .. } if failed == operation)
+            );
+            assert!(!secret.is_hardened());
+            secret.access(|value| {
+                assert_eq!(ptr::from_ref(value), address);
+                assert_eq!(*value.bytes, [42; 32]);
+            });
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+            assert_eq!(locked_kib(), locked);
+        }
+        drop(secret);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    /// Reads the locked data size reported by Linux, in KiB.
+    fn locked_kib() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmLck:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
     fn last_owner_destroys_value() {
         let drops = AtomicUsize::new(0);
-        let secret = HardenedSecret::try_from_inline(InlineSecret::new(Tracked {
+        let secret = harden(InlineSecret::new(Tracked {
             bytes: [42; 32],
             drops: &drops,
         }))
@@ -861,7 +956,7 @@ mod tests {
     #[test]
     fn unique_extraction_moves_nonclone_value() {
         let drops = AtomicUsize::new(0);
-        let secret = HardenedSecret::try_from_inline(InlineSecret::new(Tracked {
+        let secret = harden(InlineSecret::new(Tracked {
             bytes: [42; 32],
             drops: &drops,
         }))
@@ -901,18 +996,14 @@ mod tests {
                 };
                 assert_eq!(libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit), 0);
             }
-            assert!(matches!(
-                HardenedSecret::try_from_inline(InlineSecret::new([42u8; 32])),
-                Err(HardenError::System {
-                    operation: "mlock",
-                    ..
-                })
-            ));
+            assert_harden_failure("mlock");
             return;
         }
         if case == "fork_pid_collision" {
             let mut allocation =
-                ProtectedAllocation::try_new(InlineSecret::new([42u8; 32])).unwrap();
+                Arc::try_unwrap(harden(InlineSecret::new([42u8; 32])).unwrap().inner)
+                    .ok()
+                    .unwrap();
             // SAFETY: The child only checks mapping identity and exits. It never
             // interprets the wiped allocation as T or enters inherited locks.
             let pid = unsafe { libc::fork() };
@@ -964,47 +1055,22 @@ mod tests {
                 assert_unmapped(address);
                 return;
             }
-            "post_move_failure" => {
-                let drops = AtomicUsize::new(0);
-                let address = AtomicUsize::new(0);
-                struct Value<'a> {
-                    drops: &'a AtomicUsize,
-                    address: &'a AtomicUsize,
-                }
-                impl Drop for Value<'_> {
-                    fn drop(&mut self) {
-                        self.address
-                            .store(self as *const Self as usize, Ordering::Relaxed);
-                        self.drops.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+            "harden_seal_failure" => {
                 deny_mprotect(&[libc::PROT_NONE]);
-                let result = HardenedSecret::try_from_inline(InlineSecret::new(Value {
-                    drops: &drops,
-                    address: &address,
-                }));
-                assert!(matches!(
-                    result,
-                    Err(HardenError::System {
-                        operation: "mprotect",
-                        ..
-                    })
-                ));
-                assert_eq!(drops.load(Ordering::Relaxed), 1);
-                assert_unmapped(address.load(Ordering::Relaxed) as *mut u8);
+                assert_harden_failure("mprotect");
                 return;
             }
             "no_permission_changes" => {
-                let public = Secret::new([42u8; 32]).try_harden().unwrap();
-                let shared =
-                    HardenedSecret::try_from_inline(InlineSecret::new([73u8; 32])).unwrap();
+                let mut public = Secret::new([42u8; 32]);
+                public.try_harden().unwrap();
+                let shared = harden(InlineSecret::new([73u8; 32])).unwrap();
                 let clone = shared.clone();
                 deny_mprotect(&[
                     libc::PROT_NONE,
                     libc::PROT_READ,
                     libc::PROT_READ | libc::PROT_WRITE,
                 ]);
-                let public = public.try_harden().unwrap();
+                public.try_harden().unwrap();
                 assert!(public.is_hardened());
                 let returned = shared.try_extract().unwrap_err();
                 assert!(Arc::ptr_eq(&returned.inner, &clone.inner));
@@ -1019,7 +1085,8 @@ mod tests {
                 unsafe { libc::_exit(0) };
             }
             "borrowed_panic_protection" | "owned_panic_protection" => {
-                let secret = Secret::new([42u8; 32]).try_harden().unwrap();
+                let mut secret = Secret::new([42u8; 32]);
+                secret.try_harden().unwrap();
                 let address = secret.access(|value| value as *const [u8; 32]);
                 if case == "borrowed_panic_protection" {
                     assert!(catch_unwind(|| secret.access(|_| panic!("borrowed panic"))).is_err());
@@ -1052,8 +1119,7 @@ mod tests {
                 return;
             }
             "fork_guard" => {
-                let secret =
-                    HardenedSecret::try_from_inline(InlineSecret::new([42u8; 32])).unwrap();
+                let secret = harden(InlineSecret::new([42u8; 32])).unwrap();
                 let mut pid = -1;
                 secret.access(|_| {
                     // SAFETY: The child returns directly to inherited-guard rejection
@@ -1075,7 +1141,7 @@ mod tests {
             }
             _ => {}
         }
-        let secret = HardenedSecret::try_from_inline(InlineSecret::new([42u8; 32])).unwrap();
+        let secret = harden(InlineSecret::new([42u8; 32])).unwrap();
         match case.as_str() {
             "inaccessible" | "panic_protection" => {
                 if case == "panic_protection" {
@@ -1188,7 +1254,7 @@ mod tests {
     fn exit_failure() {
         // A ZST still owns one data page. Its reference occupies no bytes, so
         // removing that page leaves no live reference into unmapped data.
-        let secret = HardenedSecret::try_from_inline(InlineSecret::new(())).unwrap();
+        let secret = harden(InlineSecret::new(())).unwrap();
         secret.access(|_| {
             // SAFETY: Remove the test's data page to force last-reader mprotect
             // failure. The marker and the ZST's trailing-guard address stay mapped.
@@ -1352,7 +1418,9 @@ mod tests {
             }
         }
         let mut allocation =
-            ProtectedAllocation::try_new(InlineSecret::new(Value([42; 32]))).unwrap();
+            Arc::try_unwrap(harden(InlineSecret::new(Value([42; 32]))).unwrap().inner)
+                .ok()
+                .unwrap();
         // SAFETY: The child only executes explicit rejection/drop paths or creates
         // independent storage. It never uses a borrowed inherited value.
         let pid = unsafe { libc::fork() };
@@ -1380,8 +1448,7 @@ mod tests {
                 }
                 "fork_collision_drop" => drop(allocation),
                 "fork_new_allocation" => {
-                    let fresh =
-                        HardenedSecret::try_from_inline(InlineSecret::new([73u8; 32])).unwrap();
+                    let fresh = harden(InlineSecret::new([73u8; 32])).unwrap();
                     fresh.access(|bytes| assert_eq!(bytes, &[73; 32]));
                     drop(fresh);
                     assert!(!allocation.mapping.in_creator());

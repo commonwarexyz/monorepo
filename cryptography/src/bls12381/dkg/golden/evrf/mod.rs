@@ -222,12 +222,9 @@ impl PrivateKey {
     ///
     /// # Errors
     ///
-    /// Consumes `self` on failure, including when hardening is unsupported.
-    pub fn try_harden(self) -> Result<Self, HardenError> {
-        Ok(Self {
-            inner: self.inner.try_harden()?,
-            public: self.public,
-        })
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.inner.try_harden()
     }
 
     /// Get the [`PublicKey`] associated with this private key.

@@ -53,8 +53,8 @@
 //! Hardening requires Linux with `std` and support for `MADV_WIPEONFORK`, introduced
 //! in Linux 4.14. Construction must establish every required protection. It may
 //! fail under the process's actual locked-memory allowance or syscall policy.
-//! Hardening consumes and drops its input on any error, including unsupported
-//! platforms. Earlier inline clones and previously exported bytes are unaffected.
+//! Hardening leaves the value and its storage unchanged on error, including on
+//! unsupported platforms. Earlier inline clones and exported bytes are unaffected.
 //! Hardening an already hardened value keeps its existing allocation.
 //!
 //! | Measure | Protection and limits |
@@ -109,8 +109,8 @@
 //! Cleanup of those allocations depends on `T`'s destructor.
 //!
 //! Each inline value is destroyed and then erased. A panicking inline destructor
-//! can prevent that erasure, including during a failed hardening attempt. In
-//! hardened storage, the final owner destroys `T`, then erases and unmaps the data.
+//! can prevent that erasure. In hardened storage, the final owner destroys `T`,
+//! then erases and unmaps the data.
 //! The raw mapping owner still performs cleanup if `T`'s destructor or a byte-array
 //! initializer unwinds, provided cleanup succeeds and the process keeps unwinding.
 //! Dropping a shared handle does not erase storage still owned by another handle.
@@ -455,7 +455,7 @@ impl<T> Secret<T> {
     /// including when `T`'s alignment exceeds the system page size. Mapping and
     /// memory-protection failures return an operating-system error. Locking is
     /// subject to the process's `RLIMIT_MEMLOCK` allowance.
-    /// An error consumes and drops the input instead of returning it to the caller.
+    /// An error leaves the value and its storage unchanged.
     ///
     /// Allocating shared ownership metadata follows the ordinary Rust allocator's
     /// allocation-failure behavior. Cleanup failures abort as described in the
@@ -467,23 +467,31 @@ impl<T> Secret<T> {
     /// use commonware_cryptography::{HardenError, Secret};
     ///
     /// # fn main() -> Result<(), HardenError> {
-    /// let secret = Secret::new([42u8; 32]).try_harden()?;
+    /// let mut secret = Secret::new([42u8; 32]);
+    /// secret.try_harden()?;
     /// assert!(secret.is_hardened());
     /// secret.access(|bytes| assert_eq!(bytes[0], 42));
     /// # Ok(())
     /// # }
     /// ```
-    pub fn try_harden(self) -> Result<Self, HardenError> {
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
         #[cfg(all(target_os = "linux", feature = "std"))]
         {
-            match self.storage {
-                Storage::Inline(value) => {
-                    HardenedSecret::try_from_inline(value).map(|value| Self {
-                        storage: Storage::Hardened(value),
-                    })
-                }
-                Storage::Hardened(_) => Ok(self),
+            let hardened = match &mut self.storage {
+                // SAFETY: On success, the source is erased and overwritten below
+                // without dropping its value or invoking any code that can panic.
+                Storage::Inline(value) => unsafe { HardenedSecret::try_from_inline(value)? },
+                Storage::Hardened(_) => return Ok(()),
+            };
+            let storage = &raw mut self.storage;
+            // SAFETY: The sealed allocation now owns T. Erase the entire old
+            // storage, including padding, without dropping T. Use the raw pointer
+            // to replace the temporarily invalid bytes without forming a reference.
+            unsafe {
+                zeroize_ptr(storage);
+                storage.write(Storage::Hardened(hardened));
             }
+            Ok(())
         }
         #[cfg(not(all(target_os = "linux", feature = "std")))]
         {
@@ -605,31 +613,6 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
 pub(crate) struct InlineSecret<T>(ManuallyDrop<T>);
 
 impl<T> InlineSecret<T> {
-    /// Transfers `T` into caller-owned storage and erases this consumed wrapper.
-    ///
-    /// Does not run `T`'s destructor. Locations left by earlier moves of the wrapper
-    /// are outside this operation's control.
-    ///
-    /// # Safety
-    ///
-    /// `destination` must be non-null, aligned for `T`, and writable for
-    /// `size_of::<T>()` bytes. Non-nullness and alignment also apply to zero-sized
-    /// types. The destination must accept a new `T` without dropping its previous
-    /// contents. It must not overlap the source or be accessed through any other
-    /// pointer or reference during the transfer. The caller takes ownership of
-    /// the initialized `T` and must arrange its destruction.
-    #[cfg(all(target_os = "linux", feature = "std"))]
-    pub(crate) unsafe fn move_into(self, destination: *mut T) {
-        let mut value = ManuallyDrop::new(self);
-        let source = &raw mut *value.0;
-        // SAFETY: The caller supplies valid, disjoint storage. The source stays
-        // at its original address until wiped and is never moved or dropped again.
-        unsafe {
-            core::ptr::copy_nonoverlapping(source, destination, 1);
-            zeroize_ptr(source);
-        }
-    }
-
     /// Takes ownership of `value` and stores it inline.
     #[inline]
     pub const fn new(value: T) -> Self {
@@ -688,6 +671,16 @@ mod tests {
     use super::*;
     use core::cell::Cell;
 
+    #[cfg(not(all(target_os = "linux", feature = "std")))]
+    #[test]
+    fn test_harden_unsupported_preserves_value() {
+        struct Value([u8; 32]);
+        let mut secret = Secret::new(Value([42; 32]));
+        assert!(matches!(secret.try_harden(), Err(HardenError::Unsupported)));
+        assert!(!secret.is_hardened());
+        secret.access(|value| assert_eq!(value.0, [42; 32]));
+    }
+
     #[test]
     fn test_traits() {
         fn assert_traits<
@@ -745,37 +738,6 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "std"))]
-    #[test]
-    fn test_inline_move_transfers_non_clone_ownership() {
-        struct Value<'a> {
-            bytes: Box<[u8; 32]>,
-            drops: &'a Cell<usize>,
-        }
-        impl Drop for Value<'_> {
-            fn drop(&mut self) {
-                self.drops.set(self.drops.get() + 1);
-            }
-        }
-
-        let drops = Cell::new(0);
-        let source = InlineSecret::new(Value {
-            bytes: Box::new([42; 32]),
-            drops: &drops,
-        });
-        let mut destination = MaybeUninit::uninit();
-        // SAFETY: Destination is disjoint, aligned, uninitialized storage. The
-        // move initializes it exactly once and transfers ownership to this test.
-        let value = unsafe {
-            source.move_into(destination.as_mut_ptr());
-            destination.assume_init()
-        };
-        assert_eq!(*value.bytes, [42; 32]);
-        assert_eq!(drops.get(), 0);
-        drop(value);
-        assert_eq!(drops.get(), 1);
-    }
-
     #[test]
     fn test_try_extract_non_clone() {
         // Owning a heap value detects premature destruction during extraction.
@@ -808,15 +770,14 @@ mod tests {
             &drops,
         );
         #[cfg(all(target_os = "linux", feature = "std", not(miri)))]
-        check(
-            Secret::new(Value {
+        {
+            let mut secret = Secret::new(Value {
                 bytes: Box::new([42; 32]),
                 drops: &drops,
-            })
-            .try_harden()
-            .unwrap(),
-            &drops,
-        );
+            });
+            secret.try_harden().unwrap();
+            check(secret, &drops);
+        }
     }
 
     #[test]
@@ -857,12 +818,11 @@ mod tests {
 
         #[cfg(all(target_os = "linux", feature = "std", not(miri)))]
         {
-            let secret = Secret::new(Value {
+            let mut secret = Secret::new(Value {
                 clones: &clones,
                 drops: &drops,
-            })
-            .try_harden()
-            .unwrap();
+            });
+            secret.try_harden().unwrap();
             let shared = secret.clone();
             assert_eq!(clones.get(), 0);
 

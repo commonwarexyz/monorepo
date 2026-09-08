@@ -65,12 +65,9 @@ impl PrivateKeyInner {
     ///
     /// # Errors
     ///
-    /// Consumes `self` on failure, including when hardening is unsupported.
-    pub fn try_harden(self) -> Result<Self, HardenError> {
-        Ok(Self {
-            inner: self.inner.try_harden()?,
-            public: self.public,
-        })
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.inner.try_harden()
     }
 
     /// Returns the `VerifyingKey` corresponding to this private key.
@@ -244,9 +241,9 @@ macro_rules! impl_private_key_wrapper {
             ///
             /// # Errors
             ///
-            /// Consumes `self` on failure, including when hardening is unsupported.
-            pub fn try_harden(self) -> Result<Self, crate::secret::HardenError> {
-                self.0.try_harden().map(Self)
+            /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+            pub fn try_harden(&mut self) -> Result<(), crate::secret::HardenError> {
+                self.0.try_harden()
             }
         }
 

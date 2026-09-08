@@ -526,11 +526,9 @@ impl Private {
     ///
     /// # Errors
     ///
-    /// Consumes `self` on failure, including when hardening is unsupported.
-    pub fn try_harden(self) -> Result<Self, HardenError> {
-        Ok(Self {
-            scalar: self.scalar.try_harden()?,
-        })
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.scalar.try_harden()
     }
 
     /// Grants temporary access to the inner scalar through a closure.
@@ -1017,12 +1015,9 @@ impl Share {
     ///
     /// # Errors
     ///
-    /// Consumes `self` on failure, including when hardening is unsupported.
-    pub fn try_harden(self) -> Result<Self, HardenError> {
-        Ok(Self {
-            index: self.index,
-            private: self.private.try_harden()?,
-        })
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.private.try_harden()
     }
 
     /// Returns the public key corresponding to the share.
@@ -2475,9 +2470,9 @@ mod tests {
     #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
     #[test]
     fn test_hardened_private_extraction() {
-        let original = Private::random(test_rng());
-        let encoded = original.encode();
-        let hardened = original.clone().try_harden().unwrap();
+        let mut hardened = Private::random(test_rng());
+        let encoded = hardened.encode();
+        hardened.try_harden().unwrap();
         let cloned = hardened.clone();
         assert!(hardened.is_hardened());
         hardened.access(|value| cloned.access(|other| assert!(core::ptr::eq(value, other))));
@@ -2485,22 +2480,19 @@ mod tests {
         let shared_scalar = hardened.extract_or_clone();
         cloned.access(|scalar| assert_eq!(scalar, &shared_scalar));
         assert_eq!(cloned.encode(), encoded);
-        assert_eq!(cloned, original);
 
         // The remaining owner can move out its scalar.
         let unique_scalar = cloned.extract_or_clone();
         assert_eq!(unique_scalar, shared_scalar);
-        assert_eq!(unique_scalar, original.extract_or_clone());
     }
 
     #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
     #[test]
     fn test_hardened_share() {
-        let original = Share::new(Participant::new(1), Private::random(test_rng()));
-        let encoded = original.encode();
-        let public = original.public::<MinPk>();
-        let hardened = original.clone().try_harden().unwrap();
-        assert_eq!(hardened, original);
+        let mut hardened = Share::new(Participant::new(1), Private::random(test_rng()));
+        let encoded = hardened.encode();
+        let public = hardened.public::<MinPk>();
+        hardened.try_harden().unwrap();
         assert_eq!(hardened.encode(), encoded);
         assert_eq!(hardened.public::<MinPk>(), public);
 
@@ -2508,7 +2500,7 @@ mod tests {
         hardened
             .private
             .access(|a| cloned.private.access(|b| assert!(core::ptr::eq(a, b))));
-        let hardened = hardened.try_harden().unwrap();
+        hardened.try_harden().unwrap();
         hardened
             .private
             .access(|a| cloned.private.access(|b| assert!(core::ptr::eq(a, b))));

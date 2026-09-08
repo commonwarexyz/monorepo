@@ -94,11 +94,9 @@ impl PrivateKey {
     ///
     /// # Errors
     ///
-    /// Consumes `self` on failure, including when hardening is unsupported.
-    pub fn try_harden(self) -> Result<Self, HardenError> {
-        Ok(Self {
-            key: self.key.try_harden()?,
-        })
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.key.try_harden()
     }
 }
 
@@ -150,8 +148,11 @@ impl TryFrom<Private> for PrivateKey {
     /// consumed on success or failure. See [Secret::try_harden] for protection limits.
     fn try_from(key: Private) -> Result<Self, Self::Error> {
         let hardened = key.is_hardened();
-        let key = Self::new(key.extract_or_clone());
-        if hardened { key.try_harden() } else { Ok(key) }
+        let mut key = Self::new(key.extract_or_clone());
+        if hardened {
+            key.try_harden()?;
+        }
+        Ok(key)
     }
 }
 
