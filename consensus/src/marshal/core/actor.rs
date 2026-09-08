@@ -816,23 +816,15 @@ where
                         return self;
                     }
 
-                    // Updating the round floor can release a superseded anchor and resume dispatch,
-                    // so check staging eligibility only after it completes
-                    let height = block.height();
-                    self = self
-                        .update_processed_round_floor(height, round, buffer, application, resolver)
-                        .await;
-
-                    // Retain only new archive entries that can still be dispatched and fit in staging
+                    // Retain only new archive entries that fit in staging
                     // An existing height keeps its first block even if another finalization conflicts
-                    let next_height = self
-                        .pending_acks
-                        .next_dispatch_height(self.stream.next_height());
-                    let stage = height >= next_height
-                        && self.staged.len() < self.pending_acks.capacity().saturating_mul(2)
+                    let height = block.height();
+                    let stage = self.staged.len() < self.pending_acks.capacity().saturating_mul(2)
                         && self.finalized_blocks.next_gap(height).0.is_none();
                     let stored;
                     (self, stored) = self
+                        .update_processed_round_floor(height, round, buffer, application, resolver)
+                        .await
                         .store_finalization(height, digest, &block, Some(finalization), application)
                         .await;
                     if stage && stored {

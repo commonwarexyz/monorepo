@@ -1231,13 +1231,12 @@ mod tests {
 
     // Mutators consume the archive, so each consuming future is constructed in
     // its own match arm (only one arm ever runs, but all are type-checked). Every arm
-    // but the last needs its own key/value, so clippy's per-path analysis flags
+    // but the last needs its own key, so clippy's per-path analysis flags
     // the clones as redundant.
     #[allow(dead_code)]
     fn assert_archive_futures_are_send<T: super::Archive>(archive: T, key: T::Key, value: T::Value)
     where
         T::Key: Clone,
-        T::Value: Clone,
     {
         assert_send(archive.get(Identifier::Index(1)));
         assert_send(archive.get(Identifier::Key(&key)));
@@ -1261,7 +1260,6 @@ mod tests {
         value: T::Value,
     ) where
         T::Key: Clone,
-        T::Value: Clone,
     {
         assert_send(archive.get_all(1));
         #[allow(clippy::redundant_clone)]
