@@ -805,7 +805,7 @@ mod test {
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
-            encoded.as_ref(),
+            encoded,
             &CodedBlockCfg {
                 inner: (),
                 expected: ExpectedCommitment::Trusted(expected),
@@ -834,7 +834,7 @@ mod test {
         let encoded = (other, CONFIG).encode();
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
-            encoded.as_ref(),
+            encoded,
             &CodedBlockCfg {
                 inner: (),
                 expected: ExpectedCommitment::Trusted(expected),

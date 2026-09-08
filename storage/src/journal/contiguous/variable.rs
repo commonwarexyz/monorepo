@@ -537,7 +537,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
     /// `None` on any miss.
-    fn try_read_frame_sync(&self, position: u64, offset: u64) -> Option<V> {
+    fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut BytesMut) -> Option<V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
@@ -581,15 +581,23 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             .ok();
         }
 
-        // Otherwise try reading the full item from cache. The buffer holds exactly the frame, so
-        // skipping the varint leaves the item.
-        let mut buf = vec![0u8; item_len];
-        if !blob.try_read_sync_into(&mut buf, offset) {
+        // Otherwise try reading the full item from cache
+        buf.resize(item_len, 0);
+        if !blob.try_read_sync_into(buf, offset) {
             return None;
         }
-        let mut buf = Bytes::from(buf);
-        buf.advance(varint_len);
-        decode_item::<V>(buf, &self.codec_config, self.compressed).ok()
+        // Split before freezing to preserve reusable allocation metadata
+        let bytes = std::mem::take(buf).split().freeze();
+        let item = decode_item::<V>(
+            bytes.slice(varint_len..),
+            &self.codec_config,
+            self.compressed,
+        )
+        .ok();
+        if let Ok(reclaimed) = bytes.try_into_mut() {
+            *buf = reclaimed;
+        }
+        item
     }
 
     /// Build one replay state for each data blob touched by `[start_pos, bounds.end)`.
@@ -816,8 +824,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let total: usize = ranges.iter().map(|&(_, len)| len).sum();
             buf.resize(total, 0);
             let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
-            // Freeze so decoded byte fields are views of the scratch
-            let bytes = std::mem::take(&mut buf).freeze();
+            // Split before freezing to preserve reusable allocation metadata
+            let bytes = std::mem::take(&mut buf).split().freeze();
             let mut missed = missed.into_iter().peekable();
             let mut local = 0usize;
             for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
@@ -844,7 +852,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         // Per-frame path for frames whose extent is unknown.
         for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset) {
+            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut buf) {
                 out[idx] = Some(item);
                 hits += 1;
             }
@@ -975,7 +983,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         // offsets journal is not consulted twice.
         let cached_offset = self.offsets.try_read_sync(position);
         if let Some(offset) = cached_offset
-            && let Some(item) = self.try_read_frame_sync(position, offset)
+            && let Some(item) = self.try_read_frame_sync(position, offset, &mut BytesMut::new())
         {
             self.metrics.cache_hits.inc();
             self.metrics.items_read.inc();
@@ -1011,7 +1019,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
-        let item = self.try_read_frame_sync(position, offset)?;
+        let item = self.try_read_frame_sync(position, offset, &mut BytesMut::new())?;
         self.metrics.cache_hits.inc();
         self.metrics.items_read.inc();
         Some(item)
@@ -3192,7 +3200,9 @@ mod tests {
             let (journal, reader) = journal.snapshot().await.unwrap();
             drop(reader.read(0).await.unwrap());
             let offset = reader.offsets.try_read_sync(0).unwrap();
-            let decoded = reader.try_read_frame_sync(0, offset).unwrap();
+            let decoded = reader
+                .try_read_frame_sync(0, offset, &mut BytesMut::new())
+                .unwrap();
             drop(reader);
             journal.destroy().await.unwrap();
             assert_eq!(decoded.len(), 2);

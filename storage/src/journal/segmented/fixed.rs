@@ -437,7 +437,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if !blob.try_read_sync_into(&mut scratch, offset) {
             return None;
         }
-        let bytes = std::mem::take(&mut *scratch).freeze();
+        // Split before freezing to preserve reusable allocation metadata
+        let bytes = std::mem::take(&mut *scratch).split().freeze();
         let item = A::decode(bytes.clone()).ok();
         if let Ok(reclaimed) = bytes.try_into_mut() {
             *scratch = reclaimed;

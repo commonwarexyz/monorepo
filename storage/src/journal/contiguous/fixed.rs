@@ -1536,9 +1536,9 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 &blob_offsets,
                 Inner::<E, A>::CHUNK_SIZE,
             );
-            // Freeze so decoded byte fields are views of the scratch, and walk the slots with one
-            // cursor instead of slicing (and refcounting) per item
-            let bytes = std::mem::take(&mut *scratch).freeze();
+            // Split before freezing to preserve reusable allocation metadata
+            // Walk slots with one cursor instead of slicing and refcounting per item
+            let bytes = std::mem::take(&mut *scratch).split().freeze();
             let mut cursor = bytes.clone();
             let mut misses = misses.into_iter().peekable();
             for idx in 0..group.len() {
@@ -1608,7 +1608,8 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
             Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(BytesMut::new()), |_| Ok(())).unwrap();
         scratch.resize(A::SIZE, 0);
         let item = if blob.try_read_sync_into(&mut scratch, offset) {
-            let bytes = std::mem::take(&mut *scratch).freeze();
+            // Split before freezing to preserve reusable allocation metadata
+            let bytes = std::mem::take(&mut *scratch).split().freeze();
             let item = A::decode(bytes.clone()).ok();
             if let Ok(reclaimed) = bytes.try_into_mut() {
                 *scratch = reclaimed;
@@ -1812,9 +1813,13 @@ mod tests {
             let mut journal = Journal::init(context, cfg).await.unwrap();
             (journal, _) = journal.append(&FixedByteView::new(7)).await.unwrap();
             let decoded = journal.try_read_sync(0).unwrap();
+            (journal, _) = journal.append(&FixedByteView::new(8)).await.unwrap();
+            let next = journal.try_read_sync(1).unwrap();
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+            assert_eq!(next.bytes.as_ref(), &8u64.to_be_bytes());
             decoded.assert_shared();
+            next.assert_shared();
         });
     }
 
