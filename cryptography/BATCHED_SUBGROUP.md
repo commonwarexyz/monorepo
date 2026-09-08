@@ -1,5 +1,11 @@
 # Batched G1 subgroup checks: strategy comparison
 
+This report describes the independent-combination strategies and historical
+measurements. Its pass-count limits apply to those constructions, not all
+subgroup-checking algorithms. The test-only [graph and recursive-certificate
+research](SUBGROUP_CASCADE.md) explores faster constructions; production
+verification is unchanged.
+
 Findings from implementing and measuring three randomized strategies for
 checking that a batch of BLS12-381 G1 points lies in the prime-order subgroup.
 The shipping implementation is `bls12381::primitives::subgroup::batch_in_g1`

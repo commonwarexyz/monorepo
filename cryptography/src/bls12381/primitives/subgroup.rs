@@ -64,12 +64,10 @@
 //! point individually) is a pure performance decision made by a cost model;
 //! soundness holds for every choice.
 //!
-//! What a batch cannot escape is one pass over the points per `log2(3^m)` bits
-//! of soundness (see below), so the cost per point falls only with the
-//! logarithm of the round width — and the width is bounded by what a round's
-//! bucket slots can hold in cache. That is why the speedup over per-point
-//! checking keeps growing with the batch: at `2^-128`, nine passes is the floor,
-//! and the fixed per-round overheads only amortize away as `n` grows.
+//! In this independent-combination construction, one pass buys `log2(3^m)`
+//! bits of soundness (see below). Wider rounds reduce the pass count while
+//! increasing the bucket workspace and combine cost. The planner balances
+//! those costs for each batch; fixed per-round overheads amortize as it grows.
 //!
 //! # Soundness
 //!
@@ -129,6 +127,10 @@ use blst::{
 use commonware_parallel::Strategy;
 use core::mem::{MaybeUninit, size_of};
 use rand_core::CryptoRng;
+
+#[cfg(test)]
+#[path = "subgroup/research.rs"]
+mod research;
 
 /// One thousand times a strict lower bound on `log2(3)`.
 ///
