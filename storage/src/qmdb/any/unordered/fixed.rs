@@ -447,6 +447,11 @@ pub(crate) mod test {
             for _ in 0..100 {
                 keys.push(Digest::random(&mut rng));
             }
+            // Repeat present and absent keys, some more than once, so one operation resolves
+            // several slots in both the cached pass and the miss fallback.
+            let repeats: Vec<Digest> = keys.iter().step_by(37).copied().collect();
+            keys.extend_from_slice(&repeats);
+            keys.extend_from_slice(&repeats[..20]);
             let refs: Vec<&Digest> = keys.iter().collect();
             let fused = db.get_many(&refs).await.unwrap();
             assert_eq!(fused.len(), keys.len());
