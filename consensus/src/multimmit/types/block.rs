@@ -11,7 +11,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, Codec, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
+    Buf, BufsMut, Codec, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write,
 };
 use commonware_cryptography::{Digest, Digestible, Hasher, bls12381::primitives::variant::Variant};
 use core::{fmt, marker::PhantomData};
@@ -368,6 +368,11 @@ where
         self.header.write(buf);
         self.body.write(buf);
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.header.write_bufs(buf);
+        self.body.write_bufs(buf);
+    }
 }
 
 impl<H, B> Read for TransactionBlock<H, B>
@@ -393,6 +398,10 @@ where
 {
     fn encode_size(&self) -> usize {
         self.header.encode_size() + self.body.encode_size()
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.header.encode_inline_size() + self.body.encode_inline_size()
     }
 }
 
