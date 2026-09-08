@@ -300,7 +300,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, mocks};
-    use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{BufMut as _, BufferPooler as _, Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
         NZUsize,
         channel::{mpsc, ring},
@@ -324,6 +324,58 @@ mod tests {
     };
 
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    #[test_traced]
+    fn test_receivers_share_payload_buffer() {
+        for pooled in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                let payload = IoBuf::from(vec![42; 256 * 1024]);
+                let encoded = payload.encode();
+                let raw = if pooled {
+                    let mut raw = context.network_buffer_pool().alloc(encoded.len());
+                    raw.put_slice(&encoded);
+                    raw.freeze()
+                } else {
+                    IoBuf::from(encoded)
+                };
+                let expected = raw.as_ref()[raw.len() - payload.len()..].as_ptr() as usize;
+                for background in [false, true] {
+                    let (tx, receiver) = mpsc::unbounded_channel();
+                    tx.send((pk(0), raw.clone())).unwrap();
+                    drop(tx);
+                    let config = (..=payload.len()).into();
+                    let receiver = MockReceiver { receiver };
+                    let decoded = if background {
+                        let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, IoBuf, _>::new(
+                            context.child("bg"),
+                            receiver,
+                            config,
+                            NoopBlocker,
+                            NZUsize!(1),
+                            Sequential,
+                        );
+                        let handle = bg.start();
+                        let (_, decoded) = rx.recv().await.unwrap();
+                        handle.await.unwrap();
+                        decoded
+                    } else {
+                        WrappedReceiver::<_, IoBuf>::new(config, receiver)
+                            .recv()
+                            .await
+                            .unwrap()
+                            .1
+                            .unwrap()
+                    };
+                    assert_eq!(decoded.as_ref(), payload.as_ref());
+                    assert_eq!(
+                        decoded.as_ref().as_ptr() as usize,
+                        expected,
+                        "background={background}, pooled={pooled}"
+                    );
+                }
+            });
+        }
+    }
 
     fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(

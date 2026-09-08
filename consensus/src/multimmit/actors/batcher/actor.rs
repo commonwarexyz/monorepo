@@ -904,10 +904,49 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_parallel::Rayon;
-    use commonware_runtime::{Runner as _, Supervisor as _, tokio};
+    use bytes::Bytes;
+    use commonware_codec::Encode as _;
+    use commonware_cryptography::{Signer as _, ed25519};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_runtime::{IoBuf, Runner as _, Supervisor as _, deterministic, tokio};
     use commonware_utils::sync::{Condvar, Mutex};
     use std::{num::NonZeroUsize, sync::Arc, thread};
+
+    #[derive(Debug)]
+    struct RawReceiver(Option<(ed25519::PublicKey, IoBuf)>);
+
+    impl Receiver for RawReceiver {
+        type Error = std::convert::Infallible;
+        type PublicKey = ed25519::PublicKey;
+
+        async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
+            match self.0.take() {
+                Some(message) => Ok(message),
+                None => pending().await,
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_shares_payload_buffer() {
+        deterministic::Runner::default().start(|_| async move {
+            let payload = Bytes::from(vec![42; 96]);
+            let encoded = payload.encode();
+            let expected = encoded[encoded.len() - payload.len()..].as_ptr() as usize;
+            let peer = ed25519::PrivateKey::from_seed(0).public_key();
+            let receiver = RawReceiver(Some((peer.clone(), IoBuf::from(encoded.clone()))));
+            let mut decoder = DecodingReceiver::<_, Bytes, _>::new(
+                receiver,
+                (..=payload.len()).into(),
+                Sequential,
+            );
+            let (from, decoded) = decoder.recv(true).await.unwrap();
+            let decoded = decoded.unwrap();
+            assert_eq!(from, peer);
+            assert_eq!(decoded, payload);
+            assert_eq!(decoded.as_ptr() as usize, expected);
+        });
+    }
 
     #[test]
     fn verified_votes_retain_a_bounded_window_per_view() {
