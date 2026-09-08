@@ -44,6 +44,7 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
 };
 use core::{num::NonZeroU64, ops::Range};
+use futures::future::join_all;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
@@ -74,6 +75,10 @@ pub(crate) struct Metrics<E: Context> {
     pub prune_calls: Counter,
     /// Duration of Current-layer prune calls.
     prune_duration: Timed,
+    /// Grafted-tree input nodes warmed by best-effort prefetch.
+    pub prefetch_graft_chunks: Counter,
+    /// Duration of the grafted-tree prefetch warm.
+    prefetch_graft_duration: Timed,
     /// Clock used by the duration timers.
     clock: Arc<E>,
 }
@@ -95,6 +100,15 @@ impl<E: Context> Metrics<E> {
             sync_duration: Timed::register(&context, "sync_duration", "Duration of sync calls"),
             prune_calls: context.counter("prune_calls", "Number of prune calls"),
             prune_duration: Timed::register(&context, "prune_duration", "Duration of prune calls"),
+            prefetch_graft_chunks: context.counter(
+                "prefetch_graft_chunks",
+                "Number of grafted-tree input nodes warmed by prefetch",
+            ),
+            prefetch_graft_duration: Timed::register(
+                &context,
+                "prefetch_graft_duration",
+                "Duration of the grafted-tree prefetch warm",
+            ),
             clock: Arc::new(context),
         }
     }
@@ -109,6 +123,10 @@ impl<E: Context> Metrics<E> {
 
     pub fn prune_timer(&self) -> ScopedTimer<E> {
         self.prune_duration.scoped(&self.clock)
+    }
+
+    pub fn prefetch_graft_timer(&self) -> ScopedTimer<E> {
+        self.prefetch_graft_duration.scoped(&self.clock)
     }
 
     /// Update Current-specific state gauges.
@@ -160,7 +178,7 @@ pub struct Db<
     pub(super) root: DigestOf<H>,
 
     /// Metrics for the Current layer.
-    pub(super) metrics: Metrics<E>,
+    pub(super) metrics: Box<Metrics<E>>,
 
     /// Test-only: park [Self::prune] after the pruning-metadata sync, before the log prune,
     /// so tests can drop the pending future at that exact point.
@@ -270,6 +288,55 @@ where
     /// Return a reference to the merkleization strategy.
     pub const fn strategy(&self) -> &S {
         &self.strategy
+    }
+
+    /// Best-effort: warm the page cache for a block's access set so a later block pipeline hits
+    /// cache instead of disk.
+    ///
+    /// Warms the value-log pages for the load (via the `any` layer) and, additionally, the
+    /// grafted-tree inputs this layer's merkleize reads: the ops-tree node covering each write
+    /// key's superseded (committed) location's chunk. Everything is read-only and root-neutral, so
+    /// it is safe to run speculatively during an inter-block gap and safe to drop mid-flight. It
+    /// only helps when the working set exceeds the page cache. Read failures are swallowed.
+    pub async fn prefetch(&self, read_keys: &[&U::Key], write_keys: &[&U::Key]) {
+        // Value-log warm (covers the load; the delegated call records prefetch metrics).
+        self.any.prefetch(read_keys, write_keys).await;
+        if write_keys.is_empty() {
+            return;
+        }
+
+        // Grafted-tree warm: merkleize re-binds each superseded chunk to its covering ops-tree
+        // node (`read_graft_inputs`). Resolve committed locations from the in-memory index, dedup
+        // to chunks, and warm those nodes. The chunk bytes are unused by the node read, so pass a
+        // placeholder; a missing/pruned node just leaves that chunk cold.
+        let _timer = self.metrics.prefetch_graft_timer();
+        let grafting_height = grafting::height::<N>();
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(write_keys.len());
+        self.any
+            .snapshot
+            .get_many(write_keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+        let mut chunks: Vec<usize> = candidates
+            .iter()
+            .map(|&(_, loc)| (loc >> grafting_height) as usize)
+            .collect();
+        chunks.sort_unstable();
+        chunks.dedup();
+
+        // For each chunk, warm the ops-tree node merkleize will read for it so that read
+        // hits cache. Resolve each with read_graft_input under join_all (concurrent, but each
+        // independent) rather than try_join_all: a write key can land in the newest chunk,
+        // which is still partial (or, under MMB, complete but not yet merged into the tree)
+        // and so has no such node yet, and try_join_all would let that one miss discard the
+        // reads for every other chunk. Count only the chunks that warmed.
+        let warmed =
+            join_all(chunks.into_iter().map(|idx| {
+                read_graft_input::<F, H::Digest, N>(&self.any.log.merkle, idx, [0u8; N])
+            }))
+            .await
+            .iter()
+            .filter(|result| result.is_ok())
+            .count();
+        self.metrics.prefetch_graft_chunks.inc_by(warmed as u64);
     }
 
     /// Returns the ops tree root.
@@ -1096,13 +1163,30 @@ pub(super) async fn compute_grafted_root<
     Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
 }
 
-/// Resolve each bitmap chunk's covering ops-tree node, returning
-/// `(chunk_idx, chunk_ops_digest, chunk)` triples ready for
-/// [`grafting::graft_chunk_digests`].
+/// Resolve a single bitmap chunk's covering ops-tree node, returning a
+/// `(chunk_idx, chunk_ops_digest, chunk)` triple ready for [`grafting::graft_chunk_digests`].
 ///
-/// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
-/// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`].
+/// The chunk must be **graftable** - its h=G ancestor already born in the ops tree, where it has a
+/// single covering ops node at the deterministic `subtree_root_position(chunk_idx << G, G)`. A
+/// non-graftable chunk (a partial or not-yet-merged chunk, whose node does not exist yet) errors
+/// with [`merkle::Error::MissingNode`].
+async fn read_graft_input<F: merkle::Graftable, D: Digest, const N: usize>(
+    ops_tree: &impl MerkleStorage<F, Digest = D>,
+    chunk_idx: usize,
+    chunk: [u8; N],
+) -> Result<(usize, D, [u8; N]), Error<F>> {
+    let grafting_height = grafting::height::<N>();
+    let leaf_start = Location::<F>::new((chunk_idx as u64) << grafting_height);
+    let pos = F::subtree_root_position(leaf_start, grafting_height);
+    let chunk_ops_digest = ops_tree
+        .get_node(pos)
+        .await?
+        .ok_or(merkle::Error::<F>::MissingNode(pos))?;
+    Ok((chunk_idx, chunk_ops_digest, chunk))
+}
+
+/// Resolve each bitmap chunk's covering ops-tree node (see [read_graft_input]), returning the
+/// triples ready for [`grafting::graft_chunk_digests`]. Fail-fast: every chunk must be graftable.
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,

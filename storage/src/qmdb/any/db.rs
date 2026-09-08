@@ -233,6 +233,36 @@ where
             .await
     }
 
+    /// Best-effort: warm the page cache for a block's access set so a later load hits cache
+    /// instead of disk.
+    ///
+    /// Resolves committed locations from the in-memory index and reads the covering value-log
+    /// pages, discarding the results. It never mutates the log, snapshot, or root, so it is safe
+    /// to run speculatively (e.g. during an inter-block gap) and safe to drop mid-flight — any
+    /// pages warmed so far persist. It only helps when the working set exceeds the page cache; in
+    /// cache it is equivalent to a no-op. Read failures are swallowed (a miss just means the later
+    /// read pays for the page). `write_keys` are warmed alongside `read_keys` because a superseded
+    /// key's current page is read by read-modify-write and by ordered predecessor resolution.
+    pub async fn prefetch(&self, read_keys: &[&U::Key], write_keys: &[&U::Key]) {
+        let _timer = self.metrics.prefetch_timer();
+        self.metrics.prefetch_calls.inc();
+        self.metrics
+            .prefetch_keys
+            .inc_by((read_keys.len() + write_keys.len()) as u64);
+        let mut candidates: Vec<(usize, u64)> =
+            Vec::with_capacity(read_keys.len() + write_keys.len());
+        self.snapshot
+            .get_many(read_keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+        self.snapshot
+            .get_many(write_keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+        if candidates.is_empty() {
+            return;
+        }
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = Self::dedup_positions(&candidates);
+        let _ = self.log.read_many(&positions).await;
+    }
+
     /// Like [`Self::get_many`] but maps each matched update through `map`, which also
     /// receives the committed location the update was read from.
     pub(crate) async fn get_many_map<T: Send>(
