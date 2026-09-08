@@ -42,9 +42,7 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, Supervisor,
-    buffer::paged::{self, CacheRef},
-    spawn_cell,
-    telemetry::traces::TracedExt as _,
+    buffer::paged::CacheRef, spawn_cell, telemetry::traces::TracedExt as _,
 };
 use commonware_storage::Context as StorageContext;
 use commonware_utils::{N5f1, NZU64, NZUsize, channel::oneshot};
@@ -313,6 +311,7 @@ pub(crate) async fn open_stores<E, H, P, V>(
     prefix: &str,
     scheme: &Scheme<P, V>,
     strategy: &impl Strategy,
+    page_cache: CacheRef,
 ) -> Result<Stores<E, H, V>, OpenError>
 where
     E: CryptoRng + Storage + Metrics + BufferPooler + StorageContext + Supervisor,
@@ -347,7 +346,7 @@ where
         event_codec: DomainEventCodecConfig::from_profile(&profile),
         max_events_per_record: tuning.max_events_per_record,
         max_record_bytes: tuning.max_record_bytes,
-        page_cache: CacheRef::from_pooler(context, paged::page_size(16_384), NZUsize!(2)),
+        page_cache,
         write_buffer: WRITE_BUFFER,
     };
     let mut journal = SafetyJournal::open(context.child("journal"), journal_config, covered)
@@ -501,6 +500,12 @@ where
     pub blocker: B,
     /// Storage partition prefix owned exclusively by this engine.
     pub partition_prefix: String,
+    /// Page cache for the safety journal, including its logical page size and capacity.
+    ///
+    /// Use `paged::page_size` to select an aligned physical size.
+    /// The page size must remain unchanged when reopening this partition: changing it is a
+    /// destructive storage-format change that can truncate the journal during recovery.
+    pub page_cache: CacheRef,
     /// Mailbox capacity for every actor.
     pub mailbox_size: NonZeroUsize,
 }
@@ -726,6 +731,7 @@ where
             &config.partition_prefix,
             &config.scheme,
             &config.strategy,
+            config.page_cache,
         )
         .await?;
         if let Startup::Recovered(recovered) = &stores.startup {
@@ -890,10 +896,12 @@ mod tests {
     use commonware_p2p::{Receiver as _, Recipients, Sender as _, simulated::Oracle};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+        BufferPooler, Clock as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+        buffer::paged::{self, CacheRef},
         deterministic::{self, Runner as DeterministicRunner},
     };
     use commonware_utils::{NZUsize, channel::oneshot};
+    use rstest::rstest;
     use std::{
         collections::BTreeSet,
         num::{NonZeroU64, NonZeroUsize},
@@ -945,6 +953,7 @@ mod tests {
     }
 
     fn config(
+        context: &impl BufferPooler,
         committee: &Committee<MinPk>,
         index: usize,
         prefix: &str,
@@ -972,6 +981,7 @@ mod tests {
             blocker: NoopBlocker,
             profile,
             partition_prefix: format!("{prefix}-{index}"),
+            page_cache: CacheRef::from_pooler(context, paged::page_size(4_096), NZUsize!(8)),
             mailbox_size: NonZeroUsize::new(128).unwrap(),
         }
     }
@@ -1281,7 +1291,7 @@ mod tests {
                         .unwrap(),
                 );
             }
-            let mut config = config(&committee, 0, "maximum-timer-durations");
+            let mut config = config(&context, &committee, 0, "maximum-timer-durations");
             config.profile = Profile::new(
                 committee.config.clone(),
                 Role::Validator(Participant::new(0)),
@@ -1333,7 +1343,7 @@ mod tests {
                 vec![Participant::new(4), Participant::new(1)],
                 limits,
             );
-            let mut config = config(&scheme_committee, 0, "producer-map-mismatch");
+            let mut config = config(&context, &scheme_committee, 0, "producer-map-mismatch");
             config.profile = profile(&profile_committee, Role::Validator(Participant::new(0)));
             let _ = Engine::new(context.child("engine"), config);
         });
@@ -1477,7 +1487,7 @@ mod tests {
             );
         }
         let mut planes = planes.into_iter();
-        let mut config = config(&committee, index, prefix);
+        let mut config = config(context, &committee, index, prefix);
         config.automaton = application.clone();
         config.relay = application;
         let engine =
@@ -1544,6 +1554,7 @@ mod tests {
                 "restart-0",
                 &committee.verifier,
                 &Sequential,
+                CacheRef::from_pooler(&context, paged::page_size(4_096), NZUsize!(8)),
             ))
             .await
             .expect("stores reopen");
@@ -1606,8 +1617,11 @@ mod tests {
         });
     }
 
+    #[rstest]
+    #[case(4_096)]
+    #[case(16_384)]
     #[test_traced]
-    fn engine_restart_preserves_every_active_publication_family() {
+    fn engine_restart_preserves_every_active_publication_family(#[case] physical_page_size: u32) {
         let seed = 75;
         let prefix = "typed-obligation-restart";
         let runner = DeterministicRunner::timed(Duration::from_secs(120));
@@ -1638,12 +1652,15 @@ mod tests {
             application.pause_building();
             application.permit_builds(2);
             let mut engine_config = config(
+                &context,
                 &Committee::<MinPk>::new(seed, 6, Limits::new(2, 1).unwrap()),
                 0,
                 prefix,
             );
             engine_config.automaton = application.clone();
             engine_config.relay = application;
+            engine_config.page_cache =
+                CacheRef::from_pooler(&context, paged::page_size(physical_page_size), NZUsize!(2));
             let engine = Engine::new(context.child("typed_first"), engine_config)
                 .with_checkpoint_interval(commonware_utils::NZU64!(2));
             let mut engine = Box::pin(engine.start(
@@ -1781,6 +1798,7 @@ mod tests {
                 &format!("{prefix}-0"),
                 &committee.verifier,
                 &Sequential,
+                CacheRef::from_pooler(&context, paged::page_size(physical_page_size), NZUsize!(2)),
             ))
             .await
             .expect("stores recover");

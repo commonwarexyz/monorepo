@@ -800,6 +800,7 @@ fn main() {
                 blocker: oracle,
                 profile,
                 partition_prefix: String::from("log-multimmit"),
+                page_cache: CacheRef::from_pooler(&context, paged::page_size(16_384), NZUsize!(2)),
                 mailbox_size: NZUsize!(1_024),
             },
         );

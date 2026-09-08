@@ -32,7 +32,9 @@ use commonware_runtime::Storage as _;
 #[cfg(test)]
 use commonware_runtime::telemetry::metrics::count_running_tasks;
 use commonware_runtime::{
-    Clock as _, Handle, Quota, Spawner, Supervisor as _, deterministic,
+    Clock as _, Handle, Quota, Spawner, Supervisor as _,
+    buffer::paged::{self, CacheRef},
+    deterministic,
     mocks::{DelayedSyncContext, PendingSyncs, release_pending_syncs},
 };
 use commonware_utils::{NZUsize, probability, sync::Mutex};
@@ -715,6 +717,7 @@ impl<V: Variant> Cluster<V> {
             blocker: self.oracle.control(me.clone()),
             profile: profile.clone(),
             partition_prefix: format!("cluster-{}-{index}", self.options.seed),
+            page_cache: CacheRef::from_pooler(&self.context, paged::page_size(4_096), NZUsize!(8)),
             mailbox_size: NonZeroUsize::new(128).unwrap(),
         };
         let mut storage_sync_task: Option<Handle<()>> = None;

@@ -54,11 +54,12 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Handle, Metrics as _, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+    buffer::paged::{self, CacheRef},
     deterministic::{Context as DeterministicContext, FaultConfig, Runner as DeterministicRunner},
     mocks::{DeferredSync, DelayedSyncContext, PendingSyncs, next_pending_sync},
     telemetry::{metrics::count_running_tasks, traces::collector::TraceStorage},
 };
-use commonware_utils::{NZU64, channel::oneshot, sync::Mutex};
+use commonware_utils::{NZU64, NZUsize, channel::oneshot, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -575,6 +576,7 @@ impl Node {
             &format!("node-{seed}"),
             &scheme,
             &Sequential,
+            CacheRef::from_pooler(&storage_context, paged::page_size(4_096), NZUsize!(8)),
         ))
         .await
         .expect("stores open");
@@ -4113,6 +4115,7 @@ fn mutable_journal_sync_failure_stops_production_engine() {
                 critical_strategy: Sequential,
                 blocker: NoopBlocker,
                 partition_prefix: "storage-failure-engine".to_owned(),
+                page_cache: CacheRef::from_pooler(&context, paged::page_size(4_096), NZUsize!(8)),
                 mailbox_size: NonZeroUsize::new(64).unwrap(),
             },
         );
@@ -5305,6 +5308,7 @@ fn repeated_pre_ack_recovery_crashes_keep_the_suffix_bounded() {
             &format!("node-{SEED}"),
             &committee.signers[0],
             &Sequential,
+            CacheRef::from_pooler(&context, paged::page_size(4_096), NZUsize!(8)),
         ))
         .await
         .expect("stores recover after repeated pre-ack crashes");

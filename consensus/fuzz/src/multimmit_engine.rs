@@ -17,7 +17,11 @@ use commonware_cryptography::{
 };
 use commonware_p2p::simulated::{Link, Oracle};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+use commonware_runtime::{
+    Clock as _, Runner as _, Supervisor as _,
+    buffer::paged::{self, CacheRef},
+    deterministic,
+};
 use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -281,6 +285,11 @@ impl<V: Variant> Harness<V> {
                 critical_strategy: Sequential,
                 blocker: NoopBlocker,
                 partition_prefix: format!("multimmit-engine-fuzz-{}-{node}", self.seed),
+                page_cache: CacheRef::from_pooler(
+                    &self.context,
+                    paged::page_size(4_096),
+                    NZUsize!(8),
+                ),
                 mailbox_size: NZUsize!(128),
             },
         );
