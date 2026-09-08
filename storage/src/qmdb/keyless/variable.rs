@@ -4,16 +4,12 @@
 
 use crate::{
     Context,
-    journal::{
-        authenticated,
-        contiguous::variable::{self, Config as JournalConfig},
-    },
+    journal::contiguous::variable::{self, Config as JournalConfig},
     merkle::Family,
     qmdb::{
-        Error, ROOT_BAGGING,
+        Error,
         any::value::{VariableEncoding, VariableValue},
         keyless::operation::Operation as BaseOperation,
-        operation::Committable,
     },
 };
 use commonware_codec::Read;
@@ -30,9 +26,6 @@ pub type Db<F, E, V, H, S> =
 /// A compact keyless authenticated db for variable-length data.
 pub type CompactDb<F, E, V, H, C, S> = super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
 
-type Journal<F, E, V, H, S> =
-    authenticated::Journal<F, E, variable::Journal<E, Operation<F, V>>, H, S>;
-
 /// Configuration for a variable-size [keyless](super) authenticated db.
 pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
 
@@ -46,12 +39,28 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher, S: Strategy> Db<F, E, V
         context: E,
         cfg: Config<<Operation<F, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, V, H, S> = Journal::new(
+        Self::init_with_max(context, cfg, None).await
+    }
+
+    /// Recover the last retained commit ending at or below `max_size`.
+    pub async fn init_at_most(
+        context: E,
+        cfg: Config<<Operation<F, V> as Read>::Cfg, S>,
+        max_size: crate::merkle::Location<F>,
+    ) -> Result<Self, Error<F>> {
+        Self::init_with_max(context, cfg, Some(max_size)).await
+    }
+
+    async fn init_with_max(
+        context: E,
+        cfg: Config<<Operation<F, V> as Read>::Cfg, S>,
+        max_size: Option<crate::merkle::Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        let journal = crate::qmdb::init_journal::<F, E, _, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
-            Operation::<F, V>::is_commit,
-            ROOT_BAGGING,
+            max_size,
         )
         .await?;
         Self::init_from_journal(journal, context).await
@@ -77,6 +86,24 @@ where
             context.child("witness"),
             cfg.witness,
             cfg.commit_codec_config,
+            None,
+        )
+        .await
+    }
+
+    /// Recover the latest retained witness at or below an operation-count cap.
+    pub async fn init_at_most(
+        context: E,
+        cfg: CompactConfig<C, S>,
+        max_size: crate::merkle::Location<F>,
+    ) -> Result<Self, Error<F>> {
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(
+            merkle,
+            context.child("witness"),
+            cfg.witness,
+            cfg.commit_codec_config,
+            Some(max_size),
         )
         .await
     }
@@ -171,6 +198,15 @@ mod tests {
         TestCompactDb::init(context, cfg).await.unwrap()
     }
 
+    fn capped_open<F: Family>() -> tests::CappedOpen<TestDb<F>, F> {
+        Box::new(|ctx, cap| {
+            Box::pin(async move {
+                let cfg = db_config("partition", &ctx);
+                TestDb::init_at_most(ctx, cfg, cap).await
+            })
+        })
+    }
+
     fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
         Box::new(|ctx| Box::pin(open_db(ctx)))
     }
@@ -205,14 +241,14 @@ mod tests {
         test_keyless_variable_stale_batch_child_before_parent => run_stale_batch_child_before_parent, db;
         test_keyless_variable_to_batch => run_to_batch, db;
         test_keyless_variable_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, db;
-        test_keyless_variable_rewind_recovery => run_rewind_recovery, reopen;
-        test_keyless_variable_rewind_pruned_target_errors => run_rewind_pruned_target_errors, reopen;
+        test_keyless_variable_rewind_recovery => run_rewind_recovery, capped;
+        test_keyless_variable_rewind_pruned_target_errors => run_rewind_pruned_target_errors, capped;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
-        test_keyless_variable_rewind_restores_floor => run_rewind_restores_floor, db;
+        test_keyless_variable_rewind_restores_floor => run_rewind_restores_floor, capped_floor;
         test_keyless_variable_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
-        test_keyless_variable_rewind_after_reopen_with_floor => run_rewind_after_reopen_with_floor, reopen_indexed;
+        test_keyless_variable_rewind_after_reopen_with_floor => run_rewind_after_reopen_with_floor, capped_indexed;
         test_keyless_variable_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
         test_keyless_variable_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
         test_keyless_variable_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
@@ -372,10 +408,5 @@ mod tests {
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.get(loc));
         is_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_rewind_is_send(db: TestDb<mmr::Family>, loc: crate::merkle::Location<mmr::Family>) {
-        is_send(db.rewind(loc));
     }
 }

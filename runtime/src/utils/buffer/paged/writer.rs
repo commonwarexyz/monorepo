@@ -52,7 +52,10 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use commonware_utils::Widen;
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::{
+    marker::PhantomData,
+    num::{NonZeroU16, NonZeroUsize},
+};
 use tracing::warn;
 
 /// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
@@ -95,8 +98,22 @@ const fn too_big_for_buffer(
     overflows_capacity && has_full_page_after_fill
 }
 
+/// An initialized, append-only paged blob.
+#[commonware_macros::stability(BETA)]
+pub struct Append;
+
+/// A paged blob whose retained end has not yet been published.
+#[commonware_macros::stability(BETA)]
+pub struct Recovering;
+
+/// Exclusive initialization owner. Drop all previous writers and disk-backed readers before
+/// opening recovery. Only this owner may shorten the retained logical prefix.
+#[commonware_macros::stability(BETA)]
+pub type Recovery<B> = Writer<B, Recovering>;
+
 /// Unique writer to a cache-wrapped [Blob].
-pub struct Writer<B: Blob> {
+pub struct Writer<B: Blob, Phase = Append> {
+    phase: PhantomData<Phase>,
     /// The underlying blob being wrapped.
     blob: B,
 
@@ -129,139 +146,7 @@ pub struct Writer<B: Blob> {
     buffer: Buffer,
 }
 
-impl<B: Blob> Writer<B> {
-    /// Wrap `blob` in a [Writer]. `blob` must already hold `original_blob_size` physical bytes;
-    /// reads are cached through `cache_ref` and appends stage in a write buffer of capacity
-    /// `capacity`. Rewinds the blob if necessary so it only contains checksum-validated data.
-    ///
-    /// The blob's tail-page contents must be durable (freshly opened after a crash, or synced
-    /// since the last partial-page rewrite): the discovered checksum slot seeds the writer's
-    /// durable-slot tracking, so wrapping a blob whose tail rewrite is still volatile would
-    /// let a later unsynced flush overwrite the only durable slot.
-    pub async fn new(
-        blob: B,
-        original_blob_size: u64,
-        capacity: usize,
-        cache_ref: CacheRef,
-    ) -> Result<Self, Error> {
-        let page_size: u64 = cache_ref.page_size().widen();
-        let (partial_page_state, pages, invalid_data_found) =
-            Self::read_last_valid_page(&blob, original_blob_size, page_size).await?;
-        if invalid_data_found {
-            // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (page_size + CHECKSUM_SIZE);
-            warn!(
-                original_blob_size,
-                new_blob_size, "truncating blob to remove invalid data"
-            );
-            blob.resize(new_blob_size).await?;
-            blob.sync().await?;
-        }
-
-        let capacity = adjusted_capacity(capacity, page_size);
-        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
-
-        let (current_page, partial_page_state, partial_data) = match partial_page_state {
-            Some((partial_page, crc_record)) => (pages - 1, Some(crc_record), Some(partial_page)),
-            None => (pages, None, None),
-        };
-
-        let buffer = Buffer::from(
-            current_page * page_size,
-            partial_data.unwrap_or_default(),
-            capacity,
-            cache_ref.pool().clone(),
-        );
-
-        Ok(Self {
-            blob,
-            current_page,
-            partial_page_state,
-            durable_page_state: partial_page_state,
-            sync_state: if needs_sync {
-                SyncState::Dirty
-            } else {
-                SyncState::Clean
-            },
-            id: cache_ref.next_id(),
-            cache_ref,
-            buffer,
-        })
-    }
-
-    /// Scans backwards from the end of the blob, stopping when it finds a valid page.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(partial_page, page_count, invalid_data_found)`:
-    ///
-    /// - `partial_page`: If the last valid page is partial (contains fewer than `page_size` logical
-    ///   bytes), returns `Some((data, checksum))` containing the logical data and its active
-    ///   checksum.
-    ///   Returns `None` if the last valid page is full or if no valid pages exist.
-    ///
-    /// - `page_count`: The number of pages in the blob up to and including the last valid page
-    ///   found (whether or not it's partial). Note that it's possible earlier pages may be invalid
-    ///   since this function stops scanning when it finds one valid page.
-    ///
-    /// - `invalid_data_found`: `true` if there are any bytes in the blob that follow the last valid
-    ///   page. Typically the blob should be resized to eliminate them since their integrity cannot
-    ///   be guaranteed.
-    async fn read_last_valid_page(
-        blob: &B,
-        blob_size: u64,
-        page_size: u64,
-    ) -> Result<(Option<(IoBuf, ActiveChecksum)>, u64, bool), Error> {
-        let physical_page_size = page_size + CHECKSUM_SIZE;
-        let partial_bytes = blob_size % physical_page_size;
-        let mut last_page_end = blob_size - partial_bytes;
-
-        // If the last physical page in the blob is truncated, it can't have a valid CRC record and
-        // must be invalid.
-        let mut invalid_data_found = partial_bytes != 0;
-
-        while last_page_end != 0 {
-            // Read the last page and parse its CRC record.
-            // A valid full page remains disk-authoritative and may be read again after startup.
-            let page_start = last_page_end - physical_page_size;
-            let buf = blob
-                .read_at(
-                    page_start,
-                    physical_page_size as usize,
-                    ReadOptions::default(),
-                )
-                .await?
-                .coalesce()
-                .freeze();
-
-            match Checksum::validate_page(buf.as_ref()) {
-                Some(checksum) => {
-                    // Found a valid page.
-                    let len = checksum.len as u64;
-                    if len != page_size {
-                        // The page is partial (logical data doesn't fill the page).
-                        let logical_bytes = buf.slice(..len as usize);
-                        return Ok((
-                            Some((logical_bytes, checksum)),
-                            last_page_end / physical_page_size,
-                            invalid_data_found,
-                        ));
-                    }
-                    // The page is full.
-                    return Ok((None, last_page_end / physical_page_size, invalid_data_found));
-                }
-                None => {
-                    // The page is invalid.
-                    last_page_end = page_start;
-                    invalid_data_found = true;
-                }
-            }
-        }
-
-        // No valid page exists in the blob.
-        Ok((None, 0, invalid_data_found))
-    }
-
+impl<B: Blob, Phase: Send + Sync> Writer<B, Phase> {
     /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
     /// the first byte was written.
     pub async fn append(&mut self, buf: &[u8]) -> Result<u64, Error> {
@@ -765,73 +650,34 @@ impl<B: Blob> Writer<B> {
         (record, ActiveChecksum::new(new_slot, new_len, new_crc))
     }
 
-    /// Durably rewrite a committed page to a shorter partial length.
-    async fn sync_partial_page_shrink(
+    /// Replay at most `max_size` logical bytes without changing the stored suffix.
+    ///
+    /// The terminal physical page must still have a valid checksum covering its retained
+    /// bytes. Buffered data is flushed as for [Self::replay]; this does not establish durability.
+    #[commonware_macros::stability(BETA)]
+    pub async fn replay_prefix(
         &mut self,
-        page: u64,
-        page_size: u64,
-        new_len: u16,
-        new_crc: u32,
-        old_checksum: &ActiveChecksum,
-    ) -> Result<ActiveChecksum, Error> {
-        // Recovery chooses the valid slot with the larger length. While shrinking, the new
-        // checksum must be made durable without becoming authoritative until the old longer slot
-        // can be disabled. The sequence below therefore lets recovery observe either the old page
-        // or the new shorter page, but not a footer where both slots were damaged by one torn write.
-        let physical_page_size = page_size
-            .checked_add(CHECKSUM_SIZE)
-            .ok_or(Error::OffsetOverflow)?;
-        let crc_start = page
+        max_size: u64,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<Replay<B>, Error> {
+        self.flush_internal(true, false).await?;
+        let page_size = self.cache_ref.page_size();
+        let logical_size = max_size.min(self.size());
+        let physical_page_size = u64::from(page_size.get()) + CHECKSUM_SIZE;
+        let pages = logical_size.div_ceil(u64::from(page_size.get()));
+        let physical_size = pages
             .checked_mul(physical_page_size)
-            .and_then(|start| start.checked_add(page_size))
             .ok_or(Error::OffsetOverflow)?;
-        let old_slot = old_checksum.slot;
-        let new_slot = old_slot.other();
-
-        // Stage the new slot with a 0 length and the shrunken page CRC. A crash here leaves the
-        // old slot as the only non-zero valid slot.
-        let new_slot_offset = crc_start
-            .checked_add(new_slot.offset() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        let staged_slot = Checksum::slot_bytes(0, new_crc);
-        self.sync_state
-            .write_at(
-                &self.blob,
-                new_slot_offset,
-                staged_slot.to_vec(),
-                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
-            )
-            .await?;
-
-        // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
-        // both slots may be valid, but recovery still chooses the old longer length.
-        let published_len = Checksum::slot_len_bytes(new_len);
-        self.sync_state
-            .write_at(
-                &self.blob,
-                new_slot_offset,
-                published_len.to_vec(),
-                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
-            )
-            .await?;
-
-        // Clear the old slot entirely. The write stays within the old slot, so it cannot damage
-        // the already-durable shorter checksum, and zeroing the CRC alongside the length keeps a
-        // later torn rewrite of this page from reassembling the retired longer checksum over the
-        // pre-shrink bytes still on the page. Once this lands, the shrunken slot wins.
-        let old_slot_offset = crc_start
-            .checked_add(old_slot.offset() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        self.sync_state
-            .write_at(
-                &self.blob,
-                old_slot_offset,
-                Checksum::slot_bytes(0, 0).to_vec(),
-                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
-            )
-            .await?;
-
-        Ok(ActiveChecksum::new(new_slot, new_len, new_crc))
+        let prefetch = (buffer_size.get() / physical_page_size as usize).max(1);
+        Ok(Replay::new(PageReader::new(
+            self.blob.clone(),
+            physical_size,
+            logical_size,
+            prefetch,
+            page_size,
+            read_options,
+        )))
     }
 
     /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
@@ -887,19 +733,6 @@ impl<B: Blob> Writer<B> {
             read_options,
         );
         Ok(Replay::new(reader))
-    }
-
-    /// Flush buffered data and capture an immutable [`super::Sealed`] view without consuming the
-    /// writer.
-    ///
-    /// This writes buffered bytes to the blob layout but does not make them durable. Call
-    /// [`Self::sync`] if the returned handle's bytes must survive a crash.
-    ///
-    /// If this writer later rewinds or truncates into the returned handle's range, reads from that
-    /// handle may observe unspecified contents.
-    pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
-        self.flush_internal(true, false).await?;
-        Ok(self.sealed_handle(self.cache_ref.next_id()))
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -1009,6 +842,104 @@ impl<B: Blob> Writer<B> {
         Ok(valid_len)
     }
 
+    /// Wait for any started sync to complete without starting a new sync.
+    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        self.sync_state.wait_for_pending().await
+    }
+
+    /// Page-cache id used for reads. Exposed for tests.
+    #[cfg(test)]
+    pub(super) const fn cache_id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl<B: Blob> Writer<B> {
+    /// Open a paged blob, repairing incomplete tail pages before publishing its writer.
+    /// The existing tail must be durable, and no previous writer or disk-backed reader may
+    /// access this storage incarnation during initialization.
+    pub async fn new(
+        blob: B,
+        size: u64,
+        capacity: usize,
+        cache_ref: CacheRef,
+    ) -> Result<Self, Error> {
+        Ok(Recovery::open(blob, size, capacity, cache_ref)
+            .await?
+            .finish())
+    }
+    /// Scans backwards from the end of the blob, stopping when it finds a valid page.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(partial_page, page_count, invalid_data_found)`:
+    ///
+    /// - `partial_page`: If the last valid page is partial (contains fewer than `page_size` logical
+    ///   bytes), returns `Some((data, checksum))` containing the logical data and its active
+    ///   checksum.
+    ///   Returns `None` if the last valid page is full or if no valid pages exist.
+    ///
+    /// - `page_count`: The number of pages in the blob up to and including the last valid page
+    ///   found (whether or not it's partial). Note that it's possible earlier pages may be invalid
+    ///   since this function stops scanning when it finds one valid page.
+    ///
+    /// - `invalid_data_found`: `true` if there are any bytes in the blob that follow the last valid
+    ///   page. Typically the blob should be resized to eliminate them since their integrity cannot
+    ///   be guaranteed.
+    async fn read_last_valid_page(
+        blob: &B,
+        blob_size: u64,
+        page_size: u64,
+    ) -> Result<(Option<(IoBuf, ActiveChecksum)>, u64, bool), Error> {
+        let physical_page_size = page_size + CHECKSUM_SIZE;
+        let partial_bytes = blob_size % physical_page_size;
+        let mut last_page_end = blob_size - partial_bytes;
+
+        // If the last physical page in the blob is truncated, it can't have a valid CRC record and
+        // must be invalid.
+        let mut invalid_data_found = partial_bytes != 0;
+
+        while last_page_end != 0 {
+            // Read the last page and parse its CRC record.
+            // A valid full page remains disk-authoritative and may be read again after startup.
+            let page_start = last_page_end - physical_page_size;
+            let buf = blob
+                .read_at(
+                    page_start,
+                    physical_page_size as usize,
+                    ReadOptions::default(),
+                )
+                .await?
+                .coalesce()
+                .freeze();
+
+            match Checksum::validate_page(buf.as_ref()) {
+                Some(checksum) => {
+                    // Found a valid page.
+                    let len = checksum.len as u64;
+                    if len != page_size {
+                        // The page is partial (logical data doesn't fill the page).
+                        let logical_bytes = buf.slice(..len as usize);
+                        return Ok((
+                            Some((logical_bytes, checksum)),
+                            last_page_end / physical_page_size,
+                            invalid_data_found,
+                        ));
+                    }
+                    // The page is full.
+                    return Ok((None, last_page_end / physical_page_size, invalid_data_found));
+                }
+                None => {
+                    // The page is invalid.
+                    last_page_end = page_start;
+                    invalid_data_found = true;
+                }
+            }
+        }
+
+        // No valid page exists in the blob.
+        Ok((None, 0, invalid_data_found))
+    }
     /// Read and validate one page, returning its logical bytes and the range they cover.
     async fn read_page(
         blob: &B,
@@ -1023,7 +954,6 @@ impl<B: Blob> Writer<B> {
         let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
         Ok((logical, start, end))
     }
-
     /// Read a logical range directly from a raw paged blob, validating every page it spans.
     ///
     /// Returns [Error::BlobInsufficientLength] when valid page contents do not cover the whole
@@ -1068,7 +998,6 @@ impl<B: Blob> Writer<B> {
         }
         Ok(out)
     }
-
     /// Read the terminal logical range of a raw paged blob and return its logical size.
     ///
     /// The blob must contain only complete physical pages. The last page is validated first to
@@ -1123,38 +1052,134 @@ impl<B: Blob> Writer<B> {
         assert_eq!(out.len(), len);
         Ok((logical_size, out))
     }
-
-    /// Wait for any started sync to complete without starting a new sync.
-    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
-        self.sync_state.wait_for_pending().await
+    /// Flush buffered data and capture an immutable [`super::Sealed`] view without consuming the
+    /// writer.
+    ///
+    /// This writes buffered bytes to the blob layout but does not make them durable. Call
+    /// [`Self::sync`] if the returned handle's bytes must survive a crash.
+    ///
+    /// Later appends preserve this view, including its frozen partial page. Close all
+    /// disk-backed views before reopening the storage for initialization repair.
+    pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
+        self.flush_internal(true, false).await?;
+        Ok(self.sealed_handle(self.id))
     }
+    /// Construct an immutable read handle for the current blob state.
+    fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
+        let page_size: u64 = self.cache_ref.page_size().widen();
+        let full_pages = self.current_page;
+        assert_eq!(
+            full_pages.checked_mul(page_size),
+            Some(self.buffer.offset),
+            "flushed page count is inconsistent with the buffer offset"
+        );
+        let partial_page = if self.buffer.is_empty() {
+            None
+        } else {
+            Some(self.buffer.slice(..))
+        };
+        super::Sealed::new(
+            self.blob.clone(),
+            self.buffer.size(),
+            partial_page,
+            self.cache_ref.clone(),
+            id,
+        )
+    }
+    /// Consume the write handle, flushing buffered bytes and beginning a sync of the blob.
+    ///
+    /// Returns an immutable [`super::Sealed`] read handle plus a completion handle for the started
+    /// sync. Reads through the [`super::Sealed`] handle observe flushed bytes immediately;
+    /// durability isn't guaranteed until the sync handle completes.
+    pub async fn seal(mut self) -> Result<(super::Sealed<B>, Handle<()>), Error> {
+        self.sync_state.wait_for_pending().await?;
+        self.flush_internal(true, false).await?;
+        let handle = self.sync_state.start_sync(&self.blob).await;
+        Ok((self.sealed_handle(self.id), handle))
+    }
+}
 
-    /// Resize the blob to the provided logical `size`.
+impl<B: Blob> Recovery<B> {
+    /// Open `blob` for initialization repair. `blob` must already hold `original_blob_size` physical bytes;
+    /// reads are cached through `cache_ref` and appends stage in a write buffer of capacity
+    /// `capacity`. Repairs the blob if necessary so it only contains checksum-validated data.
     ///
-    /// This truncates the blob to contain only `size` logical bytes. The physical blob size will
-    /// be adjusted to include the necessary CRC records for the remaining pages.
-    ///
-    /// # Warning
-    ///
-    /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
-    /// - Concurrent readers which try to read past the new size during the resize may error.
-    /// - The resize is not guaranteed durable until the next sync.
-    pub async fn resize(&mut self, size: u64) -> Result<(), Error> {
-        let current_size = self.buffer.size();
-        if size == current_size {
-            return Ok(());
+    /// The blob's tail-page contents must be durable (freshly opened after a crash, or synced
+    /// since the last partial-page rewrite): the discovered checksum slot seeds the writer's
+    /// durable-slot tracking, so wrapping a blob whose tail rewrite is still volatile would
+    /// let a later unsynced flush overwrite the only durable slot.
+    pub async fn open(
+        blob: B,
+        original_blob_size: u64,
+        capacity: usize,
+        cache_ref: CacheRef,
+    ) -> Result<Self, Error> {
+        let page_size: u64 = cache_ref.page_size().widen();
+        let (partial_page_state, pages, invalid_data_found) =
+            Writer::<B>::read_last_valid_page(&blob, original_blob_size, page_size).await?;
+        if invalid_data_found {
+            // Invalid data was detected, trim it from the blob.
+            let new_blob_size = pages * (page_size + CHECKSUM_SIZE);
+            warn!(
+                original_blob_size,
+                new_blob_size, "truncating blob to remove invalid data"
+            );
+            blob.resize(new_blob_size).await?;
+            blob.sync().await?;
         }
 
-        // Handle growing by appending zero bytes.
-        if size > current_size {
-            let zeros_needed = (size - current_size) as usize;
-            let mut zeros = self.cache_ref.pool().alloc(zeros_needed);
-            zeros.put_bytes(0, zeros_needed);
-            self.append_owned(zeros.freeze()).await?;
-            return Ok(());
-        }
+        let capacity = adjusted_capacity(capacity, page_size);
+        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
-        self.shrink(size).await
+        let (current_page, partial_page_state, partial_data) = match partial_page_state {
+            Some((partial_page, crc_record)) => (pages - 1, Some(crc_record), Some(partial_page)),
+            None => (pages, None, None),
+        };
+
+        let buffer = Buffer::from(
+            current_page * page_size,
+            partial_data.unwrap_or_default(),
+            capacity,
+            cache_ref.pool().clone(),
+        );
+
+        Ok(Self {
+            phase: PhantomData,
+            blob,
+            current_page,
+            partial_page_state,
+            durable_page_state: partial_page_state,
+            sync_state: if needs_sync {
+                SyncState::Dirty
+            } else {
+                SyncState::Clean
+            },
+            id: cache_ref.next_id(),
+            cache_ref,
+            buffer,
+        })
+    }
+    /// Publish the selected prefix as an append-only writer. Repairs made by
+    /// [Self::truncate] are already durable; appended repair bytes follow ordinary sync rules.
+    pub fn finish(self) -> Writer<B> {
+        Writer {
+            phase: PhantomData,
+            blob: self.blob,
+            current_page: self.current_page,
+            partial_page_state: self.partial_page_state,
+            durable_page_state: self.durable_page_state,
+            sync_state: self.sync_state,
+            id: self.id,
+            cache_ref: self.cache_ref,
+            buffer: self.buffer,
+        }
+    }
+    /// Durably retain at most `size` logical bytes. An overshooting cap leaves the blob unchanged.
+    pub async fn truncate(&mut self, size: u64) -> Result<(), Error> {
+        if size < self.size() {
+            self.shrink(size).await?;
+        }
+        self.sync().await
     }
 
     /// Coordinate the dispatch logic for shrinking the blob.
@@ -1198,13 +1223,11 @@ impl<B: Blob> Writer<B> {
                 .await?;
         }
 
-        // Evict cached pages at or beyond the new full-page boundary. The page at
-        // `full_pages` (if partial) is now owned by the tip buffer, and anything above is
-        // beyond the new size. Leaving their pre-resize contents in the cache
-        // lets `try_read_sync_into` (whose reads below the tip boundary come straight from
-        // the page cache) observe stale bytes once
-        // the tip is repopulated.
-        self.cache_ref.invalidate_from(self.id, full_pages);
+        // Only full pages are cached. Reusing an earlier page as a tail invalidates its
+        // cached contents; shortening the current partial page leaves cached pages intact.
+        if full_pages < self.current_page {
+            self.id = self.cache_ref.next_id();
+        }
 
         if partial_bytes > 0 {
             return self
@@ -1221,7 +1244,6 @@ impl<B: Blob> Writer<B> {
 
         Ok(())
     }
-
     /// Perform a shrink to a partial page tip and make the shorter CRC slot authoritative.
     async fn shrink_to_partial(
         &mut self,
@@ -1271,46 +1293,73 @@ impl<B: Blob> Writer<B> {
 
         Ok(())
     }
+    /// Durably rewrite a committed page to a shorter partial length.
+    async fn sync_partial_page_shrink(
+        &mut self,
+        page: u64,
+        page_size: u64,
+        new_len: u16,
+        new_crc: u32,
+        old_checksum: &ActiveChecksum,
+    ) -> Result<ActiveChecksum, Error> {
+        // Recovery chooses the valid slot with the larger length. While shrinking, the new
+        // checksum must be made durable without becoming authoritative until the old longer slot
+        // can be disabled. The sequence below therefore lets recovery observe either the old page
+        // or the new shorter page, but not a footer where both slots were damaged by one torn write.
+        let physical_page_size = page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        let crc_start = page
+            .checked_mul(physical_page_size)
+            .and_then(|start| start.checked_add(page_size))
+            .ok_or(Error::OffsetOverflow)?;
+        let old_slot = old_checksum.slot;
+        let new_slot = old_slot.other();
 
-    /// Page-cache id used for reads. Exposed for tests.
-    #[cfg(test)]
-    pub(super) const fn cache_id(&self) -> u64 {
-        self.id
-    }
+        // Stage the new slot with a 0 length and the shrunken page CRC. A crash here leaves the
+        // old slot as the only non-zero valid slot.
+        let new_slot_offset = crc_start
+            .checked_add(new_slot.offset() as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        let staged_slot = Checksum::slot_bytes(0, new_crc);
+        self.sync_state
+            .write_at(
+                &self.blob,
+                new_slot_offset,
+                staged_slot.to_vec(),
+                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+            )
+            .await?;
 
-    /// Construct an immutable read handle for the current blob state.
-    fn sealed_handle(&self, id: u64) -> super::Sealed<B> {
-        let page_size: u64 = self.cache_ref.page_size().widen();
-        let full_pages = self.current_page;
-        assert_eq!(
-            full_pages.checked_mul(page_size),
-            Some(self.buffer.offset),
-            "flushed page count is inconsistent with the buffer offset"
-        );
-        let partial_page = if self.buffer.is_empty() {
-            None
-        } else {
-            Some(self.buffer.slice(..))
-        };
-        super::Sealed::new(
-            self.blob.clone(),
-            self.buffer.size(),
-            partial_page,
-            self.cache_ref.clone(),
-            id,
-        )
-    }
+        // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
+        // both slots may be valid, but recovery still chooses the old longer length.
+        let published_len = Checksum::slot_len_bytes(new_len);
+        self.sync_state
+            .write_at(
+                &self.blob,
+                new_slot_offset,
+                published_len.to_vec(),
+                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+            )
+            .await?;
 
-    /// Consume the write handle, flushing buffered bytes and beginning a sync of the blob.
-    ///
-    /// Returns an immutable [`super::Sealed`] read handle plus a completion handle for the started
-    /// sync. Reads through the [`super::Sealed`] handle observe flushed bytes immediately;
-    /// durability isn't guaranteed until the sync handle completes.
-    pub async fn seal(mut self) -> Result<(super::Sealed<B>, Handle<()>), Error> {
-        self.sync_state.wait_for_pending().await?;
-        self.flush_internal(true, false).await?;
-        let handle = self.sync_state.start_sync(&self.blob).await;
-        Ok((self.sealed_handle(self.id), handle))
+        // Clear the old slot entirely. The write stays within the old slot, so it cannot damage
+        // the already-durable shorter checksum, and zeroing the CRC alongside the length keeps a
+        // later torn rewrite of this page from reassembling the retired longer checksum over the
+        // pre-shrink bytes still on the page. Once this lands, the shrunken slot wins.
+        let old_slot_offset = crc_start
+            .checked_add(old_slot.offset() as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        self.sync_state
+            .write_at(
+                &self.blob,
+                old_slot_offset,
+                Checksum::slot_bytes(0, 0).to_vec(),
+                WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+            )
+            .await?;
+
+        Ok(ActiveChecksum::new(new_slot, new_len, new_crc))
     }
 }
 
@@ -1339,6 +1388,38 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[test]
+    fn test_replay_prefix_preserves_suffix() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, size) = context.open("prefix-replay", b"blob").await.unwrap();
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache).await.unwrap();
+            let data: Vec<u8> = (0..400).map(|i| (i % 251) as u8).collect();
+            writer.append(&data).await.unwrap();
+            writer.sync().await.unwrap();
+            for cap in [0, 1, 103, 150, 206, 400, u64::MAX] {
+                let end = cap.min(data.len() as u64) as usize;
+                let mut replay = writer
+                    .replay_prefix(cap, NZUsize!(4096), ReadOptions::default())
+                    .await
+                    .unwrap();
+                assert!(!replay.ensure(end + 1).await.unwrap());
+                assert_eq!(replay.remaining(), end);
+                assert_eq!(replay.copy_to_bytes(end).as_ref(), &data[..end]);
+                assert_eq!(writer.size(), data.len() as u64);
+            }
+            assert_eq!(
+                writer
+                    .read_at(0, data.len())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                data.as_slice()
+            );
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_writes_use_uncached_hint() {
@@ -3059,7 +3140,7 @@ mod tests {
 
             let target_size = (BUFFER_SIZE + PAGE_SIZE.get() as usize) as u64;
             let resize = context.child("resize_grow").spawn(move |_| async move {
-                writer.resize(target_size).await.unwrap();
+                writer.append(&vec![0; target_size as usize]).await.unwrap();
                 writer
             });
 
@@ -3093,7 +3174,9 @@ mod tests {
             let inner = SyncTrackingBlob::new();
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+            let mut writer = Recovery::open(blob, 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
 
             // Build durable pages, then start a sync for a newer partial page.
             let data = vec![3; PAGE_SIZE.get() as usize * 2];
@@ -3105,7 +3188,7 @@ mod tests {
             let physical_size = inner.size();
 
             let resize = context.child("resize_shrink").spawn(move |_| async move {
-                writer.resize(PAGE_SIZE.get() as u64).await.unwrap();
+                writer.truncate(PAGE_SIZE.get() as u64).await.unwrap();
                 writer
             });
 
@@ -4729,7 +4812,7 @@ mod tests {
             let blob = PartialWriteBlob::new(blob, usize::MAX, 0);
             let read_options = blob.read_options();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+            let mut writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -4739,7 +4822,7 @@ mod tests {
 
             // The shrink retains the prefix in the in-memory tip, so its backing read requests
             // DONT_CACHE.
-            writer.resize(50).await.unwrap();
+            writer.truncate(50).await.unwrap();
 
             assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE]);
         });
@@ -4760,7 +4843,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -4790,9 +4873,9 @@ mod tests {
             .unwrap();
             blob.sync().await.unwrap();
 
-            // Open the blob - Writer::new() validates the LAST page (page 2), which is still valid.
+            // Open the blob - Recovery::open() validates the LAST page (page 2), which is still valid.
             // So it should open successfully with size 250.
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size(), 250);
@@ -4800,13 +4883,37 @@ mod tests {
             // Try to shrink to 150 bytes, which ends in page 1 (the corrupted page).
             // 150 bytes = page 0 (103 full) + page 1 (47 partial).
             // This should fail because page 1's CRC is corrupted.
-            let result = append.resize(150).await;
+            let result = append.truncate(150).await;
             assert!(
                 matches!(result, Err(crate::Error::InvalidChecksum)),
                 "Expected InvalidChecksum when shrinking to corrupted page, got: {:?}",
                 result
             );
         });
+    }
+
+    #[test]
+    fn test_recovery_preserves_cached_prefix_on_publication() {
+        for shrink in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+                let (blob, size) = context.open("recovery-cache", b"blob").await.unwrap();
+                let mut recovery = Recovery::open(blob, size, BUFFER_SIZE, cache)
+                    .await
+                    .unwrap();
+                let page = PAGE_SIZE.get() as usize;
+                recovery.append(&vec![0xA5; page * 2 + 20]).await.unwrap();
+                recovery.sync().await.unwrap();
+                recovery.read_at(0, page).await.unwrap();
+                if shrink {
+                    recovery.truncate((page * 2 + 10) as u64).await.unwrap();
+                }
+                let writer = recovery.finish();
+                let mut cached = vec![0; page];
+                assert!(writer.try_read_sync_into(&mut cached, 0));
+                assert_eq!(cached, vec![0xA5; page]);
+            });
+        }
     }
 
     #[test]
@@ -4822,7 +4929,7 @@ mod tests {
                 .open("test_partition", b"resize_invalidates_cache")
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Recovery::open(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -4839,7 +4946,7 @@ mod tests {
             assert_eq!(probe, vec![0xAAu8; 16]);
 
             // Rewind to 0 (crossing the page boundary) and append a new, distinct pattern.
-            append.resize(0).await.unwrap();
+            append.truncate(0).await.unwrap();
             let new_bytes = vec![0xBBu8; 16];
             append.append(&new_bytes).await.unwrap();
 
@@ -4855,7 +4962,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_fetch_cannot_repopulate_live_cache_after_resize() {
+    fn test_snapshot_fetch_populates_shared_cache_across_append() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -4884,7 +4991,7 @@ mod tests {
             writer.append(&old_page1).await.unwrap();
             writer.sync().await.unwrap();
 
-            writer.cache_ref.invalidate_from(writer.id, 1);
+            writer.cache_ref.clear();
 
             let snapshot = writer.snapshot().await.unwrap();
             let snapshot_task = context
@@ -4892,7 +4999,6 @@ mod tests {
                 .spawn(move |_| async move { snapshot.read_at(page_size as u64, page_size).await });
             started_rx.await.expect("snapshot read never started");
 
-            writer.resize(page_size as u64).await.unwrap();
             let new_page1 = vec![0x33u8; page_size];
             writer.append(&new_page1).await.unwrap();
             writer.sync().await.unwrap();
@@ -4907,12 +5013,12 @@ mod tests {
 
             let mut probe = vec![0u8; page_size];
             assert!(writer.try_read_sync_into(&mut probe, page_size as u64));
-            assert_eq!(probe, new_page1);
+            assert_eq!(probe, old_page1);
         });
     }
 
     #[test]
-    fn test_resize_shrink_allowed_while_snapshot_alive() {
+    fn test_append_preserves_snapshot_partial_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -4937,13 +5043,15 @@ mod tests {
             assert_eq!(read.as_ref(), data.as_slice());
 
             // Growing appends after the snapshot's frozen range, so it cannot invalidate it.
-            append.resize(snapshot_size + 3).await.unwrap();
+            append.append(&[0; 3]).await.unwrap();
             assert_eq!(append.size(), snapshot_size + 3);
 
-            // Shrinking while old handles exist is allowed. Those handles remain memory-safe, but
-            // future reads from ranges reused by the writer are unspecified.
-            append.resize(snapshot_size - 1).await.unwrap();
-            assert_eq!(append.size(), snapshot_size - 1);
+            let original = snapshot_clone
+                .read_at(0, data.len())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(original.as_ref(), data.as_slice());
             assert_eq!(snapshot_clone.size(), snapshot_size);
         });
     }
@@ -5037,7 +5145,7 @@ mod tests {
                 .open("test_partition", b"resize_same_size")
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Recovery::open(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -5045,7 +5153,7 @@ mod tests {
             assert_eq!(append.size(), 11);
 
             // Resize to same size. Should succeed.
-            append.resize(11).await.unwrap();
+            append.truncate(11).await.unwrap();
             assert_eq!(append.size(), 11);
 
             // Verify content is still readable and intact.
@@ -5066,7 +5174,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink")
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -5075,14 +5183,14 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            append.resize(45).await.unwrap();
+            append.truncate(45).await.unwrap();
             drop(append);
 
             let (blob, size) = context
                 .open("test_partition", b"same_page_shrink")
                 .await
                 .unwrap();
-            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), 45);
@@ -5103,7 +5211,7 @@ mod tests {
                 .await
                 .unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
+            let mut writer = Recovery::open(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -5111,7 +5219,7 @@ mod tests {
             let data: Vec<u8> = (1u8..=80).collect();
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
-            writer.resize(50).await.unwrap();
+            writer.truncate(50).await.unwrap();
             drop(writer);
 
             // Model a rewrite of the tail page back to 80 bytes torn down to only the retired
@@ -5131,7 +5239,7 @@ mod tests {
                 .await
                 .unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let recovered = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let recovered = Recovery::open(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(recovered.size(), 50);
@@ -5152,7 +5260,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_interrupted")
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data[..40]).await.unwrap();
@@ -5168,12 +5276,12 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 1, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let mut append = Writer::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
             assert!(
-                append.resize(45).await.is_err(),
+                append.truncate(45).await.is_err(),
                 "phase-1 partial write should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 1);
@@ -5184,7 +5292,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_interrupted")
                 .await
                 .unwrap();
-            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), 50);
@@ -5209,7 +5317,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_len_stage")
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data[..255]).await.unwrap();
@@ -5225,12 +5333,13 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 2, 1);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let mut append = Writer::new(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
-                .await
-                .unwrap();
+            let mut append =
+                Recovery::open(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
 
             assert!(
-                append.resize(257).await.is_err(),
+                append.truncate(257).await.is_err(),
                 "length-stage partial write should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 2);
@@ -5241,7 +5350,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_len_stage")
                 .await
                 .unwrap();
-            let append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref)
+            let append = Recovery::open(blob, size, LARGE_BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), 300);
@@ -5265,7 +5374,7 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob.clone(), 4, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let mut append = Writer::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data[..48]).await.unwrap();
@@ -5291,7 +5400,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             assert!(
-                append.resize(45).await.is_err(),
+                append.truncate(45).await.is_err(),
                 "phase-1 partial write should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 4);
@@ -5302,7 +5411,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_fallback_slot")
                 .await
                 .unwrap();
-            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), 50);
@@ -5325,20 +5434,20 @@ mod tests {
                 .open("test_partition", b"full_page_to_partial")
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            append.resize(target).await.unwrap();
+            append.truncate(target).await.unwrap();
             drop(append);
 
             let (blob, size) = context
                 .open("test_partition", b"full_page_to_partial")
                 .await
                 .unwrap();
-            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), target);
@@ -5361,7 +5470,7 @@ mod tests {
                 .open("test_partition", b"full_page_to_partial_interrupted")
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data).await.unwrap();
@@ -5375,12 +5484,12 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 1, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let mut append = Writer::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
             assert!(
-                append.resize(target).await.is_err(),
+                append.truncate(target).await.is_err(),
                 "phase-1 partial write should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 1);
@@ -5391,7 +5500,7 @@ mod tests {
                 .open("test_partition", b"full_page_to_partial_interrupted")
                 .await
                 .unwrap();
-            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), page_size * 2);
@@ -5423,7 +5532,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let mut append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             // Put the old authoritative CRC in slot 1, so the shorter CRC will be staged in slot
@@ -5444,12 +5553,13 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 3, 1);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let mut append = Writer::new(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
-                .await
-                .unwrap();
+            let mut append =
+                Recovery::open(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
 
             assert!(
-                append.resize(40).await.is_err(),
+                append.truncate(40).await.is_err(),
                 "old-slot length invalidation should fail"
             );
             assert_eq!(write_count.load(Ordering::SeqCst), 3);
@@ -5463,7 +5573,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref)
+            let append = Recovery::open(blob, size, LARGE_BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), 40);
@@ -5478,7 +5588,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut append = Recovery::open(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -5488,7 +5598,7 @@ mod tests {
             append.sync().await.unwrap();
 
             // Shrinking within the same physical page only rewrites CRC metadata.
-            append.resize(50).await.unwrap();
+            append.truncate(50).await.unwrap();
             append.sync().await.unwrap();
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
@@ -5504,7 +5614,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut append = Recovery::open(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -5515,7 +5625,7 @@ mod tests {
 
             // Shrinking from two physical pages to one partial page must also make the resize
             // durable.
-            append.resize(50).await.unwrap();
+            append.truncate(50).await.unwrap();
             append.sync().await.unwrap();
 
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
@@ -5545,7 +5655,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut append = Recovery::open(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -5558,7 +5668,7 @@ mod tests {
             append.sync().await.unwrap();
 
             // Shrinking to a page boundary resizes the blob but does not rewrite CRC metadata.
-            append.resize(PAGE_SIZE.get() as u64).await.unwrap();
+            append.truncate(PAGE_SIZE.get() as u64).await.unwrap();
             append.sync().await.unwrap();
 
             // Only the resize needs a full sync, no additional writes are emitted by the shrink.
@@ -5568,7 +5678,7 @@ mod tests {
             assert_eq!(range_syncs, 1);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let reopened = Recovery::open(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(reopened.size(), PAGE_SIZE.get() as u64);
@@ -5592,7 +5702,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -5607,13 +5717,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let mut append = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size(), 5);
 
             append.append(&[6, 7, 8]).await.unwrap();
-            append.resize(6).await.unwrap();
+            append.truncate(6).await.unwrap();
             append.sync().await.unwrap();
 
             let data: Vec<u8> = append.read_at(0, 6).await.unwrap().coalesce().into();
@@ -5785,7 +5895,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rdr_rsz").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut writer = Recovery::open(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -5797,7 +5907,7 @@ mod tests {
 
             // Shrink below the last observed size.
             let new_size = (page_size / 2) as u64;
-            writer.resize(new_size).await.unwrap();
+            writer.truncate(new_size).await.unwrap();
 
             // Reads past the new size fail cleanly.
             let err = writer

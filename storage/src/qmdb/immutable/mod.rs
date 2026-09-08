@@ -550,105 +550,6 @@ where
         Ok(self)
     }
 
-    /// Rewind the database to `size` operations, where `size` is the location of the next append.
-    ///
-    /// This rewinds both the operations journal and its Merkle structure to the historical
-    /// state at `size`, and removes rewound set operations from the in-memory snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when:
-    /// - `size` is not a valid rewind target
-    /// - the target's required logical range is not fully retained (for immutable, this means the
-    ///   oldest retained location is already beyond the rewind boundary)
-    /// - `size - 1` is not a commit operation
-    ///
-    /// Any error from this method is fatal for this handle. Rewind may mutate journal state
-    /// before this method finishes rebuilding in-memory rewind state. Callers must drop this
-    /// database handle after any `Err` from `rewind` and reopen from storage.
-    ///
-    /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
-    /// [`Immutable::sync`] completes, or until the handle returned by a subsequent
-    /// [`Immutable::start_sync`] completes.
-    #[tracing::instrument(name = "qmdb.immutable.db.rewind", level = "info", skip_all)]
-    #[boxed]
-    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
-        let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
-        if rewind_size == current_size {
-            return Ok(self);
-        }
-        if rewind_size == 0 || rewind_size > current_size {
-            return Err(Error::Journal(crate::journal::Error::InvalidRewind(
-                rewind_size,
-            )));
-        }
-
-        let (rewind_last_loc, rewind_floor, rewound_keys) = {
-            let bounds = self.journal.bounds();
-            let rewind_last_loc = Location::new(rewind_size - 1);
-            if rewind_size <= bounds.start {
-                return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    *rewind_last_loc,
-                )));
-            }
-            let rewind_last_op = self.journal.read(*rewind_last_loc).await?;
-            let Operation::Commit(_, rewind_floor) = &rewind_last_op else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
-            };
-            let rewind_floor = *rewind_floor;
-            if *rewind_floor < bounds.start {
-                return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    *rewind_floor,
-                )));
-            }
-
-            let mut rewound_keys = Vec::new();
-            for loc in rewind_size..current_size {
-                if let Operation::Set(key, _) = self.journal.read(loc).await? {
-                    rewound_keys.push(key);
-                }
-            }
-
-            (rewind_last_loc, rewind_floor, rewound_keys)
-        };
-
-        let old_floor = self.inactivity_floor_loc;
-
-        // Journal rewind happens before in-memory snapshot updates. If a later step fails, this
-        // handle may be internally diverged and must be dropped by the caller.
-        self.journal = self.journal.rewind(rewind_size).await?;
-
-        // Remove keys that were set in the range [rewind_size, current_size) from the snapshot.
-        let rewind_loc = Location::<F>::new(rewind_size);
-        for key in &rewound_keys {
-            // Filter by location to make sure we don't also prune keys that happen to collide.
-            self.snapshot.retain(key, |loc| *loc < rewind_loc);
-        }
-
-        // If the rewind target has a lower floor than the current snapshot was
-        // built from, insert keys from the gap [rewind_floor, old_floor) that
-        // were excluded by the higher-floor reconstruction. A key written more
-        // than once may end up with multiple snapshot entries, and reads of it
-        // may return any of its written values.
-        if rewind_floor < old_floor {
-            let gap_end = core::cmp::min(*old_floor, rewind_size);
-            for loc in *rewind_floor..gap_end {
-                if let Operation::Set(key, _) = self.journal.journal.read(loc).await? {
-                    self.snapshot.insert(&key, Location::new(loc));
-                }
-            }
-        }
-
-        self.last_commit_loc = rewind_last_loc;
-        self.inactivity_floor_loc = rewind_floor;
-        let inactive_peaks = F::inactive_peaks(size, rewind_floor);
-        self.root = self.journal.root(inactive_peaks)?;
-        self.update_metrics();
-
-        Ok(self)
-    }
-
     /// Return the canonical QMDB root of the db.
     pub const fn root(&self) -> H::Digest {
         self.root
@@ -926,13 +827,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
         let bounds = db.bounds();
         assert_eq!(bounds.end, 1);
         assert_eq!(bounds.start, Location::new(0));
@@ -948,7 +851,7 @@ pub(super) mod tests {
             // Don't merkleize/apply -- simulate failed commit
         }
         drop(db);
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.root(), root);
         assert_eq!(db.bounds().end, 1);
 
@@ -960,7 +863,7 @@ pub(super) mod tests {
         let root = db.root();
         drop(db);
 
-        let db = open_db(context.child("third")).await;
+        let db = open_db(context.child("third"), None).await.unwrap();
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -971,13 +874,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
         let v1 = Sha256::fill(3u8);
@@ -993,7 +898,7 @@ pub(super) mod tests {
         let committed_root = db.root();
         drop(db);
 
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.bounds(), committed_bounds);
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
@@ -1007,14 +912,16 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with 2 keys.
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -1064,7 +971,7 @@ pub(super) mod tests {
 
         // Reopen, make sure state is restored to last commit point.
         drop(db); // Simulate failed commit
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert!(db.get(&k3).await.unwrap().is_none());
         assert_eq!(db.root(), root);
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
@@ -1081,13 +988,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(10u8);
@@ -1116,13 +1025,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.child("first")).await;
+        let mut db = open_db(context.child("first"), None).await.unwrap();
 
         for i in 0..20u8 {
             let key = Sha256::fill(i);
@@ -1165,13 +1076,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         // Fill more than one journal blob and establish a durable baseline whose floor still
         // requires the oldest blob.
@@ -1204,7 +1117,7 @@ pub(super) mod tests {
 
         // Reopen must produce one coherent state. In particular, it must not recover the old
         // floor after the prune has removed operations that floor still needs.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert!(db.bounds().start <= db.inactivity_floor_loc());
         let recovered_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
         assert!(
@@ -1223,13 +1136,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared + PartialEq + core::fmt::Debug,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let seed = db
             .new_batch()
@@ -1362,13 +1277,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -1415,14 +1332,16 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let mut batch = db.new_batch();
         for i in 0u64..2_000 {
@@ -1439,7 +1358,7 @@ pub(super) mod tests {
         let root = db.root();
         drop(db);
 
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(root, db.root());
         assert_eq!(db.bounds().end, 2_000 + 2);
         for i in 0u64..2_000 {
@@ -1469,7 +1388,9 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
@@ -1477,7 +1398,7 @@ pub(super) mod tests {
     {
         // Insert 1000 keys then sync.
         const ELEMENTS: u64 = 1000;
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let mut batch = db.new_batch();
         for i in 0u64..ELEMENTS {
@@ -1505,14 +1426,14 @@ pub(super) mod tests {
 
         // Recovery should replay the log to regenerate the merkle structure.
         // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.bounds().end, 2003);
         let root = db.root();
         assert_ne!(root, halfway_root);
 
         // Drop & reopen could preserve the final commit.
         drop(db);
-        let db = open_db(context.child("third")).await;
+        let db = open_db(context.child("third"), None).await.unwrap();
         assert_eq!(db.bounds().end, 2003);
         assert_eq!(db.root(), root);
 
@@ -1524,13 +1445,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         // Insert a single key and then commit to create a first commit point.
         let k1 = Sha256::fill(1u8);
@@ -1549,7 +1472,7 @@ pub(super) mod tests {
         drop(db);
 
         // Recovery should back up to previous commit point.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.bounds().end, 3);
         let root = db.root();
         assert_eq!(root, first_commit_root);
@@ -1562,7 +1485,9 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
@@ -1570,7 +1495,7 @@ pub(super) mod tests {
     {
         // Build a db with `ELEMENTS` key/value pairs then prune some of them.
         const ELEMENTS: u64 = 2_000;
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         // Batch writes keys in BTreeMap-sorted order, so build the sorted key
         // list to map between journal locations and keys.
@@ -1617,7 +1542,7 @@ pub(super) mod tests {
         let root = db.root();
         db.sync().await.unwrap();
 
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(root, db.root());
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
@@ -1636,7 +1561,7 @@ pub(super) mod tests {
 
         // Confirm boundary persists across restart.
         db.sync().await.unwrap();
-        let db = open_db(context.child("third")).await;
+        let db = open_db(context.child("third"), None).await.unwrap();
         let oldest_retained_loc = db.bounds().start;
         assert_eq!(
             oldest_retained_loc,
@@ -1669,13 +1594,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Test pruning empty database (floor=0, so prune(1) fails)
         let result = db.prune(Location::new(1)).await;
@@ -1684,7 +1611,7 @@ pub(super) mod tests {
                 if prune_loc == Location::new(1) && floor == Location::new(0))
         );
 
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Add key-value pairs and commit
         let k1 = Digest::from(*b"12345678901234567890123456789012");
@@ -1766,13 +1693,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
         let key2 = Sha256::hash(&[&2u64.to_be_bytes()]);
@@ -1801,7 +1730,10 @@ pub(super) mod tests {
         assert_eq!(db.get(&key3).await.unwrap(), Some(value3));
         assert_eq!(db.get(&key4).await.unwrap(), Some(value4));
 
-        let db = db.rewind(size_before).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(size_before))
+            .await
+            .unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
         assert_eq!(db.last_commit_loc, last_commit_before);
@@ -1812,7 +1744,7 @@ pub(super) mod tests {
         assert_eq!(db.get(&key4).await.unwrap(), None);
 
         db.commit().await.unwrap();
-        let db = open_db(context.child("reopen")).await;
+        let db = open_db(context.child("reopen"), None).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
         assert_eq!(db.last_commit_loc, last_commit_before);
@@ -1833,13 +1765,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Two keys sharing the first two bytes collide under TwoCap.
         let mut k1_bytes = [0u8; 32];
@@ -1861,7 +1795,10 @@ pub(super) mod tests {
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
 
-        let db = db.rewind(size_after_first).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(size_after_first))
+            .await
+            .unwrap();
 
         // The retained key must still be readable; pre-fix this returned None because the
         // translator bucket was wiped by the suffix-key remove.
@@ -1876,14 +1813,18 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_small_sections_db: impl Fn(
             deterministic::Context,
-        )
-            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>,
+        >,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_small_sections_db(context.child("db")).await;
+        let db = open_small_sections_db(context.child("db"), None)
+            .await
+            .unwrap();
 
         let (mut db, first_range) = commit_sets(
             db,
@@ -1925,7 +1866,10 @@ pub(super) mod tests {
         }
 
         let oldest_retained = db.bounds().start;
-        let Err(boundary_err) = db.rewind(oldest_retained).await else {
+        drop(db.sync().await.unwrap());
+        let Err(boundary_err) =
+            open_small_sections_db(context.child("cap_error"), Some(oldest_retained)).await
+        else {
             panic!("expected rewind to fail");
         };
         assert!(
@@ -1936,8 +1880,13 @@ pub(super) mod tests {
             "unexpected rewind error at retained boundary: {boundary_err:?}"
         );
 
-        let db = open_small_sections_db(context.child("db")).await;
-        let Err(err) = db.rewind(first_range.start).await else {
+        let db = open_small_sections_db(context.child("db"), None)
+            .await
+            .unwrap();
+        drop(db.sync().await.unwrap());
+        let Err(err) =
+            open_small_sections_db(context.child("cap_error"), Some(first_range.start)).await
+        else {
             panic!("expected rewind to fail");
         };
         assert!(
@@ -1952,13 +1901,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Pre-populate with key A.
         let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -1993,13 +1944,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Parent batch: set A.
         let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -2030,13 +1983,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Sort keys so operations are in BTreeMap order (same as merkleize writes).
         let mut kvs_first: Vec<(Digest, Digest)> = (0u64..5)
@@ -2081,13 +2036,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let mut batch = db.new_batch();
         for i in 0u8..10 {
@@ -2119,13 +2076,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Pre-populate base DB.
         let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -2165,13 +2124,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
         let val_a = Sha256::fill(1u8);
@@ -2209,13 +2170,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db(context.child("db")).await;
+        let mut db = open_db(context.child("db"), None).await.unwrap();
 
         const BATCHES: u64 = 20;
         const KEYS_PER_BATCH: u64 = 5;
@@ -2263,13 +2226,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Apply a non-empty batch first.
         let k = Sha256::hash(&[&[1u8]]);
@@ -2302,13 +2267,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Pre-populate base DB.
         let key_a = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -2358,13 +2325,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         const N: u64 = 500;
         let mut kvs: Vec<(Digest, Digest)> = Vec::new();
@@ -2406,13 +2375,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key = Sha256::hash(&[&0u64.to_be_bytes()]);
         let val_parent = Sha256::fill(1u8);
@@ -2457,14 +2428,18 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db_small_sections: impl Fn(
             deterministic::Context,
-        )
-            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>,
+        >,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db_small_sections(context.child("db")).await;
+        let db = open_db_small_sections(context.child("db"), None)
+            .await
+            .unwrap();
 
         let key = Sha256::hash(&[&0u64.to_be_bytes()]);
         let v1 = Sha256::fill(1u8);
@@ -2495,7 +2470,9 @@ pub(super) mod tests {
 
         // A restart must also serve one of the written values.
         db.commit().await.unwrap();
-        let db = open_db_small_sections(context.child("reopen")).await;
+        let db = open_db_small_sections(context.child("reopen"), None)
+            .await
+            .unwrap();
         let reopened = db.get(&key).await.unwrap().unwrap();
         assert!(reopened == v1 || reopened == v2);
         db.destroy().await.unwrap();
@@ -2504,7 +2481,9 @@ pub(super) mod tests {
         // snapshot bucket holds both locations. Floor=4 permits prune(2).
         // Layout: 0=initial commit, 1=Set(key,v1), 2=Commit, 3=Set(key,v2),
         // 4=Commit(floor=4)
-        let db = open_db_small_sections(context.child("prune")).await;
+        let db = open_db_small_sections(context.child("prune"), None)
+            .await
+            .unwrap();
         let merkleized = db
             .new_batch()
             .set(key, v1)
@@ -2533,13 +2512,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Batch with metadata.
         let metadata = Sha256::fill(42u8);
@@ -2565,13 +2546,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -2604,7 +2587,7 @@ pub(super) mod tests {
         assert!(matches!(result, Err(Error::StaleBatch)));
 
         // The rejection mutated nothing: reopening recovers the committed state.
-        let db = open_db(context.child("reopen")).await;
+        let db = open_db(context.child("reopen"), None).await.unwrap();
         assert_eq!(db.root(), root);
         assert_eq!(db.size(), size);
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
@@ -2617,13 +2600,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -2680,13 +2665,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -2731,13 +2718,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -2776,13 +2765,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -2819,13 +2810,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -2863,13 +2856,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -2903,13 +2898,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Populate.
         let key1 = Sha256::hash(&[&[1]]);
@@ -2948,13 +2945,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&[1]]);
         let key2 = Sha256::hash(&[&[2]]);
@@ -3002,13 +3001,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Empty DB has floor=0.
         assert_eq!(db.inactivity_floor_loc(), Location::new(0));
@@ -3038,7 +3039,7 @@ pub(super) mod tests {
         // Floor persists across restart.
         let db = db.commit().await.unwrap();
         db.sync().await.unwrap();
-        let db = open_db(context.child("reopen")).await;
+        let db = open_db(context.child("reopen"), None).await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
 
         db.destroy().await.unwrap();
@@ -3051,13 +3052,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // DB starts with 1 op (initial commit).
         // First batch: 1 set + 1 commit = total_size 3. Use floor=2 (the commit loc).
@@ -3102,13 +3105,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Apply first batch with floor=2.
         let k1 = Sha256::fill(1u8);
@@ -3136,7 +3141,10 @@ pub(super) mod tests {
         assert_eq!(db.inactivity_floor_loc(), Location::new(4));
 
         // Rewind to the first batch.
-        let db = db.rewind(first_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
         db.destroy().await.unwrap();
@@ -3149,13 +3157,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // DB starts with 1 op. First batch: 1 set + 1 commit = total_size 3. floor=2.
         let k1 = Sha256::fill(1u8);
@@ -3187,13 +3197,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // DB has 1 op (initial commit). A batch with 1 set + 1 commit = total_size 3.
         // Setting floor=100 exceeds total_size.
@@ -3208,7 +3220,7 @@ pub(super) mod tests {
         assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
                 if floor == Location::new(100) && commit == Location::new(2)));
 
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Boundary: floor == total_size must also be rejected. The commit op is
         // at total_size - 1, so a floor equal to total_size would allow a later
@@ -3225,7 +3237,7 @@ pub(super) mod tests {
                 if floor == Location::new(3) && commit == Location::new(2)));
 
         // Floor == total_size - 1 (the commit location) is the maximum valid.
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
         let merkleized = db
             .new_batch()
             .set(k2, v2)
@@ -3246,13 +3258,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Live floor is 0 (from the seeded initial commit).
         // a: 1 set + commit at loc 2, floor=2 (valid: >= 0, == commit_loc).
@@ -3290,7 +3304,7 @@ pub(super) mod tests {
         );
 
         // Reopen the partition and verify the rejected chain persisted nothing.
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.last_commit_loc, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
@@ -3307,13 +3321,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // a: 1 set + commit at loc 2; declare floor=3 (one past the commit -- invalid).
         // b: tip valid on its own (floor=0 <= b's commit_loc), but a's floor is bad.
@@ -3343,7 +3359,7 @@ pub(super) mod tests {
         );
 
         // Reopen the partition and verify the rejected chain persisted nothing.
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.last_commit_loc, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
@@ -3362,13 +3378,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -3394,13 +3412,16 @@ pub(super) mod tests {
         db.sync().await.unwrap();
 
         // Reopen: snapshot rebuilt from floor=first_size, batch A keys excluded.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
 
         // Verify batch A keys are NOT in the reopened snapshot (expected).
         assert!(db.get(&k1).await.unwrap().is_none());
 
         // Rewind to commit A.
-        let db = db.rewind(first_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
 
         // All batch A keys must be accessible after rewind.
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
@@ -3423,13 +3444,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(11u8);
@@ -3453,7 +3476,7 @@ pub(super) mod tests {
         db.sync().await.unwrap();
 
         // Reopen: snapshot rebuilt from floor=second_size. Only k3 is in snapshot.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert!(db.get(&k1).await.unwrap().is_none());
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
@@ -3461,13 +3484,19 @@ pub(super) mod tests {
         // Rewind to commit B (not A). The gap fill should add keys from
         // [first_size, second_size) -- which includes k2 but not k1.
         // k3 is in the suffix and gets removed. k2 from the gap gets inserted.
-        let db = db.rewind(second_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(second_size))
+            .await
+            .unwrap();
         assert!(db.get(&k1).await.unwrap().is_none()); // below B's floor
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert!(db.get(&k3).await.unwrap().is_none()); // in suffix, removed
 
         // Now rewind further to commit A.
-        let db = db.rewind(first_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
         assert!(db.get(&k2).await.unwrap().is_none()); // above first_size, truncated
         assert_eq!(db.root(), first_root);
@@ -3483,13 +3512,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let key = Sha256::fill(7u8);
         let v1 = Sha256::fill(17u8);
@@ -3512,18 +3543,24 @@ pub(super) mod tests {
         db.sync().await.unwrap();
 
         // Reopen: snapshot rebuilt from floor=second_size, key excluded.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert!(db.get(&key).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
         // Rewind to commit B: gap fill re-inserts both Set(key,...) entries.
-        let db = db.rewind(second_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(second_size))
+            .await
+            .unwrap();
         let rewound = db.get(&key).await.unwrap().unwrap();
         assert!(rewound == v1 || rewound == v2);
 
         // Rewind further to commit A: the v2 entry is dropped and get() must
         // serve v1, proving the gap fill restored the v1 location.
-        let db = db.rewind(first_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
@@ -3537,13 +3574,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let key = Sha256::fill(7u8);
         let v1 = Sha256::fill(17u8);
@@ -3568,18 +3607,24 @@ pub(super) mod tests {
 
         // Reopen: snapshot rebuilt from floor=first_size. The v2 write for key
         // is retained; the v1 write is excluded.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v2));
 
         // Rewind to commit B: gap fill re-inserts the v1 write alongside the
         // retained v2 entry, and get() serves one of the two.
-        let db = db.rewind(second_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(second_size))
+            .await
+            .unwrap();
         let rewound = db.get(&key).await.unwrap().unwrap();
         assert!(rewound == v1 || rewound == v2);
 
         // Rewind further to commit A: the v2 entry is dropped and get() must
         // serve v1, proving the gap fill restored the v1 location.
-        let db = db.rewind(first_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
@@ -3592,13 +3637,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let key = Sha256::fill(7u8);
         let v1 = Sha256::fill(17u8);
@@ -3615,7 +3662,10 @@ pub(super) mod tests {
 
         // Rewind to commit A: the v2 location is dropped and the retained v1
         // location keeps serving the key.
-        let db = db.rewind(first_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
@@ -3630,13 +3680,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let key = Sha256::fill(7u8);
         let v1 = Sha256::fill(17u8);
@@ -3651,12 +3703,15 @@ pub(super) mod tests {
         db.sync().await.unwrap();
 
         // Reopen: replay visits both writes and keeps only the newer location.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v2));
 
         // Rewind to commit A with an unchanged floor: the newer location is dropped, and the
         // older write, still retained in the restored journal, must keep the key readable.
-        let db = db.rewind(first_size).await.unwrap();
+        drop(db.sync().await.unwrap());
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
@@ -3676,13 +3731,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Initial commit is at loc 0. 3 sets + 1 commit → commit lands at loc 4.
         // Declare floor = 4 (= commit_loc), the tight maximum.
@@ -3742,7 +3799,7 @@ pub(super) mod tests {
         // Reopen. `init_from_journal` rebuilds the snapshot by replaying from
         // the floor (= commit_loc). The only op at/above the floor is the commit, which
         // contributes no keys — so the rebuilt snapshot is empty.
-        let db = open_db(context.child("reopened")).await;
+        let db = open_db(context.child("reopened"), None).await.unwrap();
         assert_eq!(db.last_commit_loc, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
@@ -3788,13 +3845,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -3852,13 +3911,15 @@ pub(super) mod tests {
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key = Sha256::fill(1u8);
         let value = Sha256::fill(11u8);

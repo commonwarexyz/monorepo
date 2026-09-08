@@ -72,11 +72,9 @@ use crate::{
     },
     merkle::{Family, Location, full::Config as MerkleConfig},
     qmdb::{
-        ROOT_BAGGING,
         any::operation::{Operation, Update},
         bitmap::Shared,
         metrics::Metrics,
-        operation::Committable,
         single_operation_root,
     },
     translator::Translator,
@@ -164,7 +162,37 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None, None, None)
+        .await
+}
+
+/// Recover at the latest retained commit ending at or below `max_size`.
+///
+/// The selected state is durable before return. Zero is invalid because the initial commit
+/// requires one operation. Subsequent appends may exceed this initialization cap.
+pub async fn init_at_most<F, E, U, H, I, J, S>(
+    context: E,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    max_size: Location<F>,
+) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
+where
+    F: Family,
+    E: Context + Spawner,
+    U: Update,
+    H: Hasher,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(
+        context,
+        cfg,
+        None,
+        Some(max_size),
+        None,
+    )
+    .await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
@@ -174,6 +202,8 @@ pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
+    max_size: Option<Location<F>>,
+    minimum_size: Option<u64>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -185,14 +215,36 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    let mut log = authenticated::Journal::<F, E, J, H, S>::new(
+    let pending = crate::qmdb::prepare_initialization::<F, E, J, H, S>(
         context.child("log"),
         cfg.merkle_config,
         cfg.journal_config,
-        Operation::is_commit,
-        ROOT_BAGGING,
+        max_size,
     )
     .await?;
+    let bounds = pending.bounds();
+    if bitmap
+        .as_ref()
+        .is_some_and(|bitmap| bounds.end < bitmap.pruned_bits())
+    {
+        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
+            bounds.end,
+        )));
+    }
+    let floor = crate::qmdb::validate_initialization(&pending).await?;
+    if let (Some(bitmap), Some(floor)) = (&bitmap, floor)
+        && *floor < bitmap.pruned_bits()
+    {
+        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
+            bounds.end,
+        )));
+    }
+    if minimum_size.is_some_and(|minimum| bounds.end < minimum) {
+        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
+            bounds.end,
+        )));
+    }
+    let mut log = pending.finish().await?;
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
@@ -362,38 +414,12 @@ pub(crate) mod test {
     }
 
     use crate::{
-        index::Unordered as UnorderedIndex,
-        journal::contiguous::Mutable,
         merkle::mmr,
-        qmdb::any::{
-            db::Db as AnyDb,
-            operation::{Operation as AnyOperation, update::Update as UpdateTrait},
-            traits::{DbAny, Provable, UnmerkleizedBatch as _},
-        },
+        qmdb::any::traits::{DbAny, Provable, UnmerkleizedBatch as _},
     };
 
     type Error = crate::qmdb::Error<mmr::Family>;
     type Location = mmr::Location;
-
-    pub(crate) trait RewindableDb: Sized {
-        fn rewind_to_size(self, size: Location)
-        -> impl Future<Output = Result<Self, Error>> + Send;
-    }
-
-    impl<E, C, I, H, U, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
-    where
-        E: crate::Context,
-        C: Mutable<Item = AnyOperation<mmr::Family, U>>,
-        I: UnorderedIndex<Value = Location>,
-        H: Hasher,
-        U: UpdateTrait,
-        S: Strategy,
-        AnyOperation<mmr::Family, U>: Codec,
-    {
-        async fn rewind_to_size(self, size: Location) -> Result<Self, Error> {
-            self.rewind(size).await
-        }
-    }
 
     /// Test recovery on non-empty db.
     pub(crate) async fn test_any_db_non_empty_recovery<F: Family, D, V: Clone + CodecShared>(
@@ -715,9 +741,10 @@ pub(crate) mod test {
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        capped_db: impl Fn(Context, Location) -> Pin<Box<dyn Future<Output = Result<D, Error>> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + RewindableDb,
+        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -733,7 +760,8 @@ pub(crate) mod test {
         let db = db.commit().await.unwrap();
         assert_eq!(empty_range.start, initial_size);
         assert_eq!(db.size(), empty_range.end);
-        let db = db.rewind_to_size(initial_size).await.unwrap();
+        drop(db);
+        let db = capped_db(context.child("cap"), initial_size).await.unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
         assert_eq!(db.inactivity_floor_loc(), initial_floor);
@@ -792,7 +820,8 @@ pub(crate) mod test {
         // Rewind across a tail where:
         // - the same key (`key0`) was updated multiple times
         // - `key1` was deleted then recreated (exercises net-zero active_keys_delta path)
-        let db = db.rewind_to_size(size_a).await.unwrap();
+        drop(db);
+        let db = capped_db(context.child("cap"), size_a).await.unwrap();
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size(), size_a);
         assert_eq!(db.inactivity_floor_loc(), floor_a);
@@ -836,7 +865,8 @@ pub(crate) mod test {
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2_d));
 
         // Rewind all the way to the initial commit boundary (`first_commit_loc + 1`).
-        let db = db.rewind_to_size(initial_size).await.unwrap();
+        drop(db);
+        let db = capped_db(context.child("cap"), initial_size).await.unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
         assert_eq!(db.inactivity_floor_loc(), initial_floor);
@@ -1315,7 +1345,7 @@ pub(crate) mod test {
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_parallel::{Sequential, Strategy};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
@@ -1530,6 +1560,39 @@ pub(crate) mod test {
     // `<f>_<variant_label>`. `with_reopen` hands the test a db plus a reopen
     // closure, `with_make_value` hands it just the db.
     macro_rules! test_for_variant {
+        (with_cap: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$f _ $l>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        let ctx = context.child(stringify!($l));
+                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                            .await
+                            .unwrap();
+                        $f(
+                            ctx,
+                            db,
+                            |ctx| {
+                                Box::pin(async move {
+                                    <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                                        .await
+                                        .unwrap()
+                                })
+                            },
+                            |ctx, cap| {
+                                Box::pin(async move {
+                                    <$db>::init_at_most(ctx.child("storage"), $cfg::<OneCap>("db", &ctx), cap).await
+                                })
+                            },
+                            to_digest,
+                        )
+                        .await;
+                    });
+                }
+            }
+        };
         (with_reopen: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
             paste::paste! {
                 #[test_group("slow")]
@@ -1609,7 +1672,7 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
-    test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
+    with_mmr_variants!(test_for_variant!(with_cap: test_any_db_rewind_recovery, "WARN"));
 
     fn key(i: u64) -> Digest {
         Sha256::hash(&[&i.to_be_bytes()])
@@ -2358,7 +2421,14 @@ pub(crate) mod test {
             }
 
             let oldest_retained = db.bounds().start;
-            let Err(boundary_err) = db.rewind(oldest_retained).await else {
+            drop(db.sync().await.unwrap());
+            let Err(boundary_err) = UnorderedVariable::init_at_most(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("rp", &ctx),
+                oldest_retained,
+            )
+            .await
+            else {
                 panic!("expected rewind at retained boundary to fail");
             };
             assert!(
@@ -2375,7 +2445,14 @@ pub(crate) mod test {
             )
             .await
             .unwrap();
-            let Err(err) = db.rewind(first_range.start).await else {
+            drop(db.sync().await.unwrap());
+            let Err(err) = UnorderedVariable::init_at_most(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("rp", &ctx),
+                first_range.start,
+            )
+            .await
+            else {
                 panic!("expected rewind to pruned target to fail");
             };
             assert!(
@@ -2406,18 +2483,31 @@ pub(crate) mod test {
 
             let root_before = db.root();
             let size_before = db.size();
-            let db = db.rewind(size_before).await.unwrap();
+            let db = {
+                drop(db.sync().await.unwrap());
+                UnorderedVariable::init_at_most(
+                    ctx.child("cap"),
+                    variable_db_config::<OneCap>("ri", &ctx),
+                    size_before,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.root(), root_before);
             assert_eq!(db.size(), size_before);
 
-            let Err(zero_err) = db.rewind(Location::new(0)).await else {
+            drop(db.sync().await.unwrap());
+            let Err(zero_err) = UnorderedVariable::init_at_most(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("ri", &ctx),
+                Location::new(0),
+            )
+            .await
+            else {
                 panic!("expected rewind to zero to fail");
             };
             assert!(
-                matches!(
-                    zero_err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(0))
-                ),
+                matches!(zero_err, crate::qmdb::Error::InvalidInitializationBound),
                 "unexpected rewind error: {zero_err:?}"
             );
 
@@ -2431,17 +2521,16 @@ pub(crate) mod test {
             assert_eq!(db.size(), size_before);
 
             let too_large_target = size_before + 1;
-            let Err(too_large_err) = db.rewind(too_large_target).await else {
-                panic!("expected rewind past size to fail");
-            };
-            assert!(
-                matches!(
-                    too_large_err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(size))
-                    if size == *too_large_target
-                ),
-                "unexpected rewind error: {too_large_err:?}"
-            );
+            drop(db);
+            let db = UnorderedVariable::init_at_most(
+                ctx.child("above"),
+                variable_db_config::<OneCap>("ri", &ctx),
+                too_large_target,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root_before);
+            drop(db);
 
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("reopen2"),
@@ -2512,16 +2601,20 @@ pub(crate) mod test {
                 "test setup expected target commit retained; target={rewind_target:?}, bounds={bounds:?}"
             );
 
-            let Err(err) = db.rewind(rewind_target).await else {
+            let original_root = db.root();
+            drop(db.sync().await.unwrap());
+            let Err(err) = UnorderedVariable::init_at_most(ctx.child("cap"), variable_db_config::<OneCap>("rf", &ctx), rewind_target).await else {
                 panic!("expected rewind to floor-pruned target to fail");
             };
             assert!(
                 matches!(
                     err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                    crate::qmdb::Error::HistoricalFloorPruned(_)
                 ),
                 "unexpected rewind error: {err:?}"
             );
+            let db = UnorderedVariable::init(ctx.child("unchanged"), variable_db_config::<OneCap>("rf", &ctx)).await.unwrap();
+            assert_eq!(db.root(), original_root);
         });
     }
 
@@ -2549,7 +2642,7 @@ pub(crate) mod test {
             cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
 
             let db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.child("storage"), cfg).await.unwrap();
+                UnorderedVariableDb::init(ctx.child("storage"), cfg.clone()).await.unwrap();
 
             let (db, _) = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
             let rewind_target = db.size();
@@ -2608,7 +2701,7 @@ pub(crate) mod test {
 
             // Rewind to the still-retained early commit must succeed and restore visible
             // state (root match implies the snapshot was rebuilt correctly).
-            let db = db.rewind(rewind_target).await.unwrap();
+            let db = { drop(db.sync().await.unwrap()); UnorderedVariable::init_at_most(ctx.child("cap"), cfg.clone(), rewind_target).await }.unwrap();
             assert_eq!(db.size(), rewind_target);
             assert_eq!(db.root(), root_at_target);
 
@@ -2945,7 +3038,16 @@ mod bitmap_tests {
             assert!(*db.last_commit_loc + 1 > *size_after_first);
 
             // Rewind to the state after the first commit.
-            let db = db.rewind(size_after_first).await.unwrap();
+            let db = {
+                drop(db.sync().await.unwrap());
+                AnyTest::init_at_most(
+                    context.child("cap"),
+                    create_test_config(0, &context),
+                    size_after_first,
+                )
+                .await
+            }
+            .unwrap();
 
             // Post-rewind: k2 gone, k1 remains.
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));

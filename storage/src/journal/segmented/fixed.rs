@@ -21,7 +21,7 @@
 //! (and their corresponding blobs) independently.
 
 use super::manager::{
-    AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
+    AppendBuffer, AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
@@ -110,7 +110,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
 
 impl<E: Storage + Metrics, A: CodecFixed> Inner<E, A> {
     /// The section's writer. A replayed section cannot be removed while the replay owns the journal.
-    fn writer(&mut self, section: u64) -> &mut Writer<E::Blob> {
+    fn writer(&mut self, section: u64) -> &mut AppendBuffer<E::Blob> {
         self.manager
             .get_mut(section)
             .expect("replayed section is present")
@@ -300,7 +300,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if let Some((section, size)) = restore {
             // The checkpoint preflight authorized this exact truncation. Make it durable before
             // the paired value journal can release any corresponding bytes.
-            manager.rewind(section, size).await?;
+            manager.truncate_pending(section, size).await?;
             manager.sync(section).await?;
             return Ok(Self {
                 manager,
@@ -508,23 +508,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         self.manager.size(section)
     }
 
-    /// See [Journal::rewind].
-    async fn rewind(&mut self, section: u64, offset: u64) -> Result<(), Error> {
-        self.manager.rewind(section, offset).await?;
-        self.unrecovered.retain(|candidate| *candidate <= section);
-        self.floors.retain(|candidate, _| *candidate <= section);
-        if offset == 0 {
-            self.unrecovered.remove(&section);
-        }
-        if let Some(floor) = self.floors.get_mut(&section) {
-            *floor = (*floor).min(offset);
-        }
-        Ok(())
-    }
-
-    /// See [Journal::rewind_section].
-    async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await?;
+    /// See [Journal::init_at_most].
+    async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.truncate_pending_section(section, size).await?;
         if size == 0 {
             self.unrecovered.remove(&section);
         }
@@ -583,6 +569,30 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
+    /// Open with a ceiling on `(section, logical byte end)`, then validate the retained replay.
+    /// Ends inside an item round down to the preceding complete item. Higher sections are removed.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn init_at_most(
+        context: E,
+        cfg: Config,
+        section: u64,
+        end: u64,
+    ) -> Result<Self, Error> {
+        let mut journal = Self::init(context, cfg).await?;
+        journal
+            .0
+            .manager
+            .truncate_pending(section, end - end % Self::CHUNK_SIZE as u64)
+            .await?;
+        let mut replay = journal
+            .replay(0, 0, NZUsize!(65536), ReadOptions::default())
+            .await?;
+        while let Some(item) = replay.next().await {
+            item?;
+        }
+        replay.finish()
+    }
+
     /// Initialize a new `Journal` instance.
     ///
     /// Backing blobs are opened without scanning their full page prefixes. Use `replay` to validate
@@ -598,6 +608,65 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         minimum_items: &BTreeMap<u64, u64>,
     ) -> Result<RecoveryPreflight<E, A>, Error> {
         Inner::preflight_floors(context, cfg, minimum_items).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
+        let (context, partition, factory) = self.0.manager.test_configuration();
+        let cfg = Config {
+            partition,
+            write_buffer: factory.write_buffer,
+            page_cache: factory.page_cache_ref,
+        };
+        drop(self.sync_all().await?);
+        Self::init_at_most(context, cfg, section, end).await
+    }
+
+    #[cfg(test)]
+    async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
+        let (context, partition, factory) = self.0.manager.test_configuration();
+        let cfg = Config {
+            partition,
+            write_buffer: factory.write_buffer,
+            page_cache: factory.page_cache_ref,
+        };
+        drop(self.sync_all().await?);
+        let mut journal = Self::init(context, cfg).await?;
+        journal
+            .0
+            .manager
+            .truncate_pending_section(section, end)
+            .await?;
+        let mut replay = journal
+            .replay(0, 0, NZUsize!(65536), ReadOptions::default())
+            .await?;
+        while let Some(item) = replay.next().await {
+            item?;
+        }
+        replay.finish()
+    }
+
+    /// Remove only unpublished suffix sections during paired initialization.
+    pub(crate) async fn truncate_pending_tail(
+        mut self,
+        section: u64,
+        end: u64,
+    ) -> Result<Self, Error> {
+        self.0.manager.truncate_pending(section, end).await?;
+        self.0.unrecovered.retain(|candidate| *candidate <= section);
+        self.0.floors.retain(|candidate, _| *candidate <= section);
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_configuration(&self) -> (E, String, AppendFactory) {
+        self.0.manager.test_configuration()
+    }
+
+    /// Publish all sections after paired recovery.
+    pub(crate) fn finish_recovery(mut self) -> Self {
+        self.0.manager.finish_recovery();
+        self
     }
 
     /// Prove every checkpoint-covered index byte without mutating damage.
@@ -788,20 +857,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.0.size(section)
     }
 
-    /// Rewind the journal to a specific section and byte size.
+    /// Truncate only the given section to a specific byte offset.
     ///
-    /// This truncates the section to the given size. All sections
-    /// after `section` are removed.
-    pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.rewind(section, size).await?;
-        Ok(self)
-    }
-
-    /// Rewind only the given section to a specific byte offset.
-    ///
-    /// Unlike `rewind`, this does not affect other sections.
-    pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.rewind_section(section, size).await?;
+    /// Other sections are unaffected.
+    pub(crate) async fn truncate_pending_section(
+        mut self,
+        section: u64,
+        size: u64,
+    ) -> Result<Self, Error> {
+        self.0.truncate_pending_section(section, size).await?;
         Ok(self)
     }
 
@@ -1020,7 +1084,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     ///
     /// Fails when the reader was not fully drained or yielded an error: the journal is
     /// destroyed and recovery is re-initialization.
-    pub fn finish(mut self) -> Result<Journal<E, A>, Error> {
+    pub fn finish(self) -> Result<Journal<E, A>, Error> {
+        let start = self.recovered_from;
+        let mut journal = self.finish_pending()?;
+        if let Some(start) = start {
+            journal.0.manager.finish_from(start);
+        }
+        Ok(journal)
+    }
+
+    /// Release the still-unpublished sections for paired initialization repair.
+    pub(crate) fn finish_pending(mut self) -> Result<Journal<E, A>, Error> {
         if self.errored || !self.finished {
             return Err(Error::ReplayFailed);
         }
@@ -1041,7 +1115,7 @@ async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
     size: u64,
 ) -> Result<(), Error> {
     let blob = journal.0.writer(section);
-    blob.resize(size).await?;
+    blob.truncate_pending(size).await?;
     blob.sync().await?;
     Ok(())
 }
@@ -1054,7 +1128,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
-        buffer::paged::{CacheRef, Writer, corrupt_page},
+        buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
@@ -1412,7 +1486,7 @@ mod tests {
             }
             journal = journal.sync_all().await.expect("failed to sync");
             journal = journal
-                .rewind_section(1, 0)
+                .test_reopen_section(1, 0)
                 .await
                 .expect("failed to empty checkpoint section");
             journal = journal.sync(1).await.expect("failed to sync empty section");
@@ -1798,7 +1872,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_rewind() {
+    fn test_segmented_fixed_truncate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1821,9 +1895,12 @@ mod tests {
                 assert!(size > 0, "section {section} should have data");
             }
 
-            // Rewind to section 1 (should remove sections 2, 3)
+            // Truncate to section 1 (should remove sections 2, 3)
             let size = journal.size(1).expect("failed to get size");
-            journal = journal.rewind(1, size).await.expect("failed to rewind");
+            journal = journal
+                .test_reopen_at_most(1, size)
+                .await
+                .expect("failed to truncate");
 
             // Verify section 1 still has data
             let size = journal.size(1).expect("failed to get size");
@@ -1844,7 +1921,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_rewind_max_section() {
+    fn test_segmented_fixed_truncate_max_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1859,12 +1936,12 @@ mod tests {
                 .expect("failed to append");
             journal = journal.sync_all().await.expect("failed to sync");
 
-            // Rewinding the maximal section removes no sections above it and must not panic.
+            // Truncating the maximal section removes no sections above it and must not panic.
             let size = journal.size(u64::MAX).expect("failed to get size");
             journal = journal
-                .rewind(u64::MAX, size)
+                .test_reopen_at_most(u64::MAX, size)
                 .await
-                .expect("failed to rewind");
+                .expect("failed to truncate");
 
             // The section is intact and readable.
             assert_eq!(journal.size(u64::MAX).expect("failed to get size"), size);
@@ -1875,7 +1952,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_rewind_many_sections() {
+    fn test_segmented_fixed_truncate_many_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1892,9 +1969,12 @@ mod tests {
             }
             journal = journal.sync_all().await.expect("failed to sync");
 
-            // Rewind to section 5 (should remove sections 6-10)
+            // Truncate to section 5 (should remove sections 6-10)
             let size = journal.size(5).expect("failed to get size");
-            journal = journal.rewind(5, size).await.expect("failed to rewind");
+            journal = journal
+                .test_reopen_at_most(5, size)
+                .await
+                .expect("failed to truncate");
 
             // Verify sections 1-5 still have data
             for section in 1u64..=5 {
@@ -1932,7 +2012,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_rewind_persistence() {
+    fn test_segmented_fixed_truncate_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -1949,9 +2029,12 @@ mod tests {
             }
             journal = journal.sync_all().await.expect("failed to sync");
 
-            // Rewind to section 2
+            // Truncate to section 2
             let size = journal.size(2).expect("failed to get size");
-            journal = journal.rewind(2, size).await.expect("failed to rewind");
+            journal = journal
+                .test_reopen_at_most(2, size)
+                .await
+                .expect("failed to truncate");
             journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
@@ -2242,16 +2325,16 @@ mod tests {
                 .await
                 .expect("failed to append");
 
-            // Create section 2 but make it empty via rewind
+            // Create section 2 but make it empty via truncate
             (journal, _) = journal
                 .append(2, &test_digest(200))
                 .await
                 .expect("failed to append");
             journal = journal.sync(2).await.expect("failed to sync");
             journal = journal
-                .rewind_section(2, 0)
+                .test_reopen_section(2, 0)
                 .await
-                .expect("failed to rewind");
+                .expect("failed to truncate");
 
             // Append to section 3
             (journal, _) = journal
@@ -2346,10 +2429,15 @@ mod tests {
                 .open(&cfg.partition, &SECTION.to_be_bytes())
                 .await
                 .unwrap();
-            let mut writer = Writer::new(blob, size, 128, cfg.page_cache.clone())
-                .await
-                .unwrap();
-            writer.resize(30).await.unwrap();
+            let mut writer = commonware_runtime::buffer::paged::Recovery::open(
+                blob,
+                size,
+                128,
+                cfg.page_cache.clone(),
+            )
+            .await
+            .unwrap();
+            writer.truncate(30).await.unwrap();
             writer.sync().await.unwrap();
             drop(writer);
 
@@ -2360,7 +2448,7 @@ mod tests {
             // items: [0......8) [8.......16) [16......24) [24..30 tail)
             //
             // Backward sizing stops at valid page 5 and reports 30 logical bytes. Item alignment
-            // alone selects 24, inside torn page 4, which `Writer::resize` cannot preserve.
+            // alone selects 24, inside torn page 4, which `Recovery::truncate` cannot preserve.
             // Forward page validation finds 20 contiguous bytes and selects safe item boundary 16.
             corrupt_page(
                 &context,
@@ -2602,7 +2690,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_last_after_rewind_to_zero() {
+    fn test_last_after_truncate_to_zero() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
@@ -2616,7 +2704,7 @@ mod tests {
 
             assert!(journal.last(0).await.unwrap().is_some());
 
-            journal = journal.rewind(0, 0).await.unwrap();
+            journal = journal.test_reopen_at_most(0, 0).await.unwrap();
             assert_eq!(journal.last(0).await.unwrap(), None);
 
             journal.destroy().await.unwrap();
@@ -2940,7 +3028,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_rewind_waits_for_in_flight_start_sync() {
+    fn test_segmented_fixed_truncate_waits_for_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
@@ -2970,9 +3058,12 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let started_clone = started.clone();
             let completed_clone = completed.clone();
-            let waiter = context.inner.child("rewind").spawn(move |_| async move {
+            let waiter = context.inner.child("truncate").spawn(move |_| async move {
                 started_clone.fetch_add(1, Ordering::Relaxed);
-                journal = journal.rewind(1, size).await.expect("failed to rewind");
+                journal = journal
+                    .test_reopen_at_most(1, size)
+                    .await
+                    .expect("failed to truncate");
                 completed_clone.fetch_add(1, Ordering::Relaxed);
                 journal
             });
@@ -2984,17 +3075,17 @@ mod tests {
             assert_eq!(
                 completed.load(Ordering::Relaxed),
                 0,
-                "rewind must wait for in-flight syncs on removed sections"
+                "truncate must wait for in-flight syncs on removed sections"
             );
 
             release_pending_syncs(&pending);
             handle
                 .await
-                .expect("sync handle should complete despite rewind");
+                .expect("sync handle should complete despite truncate");
             while completed.load(Ordering::Relaxed) == 0 {
                 commonware_runtime::reschedule().await;
             }
-            let journal = waiter.await.expect("rewind task failed");
+            let journal = waiter.await.expect("truncate task failed");
             assert_eq!(journal.size(2).expect("failed to get size"), 0);
             journal.destroy().await.expect("failed to destroy");
         });

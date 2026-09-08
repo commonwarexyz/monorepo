@@ -270,9 +270,9 @@
 //! or an ancestor of pinned peaks that can be reconstructed by hashing children (see
 //! `grafting::Storage::reconstruct_grafted_node`).
 //!
-//! The same birth threshold also defines a _rewind floor_: rewinding the database to a size where
-//! the chunk-pair parent has not been born would re-expose the individual ops peaks and break
-//! reconstruction. [`Db::rewind`](db::Db::rewind) rejects targets below this floor. The floor is a
+//! The same birth threshold also defines a recovery floor: selecting a size where the chunk-pair
+//! parent has not been born would re-expose the individual ops peaks and break reconstruction.
+//! Bounded initialization rejects sizes below this floor. The floor is a
 //! pure function of the pruned chunk count and the family geometry, so it does not need to be
 //! persisted; it is recomputed on startup from the pruned chunk count stored in metadata.
 //!
@@ -414,6 +414,7 @@ pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
     context: E,
     config: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    max_size: Option<Location<F>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
@@ -453,7 +454,14 @@ where
 
     // Initialize the underlying `any` database. It takes sole ownership of the bitmap and
     // populates it during snapshot rebuild.
-    let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
+    let any = any::init_with_bitmap(
+        context.child("any"),
+        config.into(),
+        Some(bitmap),
+        max_size,
+        db::pair_absorption_threshold::<F, N>(pruned_chunks as u64),
+    )
+    .await?;
 
     // Rebuild the grafted tree and canonical root from the initialized `any` state.
     let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
@@ -2054,7 +2062,16 @@ pub mod tests {
             assert_eq!(db.get(&key(1)).await.unwrap(), None);
             assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
 
-            let db = db.rewind(size_before).await.unwrap();
+            let db = {
+                drop(db.sync().await.unwrap());
+                UnorderedVariableDb::init_at_most(
+                    ctx.child("cap"),
+                    variable_config::<OneCap>(partition, &ctx),
+                    size_before,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.bounds().end, size_before);
             assert_eq!(db.root(), root_before);
             assert_eq!(db.ops_root(), ops_root_before);
@@ -2082,7 +2099,16 @@ pub mod tests {
             assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
             assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
 
-            let reopened = reopened.rewind(initial_size).await.unwrap();
+            let reopened = {
+                drop(reopened.sync().await.unwrap());
+                UnorderedVariableDb::init_at_most(
+                    ctx.child("cap"),
+                    variable_config::<OneCap>(partition, &ctx),
+                    initial_size,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(reopened.bounds().end, initial_size);
             assert_eq!(reopened.root(), initial_root);
             assert_eq!(reopened.ops_root(), initial_ops_root);
@@ -2170,7 +2196,7 @@ pub mod tests {
                     )
                 });
 
-            let db = db.rewind(target_size).await.unwrap();
+            let db = { drop(db.sync().await.unwrap()); UnorderedVariableDb::init_at_most(ctx.child("cap"), variable_config::<OneCap>(partition, &ctx), target_size).await }.unwrap();
             assert_eq!(db.root(), target_root);
             assert_eq!(db.ops_root(), target_ops_root);
             assert_eq!(db.bounds().end, target_size);
@@ -2361,16 +2387,18 @@ pub mod tests {
                     )
                 });
 
-            let Err(err) = db
-                .rewind(merkle::Location::<mmb::Family>::new(unsafe_target))
-                .await
+            let original_root = db.root();
+            drop(db.sync().await.unwrap());
+            let Err(err) = UnorderedVariableMmbDb::init_at_most(ctx.child("cap"), variable_config::<OneCap>(partition, &ctx), merkle::Location::<mmb::Family>::new(unsafe_target)).await
             else {
                 panic!("expected rewind rejection in unsettled delayed-merge window");
             };
             assert!(
-                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                matches!(err, Error::HistoricalFloorPruned(_)),
                 "unexpected rewind error for unsettled delayed-merge window: {err:?}"
             );
+            let db = UnorderedVariableMmbDb::init(ctx.child("unchanged"), variable_config::<OneCap>(partition, &ctx)).await.unwrap();
+            assert_eq!(db.root(), original_root);
         });
     }
 
@@ -2932,7 +2960,16 @@ pub mod tests {
                 .expect("history should contain at least three commits");
             let (target_size, target_root, target_ops_root, target_key0, target_key1) = target;
 
-            let db = db.rewind(target_size).await.unwrap();
+            let db = {
+                drop(db.sync().await.unwrap());
+                UnorderedVariableDb::init_at_most(
+                    ctx.child("cap"),
+                    variable_config::<OneCap>(partition, &ctx),
+                    target_size,
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.bounds().end, target_size);
             assert_eq!(db.root(), target_root);
             assert_eq!(db.ops_root(), target_ops_root);
@@ -2994,7 +3031,8 @@ pub mod tests {
             );
 
             let oldest_retained = db.bounds().start;
-            let Err(boundary_err) = db.rewind(oldest_retained).await else {
+            drop(db.sync().await.unwrap());
+            let Err(boundary_err) = UnorderedVariableDb::init_at_most(ctx.child("cap"), variable_config::<OneCap>(partition, &ctx), oldest_retained).await else {
                 panic!("expected rewind rejection at retained boundary");
             };
             assert!(
@@ -3011,8 +3049,9 @@ pub mod tests {
             )
             .await
             .unwrap();
-            let expected_pruned_loc = *first_range.start - 1;
-            let Err(err) = db.rewind(first_range.start).await else {
+            let expected_pruned_loc = *first_range.start;
+            drop(db.sync().await.unwrap());
+            let Err(err) = UnorderedVariableDb::init_at_most(ctx.child("cap"), variable_config::<OneCap>(partition, &ctx), first_range.start).await else {
                 panic!("expected rewind rejection at pruned target");
             };
             assert!(
@@ -3081,13 +3120,17 @@ pub mod tests {
                     )
                 });
 
-            let Err(err) = db.rewind(rewind_target).await else {
+            let original_root = db.root();
+            drop(db.sync().await.unwrap());
+            let Err(err) = UnorderedVariableDb::init_at_most(ctx.child("cap"), variable_config::<OneCap>(partition, &ctx), rewind_target).await else {
                 panic!("expected rewind rejection below bitmap floor");
             };
             assert!(
-                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                matches!(err, Error::HistoricalFloorPruned(_)),
                 "unexpected rewind error: {err:?}"
             );
+            let db = UnorderedVariableDb::init(ctx.child("unchanged"), variable_config::<OneCap>(partition, &ctx)).await.unwrap();
+            assert_eq!(db.root(), original_root);
         });
     }
 

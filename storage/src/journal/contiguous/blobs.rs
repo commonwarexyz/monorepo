@@ -7,7 +7,7 @@ use crate::{
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
-    buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
+    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
 use futures::{
@@ -64,6 +64,15 @@ impl<E: Context> Partition<E> {
         Ok(Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone()).await?)
     }
 
+    /// Open a blob under exclusive initialization ownership.
+    pub(super) async fn open_recovery(&self, index: u64) -> Result<PagedRecovery<E::Blob>, Error> {
+        let (blob, size) = self.context.open(&self.name, &index.to_be_bytes()).await?;
+        Ok(
+            PagedRecovery::open(blob, size, self.write_buffer.get(), self.page_cache.clone())
+                .await?,
+        )
+    }
+
     /// Scan a partition's blob names, treating a missing partition as empty.
     async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(name).await {
@@ -77,7 +86,7 @@ impl<E: Context> Partition<E> {
     pub(super) async fn open_many(
         &self,
         names: Vec<Vec<u8>>,
-    ) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    ) -> Result<BTreeMap<u64, PagedRecovery<E::Blob>>, Error> {
         let mut blobs = BTreeMap::new();
         for name in names {
             let hex_name = hex(&name);
@@ -85,7 +94,7 @@ impl<E: Context> Partition<E> {
                 .try_into()
                 .map_err(|_| Error::InvalidBlobName(hex_name.clone()))?;
             let index = u64::from_be_bytes(bytes);
-            let writer = self.open(index).await?;
+            let writer = self.open_recovery(index).await?;
             debug!(index, blob = hex_name, "loaded blob");
             blobs.insert(index, writer);
         }
@@ -93,9 +102,35 @@ impl<E: Context> Partition<E> {
     }
 
     /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
-    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, PagedRecovery<E::Blob>>, Error> {
         let names = Self::scan_names(&self.context, &self.name).await?;
         self.open_many(names).await
+    }
+
+    /// Open only blobs that may contain items below a cap, retaining discarded names.
+    pub(super) async fn open_bounded(
+        &self,
+        max_size: u64,
+        items_per_blob: u64,
+    ) -> Result<(BTreeMap<u64, PagedRecovery<E::Blob>>, Vec<u64>), Error> {
+        let names = Self::scan_names(&self.context, &self.name).await?;
+        let mut pending = BTreeMap::new();
+        let mut discarded = Vec::new();
+        for name in names {
+            let bytes: [u8; 8] = name
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidBlobName(hex(&name)))?;
+            let index = u64::from_be_bytes(bytes);
+            let first = super::blob_first_position(index, items_per_blob)?;
+            if first >= max_size {
+                discarded.push(index);
+            } else {
+                pending.insert(index, self.open_recovery(index).await?);
+            }
+        }
+        discarded.sort_unstable();
+        Ok((pending, discarded))
     }
 
     /// Remove the given blob.
@@ -175,7 +210,7 @@ impl<E: Context> Writable<E> {
     /// - Any blobs present must end at `tail_blob`.
     pub(super) async fn recover(
         partition: Partition<E>,
-        pending: BTreeMap<u64, Writer<E::Blob>>,
+        pending: BTreeMap<u64, PagedRecovery<E::Blob>>,
         tail_blob: u64,
     ) -> Result<Self, Error> {
         if let Some(&newest) = pending.keys().next_back()
@@ -191,6 +226,7 @@ impl<E: Context> Writable<E> {
         let mut tail: Option<Writer<E::Blob>> = None;
         let mut expected = oldest;
         for (blob, writer) in pending {
+            let writer = writer.finish();
             if expected != Some(blob) {
                 return Err(Error::Corruption(format!(
                     "retained blobs must be contiguous (expected {expected:?}, got {blob})"
@@ -242,6 +278,16 @@ impl<E: Context> Writable<E> {
     /// Index of the newest blob.
     pub(super) const fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.len() as u64
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_configuration(&self) -> (E, String, CacheRef, NonZeroUsize) {
+        (
+            self.partition.context.child("recovery_fixture"),
+            self.partition.name.clone(),
+            self.partition.page_cache.clone(),
+            self.partition.write_buffer,
+        )
     }
 
     /// A write handle for the tail.
@@ -326,74 +372,11 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Rewind the tail to `byte_offset`, shrinking it in place.
-    ///
-    /// # Invariants
-    ///
-    /// - `byte_offset <= tail size`
-    ///
-    pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
-        let current_bytes = self.tail.size();
-        assert!(byte_offset <= current_bytes);
-        if byte_offset < current_bytes {
-            self.drain_tail_predecessor_sync().await?;
-            self.drain_tail_sync().await?;
-            self.tail.resize(byte_offset).await?;
-        }
-        Ok(())
-    }
-
-    /// Rewind into a sealed blob: demote it to the writable tail, rewinding to `byte_offset`,
-    /// and discarding every newer blob.
-    ///
-    /// # Invariants
-    ///
-    /// - `blob < tail_blob_index`
-    pub(super) async fn rewind_into_sealed(
-        &mut self,
-        blob: u64,
-        byte_offset: u64,
-    ) -> Result<(), Error> {
-        self.drain_tail_predecessor_sync().await?;
-        self.drain_tail_sync().await?;
-
-        let idx = blob
-            .checked_sub(self.oldest_blob_index)
-            .map(|idx| idx as usize)
-            .filter(|&idx| idx < self.sealed.len())
-            .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
-
-        // Reopen the target as the writable tail and truncate in place. The fresh Writer
-        // gets a fresh page-cache id, so pages cached under the sealed handle's id are
-        // unreachable.
-        let mut new_writer = self.partition.open(blob).await?;
-        let current_bytes = new_writer.size();
-        if byte_offset < current_bytes {
-            new_writer.resize(byte_offset).await?;
-        }
-
-        // Remove blobs newest-first so a crash leaves a contiguous prefix: the old tail, then
-        // sealed blobs down to the target. Capture the old tail before truncating `sealed`
-        // (which redefines `tail_blob`).
-        let old_tail_blob = self.tail_blob_index();
-        self.tail = new_writer;
-        self.partition.remove(old_tail_blob).await?;
-        self.metrics.tracked.dec();
-        for newer in ((blob + 1)..old_tail_blob).rev() {
-            self.partition.remove(newer).await?;
-            self.metrics.tracked.dec();
-        }
-
-        // Sealed history now ends below the target, which is the tail.
-        self.sealed.truncate(idx);
-        self.sealed_snapshot = None;
-        Ok(())
-    }
-
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
     ///
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;

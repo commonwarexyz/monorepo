@@ -83,7 +83,7 @@ use crate::{
     Context,
     index::{Unordered as _, unordered::Index},
     journal::contiguous::{
-        Contiguous, Mutable as _,
+        Contiguous,
         variable::{Config as JournalConfig, Journal},
     },
     merkle::mmr::Location,
@@ -378,12 +378,46 @@ where
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let log =
-            Journal::<E, Operation<crate::mmr::Family, K, V>>::init(context.child("log"), cfg.log)
-                .await?;
+        Self::init_with_max(context, cfg, None).await
+    }
 
-        // Rewind log to remove uncommitted operations.
-        let (mut log, size) = log.rewind_to(|op| op.is_commit()).await?;
+    /// Recover the last retained commit ending at or below `max_size`.
+    pub async fn init_at_most(
+        context: E,
+        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
+        max_size: crate::merkle::Location<crate::mmr::Family>,
+    ) -> Result<Self, Error> {
+        Self::init_with_max(context, cfg, Some(max_size)).await
+    }
+
+    async fn init_with_max(
+        context: E,
+        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
+        max_size: Option<crate::merkle::Location<crate::mmr::Family>>,
+    ) -> Result<Self, Error> {
+        crate::qmdb::validate_initialization_bound(max_size)?;
+        let pending = <Journal<E, Operation<crate::mmr::Family, K, V>> as crate::journal::authenticated::Backing<E>>::recover(
+            context.child("log"), cfg.log, max_size.map(|size| *size),
+        ).await?;
+        let size = crate::journal::authenticated::Recovery::last_matching(
+            &pending,
+            max_size.map_or(u64::MAX, |size| *size),
+            |op| op.is_commit(),
+        )
+        .await?;
+        let bounds = crate::journal::authenticated::Recovery::bounds(&pending);
+        let commit = if size == 0 {
+            None
+        } else {
+            Some(crate::journal::authenticated::Recovery::read(&pending, size - 1).await?)
+        };
+        crate::qmdb::validate_initialization_commit(
+            bounds.start,
+            size,
+            bounds == (0..0),
+            commit.as_ref(),
+        )?;
+        let mut log = crate::journal::authenticated::Recovery::finish(pending, size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
             (log, _) = log
@@ -658,7 +692,7 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_store(&ctx, "delayed", "start-sync-overlap", &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let mut db = Box::pin(drive_pending_syncs(&pending, open)).await.unwrap();
             let key0 = Blake3::hash(&[&0u64.to_be_bytes()]);
             let value0 = vec![1u8; 8];
             db = apply_write(db, key0, value0.clone()).await;
@@ -779,7 +813,7 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_store(&ctx, "delayed", "start-sync-prune", &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+            let mut db = Box::pin(drive_pending_syncs(&pending, open)).await.unwrap();
             // Two batches so floor-raising steps leave a non-trivial prune target.
             db = apply_write(db, Blake3::hash(&[&0u64.to_be_bytes()]), vec![1u8; 8]).await;
             db = apply_write(db, Blake3::hash(&[&1u64.to_be_bytes()]), vec![2u8; 8]).await;

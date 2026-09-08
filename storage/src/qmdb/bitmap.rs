@@ -62,7 +62,6 @@ impl<const N: usize> Shared<N> {
     }
 
     /// Return the number of pruned bits. Acquires the read lock briefly.
-    #[cfg(any(test, feature = "test-traits"))]
     pub(crate) fn pruned_bits(&self) -> u64 {
         self.read().pruned_bits()
     }

@@ -113,7 +113,11 @@ mod tests {
 
             // Rewind one node at a time without syncing until empty, confirming the root matches.
             for i in (0..NUM_ELEMENTS).rev() {
-                mmr = mmr.rewind(1).await.unwrap();
+                let cap = mmr.leaves() - 1;
+                drop(mmr.sync().await.unwrap());
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                    .await
+                    .unwrap();
                 let root = mmr.root(&hasher, 0).unwrap();
                 let mut reference_mmr = mem::Mmr::new();
                 let batch = {
@@ -133,8 +137,12 @@ mod tests {
                     "root mismatch after rewind at {i}"
                 );
             }
-            mmr = mmr.rewind(0).await.unwrap();
-            assert!(matches!(mmr.rewind(1).await, Err(Error::Empty)));
+            let cap = mmr.leaves() - 0;
+            drop(mmr.sync().await.unwrap());
+            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                .await
+                .unwrap();
+            drop(mmr);
             let mut mmr = Mmr::init(context.child("reopen1"), &hasher, test_config(&context))
                 .await
                 .unwrap();
@@ -169,7 +177,11 @@ mod tests {
             }
 
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
-                mmr = mmr.rewind(2).await.unwrap();
+                let cap = mmr.leaves() - 2;
+                drop(mmr.sync().await.unwrap());
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                    .await
+                    .unwrap();
                 let root = mmr.root(&hasher, 0).unwrap();
                 let reference_mmr = mem::Mmr::new();
                 let reference_mmr = build_test_mmr(&hasher, reference_mmr, i);
@@ -181,7 +193,7 @@ mod tests {
             }
             // Persist the empty state so re-initialization below starts from it.
             mmr = mmr.sync().await.unwrap();
-            assert!(matches!(mmr.rewind(99).await, Err(Error::Empty)));
+            drop(mmr);
             let mut mmr = Mmr::init(context.child("reopen2"), &hasher, test_config(&context))
                 .await
                 .unwrap();
@@ -212,19 +224,37 @@ mod tests {
             let prune_pos = Position::try_from(prune_loc).unwrap();
             mmr = mmr.prune(prune_loc).await.unwrap();
             // Rewind enough nodes to cause the mem-mmr to be completely emptied, and then some.
-            mmr = mmr.rewind(80).await.unwrap();
+            let cap = mmr.leaves() - 80;
+            drop(mmr.sync().await.unwrap());
+            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                .await
+                .unwrap();
             // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
             mmr.proof(&hasher, prune_loc, 0).await.unwrap();
             // prune all remaining leaves 1 at a time.
             while mmr.size() > prune_pos {
-                mmr = mmr.rewind(1).await.unwrap();
+                let cap = mmr.leaves() - 1;
+                drop(mmr.sync().await.unwrap());
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                    .await
+                    .unwrap();
             }
 
             // Make sure pruning to an older location is a no-op.
             mmr = mmr.prune(prune_loc - 1).await.unwrap();
             assert_eq!(mmr.bounds().start, prune_loc);
 
-            assert!(matches!(mmr.rewind(1).await, Err(Error::ElementPruned(_))));
+            drop(mmr);
+            assert!(matches!(
+                Mmr::<_, Digest, Sequential>::init_at_most(
+                    context.child("pruned_cap"),
+                    &hasher,
+                    test_config(&context),
+                    prune_loc - 1
+                )
+                .await,
+                Err(Error::ElementPruned(_))
+            ));
         });
     }
 

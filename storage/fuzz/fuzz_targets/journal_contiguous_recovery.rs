@@ -47,11 +47,11 @@
 //!
 //! # Positions
 //!
-//! Position arguments (`Read`, `Rewind`, `Replay`) come straight from the fuzzer, so a random `u64`
+//! Position arguments (`Read`, `ReopenAtMost`, `Replay`) come straight from the fuzzer, so a random `u64`
 //! is almost always out of range. `Read` and `Replay` run twice (`Read` skips the clamped pass on
 //! an empty journal): once with the value clamped into the live range, which must take the success
 //! path, and once with the raw value, which exercises the validation path (`ItemPruned` below the
-//! start, `ItemOutOfRange` past the end). `Rewind` runs once, usually clamped, occasionally raw.
+//! start, `ItemOutOfRange` past the end). `ReopenAtMost` runs once, usually clamped, occasionally raw.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
@@ -126,8 +126,8 @@ enum JournalOperation {
     Snapshot,
     /// Commit the journal.
     Commit,
-    /// Rewind the journal to a smaller size.
-    Rewind { size: u64 },
+    /// ReopenAtMost the journal to a smaller size.
+    ReopenAtMost { size: u64 },
     /// Prune items before a position.
     Prune { min_pos: u64 },
     /// Replay items from the journal.
@@ -301,18 +301,12 @@ impl Expected {
         self.candidates.clear();
     }
 
-    /// Successful rewind: the truncated tail may or may not persist, so recovered size is in
-    /// `[target, prev]`. Until a durability barrier a crash can resurface the pre-rewind bytes,
-    /// so each truncated value stays admissible at the position it held.
-    fn rewound(&mut self, target: u64, prev_size: u64) {
-        self.durable_len = self.durable_len.min(target);
-        self.max_size = self.max_size.max(prev_size);
-        for (offset, item) in self.values.drain(target as usize..).enumerate() {
-            self.candidates
-                .entry(target + offset as u64)
-                .or_default()
-                .push(item);
-        }
+    /// A successful capped initializer durably fixes the complete retained prefix.
+    fn reopened(&mut self, end: u64) {
+        self.values.truncate(end as usize);
+        self.candidates.clear();
+        self.durable_len = end;
+        self.max_size = end;
     }
 
     /// Failed rewind: like a successful one it may or may not have truncated, but no value was
@@ -337,7 +331,7 @@ impl Expected {
 
 /// Trait abstracting over fixed and variable journals for the fuzz test.
 trait FuzzJournal: Sized {
-    type Config;
+    type Config: Clone;
 
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config;
 
@@ -360,7 +354,11 @@ trait FuzzJournal: Sized {
     fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn snapshot(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
-    fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn init_at_most(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> impl Future<Output = Result<Self, Error>> + Send;
     fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
 
     fn replay(
@@ -448,8 +446,12 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::commit(self).await
     }
 
-    async fn rewind(self, size: u64) -> Result<Self, Error> {
-        FixedJournal::rewind(self, size).await
+    async fn init_at_most(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> Result<Self, Error> {
+        FixedJournal::init_at_most(ctx, cfg, size).await
     }
 
     async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
@@ -526,8 +528,12 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         Ok(journal)
     }
 
-    async fn rewind(self, size: u64) -> Result<Self, Error> {
-        VariableJournal::rewind(self, size).await
+    async fn init_at_most(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> Result<Self, Error> {
+        VariableJournal::init_at_most(ctx, cfg, size).await
     }
 
     async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
@@ -723,6 +729,7 @@ async fn run_ops<J: FuzzJournal>(
     expected: &mut Expected,
     ops: &[JournalOperation],
     params: Params,
+    cfg: J::Config,
 ) {
     let faults = ctx.storage_fault_config();
     for op in ops {
@@ -800,7 +807,7 @@ async fn run_ops<J: FuzzJournal>(
                 }
             },
 
-            JournalOperation::Rewind { size } => {
+            JournalOperation::ReopenAtMost { size } => {
                 let bounds = journal.bounds();
                 if bounds.is_empty() {
                     journal
@@ -813,9 +820,15 @@ async fn run_ops<J: FuzzJournal>(
                     } else {
                         bounds.start + (*size % (bounds.end - bounds.start + 1))
                     };
-                    match journal.rewind(target).await {
+                    let synced = match journal.sync().await {
+                        Ok(journal) => journal,
+                        Err(_) => return,
+                    };
+                    expected.committed(bounds.end);
+                    drop(synced);
+                    match J::init_at_most(ctx.child("capped"), cfg.clone(), target).await {
                         Ok(journal) => {
-                            expected.rewound(target, bounds.end);
+                            expected.reopened(journal.bounds().end);
                             journal
                         }
                         // Any error ends the cycle. Validation errors reject before
@@ -823,7 +836,7 @@ async fn run_ops<J: FuzzJournal>(
                         // a clamped target is a bug. Any other error
                         // may have interrupted the truncation and lost data above `target`,
                         // so lower durable_len conservatively.
-                        Err(e @ (Error::InvalidRewind(_) | Error::ItemPruned(_))) => {
+                        Err(e @ Error::ItemPruned(_)) => {
                             assert!(
                                 use_raw_target,
                                 "rewind to clamped retained target {target} (bounds [{}, {})) \
@@ -1018,7 +1031,15 @@ where
 
         // Faults on for the operation phase. Returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
-        run_ops(&ctx, journal, &mut expected, &cycle.ops, params).await;
+        run_ops(
+            &ctx,
+            journal,
+            &mut expected,
+            &cycle.ops,
+            params,
+            J::config(&partition, &ctx, &params),
+        )
+        .await;
         expected
     })
 }

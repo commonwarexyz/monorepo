@@ -105,33 +105,7 @@ where
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
-        let mut journal = Self::init(context, config).await?;
-        let size = Contiguous::bounds(&journal).end;
-
-        // Fresh journal already aligned with the sync start - nothing to do.
-        if size == 0 && *range.start() == 0 {
-            return Ok(journal);
-        }
-
-        // A pruned start cannot be reconstructed from the retained suffix.
-        let bounds = journal.bounds();
-        if bounds.start > *range.start() {
-            return journal.clear_to_size(*range.start()).await;
-        }
-
-        // Sync targets describe the same append-only log, so progress beyond an older target can
-        // retain its authenticated prefix instead of refetching it.
-        if size > *range.end() {
-            journal = journal.rewind(*range.end()).await?;
-        }
-
-        if size <= *range.start() {
-            journal = journal.clear_to_size(*range.start()).await?;
-        } else {
-            (journal, _) = journal.prune(*range.start()).await?;
-        }
-
-        Ok(journal)
+        crate::journal::contiguous::init_sync(context, config, *range.start()..*range.end()).await
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {

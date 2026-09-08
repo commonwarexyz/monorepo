@@ -126,7 +126,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
         unreachable!("TestDb is constructed directly in tests")
     }
 
-    async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+    async fn init(
+        _context: E,
+        _config: Self::Config,
+        _expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, Self::Error> {
         Ok(Self::default())
     }
 
@@ -173,10 +177,6 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     fn sync_target(&self) -> Self::SyncTarget {
         0
-    }
-
-    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-        Ok(self)
     }
 }
 

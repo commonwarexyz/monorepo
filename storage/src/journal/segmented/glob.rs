@@ -184,7 +184,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     #[cfg(test)]
     async fn inject(&mut self, section: u64, offset: u64, buf: Vec<u8>) -> Result<(), Error> {
         let writer = self.manager.get_or_create(section).await?;
-        writer.write_at(offset, buf).await.map_err(Error::Runtime)
+        writer
+            .test_inject(offset, buf)
+            .await
+            .map_err(Error::Runtime)
     }
 
     /// See [Glob::sync].
@@ -207,14 +210,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.manager.size(section)
     }
 
-    /// See [Glob::rewind].
-    async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind(section, size).await
+    /// Truncate an initialization-owned suffix.
+    async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.truncate_pending(section, size).await
     }
 
-    /// See [Glob::rewind_section].
-    async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await
+    /// Repair one section during initialization.
+    async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.truncate_pending_section(section, size).await
     }
 
     /// See [Glob::prune].
@@ -277,7 +280,70 @@ impl<E: Context, V: CodecShared> std::fmt::Debug for Glob<E, V> {
 impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Ok(Self::init_pending(context, cfg).await?.finish_recovery())
+    }
+
+    /// Open the uncached sections under paired initialization ownership.
+    pub(crate) async fn init_pending(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
+        let (context, partition, factory) = self.0.manager.test_configuration();
+        (
+            context,
+            Config {
+                partition,
+                write_buffer: factory.capacity,
+                compression: self.0.compression,
+                codec_config: self.0.codec_config.clone(),
+            },
+        )
+    }
+
+    /// Publish every value section after paired recovery.
+    pub(crate) fn finish_recovery(mut self) -> Self {
+        self.0.manager.finish_recovery();
+        self
+    }
+
+    /// Retain a byte prefix during initialization. The caller supplies a complete value boundary.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn init_at_most(
+        context: E,
+        cfg: Config<V::Cfg>,
+        section: u64,
+        end: u64,
+    ) -> Result<Self, Error> {
+        let pending = Self::init_pending(context, cfg).await?;
+        Ok(pending
+            .truncate_pending(section, end)
+            .await?
+            .finish_recovery())
+    }
+
+    #[cfg(test)]
+    async fn test_reopen(self, section: u64, end: u64, remove_later: bool) -> Result<Self, Error> {
+        let (context, partition, factory) = self.0.manager.test_configuration();
+        let cfg = Config {
+            partition,
+            write_buffer: factory.capacity,
+            compression: self.0.compression,
+            codec_config: self.0.codec_config.clone(),
+        };
+        drop(self.sync_all().await?);
+        let pending = Self::init_pending(context, cfg).await?;
+        let pending = if remove_later {
+            pending.truncate_pending(section, end).await?
+        } else {
+            pending.truncate_pending_section(section, end).await?
+        };
+        Ok(pending.finish_recovery())
+    }
+    #[cfg(test)]
+    async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
+        self.test_reopen(section, end, false).await
     }
 
     /// Append value to section.
@@ -347,19 +413,23 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
         self.0.size(section)
     }
 
-    /// Rewind to a specific section and size.
+    /// Truncate to a specific section and size.
     ///
     /// Truncates the section to the given size and removes all sections after it.
-    pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.rewind(section, size).await?;
+    pub(crate) async fn truncate_pending(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.truncate_pending(section, size).await?;
         Ok(self)
     }
 
-    /// Rewind only the given section to a specific size.
+    /// Truncate only the given section to a specific size.
     ///
-    /// Unlike `rewind`, this does not affect other sections.
-    pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.rewind_section(section, size).await?;
+    /// Other sections are unaffected.
+    pub(crate) async fn truncate_pending_section(
+        mut self,
+        section: u64,
+        size: u64,
+    ) -> Result<Self, Error> {
+        self.0.truncate_pending_section(section, size).await?;
         Ok(self)
     }
 
@@ -583,7 +653,7 @@ mod tests {
             // Corrupt the data by writing directly to the underlying blob
             let writer = glob.0.manager.blobs.get_mut(&1).unwrap();
             writer
-                .write_at(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
+                .test_inject(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
                 .await
                 .expect("Failed to corrupt");
             writer.sync().await.expect("Failed to sync");
@@ -597,7 +667,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_glob_rewind() {
+    fn test_glob_truncate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
@@ -616,13 +686,13 @@ mod tests {
             }
             glob = glob.sync(1).await.expect("Failed to sync");
 
-            // Rewind to after the third value
+            // Truncate to after the third value
             let (third_offset, third_size) = locations[2];
-            let rewind_size = third_offset + u64::from(third_size);
+            let truncate_size = third_offset + u64::from(third_size);
             let glob = glob
-                .rewind_section(1, rewind_size)
+                .test_reopen_section(1, truncate_size)
                 .await
-                .expect("Failed to rewind");
+                .expect("Failed to truncate");
 
             // First three values should still be readable
             for (i, (offset, size)) in locations.iter().take(3).enumerate() {

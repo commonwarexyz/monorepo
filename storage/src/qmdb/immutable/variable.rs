@@ -5,13 +5,10 @@
 use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
     Context,
-    journal::{
-        authenticated,
-        contiguous::variable::{self, Config as JournalConfig},
-    },
+    journal::contiguous::variable::{self, Config as JournalConfig},
     merkle::Family,
     qmdb::{
-        Error, ROOT_BAGGING,
+        Error,
         any::{VariableValue, value::VariableEncoding},
         operation::Key,
     },
@@ -31,9 +28,6 @@ pub type Db<F, E, K, V, H, T, S> =
 /// Type alias for the variable-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, C, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
 
-type Journal<F, E, K, V, H, S> =
-    authenticated::Journal<F, E, variable::Journal<E, Operation<F, K, V>>, H, S>;
-
 /// Configuration for a variable-size immutable authenticated db.
 pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
 
@@ -49,12 +43,28 @@ impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, 
         context: E,
         cfg: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, K, V, H, S> = Journal::new(
+        Self::init_with_max(context, cfg, None).await
+    }
+
+    /// Recover the last retained commit ending at or below `max_size`.
+    pub async fn init_at_most(
+        context: E,
+        cfg: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: crate::merkle::Location<F>,
+    ) -> Result<Self, Error<F>> {
+        Self::init_with_max(context, cfg, Some(max_size)).await
+    }
+
+    async fn init_with_max(
+        context: E,
+        cfg: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<crate::merkle::Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        let journal = crate::qmdb::init_journal::<F, E, _, H, S>(
             context.child("journal"),
             cfg.merkle_config,
             cfg.log,
-            Operation::<F, K, V>::is_commit,
-            ROOT_BAGGING,
+            max_size,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
@@ -81,6 +91,24 @@ where
             context.child("witness"),
             cfg.witness,
             cfg.commit_codec_config,
+            None,
+        )
+        .await
+    }
+
+    /// Recover the latest retained witness at or below an operation-count cap.
+    pub async fn init_at_most(
+        context: E,
+        cfg: CompactConfig<C, S>,
+        max_size: crate::merkle::Location<F>,
+    ) -> Result<Self, Error<F>> {
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(
+            merkle,
+            context.child("witness"),
+            cfg.witness,
+            cfg.commit_codec_config,
+            Some(max_size),
         )
         .await
     }
@@ -163,22 +191,24 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn open<F: Family>(
         ctx: deterministic::Context,
+        cap: Option<crate::merkle::Location<F>>,
     ) -> Pin<
         Box<
             dyn Future<
-                    Output = Db<
-                        F,
-                        deterministic::Context,
-                        Digest,
-                        Digest,
-                        Sha256,
-                        TwoCap,
-                        Sequential,
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
                     >,
                 > + Send,
         >,
     > {
-        Box::pin(open_db::<F>(ctx))
+        Box::pin(async move {
+            let cfg = config("partition", &ctx);
+            match cap {
+                Some(size) => Db::init_at_most(ctx, cfg, size).await,
+                None => Db::init(ctx, cfg).await,
+            }
+        })
     }
 
     fn is_send<T: Send>(_: T) {}
@@ -195,14 +225,6 @@ mod tests {
         is_send(db.sync());
     }
 
-    #[allow(dead_code)]
-    fn assert_rewind_is_send(
-        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
-        loc: crate::merkle::mmr::Location,
-    ) {
-        is_send(db.rewind(loc));
-    }
-
     fn small_sections_config(
         suffix: &str,
         pooler: &impl BufferPooler,
@@ -212,32 +234,27 @@ mod tests {
         cfg
     }
 
-    async fn open_small_sections_db<F: Family>(
-        context: deterministic::Context,
-    ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = small_sections_config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
-    }
-
     #[allow(clippy::type_complexity)]
     fn open_small_sections<F: Family>(
         ctx: deterministic::Context,
+        cap: Option<crate::merkle::Location<F>>,
     ) -> Pin<
         Box<
             dyn Future<
-                    Output = Db<
-                        F,
-                        deterministic::Context,
-                        Digest,
-                        Digest,
-                        Sha256,
-                        TwoCap,
-                        Sequential,
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
                     >,
                 > + Send,
         >,
     > {
-        Box::pin(open_small_sections_db::<F>(ctx))
+        Box::pin(async move {
+            let cfg = small_sections_config("partition", &ctx);
+            match cap {
+                Some(size) => Db::init_at_most(ctx, cfg, size).await,
+                None => Db::init(ctx, cfg).await,
+            }
+        })
     }
 
     immutable_tests! {

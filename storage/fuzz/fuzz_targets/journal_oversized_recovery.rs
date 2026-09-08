@@ -571,29 +571,46 @@ fn fuzz(input: FuzzInput) {
                                 }
                             }
                         } else {
-                            // Rewind one live section below its current length: its tracked floor
-                            // durably lowers before the freed index and value ranges can be reused.
+                            // Close every owner and cap the selected section during tracked startup.
                             let live: Vec<u64> = counts.keys().copied().collect();
                             if let Some(&section) =
                                 live.get(usize::from(op >> 4) % live.len().max(1))
                             {
-                                let count = counts[&section];
-                                let keep = count * u64::from(op >> 6) / 4;
-                                oversized = drive_pending_syncs(
-                                    &pending,
-                                    oversized
-                                        .rewind_section(section, keep * TestEntry::SIZE as u64),
-                                )
+                                let keep = counts[&section] * u64::from(op >> 6) / 4;
+                                drop(
+                                    drive_pending_syncs(&pending, oversized.sync_all())
+                                        .await
+                                        .expect("sync before reopen failed"),
+                                );
+                                for (_, _, handle) in held.drain(..) {
+                                    handle.await.expect("prior sync failed");
+                                }
+                                oversized = drive_pending_syncs(&pending, async {
+                                    let capped_context = context.child("capped");
+                                    let mut replay = Oversized::init_with_metadata_at_most(
+                                        &capped_context,
+                                        config(&context),
+                                        METADATA_PARTITION.into(),
+                                        ReadOptions::default(),
+                                        section,
+                                        keep * TestEntry::SIZE as u64,
+                                    )
+                                    .await?;
+                                    while let Some(item) = replay.next().await {
+                                        item?;
+                                    }
+                                    replay.finish_tracked().await
+                                })
                                 .await
-                                .expect("rewind failed");
+                                .expect("capped initialization failed");
+                                counts.retain(|candidate, _| *candidate <= section);
+                                model.retain(|candidate, _| *candidate <= section);
                                 counts.insert(section, keep);
                                 model
                                     .get_mut(&section)
-                                    .expect("rewound section is modeled")
+                                    .expect("capped section is modeled")
                                     .truncate(keep as usize);
-                                if let Some(durable) = durable.get_mut(&section) {
-                                    *durable = (*durable).min(keep);
-                                }
+                                durable = counts.clone();
                             }
                         }
                     }

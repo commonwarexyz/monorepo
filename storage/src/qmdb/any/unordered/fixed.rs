@@ -47,6 +47,15 @@ impl<
     pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
         crate::qmdb::any::init(context, cfg).await
     }
+
+    /// Recover the last retained commit ending at or below `max_size`.
+    pub async fn init_at_most(
+        context: E,
+        cfg: Config<T, S>,
+        max_size: crate::merkle::Location<F>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::any::init_at_most(context, cfg, max_size).await
+    }
 }
 
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
@@ -110,6 +119,15 @@ pub mod partitioned {
             cfg: Config<T, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg).await
+        }
+
+        /// Recover the last retained commit ending at or below `max_size`.
+        pub async fn init_at_most(
+            context: E,
+            cfg: Config<T, S, core::num::NonZeroUsize>,
+            max_size: crate::merkle::Location<F>,
+        ) -> Result<Self, Error<F>> {
+            crate::qmdb::any::init_at_most(context, cfg, max_size).await
         }
     }
 

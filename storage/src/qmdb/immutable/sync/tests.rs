@@ -1703,7 +1703,14 @@ mod compact_variable_mmr {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.size).await.unwrap();
+            drop(source);
+            let source = ClientDb::init_at_most(
+                context.child("cap_source"),
+                source_cfg.clone(),
+                target1.size,
+            )
+            .await
+            .unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::sync(compact_engine_config(
@@ -1818,11 +1825,15 @@ mod compact_variable_mmr {
             let boundary = seeded.size();
             let seeded = seeded.prune(boundary).await.unwrap();
             // The prune moved the journal's pruning boundary: the first commit is unreachable.
+            drop(seeded);
             assert!(matches!(
-                seeded.rewind(first_size.unwrap()).await,
-                Err(crate::qmdb::Error::Merkle(
-                    crate::merkle::Error::RewindBeyondHistory
-                ))
+                ClientDb::init_at_most(
+                    context.child("cap_pruned"),
+                    client_cfg.clone(),
+                    first_size.unwrap()
+                )
+                .await,
+                Err(crate::qmdb::Error::HistoricalFloorPruned(_))
             ));
 
             // Sync different state into the same partition.
@@ -1929,9 +1940,8 @@ mod compact_variable_mmr {
             .unwrap();
             assert_eq!(imported.target(), target_b);
 
-            // Rewind is rejected until the import is persisted, even to the imported leaf
-            // count itself: the fast path must not report unpersisted state as durable.
-            assert!(imported.rewind(target_b.size).await.is_err());
+            // Drop the unpersisted import; it must not replace the previous durable witness.
+            drop(imported);
 
             // Prune is likewise rejected while the import is pending; rebuild the import.
             let (response, _) = fetch_compact_state(&source, target_b.clone())
@@ -2447,7 +2457,14 @@ mod compact_variable_mmb {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.size).await.unwrap();
+            drop(source);
+            let source = ClientDb::init_at_most(
+                context.child("cap_source"),
+                source_cfg.clone(),
+                target1.size,
+            )
+            .await
+            .unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::sync(compact_engine_config(

@@ -462,13 +462,6 @@ impl CacheRef {
     pub fn clear(&self) {
         self.cache.write().clear();
     }
-
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
-    /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
-    /// buffer (or future writes) now owns.
-    pub(super) fn invalidate_from(&self, blob_id: u64, start_page: u64) {
-        self.cache.write().invalidate_from(blob_id, start_page);
-    }
 }
 
 impl Cache {
@@ -559,12 +552,6 @@ impl Cache {
             return Some(page);
         }
         self.cache.get(&key)
-    }
-
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`.
-    fn invalidate_from(&mut self, blob_id: u64, start_page: u64) {
-        self.cache
-            .retain(|&(bid, page_num), _| bid != blob_id || page_num < start_page);
     }
 
     /// Drop all cached pages while retaining backing page buffers for reuse.
@@ -838,7 +825,7 @@ mod tests {
         // Fill both slots, then invalidate them so both slots are freed for reuse.
         cache.cache(blob_id, &vec![0xAA; page_size], 0);
         cache.cache(blob_id, &vec![0xBB; page_size], 1);
-        cache.invalidate_from(blob_id, 0);
+        cache.clear();
 
         // Re-cache page 1 into a reused slot.
         cache.cache(blob_id, &vec![0xCC; page_size], 1);
@@ -1544,7 +1531,11 @@ mod tests {
                 cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
             }
         }
-        cache_ref.invalidate_from(blob_id, 2);
+        cache_ref
+            .cache
+            .write()
+            .cache
+            .retain(|&(_, page), _| page < 2);
 
         let read_page = |page: u64| {
             let mut buf = vec![0u8; page_size];

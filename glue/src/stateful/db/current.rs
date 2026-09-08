@@ -522,8 +522,20 @@ where
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, Error<F>> {
+        let Some(target) = expected else {
+            return <Self>::init(context, config).await;
+        };
+        let db = <Self>::init_at_most(context, config, target.range.end()).await?;
+        crate::stateful::db::validate_initialization::<E, Self>(
+            db,
+            target,
+            Error::DataCorrupted("database does not match initialization target"),
+        )
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -567,18 +579,6 @@ where
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -627,8 +627,20 @@ where
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, Error<F>> {
+        let Some(target) = expected else {
+            return <Self>::init(context, config).await;
+        };
+        let db = <Self>::init_at_most(context, config, target.range.end()).await?;
+        crate::stateful::db::validate_initialization::<E, Self>(
+            db,
+            target,
+            Error::DataCorrupted("database does not match initialization target"),
+        )
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -673,18 +685,6 @@ where
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
 }
 
 /// Workaround for <https://github.com/rust-lang/rust/issues/115188>.
@@ -726,6 +726,7 @@ mod open {
     pub(super) async fn variable<F, E, K, V, H, T, const N: usize, S>(
         context: E,
         config: VConfig<T, F, K, V, S>,
+        max_size: Option<commonware_storage::merkle::Location<F>>,
     ) -> Result<Db<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
@@ -737,12 +738,16 @@ mod open {
         S: Strategy,
         Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     {
-        Db::init(context, config).await
+        match max_size {
+            Some(size) => Db::init_at_most(context, config, size).await,
+            None => Db::init(context, config).await,
+        }
     }
 
     pub(super) async fn ordered_variable<F, E, K, V, H, T, const N: usize, S>(
         context: E,
         config: OrderedVConfig<T, F, K, V, S>,
+        max_size: Option<commonware_storage::merkle::Location<F>>,
     ) -> Result<OrderedVariableDb<F, E, K, V, H, T, N, S>, Error<F>>
     where
         F: Graftable,
@@ -754,7 +759,10 @@ mod open {
         S: Strategy,
         Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     {
-        OrderedVariableDb::init(context, config).await
+        match max_size {
+            Some(size) => OrderedVariableDb::init_at_most(context, config, size).await,
+            None => OrderedVariableDb::init(context, config).await,
+        }
     }
 }
 
@@ -808,8 +816,20 @@ where
     >;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        open::variable(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, Error<F>> {
+        let Some(target) = expected else {
+            return open::variable(context, config, None).await;
+        };
+        let db = open::variable(context, config, Some(target.range.end())).await?;
+        crate::stateful::db::validate_initialization::<E, Self>(
+            db,
+            target,
+            Error::DataCorrupted("database does not match initialization target"),
+        )
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -853,18 +873,6 @@ where
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -918,8 +926,20 @@ where
     >;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        open::ordered_variable(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, Error<F>> {
+        let Some(target) = expected else {
+            return open::ordered_variable(context, config, None).await;
+        };
+        let db = open::ordered_variable(context, config, Some(target.range.end())).await?;
+        crate::stateful::db::validate_initialization::<E, Self>(
+            db,
+            target,
+            Error::DataCorrupted("database does not match initialization target"),
+        )
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -963,18 +983,6 @@ where
             self.ops_root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -1342,7 +1350,7 @@ mod tests {
     fn ordered_fixed_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-fixed-managed-db", &context);
-            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -1388,7 +1396,7 @@ mod tests {
     fn ordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-fixed-glue-staged", &context);
-            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -1465,7 +1473,7 @@ mod tests {
     fn ordered_variable_managed_db_applies_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let config = variable_config("ordered-variable-managed-db", &context);
-            let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -1506,9 +1514,10 @@ mod tests {
     fn ordered_managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-matches-sync-target", &context);
-            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
-                .await
-                .unwrap();
+            let db =
+                <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
+                    .await
+                    .unwrap();
             let db = Shared::new("test", db);
 
             let key = Sha256::hash(&[b"key"]);
@@ -1524,10 +1533,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let verification_db =
-                <OrderedFixedDb as ManagedDb<_>>::init(context.child("verification_db"), config)
-                    .await
-                    .unwrap();
+            let verification_db = <OrderedFixedDb as ManagedDb<_>>::init(
+                context.child("verification_db"),
+                config,
+                None,
+            )
+            .await
+            .unwrap();
             let (verification_db, _) = verification_db
                 .apply_batch(merkleized.inner.clone())
                 .await
@@ -1561,9 +1573,10 @@ mod tests {
     fn ordered_managed_db_rewind_to_target_round_trips() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("ordered-rewind-round-trip", &context);
-            let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
-                .await
-                .unwrap();
+            let db =
+                <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
+                    .await
+                    .unwrap();
             let db = Shared::new("test", db);
 
             let key1 = Sha256::hash(&[b"key1"]);
@@ -1602,22 +1615,48 @@ mod tests {
                 slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized2).await);
             }
 
-            {
-                let (slot, database) = db.write().await;
-                slot.put(
-                    <OrderedFixedDb as ManagedDb<_>>::rewind_to_target(
-                        database,
-                        target_after_first.clone(),
+            drop(db);
+            let db = <OrderedFixedDb as ManagedDb<_>>::init(
+                context.child("cap"),
+                config.clone(),
+                Some(target_after_first.clone()),
+            )
+            .await
+            .unwrap();
+            let target_after_rewind = <OrderedFixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target_after_rewind, target_after_first);
+            drop(db);
+
+            let mut wrong_root = target_after_first.clone();
+            wrong_root.root = Sha256::hash(&[b"wrong initialization root"]);
+            let mut behind = target_after_first.clone();
+            behind.range = non_empty_range!(behind.range.start(), behind.range.end() + 1);
+            let mut wrong_floor = target_after_first.clone();
+            wrong_floor.range =
+                non_empty_range!(wrong_floor.range.start() + 1, wrong_floor.range.end());
+            for (index, target) in [wrong_root, behind, wrong_floor].into_iter().enumerate() {
+                assert!(
+                    <OrderedFixedDb as ManagedDb<_>>::init(
+                        context.child("mismatch").with_attribute("case", index),
+                        config.clone(),
+                        Some(target),
                     )
                     .await
-                    .unwrap(),
+                    .is_err()
                 );
+                let reopened = <OrderedFixedDb as ManagedDb<_>>::init(
+                    context.child("restart").with_attribute("case", index),
+                    config.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    <OrderedFixedDb as ManagedDb<_>>::sync_target(&reopened),
+                    target_after_first
+                );
+                drop(reopened);
             }
-            let target_after_rewind = {
-                let guard = db.read().await;
-                <OrderedFixedDb as ManagedDb<_>>::sync_target(&guard)
-            };
-            assert_eq!(target_after_rewind, target_after_first);
         });
     }
 

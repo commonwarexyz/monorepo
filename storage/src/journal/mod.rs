@@ -5,6 +5,20 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
+//! # Initialization and retained prefixes
+//!
+//! Contiguous `init_at_most` constructors accept an absolute exclusive item count. Segmented
+//! constructors use a section and logical byte end. Above-end bounds preserve the recovered end;
+//! a contiguous bound below the retained start fails. Initializers durably discard suffixes before
+//! returning. Live handles support appends and pruning, with no retained-position reuse.
+//!
+//! Segmented sections opened for lazy replay remain initialization-owned until their first full
+//! replay completes. Later replays are read-only with respect to retained lengths. Removing and
+//! recreating a whole section establishes a new storage incarnation.
+//!
+//! Close all previous writers and disk-backed readers before initialization repair. Reopening is
+//! not atomic across blobs or paired journals; after a failure, retry initialization on storage.
+
 use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
@@ -49,8 +63,6 @@ pub enum Error {
     ItemOutOfRange(u64),
     #[error("item pruned: {0}")]
     ItemPruned(u64),
-    #[error("invalid rewind: {0}")]
-    InvalidRewind(u64),
     #[error("compression failed")]
     CompressionFailed,
     #[error("decompression failed")]

@@ -6,10 +6,11 @@
 use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
+    Blob, BufferPool, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, Metrics, ReadOptions,
+    Storage,
     buffer::{
         Write,
-        paged::{CacheRef, Writer},
+        paged::{CacheRef, Recovery as PagedRecovery, Replay, Writer},
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
@@ -60,54 +61,53 @@ pub trait SectionBuffer: Send + Sync {
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Resize the logical size of the buffer.
-    fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+    /// Shorten an unpublished section during initialization.
+    fn truncate_pending(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Irreversibly publish this section for appends.
+    fn finish(&mut self) {}
 }
 
-impl<B: Blob> SectionBuffer for Writer<B> {
+impl<B: Blob> SectionBuffer for AppendBuffer<B> {
     fn size(&self) -> u64 {
-        Self::size(self)
+        self.size()
     }
-
     async fn sync(&mut self) -> Result<(), RError> {
-        Self::sync(self).await
+        self.sync().await
     }
-
     async fn start_sync(&mut self) -> Handle<()> {
-        Self::start_sync(self).await
+        self.start_sync().await
     }
-
     async fn wait_for_sync(&mut self) -> Result<(), RError> {
-        Self::wait_for_sync(self).await
+        self.wait_for_sync().await
     }
-
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
+        self.truncate_pending(len).await
+    }
+    fn finish(&mut self) {
+        self.finish();
     }
 }
-
-impl<B: Blob> SectionBuffer for Write<B> {
+impl<B: Blob> SectionBuffer for WriteBuffer<B> {
     fn size(&self) -> u64 {
-        Self::size(self)
+        self.size()
     }
-
     async fn sync(&mut self) -> Result<(), RError> {
-        Self::sync(self).await
+        self.sync().await
     }
-
     async fn start_sync(&mut self) -> Handle<()> {
-        Self::start_sync(self).await
+        self.start_sync().await
     }
-
     async fn wait_for_sync(&mut self) -> Result<(), RError> {
-        Self::wait_for_sync(self).await
+        self.wait_for_sync().await
     }
-
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
+        self.truncate_pending(len).await
+    }
+    fn finish(&mut self) {
+        self.finish();
     }
 }
-
 /// Factory for creating section buffers from raw blobs.
 pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     /// The buffer type produced by this factory.
@@ -131,16 +131,18 @@ pub struct AppendFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for AppendFactory {
-    type Buffer = Writer<B>;
+    type Buffer = AppendBuffer<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Writer::new(
-            blob,
-            size,
-            self.write_buffer.get(),
-            self.page_cache_ref.clone(),
-        )
-        .await
+        Ok(AppendBuffer::Pending(Some(
+            PagedRecovery::open(
+                blob,
+                size,
+                self.write_buffer.get(),
+                self.page_cache_ref.clone(),
+            )
+            .await?,
+        )))
     }
 }
 
@@ -154,10 +156,236 @@ pub struct WriteFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for WriteFactory {
-    type Buffer = Write<B>;
+    type Buffer = WriteBuffer<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Ok(Write::new(blob, size, self.capacity, self.pool.clone()))
+        Ok(WriteBuffer {
+            inner: Write::new(blob, size, self.capacity, self.pool.clone()),
+            pending: true,
+        })
+    }
+}
+
+/// A section is either owned by initialization or permanently append-only.
+pub enum AppendBuffer<B: Blob> {
+    /// Initialization owns the retained end until replay finishes.
+    Pending(Option<PagedRecovery<B>>),
+    /// An initialized section.
+    Live(Writer<B>),
+}
+
+impl<B: Blob> AppendBuffer<B> {
+    /// Publish this section once. Only recovery can construct the pending variant.
+    pub fn finish(&mut self) {
+        if let Self::Pending(pending) = self {
+            *self = Self::Live(pending.take().expect("pending section").finish());
+        }
+    }
+    /// Repair an unpublished section; initialized sections cannot be shortened.
+    pub async fn truncate_pending(&mut self, end: u64) -> Result<(), RError> {
+        match self {
+            Self::Pending(p) => p.as_mut().expect("pending section").truncate(end).await,
+            Self::Live(w) if end >= w.size() => Ok(()),
+            Self::Live(_) => Err(RError::InvalidChecksum),
+        }
+    }
+    /// Return the section's logical length.
+    pub const fn size(&self) -> u64 {
+        match self {
+            Self::Pending(p) => p.as_ref().expect("pending section").size(),
+            Self::Live(w) => w.size(),
+        }
+    }
+    /// Make all section writes durable.
+    pub async fn sync(&mut self) -> Result<(), RError> {
+        match self {
+            Self::Pending(p) => p.as_mut().expect("pending section").sync().await,
+            Self::Live(w) => w.sync().await,
+        }
+    }
+    /// Begin syncing all accepted section writes.
+    pub async fn start_sync(&mut self) -> Handle<()> {
+        match self {
+            Self::Pending(p) => p.as_mut().expect("pending section").start_sync().await,
+            Self::Live(w) => w.start_sync().await,
+        }
+    }
+    /// Wait for previously started synchronization.
+    pub async fn wait_for_sync(&mut self) -> Result<(), RError> {
+        match self {
+            Self::Pending(p) => p.as_mut().expect("pending section").wait_for_sync().await,
+            Self::Live(w) => w.wait_for_sync().await,
+        }
+    }
+    /// Read logical section bytes.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError> {
+        match self {
+            Self::Pending(p) => {
+                p.as_ref()
+                    .expect("pending section")
+                    .read_at(offset, len)
+                    .await
+            }
+            Self::Live(w) => w.read_at(offset, len).await,
+        }
+    }
+    /// Read at most the requested number of bytes.
+    pub async fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+        buf: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), RError> {
+        match self {
+            Self::Pending(p) => {
+                p.as_ref()
+                    .expect("pending section")
+                    .read_up_to(offset, len, buf)
+                    .await
+            }
+            Self::Live(w) => w.read_up_to(offset, len, buf).await,
+        }
+    }
+    /// Read fixed-width items into the supplied buffer.
+    pub async fn read_many_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, RError> {
+        match self {
+            Self::Pending(p) => {
+                p.as_ref()
+                    .expect("pending section")
+                    .read_many_into(buf, offsets, item_size)
+                    .await
+            }
+            Self::Live(w) => w.read_many_into(buf, offsets, item_size).await,
+        }
+    }
+    /// Read from the cache and buffered tip if available.
+    pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
+        match self {
+            Self::Pending(p) => p
+                .as_ref()
+                .expect("pending section")
+                .try_read_sync_into(buf, offset),
+            Self::Live(w) => w.try_read_sync_into(buf, offset),
+        }
+    }
+    /// Read section bytes sequentially.
+    pub async fn replay(
+        &mut self,
+        buffer: NonZeroUsize,
+        options: ReadOptions,
+    ) -> Result<Replay<B>, RError> {
+        match self {
+            Self::Pending(p) => {
+                p.as_mut()
+                    .expect("pending section")
+                    .replay(buffer, options)
+                    .await
+            }
+            Self::Live(w) => w.replay(buffer, options).await,
+        }
+    }
+    /// Validate the section prefix above a previously proven boundary.
+    pub async fn recoverable_prefix_len(
+        &self,
+        proven: u64,
+        buffer: NonZeroUsize,
+        options: ReadOptions,
+    ) -> Result<u64, RError> {
+        match self {
+            Self::Pending(p) => {
+                p.as_ref()
+                    .expect("pending section")
+                    .recoverable_prefix_len(proven, buffer, options)
+                    .await
+            }
+            Self::Live(w) => w.recoverable_prefix_len(proven, buffer, options).await,
+        }
+    }
+    /// Append to a published section.
+    pub async fn append(&mut self, buf: &[u8]) -> Result<u64, RError> {
+        self.finish();
+        let Self::Live(w) = self else { unreachable!() };
+        w.append(buf).await
+    }
+    /// Append to a published section.
+    pub async fn append_owned(&mut self, buf: IoBuf) -> Result<u64, RError> {
+        self.finish();
+        let Self::Live(w) = self else { unreachable!() };
+        w.append_owned(buf).await
+    }
+}
+
+impl<B: Blob> crate::journal::frame::FrameReader for AppendBuffer<B> {
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        Ok(self.read_at(offset, len).await?)
+    }
+
+    async fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+        buf: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        Ok(self.read_up_to(offset, len, buf).await?)
+    }
+}
+
+/// Uncached section storage with a one-way initialization boundary.
+pub struct WriteBuffer<B: Blob> {
+    inner: Write<B>,
+    pending: bool,
+}
+impl<B: Blob> WriteBuffer<B> {
+    /// Publish the section.
+    pub const fn finish(&mut self) {
+        self.pending = false;
+    }
+    /// Repair the unpublished section.
+    pub async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
+        if len >= self.inner.size() {
+            return Ok(());
+        }
+        if !self.pending {
+            return Err(RError::InvalidChecksum);
+        }
+        self.inner.resize(len).await?;
+        self.inner.sync().await
+    }
+    /// Current section length.
+    pub const fn size(&self) -> u64 {
+        self.inner.size()
+    }
+    /// Read section bytes.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError> {
+        self.inner.read_at(offset, len).await
+    }
+    #[cfg(test)]
+    pub async fn test_inject(&mut self, offset: u64, buf: Vec<u8>) -> Result<(), RError> {
+        self.inner.write_at(offset, buf).await
+    }
+
+    /// Append bytes. The offset is checked before the initialization boundary is closed.
+    pub async fn write_at(&mut self, offset: u64, buf: Vec<u8>) -> Result<(), RError> {
+        assert_eq!(offset, self.size(), "section writes must append");
+        self.finish();
+        self.inner.write_at(offset, buf).await
+    }
+    /// Sync section bytes.
+    pub async fn sync(&mut self) -> Result<(), RError> {
+        self.inner.sync().await
+    }
+    /// Begin syncing section bytes.
+    pub async fn start_sync(&mut self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+    /// Drain an existing sync.
+    pub async fn wait_for_sync(&mut self) -> Result<(), RError> {
+        self.inner.wait_for_sync().await
     }
 }
 
@@ -180,7 +408,7 @@ pub struct Config<F> {
 /// # In-flight syncs
 ///
 /// Syncs started by [Manager::start_sync] complete in the background, so every path that
-/// removes a blob from `blobs` (`prune`, `remove_section`, `rewind`, `clear`, `destroy`) must
+/// removes a blob from `blobs` (`prune`, `remove_section`, `truncate_pending`, `clear`, `destroy`) must
 /// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
 /// completion first, guaranteeing that caller-held sync handles always report the sync's true
 /// result and that no buffer is dropped with I/O in flight.
@@ -249,6 +477,29 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         })
     }
 
+    /// Publish every recovered section without allowing a return to recovery ownership.
+    pub fn finish_recovery(&mut self) {
+        for blob in self.blobs.values_mut() {
+            blob.finish();
+        }
+    }
+
+    /// Publish recovered sections at or above `start` after their replay has completed.
+    pub fn finish_from(&mut self, start: u64) {
+        for (_, blob) in self.blobs.range_mut(start..) {
+            blob.finish();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_configuration(&self) -> (E, String, F) {
+        (
+            self.context.child("reopen_fixture"),
+            self.partition.clone(),
+            self.factory.clone(),
+        )
+    }
+
     /// Ensures that a section pruned during the current execution is not accessed.
     pub const fn prune_guard(&self, section: u64) -> Result<(), Error> {
         if section < self.oldest_retained_section {
@@ -284,7 +535,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             self.blobs.insert(section, buffer);
         }
 
-        Ok(self.blobs.get_mut(&section).unwrap())
+        let blob = self.blobs.get_mut(&section).unwrap();
+        blob.finish();
+        Ok(blob)
     }
 
     /// Sync the given `sections` to storage.
@@ -479,12 +732,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Rewind by removing all sections after `section` and resizing the target section.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    /// Truncate by removing all sections after `section` and resizing the target section.
+    pub async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during rewind. Section `u64::MAX` has no successor, so there are
+        // if a crash occurs during truncate. Section `u64::MAX` has no successor, so there are
         // no sections above it to remove.
         let sections_to_remove: Vec<u64> = match section.checked_add(1) {
             Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
@@ -500,7 +753,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
                 .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;
             self.tracked.dec();
-            debug!(section = s, "removed blob during rewind");
+            debug!(section = s, "removed blob during truncate");
         }
 
         // If the section exists, truncate it to the given size. No explicit sync barrier is
@@ -508,12 +761,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         if let Some(blob) = self.blobs.get_mut(&section) {
             let current_size = blob.size();
             if size < current_size {
-                blob.resize(size).await?;
+                blob.truncate_pending(size).await?;
                 debug!(
                     section,
                     old_size = current_size,
                     new_size = size,
-                    "rewound blob"
+                    "truncated blob"
                 );
             }
         }
@@ -522,7 +775,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Resize only the given section without affecting other sections.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    pub async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
         // Get the blob at the given section
@@ -530,8 +783,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             // Truncate the blob to the given size
             let current = blob.size();
             if size < current {
-                blob.resize(size).await?;
-                debug!(section, from = current, to = size, "rewound section");
+                blob.truncate_pending(size).await?;
+                debug!(section, from = current, to = size, "truncated section");
             }
         }
 
@@ -610,7 +863,7 @@ mod tests {
             Ok(())
         }
 
-        async fn resize(&mut self, _len: u64) -> Result<(), RError> {
+        async fn truncate_pending(&mut self, _len: u64) -> Result<(), RError> {
             Ok(())
         }
     }

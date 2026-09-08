@@ -51,7 +51,16 @@ impl<
     /// Initializes a [Db] authenticated database from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
     pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+        crate::qmdb::current::init(context, config, None).await
+    }
+
+    /// Recover the last retained commit ending at or below `max_size`.
+    pub async fn init_at_most(
+        context: E,
+        config: Config<T, S>,
+        max_size: crate::merkle::Location<F>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::current::init(context, config, Some(max_size)).await
     }
 }
 
@@ -101,7 +110,16 @@ pub mod partitioned {
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, None).await
+        }
+
+        /// Recover the last retained commit ending at or below `max_size`.
+        pub async fn init_at_most(
+            context: E,
+            config: Config<T, S, core::num::NonZeroUsize>,
+            max_size: crate::merkle::Location<F>,
+        ) -> Result<Self, Error<F>> {
+            crate::qmdb::current::init(context, config, Some(max_size)).await
         }
     }
 }

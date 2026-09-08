@@ -56,7 +56,16 @@ where
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+        crate::qmdb::current::init(context, config, None).await
+    }
+
+    /// Recover the last retained commit ending at or below `max_size`.
+    pub async fn init_at_most(
+        context: E,
+        config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: crate::merkle::Location<F>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::current::init(context, config, Some(max_size)).await
     }
 }
 
@@ -104,7 +113,16 @@ pub mod partitioned {
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, None).await
+        }
+
+        /// Recover the last retained commit ending at or below `max_size`.
+        pub async fn init_at_most(
+            context: E,
+            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: crate::merkle::Location<F>,
+        ) -> Result<Self, Error<F>> {
+            crate::qmdb::current::init(context, config, Some(max_size)).await
         }
     }
 }

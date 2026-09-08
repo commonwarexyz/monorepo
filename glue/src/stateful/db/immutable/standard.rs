@@ -304,8 +304,20 @@ where
     type Config = fixed::Config<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, Error<F>> {
+        let Some(target) = expected else {
+            return <Self>::init(context, config).await;
+        };
+        let db = <Self>::init_at_most(context, config, target.range.end()).await?;
+        crate::stateful::db::validate_initialization::<E, Self>(
+            db,
+            target,
+            Error::DataCorrupted("database does not match initialization target"),
+        )
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -351,18 +363,6 @@ where
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
 }
 
 impl<F, E, K, V, H, T, S> ManagedDb<E> for variable::Db<F, E, K, V, H, T, S>
@@ -400,8 +400,20 @@ where
     type Config = variable::Config<T, <variable::Operation<F, K, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, Error<F>> {
+        let Some(target) = expected else {
+            return <Self>::init(context, config).await;
+        };
+        let db = <Self>::init_at_most(context, config, target.range.end()).await?;
+        crate::stateful::db::validate_initialization::<E, Self>(
+            db,
+            target,
+            Error::DataCorrupted("database does not match initialization target"),
+        )
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -446,18 +458,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 

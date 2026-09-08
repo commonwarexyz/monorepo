@@ -2138,7 +2138,7 @@ mod tests {
         ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
-            >>::init(context.child("db_set"), config.clone())
+            >>::init(context.child("db_set"), config.clone(), None)
             .await;
             let metrics = StatefulMetrics::new(&context);
             Self {
