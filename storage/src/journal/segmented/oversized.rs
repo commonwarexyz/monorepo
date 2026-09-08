@@ -645,7 +645,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             .expect("tracked replay preserves its recovery state");
 
         // Startup-readable bytes are durable by the runtime contract, and recovery
-        // truncations are durable before their retained boundaries are published
+        // truncations are durable before their retained boundaries are published.
         let mut dirty = false;
         for section in self.index.sections() {
             let items = self.index.section_len(section)?;
@@ -976,23 +976,23 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// This rewinds the section to the given index size and removes all sections
     /// after the given section. The value size is derived from the last entry.
     ///
-    /// The resulting state of `section` is durable before this returns, including when
-    /// the target size already matches. Each journal removes its later
-    /// sections (newest first) before truncating `section`, and those removals carry the
-    /// storage layer's removal durability.
+    /// The resulting state of `section` is durable before this returns, including when the
+    /// target size already matches. Each journal removes its later sections (newest first)
+    /// before truncating `section`, and those removals carry the storage layer's removal
+    /// durability.
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, true).await?;
 
-        // Rewind the index before freeing referenced value ranges
+        // Rewind the index before freeing referenced value ranges.
         self.index = self.index.rewind(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // A matching index size may still contain unsynced retained entries
+        // The section may retain unsynced entries even when its index size already matches.
         self.index = self.index.sync(section).await?;
 
-        // Rewind values and persist retained bytes even when their size already matches
+        // Rewind values and persist retained bytes even when their size already matches.
         self.values = self.values.rewind(section, value_size).await?;
         self.values = self.values.sync(section).await?;
         Ok(self)
@@ -1003,21 +1003,21 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Unlike `rewind`, this does not affect other sections.
     /// The value size is derived from the last entry after rewinding the index.
     ///
-    /// The resulting section state is durable before this returns, including when the
-    /// target size already matches (see [Self::rewind]).
+    /// The resulting state of `section` is durable before this returns, including when the
+    /// target size already matches.
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, false).await?;
 
-        // Rewind the index before freeing referenced value ranges
+        // Rewind the index before freeing referenced value ranges.
         self.index = self.index.rewind_section(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // A matching index size may still contain unsynced retained entries
+        // The section may retain unsynced entries even when its index size already matches.
         self.index = self.index.sync(section).await?;
 
-        // Rewind values and persist retained bytes even when their size already matches
+        // Rewind values and persist retained bytes even when their size already matches.
         self.values = self.values.rewind_section(section, value_size).await?;
         self.values = self.values.sync(section).await?;
         Ok(self)

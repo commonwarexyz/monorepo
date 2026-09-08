@@ -5,9 +5,9 @@
 //!
 //! The oracle derives each section's retained prefix from the raw crash image (see
 //! `recover_expected` for the per-mode rules and marker-floor invariants). It asserts that
-//! entries covered by a completed sync survive, that recovery removes orphan value sections
-//! and truncates each value glob to the last retained entry, that a second recovery mutates
-//! nothing, and that sentinel appends land at the repaired tail and reopen intact.
+//! entries covered by a completed sync or rewind survive, that recovery removes orphan value
+//! sections and truncates each value glob to the last retained entry, that a second recovery
+//! mutates nothing, and that sentinel appends land at the repaired tail and reopen intact.
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
@@ -123,7 +123,8 @@ struct FuzzInput {
     routes: [u8; 24],
     /// Per-entry action applied after its append: pipeline a sync of its section, release one
     /// held completion, settle everything held, sync one section, or sync everything. Tracked
-    /// mode adds an empty flush that publishes marker debt, a prune, and a section rewind.
+    /// mode adds an empty flush that publishes marker debt, a prune, and section or global
+    /// rewinds, including to the current size.
     /// These ops complete before the fault window opens, so the marker-before-data ordering
     /// inside rewind is not falsifiable here. Prune's ordering is made falsifiable by the
     /// interrupted-prune final op and by the remove faults armed around every prune.
@@ -571,29 +572,36 @@ fn fuzz(input: FuzzInput) {
                                 }
                             }
                         } else {
-                            // Rewind one live section below its current length: its tracked floor
-                            // durably lowers before the freed index and value ranges can be reused.
+                            // Rewind a live section, optionally removing later sections. Retained
+                            // records become durable even when the target size already matches
                             let live: Vec<u64> = counts.keys().copied().collect();
                             if let Some(&section) =
                                 live.get(usize::from(op >> 4) % live.len().max(1))
                             {
                                 let count = counts[&section];
-                                let keep = count * u64::from(op >> 6) / 4;
-                                oversized = drive_pending_syncs(
-                                    &pending,
-                                    oversized
-                                        .rewind_section(section, keep * TestEntry::SIZE as u64),
-                                )
+                                let keep = count * u64::from(op >> 6) / 3;
+                                let remove_later = op & 0x20 != 0;
+                                oversized = drive_pending_syncs(&pending, async move {
+                                    let size = keep * TestEntry::SIZE as u64;
+                                    if remove_later {
+                                        oversized.rewind(section, size).await
+                                    } else {
+                                        oversized.rewind_section(section, size).await
+                                    }
+                                })
                                 .await
                                 .expect("rewind failed");
+                                if remove_later {
+                                    counts.retain(|&candidate, _| candidate <= section);
+                                    model.retain(|&candidate, _| candidate <= section);
+                                    durable.retain(|&candidate, _| candidate <= section);
+                                }
                                 counts.insert(section, keep);
                                 model
                                     .get_mut(&section)
                                     .expect("rewound section is modeled")
                                     .truncate(keep as usize);
-                                if let Some(durable) = durable.get_mut(&section) {
-                                    *durable = (*durable).min(keep);
-                                }
+                                durable.insert(section, keep);
                             }
                         }
                     }
@@ -778,13 +786,13 @@ fn fuzz(input: FuzzInput) {
                     .expect("recovery failed")
             };
 
-            // Entries covered by a completed sync must survive, and a crash that retained every
-            // faulted byte after flushing everything loses nothing at all.
+            // Entries covered by a completed sync or rewind must survive, and a crash that
+            // retained every faulted byte after flushing everything loses nothing at all
             for (section, &count) in &durable {
                 let retained = expected.get(section).map_or(0, Vec::len) as u64;
                 assert!(
                     retained >= count,
-                    "section {section} lost entries covered by a completed sync"
+                    "section {section} lost entries covered by a completed sync or rewind"
                 );
             }
             if retention_percent == 100 && flushed_all {

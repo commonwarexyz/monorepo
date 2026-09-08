@@ -132,9 +132,18 @@ mod tests {
     /// rewind and a crash with no commit or sync, the reopened db reports the applied state.
     #[test_traced]
     fn test_keyless_fixed_rewind_current_size_makes_applied_state_durable() {
+        // Blobs large enough that no append seals one, whose sync would make the applied state
+        // durable on its own.
+        async fn open(context: deterministic::Context) -> TestDb<mmr::Family> {
+            let mut cfg = db_config("rcs", &context, Sequential);
+            cfg.log.items_per_blob = NZU64!(1000);
+            cfg.merkle.items_per_blob = NZU64!(1000);
+            TestDb::init(context, cfg).await.unwrap()
+        }
+
         let ((size, root), checkpoint) =
             deterministic::Runner::default().start_and_recover(|context| async move {
-                let db = open_db_with_suffix::<mmr::Family>("rcs", context.child("db")).await;
+                let db = open(context.child("db")).await;
 
                 // Apply a batch without committing, then rewind to the size it produced.
                 let merkleized = db
@@ -152,7 +161,7 @@ mod tests {
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let db = open_db_with_suffix::<mmr::Family>("rcs", context.child("reopen")).await;
+            let db = open(context.child("reopen")).await;
             assert_eq!(db.bounds().end, size);
             assert_eq!(db.root(), root);
             assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(U64::new(7)));
