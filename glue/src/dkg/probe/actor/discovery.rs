@@ -936,6 +936,9 @@ mod tests {
 
             assert_eq!(decoded.height(), Height::new(1));
             assert_eq!(TestCodingVariant::commitment(&decoded), payload);
+
+            // The finalized payload fixes the root, so the probe decodes without re-encoding.
+            assert!(decoded.shard(0).is_none());
         });
     }
 
@@ -997,6 +1000,9 @@ mod tests {
 
             assert_eq!(decoded.height(), Height::new(1));
             assert_eq!(TestCodingVariant::commitment(&decoded), payload);
+
+            // The finalized payload fixes the root, so the probe decodes without re-encoding.
+            assert!(decoded.shard(0).is_none());
         });
     }
 }

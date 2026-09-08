@@ -222,6 +222,13 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The finalization.
         finalization: Finalization<S, V::Commitment>,
     },
+    /// A certification from the consensus engine.
+    Certification {
+        /// The span carried with this request.
+        span: Span,
+        /// The certified notarization.
+        notarization: Notarization<S, V::Commitment>,
+    },
 }
 
 /// How a digest-keyed block subscription should behave when the block is missing locally.
@@ -295,6 +302,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Certified { span, .. }
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
+            | Self::Certification { span, .. }
             | Self::GetProcessedHeight { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
@@ -323,6 +331,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::Prune { .. } => "prune",
             Self::Notarization { .. } => "notarization",
             Self::Finalization { .. } => "finalization",
+            Self::Certification { .. } => "certification",
         }
     }
 
@@ -360,7 +369,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 
@@ -383,7 +393,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 }
@@ -1002,6 +1013,10 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
             Activity::Finalization(finalization) => Message::Finalization {
                 span: info_span!("marshal.mailbox.finalization", round = %finalization.round()),
                 finalization,
+            },
+            Activity::Certification(notarization) => Message::Certification {
+                span: info_span!("marshal.mailbox.certification", round = %notarization.round()),
+                notarization,
             },
             _ => return Feedback::Ok,
         };

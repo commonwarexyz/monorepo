@@ -315,7 +315,7 @@ mod tests {
         assert!(matches!(
             floor.fetch_if_permitted(
                 &mut resolver,
-                Request::finalized_block_by_height(digest(1), Height::new(4)),
+                Request::finalized_by_height(digest(1), Height::new(4)),
             ),
             FetchAdmission::Denied
         ));
