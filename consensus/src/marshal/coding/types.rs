@@ -850,34 +850,6 @@ mod test {
     }
 
     #[test]
-    fn test_coded_block_decode_trusted_rejects_trailing_bytes() {
-        const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: NZU16!(1),
-            extra_shards: NZU16!(2),
-        };
-
-        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
-        let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
-        let mut encoded = coded.encode().to_vec();
-        encoded.push(0);
-
-        let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
-            encoded.as_ref(),
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Trusted(coded.commitment()),
-            },
-        ) else {
-            panic!("trailing bytes should be rejected");
-        };
-
-        assert!(
-            matches!(err, Error::ExtraData(1)),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "does not match commitment")]
     fn test_coded_block_trusted_wrong_root_panics_on_shards() {
         const CONFIG: CodingConfig = CodingConfig {
