@@ -12,20 +12,25 @@ use std::collections::{BTreeMap, BTreeSet};
 /// embedded parent commitment against a root-bound parent. So recording a
 /// certified block also records its parent, and a block fetched under this
 /// knowledge extends it to that block's parent. Entries at or below the
-/// finalized tip are pruned.
+/// finalized tip are pruned and cannot be reinserted.
 pub(super) struct Certified<C: Digest> {
     entries: BTreeMap<Height, BTreeSet<C>>,
+    min: Height,
 }
 
 impl<C: Digest> Certified<C> {
     pub(super) const fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            min: Height::new(1),
         }
     }
 
-    /// Records `commitment` at `height` as certified.
+    /// Records `commitment` at `height` as certified unless below the retention minimum.
     pub(super) fn insert(&mut self, height: Height, commitment: C) {
+        if height < self.min {
+            return;
+        }
         self.entries.entry(height).or_default().insert(commitment);
     }
 
@@ -47,8 +52,13 @@ impl<C: Digest> Certified<C> {
             .is_some_and(|commitments| commitments.iter().any(predicate))
     }
 
-    /// Retains entries at or above `min`.
+    /// Retains entries at or above `min` and rejects future inserts below it.
+    /// The retention minimum never decreases.
     pub(super) fn retain(&mut self, min: Height) {
+        if min <= self.min {
+            return;
+        }
+        self.min = min;
         self.entries = self.entries.split_off(&min);
     }
 }
@@ -76,5 +86,16 @@ mod tests {
         assert!(!certified.contains(Height::new(5), &a));
         assert!(certified.contains(Height::new(6), &c));
         assert!(certified.contains(Height::new(7), &b));
+
+        // Late inserts cannot restore pruned heights, even after a stale retain
+        certified.retain(Height::new(4));
+        certified.insert(Height::new(5), a);
+        certified.insert(Height::new(6), a);
+        assert!(!certified.contains(Height::new(5), &a));
+        assert!(certified.contains(Height::new(6), &a));
+
+        let mut certified = Certified::new();
+        certified.insert(Height::zero(), a);
+        assert!(!certified.contains(Height::zero(), &a));
     }
 }

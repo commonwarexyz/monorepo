@@ -401,6 +401,7 @@ where
             if let Some((height, digest, round)) = tip {
                 application.report(Update::Tip(round, height, digest));
                 self.tip = height;
+                self.certified.retain(height.next());
                 let _ = self.finalized_height.try_set(height.get());
             }
 
@@ -738,12 +739,8 @@ where
                     return self;
                 };
                 let height = block.height();
-                if height > self.tip {
-                    self.certified.insert(height, commitment);
-                }
-                if let Some(parent) = height.previous()
-                    && parent > self.tip
-                {
+                self.certified.insert(height, commitment);
+                if let Some(parent) = height.previous() {
                     self.certified.insert(parent, V::parent_commitment(&block));
                 }
             }
@@ -1524,7 +1521,6 @@ where
                     .iter()
                     .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
                     && let Some(parent) = height.previous()
-                    && parent > self.tip
                 {
                     self.certified.insert(parent, V::parent_commitment(&block));
                 }
