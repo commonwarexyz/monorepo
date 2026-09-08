@@ -50,8 +50,11 @@ where
     /// Notarized blocks stored by view
     notarized_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
-    /// Blocks fetched by ancestry walks, indexed by height and keyed by digest.
-    ancestry_blocks: prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
+    /// Certified blocks indexed by height and keyed by digest.
+    ///
+    /// Also includes uncertified ancestors fetched during optimistic verification.
+    certified_blocks:
+        prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view
     notarizations: prunable::Archive<
         TwoCap,
@@ -94,8 +97,8 @@ where
 
     /// Prune height-indexed archives to the given height.
     async fn prune_by_height(mut self, min_height: Height) -> Self {
-        self.ancestry_blocks = self
-            .ancestry_blocks
+        self.certified_blocks = self
+            .certified_blocks
             .prune(min_height.get())
             .await
             .expect("failed to prune ancestry blocks");
@@ -234,7 +237,7 @@ where
     #[boxed]
     async fn init_epoch(&mut self, epoch: Epoch) {
         let context = self.context.child("cache").with_attribute("epoch", epoch);
-        let (verified_blocks, notarized_blocks, ancestry_blocks, notarizations, finalizations) = futures::join!(
+        let (verified_blocks, notarized_blocks, certified_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
                 &context,
                 &self.cfg,
@@ -249,8 +252,6 @@ where
                 "notarized",
                 self.block_codec_config.clone()
             ),
-            // Renaming a partition is a storage break, so ancestry blocks keep
-            // the `certified` partition.
             Self::init_archive(
                 &context,
                 &self.cfg,
@@ -278,7 +279,7 @@ where
             Cache {
                 verified_blocks,
                 notarized_blocks,
-                ancestry_blocks,
+                certified_blocks,
                 notarizations,
                 finalizations,
             },
@@ -378,13 +379,13 @@ where
             .with_epoch(epoch, |mut cache| async move {
                 // A digest determines its height, so scoping the dedup to this height
                 // is exact and avoids fetching values.
-                let exists = match cache.ancestry_blocks.has_at(height.get(), &digest).await {
+                let exists = match cache.certified_blocks.has_at(height.get(), &digest).await {
                     Ok(exists) => exists,
                     Err(e) => panic!("failed to check ancestry block: {e}"),
                 };
                 if !exists {
-                    cache.ancestry_blocks = cache
-                        .ancestry_blocks
+                    cache.certified_blocks = cache
+                        .certified_blocks
                         .put_multi_sync(height.get(), digest, block)
                         .await
                         .unwrap_or_else(|e| panic!("failed to insert ancestry block: {e}"));
@@ -621,7 +622,7 @@ where
 
             // Check ancestry blocks
             if let Some(block) = cache
-                .ancestry_blocks
+                .certified_blocks
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get ancestry block")
@@ -647,7 +648,7 @@ where
             let Cache {
                 verified_blocks: vb,
                 notarized_blocks: nb,
-                ancestry_blocks: ab,
+                certified_blocks: ab,
                 notarizations: nv,
                 finalizations: fv,
             } = self.caches.remove(epoch).unwrap();

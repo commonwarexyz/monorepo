@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// embedded parent commitment against a root-bound parent. So recording a
 /// certified block also records its parent, and a block fetched under this
 /// knowledge extends it to that block's parent. Entries at or below the
-/// processed floor are pruned.
+/// finalized tip are pruned.
 pub(super) struct Certified<C: Digest> {
     entries: BTreeMap<Height, BTreeSet<C>>,
 }

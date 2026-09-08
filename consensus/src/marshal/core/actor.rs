@@ -141,7 +141,7 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
-    // Commitments known certified above the processed floor
+    // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
@@ -737,8 +737,13 @@ where
                     debug!(?commitment, "certified block unavailable locally");
                     return self;
                 };
-                self.certified.insert(block.height(), commitment);
-                if let Some(parent) = block.height().previous() {
+                let height = block.height();
+                if height > self.tip {
+                    self.certified.insert(height, commitment);
+                }
+                if let Some(parent) = height.previous()
+                    && parent > self.tip
+                {
                     self.certified.insert(parent, V::parent_commitment(&block));
                 }
             }
@@ -1377,6 +1382,7 @@ where
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
             self.tip = height;
+            self.certified.retain(height.next());
             let _ = self.finalized_height.try_set(height.get());
         }
 
@@ -1501,6 +1507,7 @@ where
                     .iter()
                     .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
                     && let Some(parent) = height.previous()
+                    && parent > self.tip
                 {
                     self.certified.insert(parent, V::parent_commitment(&block));
                 }
@@ -2145,6 +2152,7 @@ where
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest));
             self.tip = height;
+            self.certified.retain(height.next());
             let _ = self.finalized_height.try_set(height.get());
         }
 
@@ -2413,10 +2421,6 @@ where
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
-
-        // Certification evidence at or below the processed height can no longer
-        // gate a fetch.
-        self.certified.retain(height.next());
     }
 
     /// Returns the latest recoverable round at or immediately after the processed height.
