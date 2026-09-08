@@ -6,7 +6,7 @@
 //!
 //! See [Db] for the main database type and [super::ExclusionProof] for proving key inactivity.
 
-pub use super::db::KeyValueProof;
+pub use super::db::{KeyValueProof, RuntimeKeyValueProof};
 use crate::{
     Context,
     index::ordered::Index,
@@ -112,7 +112,8 @@ pub mod partitioned {
 #[cfg(test)]
 mod test {
     use crate::{
-        mmr,
+        merkle::Graftable,
+        mmb, mmr,
         qmdb::current::{ordered::tests as shared, tests::variable_config},
         translator::OneCap,
     };
@@ -121,8 +122,8 @@ mod test {
     use commonware_runtime::deterministic;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest = super::Db<
-        mmr::Family,
+    type CurrentTest<F = mmr::Family> = super::Db<
+        F,
         deterministic::Context,
         Digest,
         Digest,
@@ -143,33 +144,51 @@ mod test {
     }
 
     /// Return a [Db] database initialized with a variable config.
-    async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
+    async fn open_db<F: Graftable>(
+        context: deterministic::Context,
+        partition_prefix: String,
+    ) -> CurrentTest<F> {
         let cfg = variable_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
-        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db);
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_range_proofs() {
-        shared::test_range_proofs(open_db);
+        shared::test_range_proofs(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_key_value_proof() {
-        shared::test_key_value_proof(open_db);
+        shared::test_key_value_proof(open_db::<mmr::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_runtime_key_value_proof_mmb() {
+        shared::test_key_value_proof(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_runtime_exclusion_proofs_mmb() {
+        shared::test_exclusion_proofs(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_runtime_inactive_proof_mmb() {
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmb::Family>);
     }
 
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
-        shared::test_proving_repeated_updates(open_db);
+        shared::test_proving_repeated_updates(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_exclusion_proofs() {
-        shared::test_exclusion_proofs(open_db);
+        shared::test_exclusion_proofs(open_db::<mmr::Family>);
     }
 }

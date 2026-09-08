@@ -1,4 +1,4 @@
-use super::{OperationProof, RangeProof, required_chunks};
+use super::{OperationProof, RangeProof, RuntimeOperationProof, required_chunks};
 use crate::{
     merkle::{self, Graftable, Location, conformance::build_test_mem, mem::Mem},
     mmb, mmr,
@@ -7,6 +7,7 @@ use crate::{
         current::{db, grafting},
     },
 };
+use commonware_codec::{Decode as _, Encode as _};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_async;
 use commonware_parallel::Sequential;
@@ -128,6 +129,10 @@ async fn check_constructor_reads<F: Graftable>() {
                     assert!(
                         proof.verify::<Sha256, _>(hasher.digest(&(*loc).to_be_bytes()), &root,)
                     );
+                    let proof =
+                        RuntimeOperationProof::<F, Digest>::decode_cfg(proof.encode(), &(1, 64))
+                            .unwrap();
+                    assert!(proof.verify::<Sha256, _>(hasher.digest(&(*loc).to_be_bytes()), &root));
                 } else {
                     let proof = RangeProof::new::<Sha256, _, 1>(
                         &preloaded,
@@ -145,6 +150,11 @@ async fn check_constructor_reads<F: Graftable>() {
                         .map(|chunk| *bitmap.get_chunk(chunk as usize))
                         .collect::<Vec<_>>();
                     assert!(proof.verify::<Sha256, _, 1>(floor, &elements, &chunks, &root));
+                    assert!(
+                        proof.verify_with_chunk_size::<Sha256, _>(
+                            floor, &elements, &chunks, 1, &root,
+                        )
+                    );
                 }
                 #[allow(unstable_name_collisions)]
                 let read_chunks = preloaded

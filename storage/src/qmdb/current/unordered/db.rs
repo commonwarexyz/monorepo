@@ -15,7 +15,7 @@ use crate::{
             operation::update::Unordered as UnorderedUpdate,
             unordered::{Operation, Update},
         },
-        current::proof::OperationProof,
+        current::proof::{OperationProof, RuntimeOperationProof},
         operation::Key,
     },
 };
@@ -25,6 +25,11 @@ use commonware_parallel::Strategy;
 
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
+
+/// A key-value proof with a runtime-sized bitmap chunk.
+///
+/// Decoding takes `(chunk_size, max_digests)` as configuration, as in [RuntimeOperationProof].
+pub type RuntimeKeyValueProof<F, D> = RuntimeOperationProof<F, D>;
 
 /// The generic Db type for unordered Current QMDB variants.
 ///

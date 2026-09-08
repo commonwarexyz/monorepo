@@ -7,7 +7,7 @@
 //!
 //! See [Db] for the main database type and [super::ExclusionProof] for proving key inactivity.
 
-pub use super::db::KeyValueProof;
+pub use super::db::{KeyValueProof, RuntimeKeyValueProof};
 use crate::{
     Context,
     index::ordered::Index,
@@ -106,7 +106,8 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        mmr,
+        merkle::Graftable,
+        mmb, mmr,
         qmdb::{
             Error,
             current::{
@@ -126,23 +127,26 @@ pub mod test {
     };
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest =
-        Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+    type CurrentTest<F = mmr::Family> =
+        Db<F, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
 
     /// Return an [Db] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
+    async fn open_db<F: Graftable>(
+        context: deterministic::Context,
+        partition_prefix: String,
+    ) -> CurrentTest<F> {
         let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
-        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db);
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_range_proofs() {
-        shared::test_range_proofs(open_db);
+        shared::test_range_proofs(open_db::<mmr::Family>);
     }
 
     /// Regression test: requesting a range proof for a location in a pruned bitmap chunk
@@ -152,7 +156,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "range-proofs-pruned".to_string();
-            let mut db = open_db(context.child("db"), partition).await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
 
             let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
 
@@ -193,22 +197,37 @@ pub mod test {
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_key_value_proof() {
-        shared::test_key_value_proof(open_db);
+        shared::test_key_value_proof(open_db::<mmr::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_runtime_key_value_proof_mmb() {
+        shared::test_key_value_proof(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_runtime_exclusion_proofs_mmb() {
+        shared::test_exclusion_proofs(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_runtime_inactive_proof_mmb() {
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmb::Family>);
     }
 
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
-        shared::test_proving_repeated_updates(open_db);
+        shared::test_proving_repeated_updates(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_exclusion_proofs() {
-        shared::test_exclusion_proofs(open_db);
+        shared::test_exclusion_proofs(open_db::<mmr::Family>);
     }
 
     crate::qmdb::current::tests::staged_merkleize_parity_test!(
         test_current_ordered_fixed_staged_merkleize_parity,
-        open_db
+        open_db::<mmr::Family>
     );
 
     /// Build a `P`-partitioned current db with churny ops across two commits (so the second commit's

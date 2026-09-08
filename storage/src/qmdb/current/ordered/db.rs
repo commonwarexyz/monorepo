@@ -14,89 +14,22 @@ use crate::{
             ValueEncoding,
             ordered::{Operation, Update},
         },
-        current::proof::OperationProof,
         operation::Key,
     },
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_codec::Codec;
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
 
-/// Proof information for verifying a key has a particular value in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize> {
-    pub proof: OperationProof<F, D, N>,
-    pub next_key: K,
-}
+/// Proof information for verifying a key has a particular value, with a fixed-size bitmap chunk.
+pub type KeyValueProof<F, K, D, const N: usize> = super::proof::KeyValueProof<F, K, D, [u8; N]>;
 
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K, D, N> {
-    /// Return true if the proof authenticates that `key` currently has `value` in the database
-    /// with the provided `root`.
-    ///
-    /// `V` selects the fixed or variable value encoding used by the database.
-    pub fn verify<H, V>(&self, key: K, value: V::Value, root: &D) -> bool
-    where
-        H: Hasher<Digest = D>,
-        V: ValueEncoding,
-        Operation<F, K, V>: Codec,
-    {
-        let op = Operation::<F, K, V>::Update(Update {
-            key,
-            value,
-            next_key: self.next_key.clone(),
-        });
-
-        self.proof.verify::<H, _>(op, root)
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.next_key.write(buf);
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> EncodeSize
-    for KeyValueProof<F, K, D, N>
-{
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.next_key.encode_size()
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
-    /// `(max_digests, key_cfg)`: the Merkle digest cap forwarded to the embedded operation
-    /// proof and the read configuration for the key type.
-    type Cfg = (usize, <K as Read>::Cfg);
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_digests, key_cfg): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
-        let next_key = K::read_cfg(buf, key_cfg)?;
-        Ok(Self { proof, next_key })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
-    for KeyValueProof<F, K, D, N>
-where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            proof: u.arbitrary()?,
-            next_key: u.arbitrary()?,
-        })
-    }
-}
+/// Proof information for verifying a key has a particular value, with a runtime-sized bitmap chunk.
+///
+/// The decoder configuration is `((chunk_size, max_digests), key_cfg)`.
+/// The chunk size is in bytes and is not encoded in the proof.
+pub type RuntimeKeyValueProof<F, K, D> = super::proof::KeyValueProof<F, K, D, bytes::Bytes>;
 
 /// The generic Db type for ordered Current QMDB variants.
 ///

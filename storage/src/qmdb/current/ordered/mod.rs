@@ -8,46 +8,23 @@
 //! - [fixed]: Variant optimized for values of fixed size.
 //! - [variable]: Variant for values of variable size.
 
-use crate::{
-    merkle::Graftable,
-    qmdb::{
-        any::{
-            ValueEncoding,
-            ordered::{Operation, Update, span_contains},
-        },
-        current::proof::OperationProof,
-        operation::Key,
-    },
-};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write};
-use commonware_cryptography::{Digest, Hasher};
-
 pub mod db;
 pub mod fixed;
+pub mod proof;
 #[cfg(any(test, feature = "test-traits"))]
 mod test_trait_impls;
 pub mod variable;
 
-/// Proof that a key has no assigned value in the database.
+/// Proof that a key has no assigned value in the database, with a fixed-size bitmap chunk.
 ///
-/// When the database has active keys, exclusion is proven by showing the key falls within a span
-/// between two adjacent active keys. Otherwise exclusion is proven by showing the database contains
-/// no active keys through the most recent commit operation.
-///
-/// Verify using [Self::verify].
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub enum ExclusionProof<F: Graftable, K: Key, V: ValueEncoding, D: Digest, const N: usize> {
-    /// Proves that two keys are active in the database and adjacent to each other in the key
-    /// ordering. Any key falling between them (non-inclusively) can be proven excluded.
-    KeyValue(OperationProof<F, D, N>, Update<K, V>),
+/// Verify using [ExclusionProof::verify].
+pub type ExclusionProof<F, K, V, D, const N: usize> = proof::ExclusionProof<F, K, V, D, [u8; N]>;
 
-    /// Proves that the database has no active keys, allowing any key to be proven excluded.
-    /// Specifically, the proof establishes the most recent Commit operation has an activity floor
-    /// equal to its own location, which is a necessary and sufficient condition for an empty
-    /// database.
-    Commit(OperationProof<F, D, N>, Option<V::Value>),
-}
+/// Proof that a key has no assigned value in the database, with a runtime-sized bitmap chunk.
+///
+/// The decoder configuration is `((chunk_size, max_digests), update_cfg, value_cfg)`.
+/// The chunk size is in bytes and is not encoded in the proof.
+pub type RuntimeExclusionProof<F, K, V, D> = proof::ExclusionProof<F, K, V, D, bytes::Bytes>;
 
 /// Wire tag for [ExclusionProof::KeyValue].
 pub const KEY_VALUE_CONTEXT: u8 = 0;
@@ -55,150 +32,23 @@ pub const KEY_VALUE_CONTEXT: u8 = 0;
 /// Wire tag for [ExclusionProof::Commit].
 pub const COMMIT_CONTEXT: u8 = 1;
 
-impl<F, K, V, D, const N: usize> ExclusionProof<F, K, V, D, N>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    Operation<F, K, V>: Codec,
-{
-    /// Return true if the proof authenticates that `key` does not exist in the database with
-    /// the provided `root`.
-    pub fn verify<H: Hasher<Digest = D>>(&self, key: &K, root: &D) -> bool {
-        let (op_proof, op) = match self {
-            Self::KeyValue(op_proof, data) => {
-                if data.key == *key || !span_contains(&data.key, &data.next_key, key) {
-                    return false;
-                }
-
-                (op_proof, Operation::Update(data.clone()))
-            }
-            Self::Commit(op_proof, metadata) => {
-                // An empty database's commit floor equals the commit operation's location
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), op_proof.loc),
-                )
-            }
-        };
-
-        op_proof.verify::<H, _>(op, root)
-    }
-}
-
-impl<F, K, V, D, const N: usize> Write for ExclusionProof<F, K, V, D, N>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    Update<K, V>: Write,
-{
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::KeyValue(op_proof, update) => {
-                KEY_VALUE_CONTEXT.write(buf);
-                op_proof.write(buf);
-                update.write(buf);
-            }
-            Self::Commit(op_proof, value) => {
-                COMMIT_CONTEXT.write(buf);
-                op_proof.write(buf);
-                value.write(buf);
-            }
-        }
-    }
-}
-
-impl<F, K, V, D, const N: usize> EncodeSize for ExclusionProof<F, K, V, D, N>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    Update<K, V>: EncodeSize,
-{
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::KeyValue(op_proof, update) => op_proof.encode_size() + update.encode_size(),
-            Self::Commit(op_proof, value) => op_proof.encode_size() + value.encode_size(),
-        }
-    }
-}
-
-impl<F, K, V, D, const N: usize> Read for ExclusionProof<F, K, V, D, N>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    Update<K, V>: Read,
-{
-    /// `(max_digests, update_cfg, value_cfg)`: Merkle digest cap forwarded to the embedded
-    /// operation proof, the read configuration for [Update], and the read configuration for the
-    /// value type.
-    type Cfg = (usize, <Update<K, V> as Read>::Cfg, <V::Value as Read>::Cfg);
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_digests, update_cfg, value_cfg): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        match u8::read(buf)? {
-            KEY_VALUE_CONTEXT => {
-                let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
-                let update = Update::<K, V>::read_cfg(buf, update_cfg)?;
-                Ok(Self::KeyValue(op_proof, update))
-            }
-            COMMIT_CONTEXT => {
-                let op_proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
-                let value = Option::<V::Value>::read_cfg(buf, value_cfg)?;
-                Ok(Self::Commit(op_proof, value))
-            }
-            tag => Err(commonware_codec::Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<F, K, V, D, const N: usize> arbitrary::Arbitrary<'_> for ExclusionProof<F, K, V, D, N>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    D: Digest,
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    V::Value: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let op_proof = u.arbitrary()?;
-        if u.arbitrary()? {
-            Ok(Self::KeyValue(op_proof, u.arbitrary()?))
-        } else {
-            Ok(Self::Commit(op_proof, u.arbitrary()?))
-        }
-    }
-}
-
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for ordered Current QMDB variants.
 
-    use super::{ExclusionProof, db};
+    use super::{ExclusionProof, RuntimeExclusionProof, db};
     use crate::{
         index::ordered::Index,
         journal::contiguous::{Contiguous as _, Mutable},
         merkle::{Graftable, Location, Proof},
-        mmb,
+        mmb, mmr,
         qmdb::{
             Error,
             any::{
                 ValueEncoding,
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
-                value::FixedEncoding,
+                value::{FixedEncoding, VariableEncoding},
             },
             current::{
                 BitmapPrunedBits,
@@ -209,7 +59,8 @@ pub mod tests {
         },
         translator::OneCap,
     };
-    use commonware_codec::{Codec, Decode as _, Encode as _, EncodeSize as _};
+    use bytes::Bytes;
+    use commonware_codec::{Codec, Decode as _, Encode as _, EncodeSize as _, Read};
     use commonware_cryptography::{Digest as _, Hasher as _, Sha256, sha256::Digest};
     use commonware_runtime::{
         Runner as _, Supervisor as _,
@@ -425,6 +276,15 @@ pub mod tests {
             // But this proof should *not* verify as a key value proof, since verification will see
             // that the operation is inactive.
             assert!(!proof_inactive.verify::<Sha256, V>(k, v1, &root));
+            let runtime_inactive = db::RuntimeKeyValueProof::<F, Digest, Digest>::decode_cfg(
+                proof_inactive.encode(),
+                &(
+                    (32, proof_inactive.proof.range_proof.proof.digests.len()),
+                    (),
+                ),
+            )
+            .unwrap();
+            assert!(!runtime_inactive.verify::<Sha256, V>(k, v1, &root));
 
             // Attempt #1 to "fool" the verifier:  change the location to that of an active
             // operation. This should not fool the verifier if we're properly validating the
@@ -574,11 +434,13 @@ pub mod tests {
                 };
                 let proof = db.key_value_proof(key).await.unwrap();
                 let max_digests = proof.proof.range_proof.proof.digests.len();
-                let proof = db::KeyValueProof::<F, Digest, Digest, 32>::decode_cfg(
-                    proof.encode(),
-                    &(max_digests, ()),
+                let encoded = proof.encode();
+                let proof = db::RuntimeKeyValueProof::<F, Digest, Digest>::decode_cfg(
+                    encoded.clone(),
+                    &((32, max_digests), ()),
                 )
                 .unwrap();
+                assert_eq!(proof.encode(), encoded);
 
                 // Proof should validate against the current value and correct root.
                 assert!(proof.verify::<Sha256, V>(key, value, &root));
@@ -655,6 +517,30 @@ pub mod tests {
         });
     }
 
+    fn runtime_exclusion_proof<F, V>(
+        proof: ExclusionProof<F, Digest, V, Digest, 32>,
+    ) -> RuntimeExclusionProof<F, Digest, V, Digest>
+    where
+        F: Graftable,
+        V: ValueEncoding<Value = Digest>,
+        Update<Digest, V>: Codec,
+        <Update<Digest, V> as Read>::Cfg: Default,
+    {
+        let max_digests = match &proof {
+            ExclusionProof::KeyValue(proof, _) | ExclusionProof::Commit(proof, _) => {
+                proof.range_proof.proof.digests.len()
+            }
+        };
+        let encoded = proof.encode();
+        let runtime = RuntimeExclusionProof::<F, Digest, V, Digest>::decode_cfg(
+            encoded.clone(),
+            &((32, max_digests), Default::default(), ()),
+        )
+        .unwrap();
+        assert_eq!(runtime.encode(), encoded);
+        runtime
+    }
+
     /// Build a tiny database and confirm exclusion proofs work as expected.
     ///
     /// Tests empty-db exclusion, single-key exclusion, two-key exclusion with cycle-around
@@ -666,6 +552,8 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug + 'static,
         Operation<F, Digest, V>: Codec,
+        Update<Digest, V>: Codec,
+        <Update<Digest, V> as Read>::Cfg: Default,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
@@ -679,7 +567,8 @@ pub mod tests {
 
             // We should be able to prove exclusion for any key against an empty db.
             let empty_root = db.root();
-            let empty_proof = db.exclusion_proof(&key_exists_1).await.unwrap();
+            let empty_proof =
+                runtime_exclusion_proof(db.exclusion_proof(&key_exists_1).await.unwrap());
             assert!(empty_proof.verify::<Sha256>(&key_exists_1, &empty_root));
 
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
@@ -700,8 +589,8 @@ pub mod tests {
             // Generate some valid exclusion proofs for keys on either side.
             let greater_key = Sha256::fill(0xFF);
             let lesser_key = Sha256::fill(0x00);
-            let proof = db.exclusion_proof(&greater_key).await.unwrap();
-            let proof2 = db.exclusion_proof(&lesser_key).await.unwrap();
+            let proof = runtime_exclusion_proof(db.exclusion_proof(&greater_key).await.unwrap());
+            let proof2 = runtime_exclusion_proof(db.exclusion_proof(&lesser_key).await.unwrap());
 
             // Since there's only one span in the DB, the two exclusion proofs should be identical,
             // and the proof should verify any key but the one that exists in the db.
@@ -730,7 +619,7 @@ pub mod tests {
             let lesser_key = Sha256::fill(0x0F); // < k1=0x10
             let greater_key = Sha256::fill(0x31); // > k2=0x30
             let middle_key = Sha256::fill(0x20); // between k1=0x10 and k2=0x30
-            let proof = db.exclusion_proof(&greater_key).await.unwrap();
+            let proof = runtime_exclusion_proof(db.exclusion_proof(&greater_key).await.unwrap());
             // Test the "cycle around" span. This should prove exclusion of greater_key & lesser
             // key, but fail on middle_key.
             assert!(proof.verify::<Sha256>(&greater_key, &root));
@@ -738,11 +627,11 @@ pub mod tests {
             assert!(!proof.verify::<Sha256>(&middle_key, &root));
 
             // Due to the cycle, lesser & greater keys should produce the same proof.
-            let new_proof = db.exclusion_proof(&lesser_key).await.unwrap();
+            let new_proof = runtime_exclusion_proof(db.exclusion_proof(&lesser_key).await.unwrap());
             assert_eq!(proof, new_proof);
 
             // Test the inner span [k, k2).
-            let proof = db.exclusion_proof(&middle_key).await.unwrap();
+            let proof = runtime_exclusion_proof(db.exclusion_proof(&middle_key).await.unwrap());
             // `k` should fail since it's in the db.
             assert!(!proof.verify::<Sha256>(&key_exists_1, &root));
             // `middle_key` should succeed since it's in range.
@@ -774,7 +663,7 @@ pub mod tests {
             assert_ne!(db.bounds().end, 0);
             assert_ne!(root, empty_root);
 
-            let proof = db.exclusion_proof(&key_exists_1).await.unwrap();
+            let proof = runtime_exclusion_proof(db.exclusion_proof(&key_exists_1).await.unwrap());
             assert!(proof.verify::<Sha256>(&key_exists_1, &root));
             assert!(proof.verify::<Sha256>(&key_exists_2, &root));
 
@@ -784,20 +673,20 @@ pub mod tests {
         });
     }
 
-    fn sample_op_proof() -> OperationProof<mmb::Family, Digest, 32> {
+    fn sample_op_proof<F: Graftable>() -> OperationProof<F, Digest, 32> {
         let range_proof = RangeProof {
-            proof: Proof::<mmb::Family, Digest> {
-                leaves: mmb::Location::new(7),
+            proof: Proof::<F, Digest> {
+                leaves: Location::<F>::new(7),
                 inactive_peaks: 0,
                 digests: vec![Sha256::hash(&[b"sib"])],
             },
-            pending_chunk_digest: None,
+            pending_chunk_digest: None.try_into().unwrap(),
             partial_chunk_digest: None,
             ops_root: Sha256::hash(&[b"ops"]),
         };
         let chunk: [u8; 32] = core::array::from_fn(|i| i as u8);
         OperationProof {
-            loc: mmb::Location::new(5),
+            loc: Location::<F>::new(5),
             chunk,
             range_proof,
         }
@@ -902,13 +791,121 @@ pub mod tests {
         assert!(result.is_err());
     }
 
+    fn check_runtime_codec<P: Codec>(encoded: Bytes, cfg: &P::Cfg, limited: &P::Cfg) {
+        let runtime = P::decode_cfg(encoded.clone(), cfg).unwrap();
+        assert_eq!(runtime.encode(), encoded);
+        assert_eq!(runtime.encode_size(), encoded.len());
+        assert!(P::decode_cfg(encoded.clone(), limited).is_err());
+        for end in 0..encoded.len() {
+            assert!(P::decode_cfg(&encoded[..end], cfg).is_err());
+        }
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(P::decode_cfg(trailing.as_slice(), cfg).is_err());
+    }
+
+    fn check_runtime_ordered_codecs<F: Graftable>() {
+        let proof = db::KeyValueProof::<F, Digest, Digest, 32> {
+            proof: sample_op_proof(),
+            next_key: Sha256::hash(&[b"next-key"]),
+        };
+        check_runtime_codec::<db::RuntimeKeyValueProof<F, Digest, Digest>>(
+            proof.encode(),
+            &((32, 1), ()),
+            &((32, 0), ()),
+        );
+        assert!(
+            db::RuntimeKeyValueProof::<F, Digest, Digest>::decode_cfg(
+                proof.encode(),
+                &((3, 1), ()),
+            )
+            .is_err()
+        );
+
+        let cases = [
+            ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, 32>::KeyValue(
+                sample_op_proof(),
+                Update {
+                    key: Sha256::hash(&[b"key"]),
+                    value: Sha256::hash(&[b"value"]),
+                    next_key: Sha256::hash(&[b"next-key"]),
+                },
+            ),
+            ExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
+            ExclusionProof::Commit(sample_op_proof(), None),
+        ];
+        for proof in cases {
+            check_runtime_codec::<RuntimeExclusionProof<F, Digest, FixedEncoding<Digest>, Digest>>(
+                proof.encode(),
+                &((32, 1), (), ()),
+                &((32, 0), (), ()),
+            );
+            assert!(
+                RuntimeExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest>::decode_cfg(
+                    proof.encode(),
+                    &((3, 1), (), ()),
+                )
+                .is_err()
+            );
+            let mut unknown_tag = proof.encode().to_vec();
+            unknown_tag[0] = 2;
+            assert!(matches!(
+                RuntimeExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest>::decode_cfg(
+                    unknown_tag.as_slice(),
+                    &((32, 1), (), ()),
+                ),
+                Err(commonware_codec::Error::InvalidEnum(2)),
+            ));
+        }
+
+        let value_cfg = ((..=3).into(), ());
+        let update_cfg = ((), value_cfg);
+        let cases = [
+            ExclusionProof::<F, Digest, VariableEncoding<Vec<u8>>, Digest, 32>::KeyValue(
+                sample_op_proof(),
+                Update {
+                    key: Sha256::hash(&[b"key"]),
+                    value: vec![1, 2, 3],
+                    next_key: Sha256::hash(&[b"next-key"]),
+                },
+            ),
+            ExclusionProof::Commit(sample_op_proof(), Some(vec![1, 2, 3])),
+        ];
+        for proof in cases {
+            check_runtime_codec::<
+                RuntimeExclusionProof<F, Digest, VariableEncoding<Vec<u8>>, Digest>,
+            >(
+                proof.encode(),
+                &((32, 1), update_cfg, value_cfg),
+                &((32, 0), update_cfg, value_cfg),
+            );
+            let short_value_cfg = ((..=2).into(), ());
+            assert!(
+                RuntimeExclusionProof::<F, Digest, VariableEncoding<Vec<u8>>, Digest>::decode_cfg(
+                    proof.encode(),
+                    &((32, 1), ((), short_value_cfg), short_value_cfg),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_runtime_ordered_codecs() {
+        check_runtime_ordered_codecs::<mmr::Family>();
+        check_runtime_ordered_codecs::<mmb::Family>();
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use crate::{
             merkle::{mmb, mmr},
             qmdb::{
                 any::value::{FixedEncoding, VariableEncoding},
-                current::ordered::{ExclusionProof, db::KeyValueProof},
+                current::ordered::{
+                    ExclusionProof, RuntimeExclusionProof,
+                    db::{KeyValueProof, RuntimeKeyValueProof},
+                },
             },
         };
         use commonware_codec::conformance::CodecConformance;
@@ -922,6 +919,12 @@ pub mod tests {
             CodecConformance<ExclusionProof<mmr::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
             CodecConformance<ExclusionProof<mmb::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
             CodecConformance<ExclusionProof<mmb::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
+            CodecConformance<RuntimeKeyValueProof<mmr::Family, U64, Sha256Digest>>,
+            CodecConformance<RuntimeKeyValueProof<mmb::Family, U64, Sha256Digest>>,
+            CodecConformance<RuntimeExclusionProof<mmr::Family, U64, FixedEncoding<U64>, Sha256Digest>>,
+            CodecConformance<RuntimeExclusionProof<mmr::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest>>,
+            CodecConformance<RuntimeExclusionProof<mmb::Family, U64, FixedEncoding<U64>, Sha256Digest>>,
+            CodecConformance<RuntimeExclusionProof<mmb::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest>>,
         }
     }
 }
