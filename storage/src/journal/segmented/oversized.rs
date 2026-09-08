@@ -382,9 +382,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 let index = preflight.finish().await?;
 
                 // The index truncation is already durable. Release its unreferenced values only
-                // after that proof, preserving the index-first crash-recovery order. The sync
-                // covers the case where nothing was released: on real filesystems the adopted
-                // value bytes may have been readable but not yet synced.
+                // after that proof, preserving the index-first crash-recovery order.
                 let values = values.rewind(section, value_size).await?;
                 (index, values.sync(section).await?)
             }
@@ -646,6 +644,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             .take()
             .expect("tracked replay preserves its recovery state");
 
+        // Startup-readable bytes are durable by the runtime contract, and recovery
+        // truncations are durable before their retained boundaries are published
         let mut dirty = false;
         for section in self.index.sections() {
             let items = self.index.section_len(section)?;
@@ -976,24 +976,25 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// This rewinds the section to the given index size and removes all sections
     /// after the given section. The value size is derived from the last entry.
     ///
-    /// Both of `section`'s truncations are durable before this returns: a crash recovers
-    /// `section` to either its pre-rewind or its post-rewind state. Each journal removes
-    /// its later sections (newest first) before truncating `section`, and those removals
-    /// carry the storage layer's removal durability.
+    /// The resulting state of `section` is durable before this returns, including when
+    /// the target size already matches. Each journal removes its later
+    /// sections (newest first) before truncating `section`, and those removals carry the
+    /// storage layer's removal durability.
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, true).await?;
 
-        // Rewind the index first (this also removes sections after `section`). Its truncation
-        // is durable when `index.rewind` returns, so once the values rewind frees ranges for
-        // later appends, no dropped index entry can survive a crash and be adopted referencing
-        // whatever bytes a later append placed at its offsets.
+        // Rewind the index before freeing referenced value ranges
         self.index = self.index.rewind(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // Rewind values (this also removes sections after `section`)
+        // A matching index size may still contain unsynced retained entries
+        self.index = self.index.sync(section).await?;
+
+        // Rewind values and persist retained bytes even when their size already matches
         self.values = self.values.rewind(section, value_size).await?;
+        self.values = self.values.sync(section).await?;
         Ok(self)
     }
 
@@ -1002,19 +1003,23 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Unlike `rewind`, this does not affect other sections.
     /// The value size is derived from the last entry after rewinding the index.
     ///
-    /// Both truncations are durable before this returns (see [Self::rewind]).
+    /// The resulting section state is durable before this returns, including when the
+    /// target size already matches (see [Self::rewind]).
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, false).await?;
 
-        // Rewind the index first (see Self::rewind for why its durable truncation must precede
-        // the values rewind).
+        // Rewind the index before freeing referenced value ranges
         self.index = self.index.rewind_section(section, index_size).await?;
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = self.rewound_value_end(section, index_size).await?;
 
-        // Rewind values
+        // A matching index size may still contain unsynced retained entries
+        self.index = self.index.sync(section).await?;
+
+        // Rewind values and persist retained bytes even when their size already matches
         self.values = self.values.rewind_section(section, value_size).await?;
+        self.values = self.values.sync(section).await?;
         Ok(self)
     }
 
@@ -1195,6 +1200,7 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
     use commonware_utils::{NZU16, NZUsize};
+    use rstest::rstest;
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -1497,6 +1503,62 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    #[rstest]
+    #[case::all_sections(true)]
+    #[case::single_section(false)]
+    fn test_oversized_rewind_current_size_is_durable(#[case] all_sections: bool) {
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(move |context| async move {
+                let mut journal: Oversized<_, TestEntry, TestValue> =
+                    Oversized::init(context.child("initial"), test_cfg(&context))
+                        .await
+                        .unwrap();
+                for section in 1..=2 {
+                    (journal, _, _, _) = journal
+                        .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                        .await
+                        .unwrap();
+                }
+
+                // Keep the target section buffered while making the later section durable
+                journal = journal.sync(2).await.unwrap();
+                let size = journal.size(1).unwrap();
+                journal = if all_sections {
+                    journal.rewind(1, size).await.unwrap()
+                } else {
+                    journal.rewind_section(1, size).await.unwrap()
+                };
+                assert_eq!(journal.size(1).unwrap(), size);
+                drop(journal);
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("reopen"), test_cfg(&context))
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
+            assert_eq!(
+                journal.size(2).unwrap(),
+                if all_sections {
+                    0
+                } else {
+                    TestEntry::SIZE as u64
+                }
+            );
+            let entry = journal.get(1, 0).await.unwrap();
+            assert_eq!(entry.id, 1);
+            assert_eq!(
+                journal
+                    .get_value(1, entry.value_offset, entry.value_size)
+                    .await
+                    .unwrap(),
+                [1; 16]
+            );
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]

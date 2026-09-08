@@ -110,18 +110,28 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
+        journal::contiguous::fixed::Config as JournalConfig,
+        merkle::full::Config as MerkleConfig,
         mmr,
         qmdb::current::{
+            FixedConfig,
             tests::{fixed_config, fixed_config_partitioned},
             unordered::tests as shared,
         },
         translator::{OneCap, TwoCap},
     };
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Metrics, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::TestRng;
+    use commonware_runtime::{
+        Metrics, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic::{
+            self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
+        },
+    };
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
     use rand::Rng as _;
     use std::collections::HashMap;
 
@@ -541,18 +551,6 @@ pub mod test {
     /// operations behind the new ones for recovery to splice into a hybrid history.
     #[test_traced]
     fn test_current_unordered_fixed_rewind_then_rebranch_crash_recovers_branch() {
-        use crate::{
-            journal::contiguous::fixed::Config as JournalConfig,
-            merkle::{Location, full::Config as MerkleConfig},
-            qmdb::current::FixedConfig,
-        };
-        use commonware_codec::FixedSize;
-        use commonware_runtime::{
-            buffer::paged::CacheRef,
-            deterministic::{Config, FaultConfig, PartialWriteMode, WriteConfig},
-        };
-        use commonware_utils::{NZU16, NZU64, NZUsize, probability};
-
         fn key(i: u8) -> Digest {
             Digest::from([i; 32])
         }
@@ -594,13 +592,13 @@ pub mod test {
         }
 
         // The crash keeps every unsynced write in full and drops every unsynced resize.
-        let runtime = Config::default().with_storage_fault_config(FaultConfig::default().write(
-            WriteConfig {
+        let runtime = DeterministicConfig::default().with_storage_fault_config(
+            FaultConfig::default().write(WriteConfig {
                 failure_rate: probability!(0.0),
                 retention_rate: probability!(1.0),
                 mode: PartialWriteMode::Prefix,
-            },
-        ));
+            }),
+        );
         let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
             .start_and_recover(|ctx| async move {
                 let db = CurrentTest::init(ctx.child("initial"), db_config(&ctx))

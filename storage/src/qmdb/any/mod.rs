@@ -1635,6 +1635,53 @@ pub(crate) mod test {
         (db, range)
     }
 
+    /// A rewind to the current size makes applied but uncommitted state durable: after such a
+    /// rewind and a crash with no commit or sync, the reopened db reports the applied state.
+    #[test_traced("INFO")]
+    fn test_any_rewind_current_size_makes_applied_state_durable() {
+        // Sections large enough that no append seals a blob, whose sync would make the applied
+        // state durable on its own.
+        fn config(ctx: &Context) -> VariableConfig<OneCap, ((), ()), Sequential> {
+            let mut config = variable_db_config::<OneCap>("rcs", ctx);
+            config.journal_config.items_per_section = NZU64!(1000);
+            config.merkle_config.items_per_blob = NZU64!(1000);
+            config
+        }
+
+        let ((size, root), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let ctx = context.child("db");
+                let db: UnorderedVariable =
+                    UnorderedVariableDb::init(ctx.child("storage"), config(&ctx))
+                        .await
+                        .unwrap();
+                let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+
+                // Apply a batch without committing, then rewind to the size it produced.
+                let batch = db.new_batch().write(key(1), Some(val(1)));
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                let size = db.bounds().end;
+                let root = db.root();
+                let db = db.rewind(size).await.unwrap();
+                assert_eq!(db.root(), root);
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.child("reopen"), config(&ctx))
+                    .await
+                    .unwrap();
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// An empty batch (no mutations) still produces a valid commit.
     #[test_traced("INFO")]
     fn test_any_batch_empty() {

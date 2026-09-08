@@ -124,6 +124,40 @@ mod tests {
         Db::init(context, cfg).await.unwrap()
     }
 
+    /// A rewind to the current size makes applied but uncommitted state durable: after such a
+    /// rewind and a crash with no commit or sync, the reopened db reports the applied state.
+    #[test_traced]
+    fn test_immutable_fixed_rewind_current_size_makes_applied_state_durable() {
+        let key = Sha256::hash(&[b"key"]);
+        let value = Sha256::fill(7u8);
+        let ((size, root), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let db = open_db::<mmr::Family>(context.child("db")).await;
+
+                // Apply a batch without committing, then rewind to the size it produced.
+                let merkleized = db
+                    .new_batch()
+                    .set(key, value)
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await;
+                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                let size = db.bounds().end;
+                let root = db.root();
+                let db = db.rewind(size).await.unwrap();
+                assert_eq!(db.root(), root);
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = open_db::<mmr::Family>(context.child("reopen")).await;
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value));
+            db.destroy().await.unwrap();
+        });
+    }
+
     async fn open_compact<F: Family>(
         context: deterministic::Context,
     ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {

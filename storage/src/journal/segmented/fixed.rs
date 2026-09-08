@@ -298,10 +298,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
         if let Some((section, size)) = restore {
-            // The checkpoint preflight authorized this exact truncation, and it is durable when
-            // `rewind` returns, before the paired value journal can release any corresponding
-            // bytes. The sync covers the case where nothing was truncated: on real filesystems
-            // the adopted bytes may have been readable but not yet synced.
+            // The checkpoint preflight authorized this exact truncation. Make it durable before
+            // the paired value journal can release any corresponding bytes.
             manager.rewind(section, size).await?;
             manager.sync(section).await?;
             return Ok(Self {
