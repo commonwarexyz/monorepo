@@ -390,8 +390,8 @@ mod tests {
         StoredCodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
     >;
 
-    /// Actor configuration for direct actor tests over [`direct_archives`].
-    fn direct_config(
+    /// Builds a marshal actor configuration for tests.
+    fn test_config(
         context: &deterministic::Context,
         partition_prefix: &str,
         provider: ConstantProvider<S, Epoch>,
@@ -426,8 +426,8 @@ mod tests {
         }
     }
 
-    /// Initialize immutable finalized stores for direct actor tests.
-    async fn direct_archives(
+    /// Initializes immutable finalized stores for tests.
+    async fn immutable_finalized_stores(
         context: &deterministic::Context,
         partition_prefix: &str,
         config: &Config<
@@ -511,9 +511,9 @@ mod tests {
         RecordingResolver,
         commonware_runtime::Handle<()>,
     ) {
-        let config = direct_config(&context, partition_prefix, provider);
+        let config = test_config(&context, partition_prefix, provider);
         let (finalizations_by_height, finalized_blocks) =
-            direct_archives(&context, partition_prefix, &config).await;
+            immutable_finalized_stores(&context, partition_prefix, &config).await;
         let (actor, mailbox, _) = core::Actor::init(
             context.child("actor"),
             finalizations_by_height,
@@ -1178,13 +1178,13 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let config = direct_config(
+            let config = test_config(
                 &context,
                 PARTITION_PREFIX,
                 ConstantProvider::new(schemes[0].clone()),
             );
             let (finalizations_by_height, finalized_blocks) =
-                direct_archives(&context, PARTITION_PREFIX, &config).await;
+                immutable_finalized_stores(&context, PARTITION_PREFIX, &config).await;
             let finalized_blocks = Recording::new(finalized_blocks);
             let ops = finalized_blocks.ops();
             let (actor, mut mailbox, _) = core::Actor::init(

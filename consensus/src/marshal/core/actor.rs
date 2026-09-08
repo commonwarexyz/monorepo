@@ -146,7 +146,7 @@ where
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
-    // Finalized blocks awaiting durable dispatch, capped at the pending-ack capacity
+    // Finalized blocks awaiting durable dispatch, capped at twice the pending-ack capacity
     staged: BTreeMap<Height, Arc<V::Block>>,
 
     // ---------- Storage ----------
@@ -824,7 +824,9 @@ where
                     let next_height = self
                         .pending_acks
                         .next_dispatch_height(self.stream.next_height());
-                    if height >= next_height && self.staged.len() < self.pending_acks.capacity() {
+                    if height >= next_height
+                        && self.staged.len() < self.pending_acks.capacity().saturating_mul(2)
+                    {
                         self.staged.insert(height, Arc::clone(&block));
                     }
                     let stored;
