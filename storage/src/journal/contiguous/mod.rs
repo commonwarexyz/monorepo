@@ -173,6 +173,9 @@ pub trait Contiguous: Send + Sync {
     ///
     /// Equivalent to serving every position [`try_read_many_sync`](Self::try_read_many_sync)
     /// declines with one batched read. Implementations may fuse the two passes.
+    ///
+    /// Items are decoded from one buffer covering the batch, so an item that retains byte
+    /// fields keeps that whole buffer alive.
     fn read_many(
         &self,
         positions: &[u64],
@@ -193,6 +196,9 @@ pub trait Contiguous: Send + Sync {
     /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
     /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
     /// [ReadOptions::DONT_CACHE] on page-cache misses because the cache retains the fetched pages.
+    ///
+    /// Items are decoded from the replay chunks, so an item that retains byte fields keeps its
+    /// whole chunk (up to `buffer` bytes) alive.
     fn replay(
         &self,
         start_pos: u64,

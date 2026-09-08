@@ -1010,9 +1010,12 @@ impl IoBufsMut {
 
 impl DecodeInput for IoBufsMut {
     type Buf = IoBufs;
+}
 
-    fn into_buf(self) -> Self::Buf {
-        self.freeze()
+/// Freezes every chunk (see [`IoBufsMut::freeze`]).
+impl From<IoBufsMut> for IoBufs {
+    fn from(bufs: IoBufsMut) -> Self {
+        bufs.freeze()
     }
 }
 

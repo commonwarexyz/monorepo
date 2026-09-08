@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{DecodeInput, ReadExt, Write};
+use commonware_codec::{Copying, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G2, Share},
     ops::threshold,
@@ -457,7 +457,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::SerializeShare { share } => {
             let mut encoded = Vec::new();
             share.write(&mut encoded);
-            if let Ok(decoded) = Share::read(&mut encoded.into_buf()) {
+            if let Ok(decoded) = Share::read(&mut Copying(&encoded)) {
                 assert_eq!(share, decoded);
             }
         }
