@@ -1456,22 +1456,12 @@ where
         } = delivery;
         match key {
             Key::Block(commitment) => {
-                // The peer-visible request only says "give me this block".
-                // Local annotations explain why the block was requested, and
-                // therefore how much of the commitment to recompute and where,
-                // if anywhere, the block should be stored.
+                // Local annotations determine commitment checks and block storage
                 let annotations = subscribers
                     .map_into(|(annotation, _)| annotation)
                     .into_vec();
 
-                // `Finalized` annotations come only from request sites whose
-                // commitment is the payload of a verified finalization or the
-                // parent commitment of an archived finalized block. `Certified`
-                // annotations come only from ancestry fetches for commitments
-                // this node recorded as certified. Either way the commitment is
-                // already bound to the block, so decoding need not recompute it.
-                // `Ancestry` annotations carry no such evidence, so those
-                // deliveries recompute it.
+                // Any `Finalized` or `Certified` subscriber authenticates the shared commitment
                 let expected = if annotations.iter().any(|annotation| {
                     matches!(
                         annotation,
