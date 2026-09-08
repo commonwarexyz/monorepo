@@ -13,6 +13,7 @@ use commonware_consensus::{
         telemetry::WAN_LATENCY,
         types::{Activity, BlockRef, ChainId, Context, TransactionBlock, TransactionBlockHeader},
     },
+    types::{Height, View},
 };
 use commonware_cryptography::{
     Digestible, Hasher as _, Sha256, bls12381::primitives::variant::MinPk, ed25519,
@@ -22,7 +23,7 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
-    telemetry::metrics::{Counter, Histogram, HistogramExt as _, MetricsExt as _},
+    telemetry::metrics::{Counter, Gauge, Histogram, HistogramExt as _, MetricsExt as _},
 };
 use commonware_utils::{Acknowledgement as _, channel::oneshot, sync::Mutex};
 use std::{
@@ -143,6 +144,15 @@ pub struct ProposalLatency {
     input_finality: Histogram,
     dropped: Counter,
     finality_evicted: Counter,
+    benchmark_quorum: Option<usize>,
+    starts: Counter,
+    cancellations: Counter,
+    outstanding: Gauge,
+    nonfinalized: Gauge,
+    proposed_early: Counter,
+    proposed_late: Counter,
+    extension_early: Counter,
+    extension_late: Counter,
 }
 
 impl ProposalLatency {
@@ -151,6 +161,39 @@ impl ProposalLatency {
         Self {
             started: Arc::new(Mutex::new(VecDeque::new())),
             capacity: capacity.get(),
+            benchmark_quorum: None,
+            starts: context.counter(
+                "proposal_started",
+                "locally built blocks tracked for latency",
+            ),
+            cancellations: context.counter(
+                "proposal_cancelled",
+                "tracked proposal attempts cancelled",
+            ),
+            outstanding: context.gauge(
+                "proposal_outstanding",
+                "starts awaiting ordering or removal",
+            ),
+            nonfinalized: context.gauge(
+                "proposal_nonfinalized",
+                "retained starts without observed finality",
+            ),
+            proposed_early: context.counter(
+                "proposal_first_finality_proposed_early",
+                "first finality at or below proposed height with quorum votes",
+            ),
+            proposed_late: context.counter(
+                "proposal_first_finality_proposed_late",
+                "first finality at or below proposed height with more than quorum votes",
+            ),
+            extension_early: context.counter(
+                "proposal_first_finality_extension_early",
+                "first finality above proposed height with quorum votes",
+            ),
+            extension_late: context.counter(
+                "proposal_first_finality_extension_late",
+                "first finality above proposed height with more than quorum votes",
+            ),
             finality: context.histogram(
                 "proposal_finalization_latency",
                 "time from block build to inclusion by a directly finalized leader",
@@ -177,6 +220,68 @@ impl ProposalLatency {
         }
     }
 
+    /// Enables unsampled INFO events and first-finality classification for a benchmark run.
+    ///
+    /// Supply the consensus quorum before cloning this tracker. Samples cover locally built
+    /// blocks while retained in memory; restart, eviction, and missing staged ancestry can
+    /// prevent observing finality. Logger or process loss must be checked against metric counts.
+    pub const fn enable_benchmark(mut self, quorum: NonZeroUsize) -> Self {
+        self.benchmark_quorum = Some(quorum.get());
+        self
+    }
+
+    fn sample(
+        &self,
+        start: &ProposalStart,
+        event: &str,
+        reason: &str,
+        now: SystemTime,
+        evidence: Option<(View, usize)>,
+    ) {
+        if self.benchmark_quorum.is_none() {
+            return;
+        }
+        let micros = |time: SystemTime| {
+            u64::try_from(
+                time.duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros(),
+            )
+            .unwrap_or(u64::MAX)
+        };
+        let elapsed = |time: SystemTime| {
+            u64::try_from(now.duration_since(time).unwrap_or_default().as_micros())
+                .unwrap_or(u64::MAX)
+        };
+        info!(
+            benchmark_event = event,
+            reason,
+            chain = start.block.chain().get(),
+            height = start.block.height().get(),
+            digest = %start.block.digest(),
+            timestamp_us = micros(now),
+            started_at_us = micros(start.started_at),
+            input_ready_at_us = start.input_ready_at.map(micros),
+            elapsed_us = elapsed(start.started_at),
+            input_elapsed_us = start.input_ready_at.map(elapsed),
+            finalized = start.finalized,
+            view = evidence.map(|(view, _)| view.get()),
+            votes = evidence.map(|(_, votes)| votes as u64),
+            quorum = self.benchmark_quorum.map(|quorum| quorum as u64),
+            starts = self.starts.get(),
+            cancellations = self.cancellations.get(),
+            drops = self.dropped.get(),
+            finality_evictions = self.finality_evicted.get(),
+            proposed_early = self.proposed_early.get(),
+            proposed_late = self.proposed_late.get(),
+            extension_early = self.extension_early.get(),
+            extension_late = self.extension_late.get(),
+            outstanding = self.outstanding.get(),
+            nonfinalized = self.nonfinalized.get(),
+            "proposal benchmark sample"
+        );
+    }
+
     fn start(
         &self,
         block: BlockRef<Sha256Digest>,
@@ -191,25 +296,46 @@ impl ProposalLatency {
             let evicted = started.pop_front().expect("proposal capacity is nonzero");
             if !evicted.finalized {
                 self.finality_evicted.inc();
+                self.nonfinalized.dec();
             }
             self.dropped.inc();
+            self.outstanding.dec();
+            self.sample(&evicted, "eviction", "capacity", SystemTime::now(), None);
         }
-        started.push_back(ProposalStart {
+        self.starts.inc();
+        self.outstanding.inc();
+        self.nonfinalized.inc();
+        let start = ProposalStart {
             block,
             started_at,
             input_ready_at,
             finalized: false,
-        });
+        };
+        self.sample(&start, "start", "built", started_at, None);
+        started.push_back(start);
     }
 
-    fn cancel(&self, block: BlockRef<Sha256Digest>) {
+    fn cancel(&self, block: BlockRef<Sha256Digest>, reason: &str) {
         let mut started = self.started.lock();
         if let Some(index) = started.iter().position(|start| start.block == block) {
-            started.remove(index);
+            let start = started.remove(index).unwrap();
+            self.cancellations.inc();
+            self.outstanding.dec();
+            if !start.finalized {
+                self.nonfinalized.dec();
+            }
+            self.sample(&start, "cancellation", reason, SystemTime::now(), None);
         }
     }
 
-    fn finalize(&self, blocks: &[BlockRef<Sha256Digest>], staged: &Staged) {
+    fn finalize(
+        &self,
+        blocks: &[BlockRef<Sha256Digest>],
+        proposed: &[Height],
+        votes: usize,
+        view: View,
+        staged: &Staged,
+    ) {
         let finalized = {
             let staged = staged.0.lock();
             let mut finalized = BTreeSet::new();
@@ -232,34 +358,50 @@ impl ProposalLatency {
             }
             finalized
         };
-        let mut samples = Vec::new();
-        for start in self.started.lock().iter_mut() {
-            if !start.finalized && finalized.contains(&start.block) {
-                start.finalized = true;
-                samples.push((start.started_at, start.input_ready_at));
-            }
-        }
         let now = SystemTime::now();
-        for (started_at, input_ready_at) in samples {
-            self.finality.observe_between(started_at, now);
-            if let Some(input_ready_at) = input_ready_at {
+        for start in self.started.lock().iter_mut() {
+            if start.finalized || !finalized.contains(&start.block) {
+                continue;
+            }
+            start.finalized = true;
+            self.nonfinalized.dec();
+            self.finality.observe_between(start.started_at, now);
+            if let Some(input_ready_at) = start.input_ready_at {
                 self.input_finality.observe_between(input_ready_at, now);
+            }
+            if let Some(quorum) = self.benchmark_quorum {
+                let extension = start.block.height() > proposed[start.block.chain().get() as usize];
+                let late = votes > quorum;
+                let (counter, reason) = match (extension, late) {
+                    (false, false) => (&self.proposed_early, "proposed_early"),
+                    (false, true) => (&self.proposed_late, "proposed_late"),
+                    (true, false) => (&self.extension_early, "extension_early"),
+                    (true, true) => (&self.extension_late, "extension_late"),
+                };
+                counter.inc();
+                self.sample(
+                    start,
+                    "first_finalization",
+                    reason,
+                    now,
+                    Some((view, votes)),
+                );
             }
         }
     }
 
     /// Records the ordered delivery of `block` and forgets its start.
     pub fn order(&self, block: BlockRef<Sha256Digest>) {
-        let start = {
-            let mut started = self.started.lock();
-            started
-                .iter()
-                .position(|start| start.block == block)
-                .and_then(|index| started.remove(index))
-        };
-        if let Some(start) = start {
-            self.ordering
-                .observe_between(start.started_at, SystemTime::now());
+        let mut started = self.started.lock();
+        if let Some(index) = started.iter().position(|start| start.block == block) {
+            let start = started.remove(index).unwrap();
+            let now = SystemTime::now();
+            self.outstanding.dec();
+            if !start.finalized {
+                self.nonfinalized.dec();
+            }
+            self.ordering.observe_between(start.started_at, now);
+            self.sample(&start, "ordered", "delivery", now, None);
         }
     }
 }
@@ -482,21 +624,26 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 let body_digest = block.header().body_digest();
                 let block_digest = block.digest();
                 let reference = block.reference();
+                proposal_latency.start(reference, started_at, input_ready_at);
                 let custody = select! {
-                    _ = sender.closed() => return,
+                    _ = sender.closed() => {
+                        proposal_latency.cancel(reference, "receiver_closed");
+                        return;
+                    },
                     result = marshal.stage_block(Arc::clone(&block)) => result,
                 };
                 let custody = match custody {
                     Ok(custody) => custody,
                     Err(error) => {
+                        proposal_latency.cancel(reference, "stage_error");
                         warn!(?reference, %error, "cannot stage proposed block");
                         return;
                     }
                 };
                 if !staged.insert_with_custody(block, Some(custody)) {
+                    proposal_latency.cancel(reference, "staged_identity_conflict");
                     return;
                 }
-                proposal_latency.start(reference, started_at, input_ready_at);
                 info!(
                     chain = context.chain().get(),
                     height = context.height().get(),
@@ -506,7 +653,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                     "produced body"
                 );
                 if sender.send(body_digest).is_err() {
-                    proposal_latency.cancel(reference);
+                    proposal_latency.cancel(reference, "receiver_closed");
                 } else if let Some(workload) = workload {
                     workload.lock().admit(context.height().get());
                 }
@@ -624,9 +771,13 @@ impl<E: Clock + Spawner> Reporter for Application<E> {
         if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
             &activity
         {
-            self.metrics
-                .proposal_latency
-                .finalize(fact.blocks(), &self.staged);
+            self.metrics.proposal_latency.finalize(
+                fact.blocks(),
+                fact.proposed(),
+                fact.votes(),
+                fact.round().view(),
+                &self.staged,
+            );
         }
         let certified = match &activity {
             Activity::ProtocolAccepted { artifact, .. } => match artifact.as_ref() {
@@ -722,6 +873,195 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_events_include_raw_microseconds_and_loss_accounting() {
+        #[derive(Clone, Default)]
+        struct Output(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        deterministic::Runner::default().start(|runtime| async move {
+            let output = Output::default();
+            let writer = output.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .without_time()
+                .with_writer(move || writer.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let latency = ProposalLatency::new(&runtime, NZUsize!(1));
+                let block = |height| {
+                    BlockRef::new(
+                        ChainId::new(0),
+                        Height::new(height),
+                        Sha256::hash(&[&height.to_be_bytes()]),
+                    )
+                };
+                let started = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+                latency.start(block(1), started, None);
+                latency.cancel(block(1), "receiver_closed");
+                assert!(output.0.lock().is_empty());
+                let latency = latency.enable_benchmark(NZUsize!(3));
+                latency.start(block(2), started, Some(started - Duration::from_secs(2)));
+                latency.finalize(
+                    &[block(2)],
+                    &[Height::new(2)],
+                    3,
+                    View::new(4),
+                    &Staged::default(),
+                );
+                latency.order(block(2));
+                latency.start(block(3), started, None);
+                latency.start(block(4), started, None);
+                latency.cancel(block(4), "stage_error");
+            });
+            let output = String::from_utf8(output.0.lock().clone()).unwrap();
+            let events: Vec<serde_yaml::Value> = output
+                .lines()
+                .map(|line| serde_yaml::from_str(line).unwrap())
+                .collect();
+            assert_eq!(events.len(), 7);
+            let first = &events[0]["fields"];
+            assert_eq!(first["benchmark_event"].as_str(), Some("start"));
+            assert_eq!(first["started_at_us"].as_u64(), Some(10_000_000));
+            assert_eq!(first["input_ready_at_us"].as_u64(), Some(8_000_000));
+            assert_eq!(first["elapsed_us"].as_u64(), Some(0));
+            let finality = &events[1]["fields"];
+            assert_eq!(
+                finality["benchmark_event"].as_str(),
+                Some("first_finalization")
+            );
+            assert!(finality["elapsed_us"].as_u64().unwrap() > 1_000_000);
+            assert_eq!(
+                finality["input_elapsed_us"].as_u64().unwrap()
+                    - finality["elapsed_us"].as_u64().unwrap(),
+                2_000_000
+            );
+            assert_eq!(finality["reason"].as_str(), Some("proposed_early"));
+            assert_eq!(
+                events[2]["fields"]["benchmark_event"].as_str(),
+                Some("ordered")
+            );
+            assert_eq!(
+                events[4]["fields"]["benchmark_event"].as_str(),
+                Some("eviction")
+            );
+            let last = &events[6]["fields"];
+            assert_eq!(last["benchmark_event"].as_str(), Some("cancellation"));
+            assert_eq!(last["starts"].as_u64(), Some(4));
+            assert_eq!(last["cancellations"].as_u64(), Some(2));
+            assert_eq!(last["drops"].as_u64(), Some(1));
+            assert_eq!(last["outstanding"].as_u64(), Some(0));
+            assert_eq!(last["nonfinalized"].as_u64(), Some(0));
+        });
+    }
+
+    #[test]
+    fn benchmark_first_finality_classifies_exact_blocks_once() {
+        deterministic::Runner::default().start(|runtime| async move {
+            let latency = ProposalLatency::new(&runtime, NZUsize!(8)).enable_benchmark(NZUsize!(3));
+            let staged = Staged::default();
+            let mut parent = Sha256::hash(&[b"genesis"]);
+            let blocks: Vec<_> = (1..=4)
+                .map(|height| {
+                    let context =
+                        Context::new(Epoch::new(7), ChainId::new(0), Height::new(height), parent)
+                            .unwrap();
+                    let block = Arc::new(Block::from_context(context, Body::junk(9, context, 32)));
+                    parent = block.digest();
+                    assert!(staged.insert(Arc::clone(&block)));
+                    latency.start(block.reference(), SystemTime::now(), None);
+                    block
+                })
+                .collect();
+            let conflicting = BlockRef::new(
+                ChainId::new(0),
+                Height::new(2),
+                Sha256::hash(&[b"conflict"]),
+            );
+            latency.start(conflicting, SystemTime::now(), None);
+            // Height one is proposed; height two is covered by the quorum's extension.
+            latency.finalize(
+                &[blocks[1].reference()],
+                &[Height::new(1)],
+                3,
+                View::new(1),
+                &staged,
+            );
+            assert_eq!(latency.proposed_early.get(), 1);
+            assert_eq!(latency.extension_early.get(), 1);
+            assert_eq!(latency.nonfinalized.get(), 3);
+            // A larger fact counts only newly covered blocks, with the configured quorum.
+            for _ in 0..2 {
+                latency.finalize(
+                    &[blocks[3].reference()],
+                    &[Height::new(3)],
+                    4,
+                    View::new(1),
+                    &staged,
+                );
+            }
+            assert_eq!(latency.proposed_early.get(), 1);
+            assert_eq!(latency.extension_early.get(), 1);
+            assert_eq!(latency.proposed_late.get(), 1);
+            assert_eq!(latency.extension_late.get(), 1);
+            assert_eq!(latency.outstanding.get(), 5);
+            assert_eq!(latency.nonfinalized.get(), 1);
+            assert!(
+                latency
+                    .started
+                    .lock()
+                    .iter()
+                    .any(|start| start.block == conflicting && !start.finalized)
+            );
+            assert!(
+                runtime
+                    .encode()
+                    .contains("proposal_finalization_latency_count 4\n")
+            );
+        });
+    }
+
+    #[test]
+    fn benchmark_censored_starts_remain_visible_until_cancel_or_eviction() {
+        deterministic::Runner::default().start(|runtime| async move {
+            let latency = ProposalLatency::new(&runtime, NZUsize!(2)).enable_benchmark(NZUsize!(2));
+            let block = |height| {
+                BlockRef::new(
+                    ChainId::new(0),
+                    Height::new(height),
+                    Sha256::hash(&[&height.to_be_bytes()]),
+                )
+            };
+            let now = SystemTime::now();
+            latency.start(block(1), now, Some(now - Duration::from_secs(2)));
+            latency.start(block(1), now, None);
+            latency.start(block(2), now, None);
+            assert_eq!(latency.starts.get(), 2);
+            assert_eq!(latency.outstanding.get(), 2);
+            assert_eq!(latency.nonfinalized.get(), 2);
+            latency.start(block(3), now, None);
+            assert_eq!(latency.dropped.get(), 1);
+            assert_eq!(latency.finality_evicted.get(), 1);
+            assert_eq!(latency.outstanding.get(), 2);
+            assert_eq!(latency.nonfinalized.get(), 2);
+            latency.cancel(block(2), "stage_error");
+            latency.cancel(block(2), "receiver_closed");
+            assert_eq!(latency.cancellations.get(), 1);
+            assert_eq!(latency.outstanding.get(), 1);
+            assert_eq!(latency.nonfinalized.get(), 1);
+            latency.order(block(3));
+            assert_eq!(latency.outstanding.get(), 0);
+            assert_eq!(latency.nonfinalized.get(), 0);
+        });
+    }
+
+    #[test]
     fn proposal_latency_retention_is_bounded_without_finality() {
         deterministic::Runner::default().start(|context| async move {
             let latency = ProposalLatency::new(&context, NZUsize!(2));
@@ -757,7 +1097,13 @@ mod tests {
                 )
             };
             latency.start(reference(1), runtime.current(), None);
-            latency.finalize(&[reference(1)], &staged);
+            latency.finalize(
+                &[reference(1)],
+                &[Height::new(100)],
+                3,
+                View::new(1),
+                &staged,
+            );
             latency.start(reference(2), runtime.current(), None);
             assert_eq!(latency.dropped.get(), 1);
             assert_eq!(latency.finality_evicted.get(), 0);
@@ -766,7 +1112,7 @@ mod tests {
             assert_eq!(latency.dropped.get(), 2);
             assert_eq!(latency.finality_evicted.get(), 1);
 
-            latency.cancel(reference(3));
+            latency.cancel(reference(3), "test");
             latency.start(reference(4), runtime.current(), None);
             latency.order(reference(4));
             latency.start(reference(5), runtime.current(), None);
@@ -790,11 +1136,11 @@ mod tests {
             let started = SystemTime::now();
             let input = started - Duration::from_secs(1);
             latency.start(block(1), started, Some(input));
-            latency.cancel(block(1));
-            latency.finalize(&[block(1)], &staged);
+            latency.cancel(block(1), "test");
+            latency.finalize(&[block(1)], &[Height::new(100)], 3, View::new(1), &staged);
             latency.start(block(2), started, Some(input));
-            latency.finalize(&[block(2)], &staged);
-            latency.finalize(&[block(2)], &staged);
+            latency.finalize(&[block(2)], &[Height::new(100)], 3, View::new(1), &staged);
+            latency.finalize(&[block(2)], &[Height::new(100)], 3, View::new(1), &staged);
             let encoded = context.encode();
             assert!(encoded.contains("input_finalization_latency_count 1\n"));
             let sum = |name: &str| {
@@ -870,7 +1216,13 @@ mod tests {
             assert!(staged.insert(Arc::clone(&right)));
             latency.start(left.reference(), SystemTime::now(), None);
 
-            latency.finalize(&[right.reference()], &staged);
+            latency.finalize(
+                &[right.reference()],
+                &[Height::new(100)],
+                3,
+                View::new(1),
+                &staged,
+            );
             assert!(
                 latency
                     .started
@@ -879,7 +1231,13 @@ mod tests {
                     .any(|start| start.block == left.reference() && !start.finalized)
             );
 
-            latency.finalize(&[left.reference()], &staged);
+            latency.finalize(
+                &[left.reference()],
+                &[Height::new(100)],
+                3,
+                View::new(1),
+                &staged,
+            );
             assert!(latency.started.lock().iter().all(|start| start.finalized));
             latency.order(left.reference());
             assert!(latency.started.lock().is_empty());
@@ -903,7 +1261,13 @@ mod tests {
             assert!(staged.insert(Arc::clone(&child)));
             latency.start(parent.reference(), SystemTime::now(), None);
 
-            latency.finalize(&[child.reference()], &staged);
+            latency.finalize(
+                &[child.reference()],
+                &[Height::new(100)],
+                3,
+                View::new(1),
+                &staged,
+            );
             assert!(latency.started.lock().iter().all(|start| start.finalized));
             latency.order(parent.reference());
             assert!(latency.started.lock().is_empty());
