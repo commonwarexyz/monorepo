@@ -98,4 +98,6 @@ impl GAffineVec {
     }
 }
 
-impl super::msm::Backend for Backend {}
+impl super::msm::Backend for Backend {
+    const STRIPES: usize = LANES;
+}

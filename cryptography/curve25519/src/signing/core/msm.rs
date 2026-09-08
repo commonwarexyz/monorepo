@@ -9,9 +9,7 @@
 //! added together, and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
-#[cfg(test)]
-use crate::curve::GVec;
-use crate::curve::{Backend, G, GAffine};
+use crate::curve::{G, GAffine, msm::Backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;
@@ -123,12 +121,8 @@ fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> 
         .unwrap_or(0)
 }
 
-mod transposed {
-    #[cfg(test)]
-    use super::GVec;
+mod bucketed {
     use super::{Backend, G, Term};
-    #[cfg(test)]
-    use crate::curve::msm::fold_buckets;
     #[cfg(not(feature = "std"))]
     use alloc::{vec, vec::Vec};
 
@@ -138,9 +132,7 @@ mod transposed {
     }
 
     /// One window's contribution to the MSM over global term range `[start, end)`, *before* the
-    /// doubling shift that positions it -- the vectorized counterpart of
-    /// the scalar bucket algorithm, with the `LANES` per-lane partials summed down to a
-    /// single point at the end (valid because MSM is linear in its terms).
+    /// doubling shift that positions it. The backend folds its bucket stripes into one point.
     pub(super) fn window_partial<B: Backend>(
         backend: B,
         chunks: &[&[Term]],
@@ -161,15 +153,11 @@ mod transposed {
         for piece in super::pieces(chunks, start, end) {
             backend.fill_buckets(buckets, nb, piece, |term| (term.point, term.digits[window]));
         }
-        let partial = backend.fold_buckets(buckets, nb, used);
-        partial.sum_lanes(backend)
+        backend.fold_buckets(buckets, nb, used)
     }
 
-    /// Computes the full MSM over `chunks` via the lane-transposed Pippenger bucket method,
-    /// window by window from the top down. Unlike [`window_partial`], the running `result` stays
-    /// a [`GVec`] across all windows -- the inter-window doublings run `LANES` wide, and the
-    /// lanes are only summed down to a single point once, at the very end. One bucket allocation
-    /// is reused (re-set to the identity) across every window.
+    /// Computes the full MSM with backend bucket filling and an independent scalar fold.
+    /// One bucket allocation is reused across every window.
     #[cfg(test)]
     pub(super) fn multiscalar_mul_serial<B: Backend>(
         backend: B,
@@ -178,11 +166,11 @@ mod transposed {
     ) -> G {
         let nb = super::num_buckets(width);
         let total = super::total_terms(chunks);
-        let mut result = GVec::identity();
+        let mut result = G::IDENTITY;
         let mut buckets = identity_buckets(backend, nb);
         for window in (0..super::num_windows(width)).rev() {
             for _ in 0..width {
-                result = backend.g_double(result);
+                result = result.double();
             }
             let used = super::used_buckets(chunks, 0, total, window);
             for piece in super::pieces(chunks, 0, total) {
@@ -190,18 +178,24 @@ mod transposed {
                     (term.point, term.digits[window])
                 });
             }
-            result = fold_buckets(backend, result, &buckets, nb, used);
+            let mut sum = G::IDENTITY;
+            for digit in (0..used).rev() {
+                for stripe in 0..B::STRIPES {
+                    sum = sum.add(buckets[stripe * nb + digit]);
+                }
+                result = result.add(sum);
+            }
             buckets.fill(G::IDENTITY);
         }
 
-        result.sum_lanes(backend)
+        result
     }
 }
 
-/// Computes the full MSM over `chunks` serially using the backend's transposed lanes.
+/// Computes the full MSM over `chunks` with an independent scalar fold.
 #[cfg(test)]
 fn multiscalar_mul_terms_serial<B: Backend>(backend: B, chunks: &[&[Term]], width: u32) -> G {
-    transposed::multiscalar_mul_serial(backend, chunks, width)
+    bucketed::multiscalar_mul_serial(backend, chunks, width)
 }
 
 /// Computes `sum(points[i] * scalars[i])` serially: the reference the differential tests below
@@ -290,9 +284,9 @@ pub(super) fn multiscalar_mul<B: Backend>(
     let buckets = num_buckets(width);
     let partials = strategy.map_init_collect_vec(
         tiles,
-        || transposed::identity_buckets(backend, buckets),
+        || bucketed::identity_buckets(backend, buckets),
         |scratch, tile| {
-            let partial = transposed::window_partial(
+            let partial = bucketed::window_partial(
                 backend,
                 chunks,
                 tile.start,
@@ -310,6 +304,7 @@ pub(super) fn multiscalar_mul<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curve::Backend;
     #[cfg(not(feature = "std"))]
     use alloc::vec;
     use arbitrary::Unstructured;
@@ -358,7 +353,7 @@ mod tests {
         actual.add(expected.negate()).is_identity()
     }
 
-    /// Splits `terms` into owned chunks of the given (deliberately uneven, `LANES`-unaligned)
+    /// Splits `terms` into owned chunks of the given (deliberately uneven, stripe-unaligned)
     /// sizes, with any remainder in one final chunk.
     fn split_terms(mut terms: Vec<Term>, sizes: &[usize]) -> Vec<Vec<Term>> {
         let mut chunks = Vec::new();
@@ -457,7 +452,7 @@ mod tests {
             });
     }
 
-    /// Slice boundaries are pure layout: any split of the same terms (including `LANES`-unaligned
+    /// Slice boundaries are pure layout: any split of the same terms (including stripe-unaligned
     /// and empty slices, whose tail waves pad with identity lanes) must produce the same point as
     /// one contiguous slice.
     #[test]
@@ -576,13 +571,13 @@ mod tests {
                 for width in TEST_WIDTHS {
                     let scalar = Scalar::from_u128((1u128 << (2 * width)) | 1);
                     let terms = [Term::new(point, &scalar, width)];
-                    let mut buckets = transposed::identity_buckets(backend, num_buckets(width));
+                    let mut buckets = bucketed::identity_buckets(backend, num_buckets(width));
                     for (window, expected) in
                         [point.to_extended(), G::IDENTITY, point.to_extended()]
                             .into_iter()
                             .enumerate()
                     {
-                        let actual = transposed::window_partial(
+                        let actual = bucketed::window_partial(
                             backend,
                             &[&terms],
                             0,
@@ -629,11 +624,11 @@ mod tests {
                             let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
 
                             let nw = num_windows(WIDTH);
-                            let mut transposed_windows = vec![G::IDENTITY; nw];
+                            let mut window_partials = vec![G::IDENTITY; nw];
                             let mut buckets =
-                                transposed::identity_buckets(backend, num_buckets(WIDTH));
-                            for (window, partial) in transposed_windows.iter_mut().enumerate() {
-                                let left = transposed::window_partial(
+                                bucketed::identity_buckets(backend, num_buckets(WIDTH));
+                            for (window, partial) in window_partials.iter_mut().enumerate() {
+                                let left = bucketed::window_partial(
                                     backend,
                                     &chunks,
                                     0,
@@ -642,7 +637,7 @@ mod tests {
                                     WIDTH,
                                     &mut buckets,
                                 );
-                                let right = transposed::window_partial(
+                                let right = bucketed::window_partial(
                                     backend,
                                     &chunks,
                                     mid,
@@ -656,7 +651,7 @@ mod tests {
 
                             assert!(points_equal(
                                 backend.combine_windows(
-                                    transposed_windows.into_iter().enumerate(),
+                                    window_partials.into_iter().enumerate(),
                                     nw,
                                     WIDTH
                                 ),

@@ -471,7 +471,9 @@ impl Backend {
 
 impl super::Backend for Backend {}
 
-impl super::msm::Backend for Backend {}
+impl super::msm::Backend for Backend {
+    const STRIPES: usize = LANES;
+}
 
 impl GBackend for Backend {
     #[inline(always)]

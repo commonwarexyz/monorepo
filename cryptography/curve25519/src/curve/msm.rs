@@ -13,12 +13,12 @@ use alloc::vec::Vec;
 ///
 /// The defaults use one bucket stripe per logical lane and vector point arithmetic. Backends
 /// with narrower physical tiles can override these kernels without changing MSM scheduling.
-pub trait Backend: GBackend {
+pub trait Backend: GBackend + Send + Sync {
     /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`.
     ///
-    /// Override [`Self::fill_buckets`] when changing this from [`LANES`]. The default fold
-    /// supports at most [`LANES`] stripes.
-    const STRIPES: usize = LANES;
+    /// Must be nonzero. The default fill requires [`super::LANES`] stripes, and the default fold
+    /// supports at most [`super::LANES`] stripes. Override those methods for other geometries.
+    const STRIPES: usize;
 
     /// Adds the projected points and signed digits to `Self::STRIPES * nb` buckets.
     ///
@@ -46,11 +46,12 @@ pub trait Backend: GBackend {
         );
     }
 
-    /// Returns lanes whose sum weights each bucket by its index plus one, across all stripes.
+    /// Returns the sum of all stripes, weighting each bucket by its index plus one.
     ///
     /// `used <= nb` is the largest nonzero digit magnitude. Buckets above it contribute nothing.
-    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> GVec {
-        fold_buckets(self, GVec::identity(), buckets, nb, used)
+    #[inline(always)]
+    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> G {
+        fold_buckets(self, GVec::identity(), buckets, nb, used).sum_lanes(self)
     }
 
     /// Sums `(window, point)` partials, then Horner-folds the windows with `width` doublings.
@@ -128,7 +129,7 @@ pub fn fill_buckets<const STRIPES: usize, T>(
 ///
 /// Lanes without a stripe contribute the identity. Untouched top buckets can be skipped
 /// because their identity values leave both running sums unchanged.
-pub fn fold_buckets<B: Backend>(
+fn fold_buckets<B: Backend>(
     backend: B,
     result: GVec,
     buckets: &[G],
@@ -184,7 +185,7 @@ fn fold_preserves_every_bucket_weight() {
                             .scalar_mul((0..usize::BITS).rev().map(|bit| used & (1 << bit) != 0));
                         expected = expected.add(weighted);
                     }
-                    let actual = backend.fold_buckets(&buckets, nb, used).sum_lanes(backend);
+                    let actual = backend.fold_buckets(&buckets, nb, used);
                     assert!(
                         actual.add(expected.negate()).is_identity(),
                         "width={width} used={used}"

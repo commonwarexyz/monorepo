@@ -716,32 +716,18 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
     })
 }
 
-impl msm::Backend for Backend {
-    // One stripe per physical mixed-addition lane keeps wave updates independent. Folds retain
-    // LANES independent bucket indices.
-    const STRIPES: usize = WIDTH;
-
-    fn fill_buckets<T>(
-        self,
-        buckets: &mut [G],
-        nb: usize,
-        terms: &[T],
-        term: impl Fn(&T) -> (GAffine, i16),
-    ) {
-        msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
-    }
-
+impl Backend {
     /// Returns lanes whose sum is the weighted sum of all bucket stripes.
     ///
     /// Let `B[k, lane]` sum the stripes at bucket index `k*LANES + lane`. The descending pass
     /// builds `sum[lane] = sum_k B[k, lane]` and `rows[lane] = sum_k k*B[k, lane]`.
     /// Final weighting gives `LANES*rows[lane] + (lane + 1)*sum[lane]`, assigning each bucket
     /// its index-plus-one weight. The lane count is a power of two.
-    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> GVec {
+    fn fold_buckets_lanes(self, buckets: &[G], nb: usize, used: usize) -> GVec {
         // A single used bucket has weight one, so return the stripes without weighting.
         if used == 1 {
             return GVec::transpose(core::array::from_fn(|lane| {
-                if lane < Self::STRIPES {
+                if lane < <Self as msm::Backend>::STRIPES {
                     buckets[lane * nb]
                 } else {
                     G::IDENTITY
@@ -762,7 +748,7 @@ impl msm::Backend for Backend {
                 }))
             };
             let mut combined = gather(0);
-            for stripe in 1..Self::STRIPES {
+            for stripe in 1..<Self as msm::Backend>::STRIPES {
                 combined = self.g_add(combined, gather(stripe));
             }
             rows = self.g_add(rows, sum);
@@ -793,6 +779,27 @@ impl msm::Backend for Backend {
             weighted = self.g_add(weighted, GVec::transpose(selected));
         }
         weighted
+    }
+}
+
+impl msm::Backend for Backend {
+    // One stripe per physical mixed-addition lane keeps wave updates independent. Folds retain
+    // LANES independent bucket indices.
+    const STRIPES: usize = WIDTH;
+
+    fn fill_buckets<T>(
+        self,
+        buckets: &mut [G],
+        nb: usize,
+        terms: &[T],
+        term: impl Fn(&T) -> (GAffine, i16),
+    ) {
+        msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
+    }
+
+    #[inline(always)]
+    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> G {
+        self.fold_buckets_lanes(buckets, nb, used).sum_lanes(self)
     }
 
     /// Scalar recombination computes each point once, avoiding duplicate SIMD lanes.

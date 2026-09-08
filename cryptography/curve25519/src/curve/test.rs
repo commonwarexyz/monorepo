@@ -739,3 +739,107 @@ fn backend_conditional_neg_matches_every_mask() {
     Check.call(super::portable::Backend::new());
     super::with_backend(Check);
 }
+
+#[test]
+fn bucket_fill_matches_scalar_sum_for_every_geometry() {
+    fn check<const STRIPES: usize>() {
+        const NB: usize = 7;
+        let torsion = GAffine::decompress(&[0; 32]).unwrap();
+        let mixed = GAffine::decompress(
+            &GAffine::BASEPOINT
+                .to_extended()
+                .add(torsion.to_extended())
+                .to_bytes(),
+        )
+        .unwrap();
+        let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
+        let digits = [0, 1, -1, 7, -7, 3, 3, -3, 7];
+        let terms: [(GAffine, i16); 53] = array::from_fn(|i| {
+            let digit = if i < 16 {
+                0
+            } else {
+                digits[(i - 16) % digits.len()]
+            };
+            (points[i % points.len()], digit)
+        });
+        let expected = terms.iter().fold(G::IDENTITY, |sum, &(point, digit)| {
+            let point = point.to_extended();
+            let point = if digit < 0 { point.negate() } else { point };
+            (0..digit.unsigned_abs()).fold(sum, |sum, _| sum.add(point))
+        });
+
+        for split in [0, 1, 3, 17, 31, terms.len()] {
+            let mut buckets = [[G::IDENTITY; NB]; STRIPES];
+            for piece in [&terms[..split], &terms[split..]] {
+                super::msm::fill_buckets(
+                    |current: [G; STRIPES], incoming, negative| {
+                        array::from_fn(|lane| {
+                            let mut point = incoming[lane];
+                            if negative[lane] {
+                                point.x = point.x.neg();
+                                point.t2d = point.t2d.neg();
+                            }
+                            current[lane].add_mixed(point)
+                        })
+                    },
+                    buckets.as_flattened_mut(),
+                    NB,
+                    piece,
+                    |term| *term,
+                );
+            }
+            let actual = buckets
+                .iter()
+                .flatten()
+                .enumerate()
+                .fold(G::IDENTITY, |sum, (i, &point)| {
+                    (0..=i % NB).fold(sum, |sum, _| sum.add(point))
+                });
+            assert!(
+                actual.add(expected.negate()).is_identity(),
+                "stripes={STRIPES} split={split}"
+            );
+        }
+    }
+
+    check::<1>();
+    check::<2>();
+    check::<3>();
+    check::<8>();
+    check::<16>();
+}
+
+#[test]
+fn sum_lanes_matches_scalar_sum() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let base = GAffine::BASEPOINT.to_extended();
+            let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
+            let points = [G::IDENTITY, base, torsion, base.add(torsion), base.negate()];
+            for offset in 0..points.len() {
+                for mask in 0..1usize << LANES {
+                    let lanes = array::from_fn(|lane| {
+                        if mask & (1 << lane) != 0 {
+                            points[(lane + offset) % points.len()]
+                        } else {
+                            G::IDENTITY
+                        }
+                    });
+                    let expected = lanes.into_iter().fold(G::IDENTITY, G::add);
+                    let actual = GVec::transpose(lanes).sum_lanes(backend);
+                    assert!(
+                        actual.add(expected.negate()).is_identity(),
+                        "offset={offset} mask={mask:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
