@@ -877,10 +877,10 @@ pub trait GBackend: FBackend {
     /// This can be faster than [`Self::g_add`].
     fn g_add_mixed(self, a: GVec, b: GAffineVec) -> GVec;
 
-    /// Adds a signed affine point to each of two extended points
+    /// Adds a signed affine point to each of two extended points.
     ///
     /// Each result is `a[i] + b[i]` or `a[i] - b[i]` according to `negative[i]`.
-    /// Variable-time, so the signs must be public
+    /// Variable-time, so the signs must be public.
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     fn g_add_mixed_pair(self, a: [G; 2], b: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {

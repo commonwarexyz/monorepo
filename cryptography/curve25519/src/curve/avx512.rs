@@ -255,37 +255,37 @@ impl Backend {
 impl FBackend for Backend {
     #[inline(always)]
     fn add(self, a: FVec, b: FVec) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.add_field(a, b) }
     }
 
     #[inline(always)]
     fn neg(self, a: FVec) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.neg_field(a) }
     }
 
     #[inline(always)]
     fn sub(self, a: FVec, b: FVec) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.sub_field(a, b) }
     }
 
     #[inline(always)]
     fn mul(self, a: FVec, b: FVec) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.mul_field(a, b) }
     }
 
     #[inline(always)]
     fn pow2k(self, a: FVec, k: u32) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.pow2k_field(a, k) }
     }
 
     #[inline(always)]
     fn square(self, a: FVec) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.square_field(a) }
     }
 }
@@ -432,19 +432,19 @@ impl super::Backend for Backend {}
 impl GBackend for Backend {
     #[inline(always)]
     fn g_add(self, p: GVec, q: GVec) -> GVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.add_points(p, q) }
     }
 
     #[inline(always)]
     fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.add_mixed_points(p, q) }
     }
 
     #[inline(always)]
     fn g_double(self, p: GVec) -> GVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.double_points(p) }
     }
 }

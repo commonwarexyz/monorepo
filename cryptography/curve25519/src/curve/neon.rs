@@ -157,15 +157,15 @@ fn digit_product(a: uint32x2_t, b: uint32x2_t) -> uint64x2_t {
     unsafe { vmull_u32(a, b) }
 }
 
-/// Reduces ten alternating 26/25-bit product columns into five loose radix-`2^51` limbs
+/// Reduces ten alternating 26/25-bit product columns into five loose radix-`2^51` limbs.
 ///
 /// With `M = 2^26 - 1`, column bounds are `M^2` times
 /// `[267, 154, 213, 118, 159, 82, 105, 46, 51, 10]`.
 /// Each pair satisfies `c[2*i] + 2^26*c[2*i + 1] = low[i] + 2^51*carry[i]`, with
-/// `low[i] < 2^51`. Carries move to the next limb, wrapping the top carry by `2^255 = 19 (mod p)`
+/// `low[i] < 2^51`. Carries move to the next limb, wrapping the top carry by `2^255 = 19 (mod p)`.
 #[inline(always)]
 fn reduce_columns(c: [uint64x2_t; 10]) -> Regs {
-    // SAFETY: AArch64 targets provide NEON. Paired columns and carry additions fit in u64
+    // SAFETY: AArch64 targets provide NEON. Paired columns and carry additions fit in u64.
     unsafe {
         let mask26 = vdupq_n_u64((1 << 26) - 1);
         let mask25 = vdupq_n_u64((1 << 25) - 1);
@@ -180,7 +180,7 @@ fn reduce_columns(c: [uint64x2_t; 10]) -> Regs {
 
         // Column 8 is at most 51*M^2 and column 9 at most 10*M^2, so the top carry fits
         // below 2^31 and can narrow losslessly. Its 19-fold and every other carry are
-        // below 2^35, leaving each output below 2^51 + 2^35 < 2^52 without another pass
+        // below 2^35, leaving each output below 2^51 + 2^35 < 2^52 without another pass.
         let top = vmovn_u64(vshrq_n_u64(paired[4], 25));
         out[0] = vaddq_u64(out[0], vmull_n_u32(top, 19));
         for i in 1..5 {
@@ -536,19 +536,19 @@ impl FBackend for Backend {
     }
 }
 
-/// Packs two independent field elements into register lanes
+/// Packs two independent field elements into register lanes.
 #[inline(always)]
 fn pack_pair(values: [F; 2]) -> Regs {
-    // SAFETY: AArch64 targets provide NEON, and the selected lane is within the two-lane register
+    // SAFETY: AArch64 targets provide NEON, and the selected lane is within the two-lane register.
     unsafe {
         core::array::from_fn(|i| vsetq_lane_u64(values[1].0[i], vdupq_n_u64(values[0].0[i]), 1))
     }
 }
 
-/// Unpacks both register lanes into independent field elements
+/// Unpacks both register lanes into independent field elements.
 #[inline(always)]
 fn unpack_pair(regs: Regs) -> [F; 2] {
-    // SAFETY: AArch64 targets provide NEON, and both lane indices are within the register
+    // SAFETY: AArch64 targets provide NEON, and both lane indices are within the register.
     unsafe {
         [
             F(regs.map(|reg| vgetq_lane_u64(reg, 0))),
@@ -557,9 +557,9 @@ fn unpack_pair(regs: Regs) -> [F; 2] {
     }
 }
 
-/// Applies the complete mixed-addition formula to two independent register lanes
+/// Applies the complete mixed-addition formula to two independent register lanes.
 ///
-/// Extended inputs and outputs use `[x, y, t, z]`; affine inputs use `[x, y, t2d]`
+/// Extended inputs and outputs use `[x, y, t, z]`; affine inputs use `[x, y, t2d]`.
 #[inline(always)]
 fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
     let [x1, y1, t1, z1] = p;
@@ -646,7 +646,7 @@ impl GBackend for Backend {
         let mut x2 = pack_pair(q.map(|point| point.x));
         let mut t2d = pack_pair(q.map(|point| point.t2d));
         if negative.iter().any(|&sign| sign) {
-            // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes
+            // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.
             unsafe {
                 let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
                 let mask = vld1q_u64(masks.as_ptr());

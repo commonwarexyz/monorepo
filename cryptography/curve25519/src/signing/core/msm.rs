@@ -128,8 +128,8 @@ mod transposed {
     use super::GAffineVec;
     use super::{Backend, G, GAffine, GVec, LANES, Term};
 
-    // NEON fills one stripe per physical mixed-addition lane, keeping wave updates independent
-    // Folds retain LANES independent bucket indices
+    // NEON fills one stripe per physical mixed-addition lane, keeping wave updates independent.
+    // Folds retain LANES independent bucket indices.
     #[cfg(target_arch = "aarch64")]
     const STRIPES: usize = 2;
     #[cfg(not(target_arch = "aarch64"))]
@@ -137,19 +137,19 @@ mod transposed {
     #[cfg(not(feature = "std"))]
     use alloc::{vec, vec::Vec};
 
-    /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`
+    /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`.
     ///
     /// Each wave assigns one term to each stripe, so updates within a wave cannot collide.
-    /// Heap allocation accommodates the per-batch bucket count
+    /// Heap allocation accommodates the per-batch bucket count.
     pub(super) fn identity_buckets(nb: usize) -> Vec<G> {
         vec![G::IDENTITY; STRIPES * nb]
     }
 
-    /// Adds each run in waves of one term per bucket stripe
+    /// Adds each run in waves of one term per bucket stripe.
     ///
     /// Missing or zero-digit lanes use identity inputs and never scatter a result. Entirely
     /// zero waves skip group arithmetic, including the high windows of short coefficients.
-    /// Each piece may restart stripe assignment because the fold sums every stripe
+    /// Each piece may restart stripe assignment because the fold sums every stripe.
     #[allow(clippy::needless_range_loop)]
     fn fill_buckets<B: Backend>(
         backend: B,
@@ -200,10 +200,10 @@ mod transposed {
         }
     }
 
-    /// Folds each bucket stripe into its corresponding result lane with a running sum
+    /// Folds each bucket stripe into its corresponding result lane with a running sum.
     ///
     /// Lanes without a stripe contribute the identity. Untouched top buckets can be skipped
-    /// because their identity values leave both running sums unchanged
+    /// because their identity values leave both running sums unchanged.
     #[cfg(any(test, not(target_arch = "aarch64")))]
     fn fold_buckets<B: Backend>(
         backend: B,
@@ -233,10 +233,10 @@ mod transposed {
     /// Let `B[k, lane]` sum the stripes at bucket index `k*LANES + lane`. The descending pass
     /// builds `sum[lane] = sum_k B[k, lane]` and `rows[lane] = sum_k k*B[k, lane]`.
     /// Final weighting gives `LANES*rows[lane] + (lane + 1)*sum[lane]`, assigning each bucket
-    /// its index-plus-one weight. The lane count is a power of two
+    /// its index-plus-one weight. The lane count is a power of two.
     #[cfg(target_arch = "aarch64")]
     fn fold_buckets_merged<B: Backend>(backend: B, buckets: &[G], nb: usize, used: usize) -> GVec {
-        // A single used bucket has weight one, so return the stripes without weighting
+        // A single used bucket has weight one, so return the stripes without weighting.
         if used == 1 {
             return GVec::transpose(core::array::from_fn(|lane| {
                 if lane < STRIPES {
@@ -267,7 +267,7 @@ mod transposed {
             sum = backend.g_add(sum, combined);
         }
 
-        // Seed the high bit of lane + 1, then fold its remaining bits
+        // Seed the high bit of lane + 1, then fold its remaining bits.
         let lanes = sum.untranspose();
         let mut weighted = GVec::transpose(core::array::from_fn(|lane| {
             if lane == LANES - 1 {
@@ -360,8 +360,8 @@ mod transposed {
         let nb = super::num_buckets(width);
         debug_assert_eq!(buckets.len(), STRIPES * nb);
         let used = super::used_buckets(chunks, start, end, window);
-        // An all-zero window contributes the identity without resetting or folding scratch
         if used == 0 {
+            // An all-zero window contributes the identity without resetting or folding scratch.
             return G::IDENTITY;
         }
         buckets.fill(G::IDENTITY);
