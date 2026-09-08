@@ -5,6 +5,10 @@ Research against `63a7a9bad`, 2026-09-08. All implementations are test-only in
 The derivations and implementations received skeptical agent review, not
 external cryptographic review or formal verification.
 
+For recurring 100,000-point batches, the subsequent
+[precomputation experiment](SUBGROUP_PRECOMPUTATION.md) separates advance setup
+from online verification and evaluates a fused graph accumulator.
+
 Soundness assumes inputs are already validated as on-curve and the batch is
 fixed before sampling fresh private randomness. This is a subgroup check,
 not a replacement for point decoding or on-curve validation.

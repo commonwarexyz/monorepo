@@ -6,6 +6,9 @@
 use super::*;
 use commonware_utils::{ScriptedRng, TestRng};
 
+#[path = "blocks.rs"]
+mod blocks;
+
 fn uniform_below(bound: u32, mut draw: impl FnMut() -> u64) -> u32 {
     assert!(bound > 0);
     let bound = u64::from(bound);

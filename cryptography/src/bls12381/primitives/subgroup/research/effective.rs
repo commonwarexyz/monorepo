@@ -152,6 +152,229 @@ pub(super) fn check(points: &[G1], rng: &mut impl CryptoRng) -> bool {
         .all(|(&width, pass)| final_round.run(&compressed, pass, width))
 }
 
+// A one-shot, input-independent circuit. All graph buckets retain their final
+// coefficient columns, including buckets whose eventual curve sum is zero.
+// Thus exact exceptions can be certified before any input point is available.
+pub(super) struct Prepared {
+    graph_ids: [Vec<u32>; 2],
+    widths: Vec<u32>,
+    ids: Vec<Vec<u32>>,
+    exceptions: Vec<usize>,
+    graph_round: Round,
+    final_round: Round,
+    affine: Vec<blst_p1_affine>,
+    inputs: Vec<usize>,
+    compressed: Vec<blst_p1_affine>,
+    outputs: Vec<usize>,
+    filtered: Vec<u32>,
+}
+
+impl Prepared {
+    pub(super) fn new(n: usize, rng: &mut impl CryptoRng) -> Self {
+        assert!(n <= Q.pow(4) as usize);
+        let graph_ids = super::two::draw_ids::<Q>(n, rng);
+        let widths = plan(2 * BUCKETS, combinations_for_security(99)).expect("batched final stage");
+        let mut trits = Trits::new(rng);
+        let ids: Vec<_> = widths
+            .iter()
+            .map(|&width| trits.fill(width, 2 * BUCKETS))
+            .collect();
+        let positions: Vec<_> = (0..2 * BUCKETS).collect();
+        let effective = effective_columns(&graph_ids, &positions, &columns(&widths, &ids), BUCKETS);
+        let exceptions =
+            super::pair::exception_indices(effective.into_iter().map(Column::canonical));
+        let mut graph_round = Round::new(9);
+        graph_round.widen(9);
+        let final_round = Round::new(*widths.iter().max().expect("positive target"));
+        Self {
+            graph_ids,
+            widths,
+            ids,
+            exceptions,
+            graph_round,
+            final_round,
+            affine: Vec::with_capacity(n),
+            inputs: Vec::with_capacity(n),
+            compressed: Vec::with_capacity(2 * BUCKETS),
+            outputs: Vec::with_capacity(2 * BUCKETS),
+            filtered: Vec::with_capacity(n.max(2 * BUCKETS)),
+        }
+    }
+
+    fn compress(&mut self, points: &[blst_p1_affine], state: &[u8]) {
+        for (index, (&point, &state)) in points.iter().zip(state).enumerate() {
+            if state != EMPTY {
+                self.affine.push(point);
+                self.inputs.push(index);
+            }
+        }
+        for (pass, ids) in self.graph_ids.iter().enumerate() {
+            self.filtered.clear();
+            self.filtered
+                .extend(self.inputs.iter().map(|&index| ids[index]));
+            self.graph_round.accumulate(&self.affine, &self.filtered);
+            for bucket in 0..BUCKETS {
+                if self.graph_round.live[bucket] {
+                    self.compressed.push(self.graph_round.sums[bucket]);
+                    self.outputs.push(pass * BUCKETS + bucket);
+                }
+            }
+        }
+    }
+
+    pub(super) fn check(mut self, points: &[blst_p1_affine], state: &[u8]) -> bool {
+        assert_eq!(points.len(), self.graph_ids[0].len());
+        assert_eq!(points.len(), state.len());
+        assert!(!state.contains(&BUSY));
+        if !self
+            .exceptions
+            .iter()
+            .all(|&index| state[index] == EMPTY || in_subgroup(points[index]))
+        {
+            return false;
+        }
+        self.compress(points, state);
+        for (&width, ids) in self.widths.iter().zip(&self.ids) {
+            self.filtered.clear();
+            self.filtered
+                .extend(self.outputs.iter().map(|&index| ids[index]));
+            if !self
+                .final_round
+                .run(&self.compressed, &self.filtered, width)
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[test]
+fn prepared_circuit_preserves_identity_positions_and_final_coefficients() {
+    let generator = G1::generator();
+    let three = order_three();
+    let eleven = order_eleven();
+    let points = [
+        generator,
+        -generator,
+        G1::zero(),
+        three,
+        -three,
+        eleven,
+        generator + &eleven,
+        -generator,
+    ];
+    let affine: Vec<_> = points
+        .iter()
+        .map(|point| {
+            if *point == G1::zero() {
+                blst_p1_affine::default()
+            } else {
+                to_affine(&[*point])[0]
+            }
+        })
+        .collect();
+    let state: Vec<_> = points
+        .iter()
+        .map(|point| if *point == G1::zero() { EMPTY } else { FILLED })
+        .collect();
+    let mut prepared = Prepared::new(points.len(), &mut test_rng());
+    assert_eq!(prepared.widths.iter().sum::<u32>(), 63);
+    // Force cancellations in two graph buckets, plus an absent original input.
+    prepared.graph_ids = [
+        vec![0, 0, 1, 2, 2, 3, 3, 4],
+        vec![0, 1, 2, 3, 4, 5, 5, 6 | ID_NEGATE],
+    ];
+    let mut expected = vec![G1::zero(); 2 * BUCKETS];
+    for (pass, ids) in prepared.graph_ids.iter().enumerate() {
+        for (point, &id) in points.iter().zip(ids) {
+            let out = &mut expected[pass * BUCKETS + (id & !ID_NEGATE) as usize];
+            if id & ID_NEGATE == 0 {
+                *out += point;
+            } else {
+                *out -= point;
+            }
+        }
+    }
+    prepared.compress(&affine, &state);
+    assert!(!prepared.inputs.contains(&2));
+    assert!(!prepared.outputs.contains(&0));
+    assert!(!prepared.outputs.contains(&2));
+    let mut actual = vec![G1::zero(); 2 * BUCKETS];
+    for (&index, &point) in prepared.outputs.iter().zip(&prepared.compressed) {
+        actual[index] = G1::from_blst_p1(blst_p1 {
+            x: point.x,
+            y: point.y,
+            z: MONTGOMERY_ONE,
+        });
+    }
+    assert_eq!(actual, expected);
+    let expected: Vec<_> = expected
+        .into_iter()
+        .enumerate()
+        .filter(|(_, point)| *point != G1::zero())
+        .collect();
+    for (&width, ids) in prepared.widths.iter().zip(&prepared.ids) {
+        let filtered: Vec<_> = prepared.outputs.iter().map(|&index| ids[index]).collect();
+        let _ = prepared
+            .final_round
+            .run(&prepared.compressed, &filtered, width);
+        for row in 0..width {
+            let mut direct = G1::zero();
+            for &(index, point) in &expected {
+                let id = ids[index];
+                let value = (id & !ID_NEGATE) as i32 * if id & ID_NEGATE == 0 { 1 } else { -1 };
+                let digit = ((value + (3i32.pow(width) - 1) / 2) / 3i32.pow(row)) % 3 - 1;
+                match digit {
+                    1 => direct += &point,
+                    -1 => direct -= &point,
+                    _ => {}
+                }
+            }
+            let actual =
+                prepared.final_round.marginals[row as usize]
+                    .first()
+                    .map_or(G1::zero(), |&slot| {
+                        let point = prepared.final_round.sums[slot as usize];
+                        G1::from_blst_p1(blst_p1 {
+                            x: point.x,
+                            y: point.y,
+                            z: MONTGOMERY_ONE,
+                        })
+                    });
+            assert_eq!(actual, direct);
+        }
+    }
+}
+
+#[test]
+fn prepared_certificate_checks_original_dense_input_indices() {
+    for bad in [order_three(), order_eleven()] {
+        for value in [0, 1] {
+            let mut prepared = Prepared::new(3, &mut test_rng());
+            prepared.graph_ids = [vec![0, 1, 2], vec![0, 1, 2]];
+            for pass in &mut prepared.ids {
+                pass.fill(value);
+            }
+            let positions: Vec<_> = (0..2 * BUCKETS).collect();
+            let effective = effective_columns(
+                &prepared.graph_ids,
+                &positions,
+                &columns(&prepared.widths, &prepared.ids),
+                BUCKETS,
+            );
+            prepared.exceptions =
+                super::pair::exception_indices(effective.into_iter().map(Column::canonical));
+            let mut marked = prepared.exceptions.clone();
+            marked.sort_unstable();
+            assert_eq!(marked, [0, 1, 2]);
+            let mut affine = vec![blst_p1_affine::default()];
+            affine.extend(to_affine(&[G1::generator(), G1::generator() + &bad]));
+            assert!(!prepared.check(&affine, &[EMPTY, FILLED, FILLED]));
+        }
+    }
+}
+
 #[test]
 fn bit_planes_match_ternary_arithmetic() {
     let from_digit = |digit| Column {
