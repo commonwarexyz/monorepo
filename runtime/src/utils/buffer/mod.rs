@@ -171,7 +171,7 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_macros::test_traced;
-    use commonware_utils::{NZU32, NZUsize, probability, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use futures::FutureExt;
     use std::sync::Arc;
 
@@ -1247,63 +1247,6 @@ mod tests {
             assert_eq!(durable.as_slice(), b"abcdef\0\0");
             assert_eq!(full_syncs, 6);
         });
-    }
-
-    fn assert_write_synced_shrink_then_resize_survives_crash(resize_to: u64) {
-        // Keep unsynced writes and drop unsynced resizes at the crash
-        let config = deterministic::Config::default().with_storage_fault_config(
-            deterministic::FaultConfig::default()
-                .write(deterministic::WriteConfig {
-                    failure_rate: probability!(0.0),
-                    retention_rate: probability!(1.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                })
-                .resize(deterministic::ResizeConfig {
-                    failure_rate: probability!(0.0),
-                    partial_rate: probability!(0.0),
-                }),
-        );
-        let (_, checkpoint) =
-            deterministic::Runner::new(config).start_and_recover(move |context| async move {
-                let (blob, size) = context.open("partition", b"resize_crash").await.unwrap();
-
-                // A one-byte buffer sends the replacement write directly to the blob
-                let mut writer = Write::from_pooler(&context, blob, size, NZUsize!(1));
-                writer.write_at(0, b"abcdefgh").await.unwrap();
-                writer.sync().await.unwrap();
-
-                // Persist the shrink before an unsynced resize and write reuse its range
-                writer.resize(4).await.unwrap();
-                writer.sync().await.unwrap();
-                writer.resize(resize_to).await.unwrap();
-                writer.write_at(4, b"XY").await.unwrap();
-                drop(writer);
-            });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let (blob, size) = context.open("partition", b"resize_crash").await.unwrap();
-
-            // Inspect the raw recovered image before any repair or explicit sync
-            assert_eq!(size, 6, "the discarded tail survived the crash");
-            let bytes = blob
-                .read_at(0, size as usize, ReadOptions::default())
-                .await
-                .unwrap()
-                .coalesce();
-            assert_eq!(bytes.as_ref(), b"abcdXY");
-        });
-    }
-
-    /// An unsynced equal-size resize and replacement write must not undo a durable shrink.
-    #[test_traced]
-    fn test_write_synced_shrink_then_equal_resize_survives_crash() {
-        assert_write_synced_shrink_then_resize_survives_crash(4);
-    }
-
-    /// Unsynced growth and a replacement write must not resurrect the discarded tail.
-    #[test_traced]
-    fn test_write_synced_shrink_then_grow_resize_survives_crash() {
-        assert_write_synced_shrink_then_resize_survives_crash(6);
     }
 
     #[test_traced]

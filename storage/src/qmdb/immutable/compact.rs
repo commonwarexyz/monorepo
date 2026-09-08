@@ -724,6 +724,7 @@ mod tests {
     use super::*;
     use crate::{
         merkle::{mmb, mmr},
+        metadata::{Config as MetadataConfig, Metadata},
         qmdb::{
             any::value::FixedEncoding, compact::witness, verify_proof,
             verify_proof_and_pinned_nodes,
@@ -738,7 +739,7 @@ mod tests {
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::VecU64};
     use core::future::Future;
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -1600,10 +1601,24 @@ mod tests {
                     .await;
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
-                // The commit already made the state durable, so this is a no-op.
+                // Commit persists witness data; sync must also persist recovery metadata
                 let db = db.sync().await.unwrap();
                 db.root()
             };
+
+            // Check the watermark before reopening can rebuild the offsets journal
+            let metadata = Metadata::<_, u64, VecU64>::init(
+                context.child("checkpoint"),
+                MetadataConfig {
+                    partition: format!("{partition}-witness_offsets-metadata"),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            // Key 3 records the durable prefix: the bootstrap witness and the applied batch
+            assert_eq!(metadata.get(&3).copied().map(u64::from), Some(2));
+            drop(metadata);
 
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root);
