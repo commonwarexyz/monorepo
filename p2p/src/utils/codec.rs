@@ -301,7 +301,12 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, channel::mpsc, ordered::Set, probability};
+    use commonware_utils::{
+        NZUsize,
+        channel::{mpsc, ring},
+        ordered::Set,
+        probability,
+    };
     use std::{
         io,
         num::NonZeroU32,
@@ -398,6 +403,11 @@ mod tests {
 
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> crate::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) = ring::channel(NZUsize!(1));
+            receiver
         }
     }
 

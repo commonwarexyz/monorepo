@@ -1,4 +1,7 @@
-use crate::{Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions, deterministic::Auditor};
+use crate::{
+    BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    deterministic::Auditor,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -25,13 +28,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
-            hasher.update(versions.start().to_be_bytes());
-            hasher.update(versions.end().to_be_bytes());
+            hasher.update(versions.start().get().to_be_bytes());
+            hasher.update(versions.end().get().to_be_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)

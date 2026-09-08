@@ -9,7 +9,6 @@ use crate::{
     qmdb::{
         self, Error,
         any::ValueEncoding,
-        build_snapshot_from_log,
         immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
         sync,
@@ -98,14 +97,14 @@ where
         let inactivity_floor_loc =
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
-        // Replay the log from the inactivity floor to build the snapshot.
-        build_snapshot_from_log::<F, _, _, _>(
+        // Replay the log from the inactivity floor to build the snapshot. Every retained
+        // location is inserted, mirroring the live apply path, so a repeated key keeps
+        // serving one of its written values across restarts and rewinds.
+        immutable::build_snapshot(
             inactivity_floor_loc,
             &journal.journal,
             &mut snapshot,
             db_config.init_buffer,
-            db_config.init_cache_size,
-            |_, _| {},
         )
         .await?;
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);

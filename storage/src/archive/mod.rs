@@ -37,8 +37,6 @@ pub enum Error {
     Freezer(#[from] crate::freezer::Error),
     #[error("record corrupted")]
     RecordCorrupted,
-    #[error("record too large")]
-    RecordTooLarge,
 }
 
 // Preserve the archive's error classification for journal-owned metadata operations.

@@ -266,10 +266,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Classify an invalid or missing boundary as committed corruption without hiding I/O errors.
-    fn boundary_error(section: u64, required: u64, err: RError) -> Error {
+    ///
+    /// `searched` is the extent the boundary read covered: the current section's logical
+    /// boundary size, or an earlier section's physical blob size.
+    fn boundary_error(section: u64, searched: u64, err: RError) -> Error {
         match err {
             RError::InvalidChecksum | RError::BlobInsufficientLength => Error::Corruption(format!(
-                "section {section} does not retain its {required}-byte durable boundary"
+                "section {section} does not retain a valid durable boundary within {searched} bytes"
             )),
             err => err.into(),
         }
@@ -1316,6 +1319,23 @@ mod tests {
                 .await
                 .expect("failed to reopen");
             journal.append(1, &test_digest(1)).await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
+    fn test_segmented_fixed_gates_older_section_after_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            seed(&context, &cfg, 1..=3).await;
+
+            // Every nonempty retained section is append-locked, not only the oldest or the
+            // newest.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .expect("failed to reopen");
+            journal.append(2, &2).await.unwrap();
         });
     }
 

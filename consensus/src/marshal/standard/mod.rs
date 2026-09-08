@@ -112,8 +112,12 @@ mod tests {
         vec::NonEmptyVec,
     };
     use std::{
+        collections::BTreeMap,
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -142,6 +146,43 @@ mod tests {
 
         fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
             Some(Scoped::verifier(self.scheme.clone()))
+        }
+    }
+
+    /// A signing provider whose scopes each survive a fixed number of lookups
+    /// and then retire, modeling an application that prunes an epoch between a
+    /// delivery's admission and its batched verification.
+    #[derive(Clone, Default)]
+    struct RetiringProvider {
+        scopes: BTreeMap<Epoch, (Arc<S>, Arc<AtomicUsize>)>,
+    }
+
+    impl RetiringProvider {
+        fn with(mut self, epoch: Epoch, scheme: S, remaining: usize) -> Self {
+            self.scopes.insert(
+                epoch,
+                (Arc::new(scheme), Arc::new(AtomicUsize::new(remaining))),
+            );
+            self
+        }
+
+        /// Returns true once `epoch` has been looked up as many times as allowed,
+        /// which confirms the admission path consulted the provider.
+        fn retired(&self, epoch: Epoch) -> bool {
+            self.scopes[&epoch].1.load(Ordering::Acquire) == 0
+        }
+    }
+
+    impl Provider for RetiringProvider {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
+            let (scheme, remaining) = self.scopes.get(&epoch)?;
+            remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .ok()?;
+            Some(Scoped::scheme(Arc::clone(scheme)))
         }
     }
 
@@ -6400,6 +6441,304 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_verifies_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+            let application = Application::<B>::manual_ack();
+
+            // The scope survives exactly the admission lookup, so it is gone by
+            // the time the batched verification runs.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-scope-retires",
+                provider.clone(),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "finalization admitted under a live scope must not blame the peer"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(
+                application.blocks().get(&height).unwrap().digest(),
+                block.digest()
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_notarized_delivery_verifies_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+
+            // The scope survives exactly the admission lookup, so it is gone by
+            // the time the batched verification runs.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "notarized-delivery-scope-retires",
+                provider.clone(),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Notarized { round },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Notarization { round },
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (notarization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "notarization admitted under a live scope must not blame the peer"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
+            );
+            assert_eq!(
+                mailbox
+                    .get_block(&block.digest())
+                    .await
+                    .map(|cached| cached.digest()),
+                Some(block.digest()),
+                "notarized block verified under the admission scope must be cached"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_foreign_certificate_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: foreign, ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // The certificate decodes under epoch 0's scope but was signed by a
+            // committee marshal does not know.
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &foreign, QUORUM);
+
+            // Retiring the scope after admission must not turn the rejection into
+            // an acceptance: the retained scope still verifies the certificate.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-foreign-certificate-scope-retires",
+                provider.clone(),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "certificate from a foreign committee must be rejected"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_batch_verifies_each_epoch_under_admission_scope() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Distinct committees per epoch, so a certificate only verifies under
+            // its own epoch's scope.
+            let Fixture { schemes: first, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: second, ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let early_height = Height::new(1);
+            let early_block = make_raw_block(Sha256::hash(&[b""]), early_height, 100);
+            let early_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    StandardHarness::commitment(&early_block),
+                ),
+                &first,
+                QUORUM,
+            );
+            let late_height = Height::new(BLOCKS_PER_EPOCH.get() + 1);
+            let late_block = make_raw_block(Sha256::hash(&[b"late"]), late_height, 2100);
+            let late_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::new(1), View::new(late_height.get())),
+                    View::zero(),
+                    StandardHarness::commitment(&late_block),
+                ),
+                &second,
+                QUORUM,
+            );
+            let application = Application::<B>::manual_ack();
+
+            // Epoch 0 retires right after its admission lookup while epoch 1
+            // stays live. Both deliveries land in one batch, so each epoch group
+            // must be verified under the scope its own items were admitted with.
+            let provider = RetiringProvider::default()
+                .with(Epoch::zero(), first[0].clone(), 1)
+                .with(Epoch::new(1), second[0].clone(), usize::MAX);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-batch-mixed-scopes",
+                provider.clone(),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let mut responses = Vec::new();
+            for (height, finalization, block) in [
+                (early_height, early_finalization, early_block.clone()),
+                (late_height, late_finalization, late_block.clone()),
+            ] {
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Finalized { height },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                        height
+                                    }),
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: (finalization, block).encode(),
+                            response,
+                        })
+                        .accepted()
+                );
+                responses.push(response_rx);
+            }
+            for response_rx in responses {
+                assert!(
+                    response_rx.await.expect("delivery response missing"),
+                    "every delivery admitted under a live scope must be accepted"
+                );
+            }
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the retired scope"
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, early_height);
+            assert_eq!(
+                mailbox
+                    .get_finalization(late_height)
+                    .await
+                    .map(|finalization| finalization.proposal.payload),
+                Some(StandardHarness::commitment(&late_block)),
+                "finalization verified under the live epoch's scope must be stored"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_processed_round_skips_fetch_and_preserves_subscription() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -6948,6 +7287,143 @@ mod tests {
                 fetches_before,
                 "set_floor must apply the round floor to future fetches"
             );
+        });
+    }
+
+    /// A round-floor advance that supersedes the pending floor anchor must
+    /// release the floor transition rather than strand it once its anchor
+    /// fetch is pruned.
+    #[test_traced("WARN")]
+    fn test_standard_round_floor_advance_releases_superseded_pending_floor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition_prefix = "round-floor-releases-pending-floor";
+
+            // Models a prunable deployment after section pruning: the application
+            // processed through height 3, the section holding earlier heights was
+            // pruned, and height 3 was repaired by walkback without a direct
+            // finalization, so the recovered round floor lags every finalization
+            // on the chain.
+            let anchor_round = Round::new(Epoch::zero(), View::new(2));
+            let anchor = make_raw_block(Sha256::hash(&[b"anchor-parent"]), Height::new(2), 200);
+            let anchor_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    anchor_round,
+                    View::new(1),
+                    StandardHarness::commitment(&anchor),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let processed_round = Round::new(Epoch::zero(), View::new(3));
+            let processed = make_raw_block(anchor.digest(), Height::new(3), 300);
+            let processed_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    processed_round,
+                    View::new(2),
+                    StandardHarness::commitment(&processed),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let next = make_raw_block(processed.digest(), Height::new(4), 400);
+            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(3))
+                .await;
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                partition_prefix,
+                &[processed.clone(), next.clone()],
+                &[],
+            )
+            .await;
+
+            // A configured floor for the pruned height 2 block is above the
+            // recovered round floor, so marshal fetches it as a pending anchor.
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Floor(anchor_finalization),
+            )
+            .await;
+            let mut mailbox = mailbox;
+            let is_anchor_fetch = |fetch: &FetchRecord| {
+                matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Block(commitment),
+                        handler::Annotation::Finalized(handler::Finalized::ByRound { round }),
+                    ) if *commitment == StandardHarness::commitment(&anchor)
+                        && *round == anchor_round
+                )
+            };
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor anchor fetch",
+                || resolver.active_fetches().iter().any(is_anchor_fetch),
+            )
+            .await;
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                application.pending_ack_heights().is_empty(),
+                "pending floor must hold dispatch until the anchor resolves"
+            );
+
+            // A finalization for the retained height 3 block (for example,
+            // re-reported by consensus on restart) advances the round floor
+            // past the pending anchor round.
+            let retains_before = resolver.retain_count();
+            StandardHarness::report_finalization(&mut mailbox, processed_finalization).await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "round floor advance",
+                || resolver.retain_count() > retains_before,
+            )
+            .await;
+
+            // The anchor is now provably at or below the processed height. If
+            // marshal still wants it, serve it. Either way the superseded
+            // floor must release application dispatch.
+            if let Some(fetch) = resolver
+                .active_fetches()
+                .into_iter()
+                .find(is_anchor_fetch)
+            {
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: fetch.key,
+                                subscribers: NonEmptyVec::new((
+                                    fetch.subscriber,
+                                    tracing::Span::none()
+                                )),
+                            },
+                            value: anchor.encode(),
+                            response,
+                        })
+                        .accepted()
+                );
+                assert!(response_rx.await.expect("delivery response missing"));
+            }
+            select! {
+                height = application.acknowledged() => {
+                    assert_eq!(height, Height::new(4));
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!(
+                        "superseded pending floor stranded dispatch: anchor fetch pruned without releasing the floor"
+                    );
+                },
+            }
         });
     }
 

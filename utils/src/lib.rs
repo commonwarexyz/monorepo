@@ -7,7 +7,7 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub use rng::{FuzzRng, ScriptedRng, TestRng, test_rng};
+    pub use rng::{Entropy, FuzzRng, ScriptedRng, TestRng, test_rng};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]

@@ -511,6 +511,44 @@ impl<
         let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
         Ok(self.reconstruct_grafted_node(grafted_pos))
     }
+
+    async fn get_nodes(
+        &self,
+        positions: &[Position<F>],
+    ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
+        let mut nodes = vec![None; positions.len()];
+        let mut ops_positions = Vec::with_capacity(positions.len());
+        let mut missing = None;
+        for (slot, &pos) in nodes.iter_mut().zip(positions) {
+            if F::pos_to_height(pos) < self.grafting_height {
+                ops_positions.push(pos);
+                continue;
+            }
+            let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
+            match self.reconstruct_grafted_node(grafted_pos) {
+                Some(node) => *slot = Some(node),
+                None => {
+                    missing = Some(pos);
+                    break;
+                }
+            }
+        }
+
+        // A pruned ops position below a missing grafted node is the lower one, so read ops first.
+        let ops_nodes = if ops_positions.is_empty() {
+            Vec::new()
+        } else {
+            self.ops_tree.get_nodes(&ops_positions).await?
+        };
+        if let Some(pos) = missing {
+            return Err(merkle::Error::ElementPruned(pos));
+        }
+        let mut ops_nodes = ops_nodes.into_iter();
+        Ok(nodes
+            .into_iter()
+            .map(|node| node.unwrap_or_else(|| ops_nodes.next().expect("one node per ops read")))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -1165,6 +1203,83 @@ mod tests {
                 .await
                 .unwrap();
             assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));
+        });
+    }
+
+    /// The combined storage's `get_nodes` must agree with `get_node` on every available
+    /// position and name the lowest position `get_node` reports as absent.
+    async fn assert_get_nodes_matches_get_node(
+        combined: &impl StorageTrait<mmr::Family, Digest = sha256::Digest>,
+    ) {
+        let all: Vec<Position> = (0..*combined.size()).map(Position::new).collect();
+        let mut available = Vec::new();
+        let mut first_absent = None;
+        for &pos in &all {
+            match combined.get_node(pos).await.unwrap() {
+                Some(node) => available.push((pos, node)),
+                None => {
+                    if first_absent.is_none() {
+                        first_absent = Some(pos);
+                    }
+                }
+            }
+        }
+
+        match (combined.get_nodes(&all).await, first_absent) {
+            (Ok(nodes), None) => assert_eq!(nodes.len(), all.len()),
+            (Err(merkle::Error::ElementPruned(pos)), Some(expected)) => assert_eq!(pos, expected),
+            (other, expected) => panic!("expected first absent {expected:?}, got {other:?}"),
+        }
+
+        // Every available position, then a sparse subset (slot correspondence), then empty.
+        let positions: Vec<_> = available.iter().map(|&(pos, _)| pos).collect();
+        let batched = combined.get_nodes(&positions).await.unwrap();
+        assert_eq!(batched.len(), available.len());
+        for (slot, &(pos, node)) in available.iter().enumerate() {
+            assert_eq!(batched[slot], node, "position {pos}");
+        }
+        let sparse: Vec<_> = positions.iter().copied().step_by(3).collect();
+        let batched = combined.get_nodes(&sparse).await.unwrap();
+        for (slot, &pos) in sparse.iter().enumerate() {
+            let single = combined.get_node(pos).await.unwrap().unwrap();
+            assert_eq!(batched[slot], single, "position {pos}");
+        }
+        assert!(combined.get_nodes(&[]).await.unwrap().is_empty());
+    }
+
+    #[test_traced]
+    fn test_grafted_storage_get_nodes_matches_get_node() {
+        const GRAFTING_HEIGHT: u32 = 1;
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher = qmdb::hasher::<Sha256>();
+            let mut ops_mmr = Mmr::new();
+            let batch = {
+                let mut batch = ops_mmr.new_batch();
+                for i in 0u8..16 {
+                    batch = batch.add(&hasher, &Sha256::fill(i));
+                }
+                batch.merkleize(&ops_mmr, &hasher)
+            };
+            ops_mmr.apply_batch(&batch).unwrap();
+            let chunks: Vec<_> = (0xF0u8..0xF8).map(Sha256::fill).collect();
+            let mut grafted = build_test_grafted_mmr(&hasher, &ops_mmr, &chunks, GRAFTING_HEIGHT);
+
+            // Fully retained, then pruned on each side: a pruned grafted leaf is absent at the
+            // grafting height and a pruned ops leaf is absent below it.
+            let combined =
+                Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+            assert_get_nodes_matches_get_node(&combined).await;
+
+            grafted.prune(Location::new(4)).unwrap();
+            let combined =
+                Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+            assert_get_nodes_matches_get_node(&combined).await;
+
+            ops_mmr.prune(Location::new(2)).unwrap();
+            let combined =
+                Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
+            assert_get_nodes_matches_get_node(&combined).await;
         });
     }
 

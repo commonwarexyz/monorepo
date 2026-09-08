@@ -195,7 +195,6 @@ pub fn imm_fix_cfg_with(
         merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
     }
 }
