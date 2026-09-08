@@ -40,6 +40,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::{
+    Widen as _,
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
 };
@@ -916,10 +917,11 @@ pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const 
     ops_leaves: Location<F>,
     grafting_height: u32,
 ) -> Result<Option<[u8; N]>, Error<F>> {
+    #[allow(unstable_name_collisions)]
     let (complete, graftable) = graftable_chunk_window(
         ops_leaves,
-        bitmap.complete_chunks() as u64,
-        bitmap.pruned_chunks() as u64,
+        bitmap.complete_chunks().widen(),
+        bitmap.pruned_chunks().widen(),
         grafting_height,
     )?;
     if complete - graftable != 1 {
@@ -1084,10 +1086,11 @@ pub(super) async fn compute_grafted_root<
 
     // Validate bitmap invariants (pending <= 1, pruned <= graftable).
     let grafting_height = grafting::height::<N>();
+    #[allow(unstable_name_collisions)]
     let (_complete_chunks, _graftable_chunks) = graftable_chunk_window(
         ops_leaves,
-        status.complete_chunks() as u64,
-        status.pruned_chunks() as u64,
+        status.complete_chunks().widen(),
+        status.pruned_chunks().widen(),
         grafting_height,
     )?;
 

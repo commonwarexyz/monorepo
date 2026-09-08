@@ -11,6 +11,7 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_async;
 use commonware_parallel::Sequential;
 use commonware_utils::{
+    Widen as _,
     bitmap::{Prunable as BitMap, Readable},
     sync::Mutex,
 };
@@ -145,14 +146,15 @@ async fn check_constructor_reads<F: Graftable>() {
                         .collect::<Vec<_>>();
                     assert!(proof.verify::<Sha256, _, 1>(floor, &elements, &chunks, &root));
                 }
+                #[allow(unstable_name_collisions)]
+                let read_chunks = preloaded
+                    .reads
+                    .into_inner()
+                    .into_iter()
+                    .map(|chunk| chunk.widen())
+                    .collect::<Vec<_>>();
                 assert_eq!(
-                    preloaded
-                        .reads
-                        .into_inner()
-                        .into_iter()
-                        .map(|chunk| chunk as u64)
-                        .collect::<Vec<_>>(),
-                    required,
+                    read_chunks, required,
                     "leaves={leaves}, pruned={pruned}, location={location:?}",
                 );
             }
