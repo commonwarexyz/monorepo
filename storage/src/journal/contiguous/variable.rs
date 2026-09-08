@@ -2733,6 +2733,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 mod tests {
     use super::*;
     use crate::{journal::contiguous::tests::run_contiguous_tests, utils::codec::View};
+    use bytes::Bytes;
+    use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
@@ -3992,6 +3994,74 @@ mod tests {
             drop(reader);
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    struct ByteView {
+        value: Bytes,
+        source: Range<usize>,
+    }
+
+    impl Write for ByteView {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.value.write(buf);
+        }
+    }
+
+    impl EncodeSize for ByteView {
+        fn encode_size(&self) -> usize {
+            self.value.encode_size()
+        }
+    }
+
+    impl Read for ByteView {
+        type Cfg = RangeCfg<usize>;
+
+        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            let start = buf.chunk().as_ptr() as usize;
+            let source = start..start + buf.chunk().len();
+            Ok(Self {
+                value: Bytes::read_cfg(buf, cfg)?,
+                source,
+            })
+        }
+    }
+
+    #[test_traced]
+    fn test_variable_read_consecutive_preserves_byte_views() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "read-consecutive-byte-views".into(),
+                items_per_section: NZU64!(20),
+                compression: None,
+                codec_config: (..).into(),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, ByteView>::init(context, cfg).await.unwrap();
+            let values: Vec<_> = (0..3)
+                .map(|i| ByteView {
+                    value: Bytes::from(vec![i; 256 * 1024]),
+                    source: 0..0,
+                })
+                .collect();
+            (journal, _) = journal.append_many(Many::Flat(&values)).await.unwrap();
+            let (journal, reader) = journal.snapshot().await.unwrap();
+            let offsets = reader.offsets.read_many(&[0, 1, 2]).await.unwrap();
+            let blob = reader.data.get(0).unwrap();
+            let decoded = reader.read_consecutive(&blob, 0, &offsets).await.unwrap();
+            for (item, expected) in decoded.iter().zip(&values) {
+                assert_eq!(item.value, expected.value);
+            }
+            // The last frame has its own read because its length has no successor offset.
+            for item in &decoded[..2] {
+                assert!(item.source.contains(&(item.value.as_ptr() as usize)));
+            }
+            drop(blob);
+            drop(reader);
+            journal.destroy().await.unwrap();
+            assert_eq!(decoded[0].value, values[0].value);
         });
     }
 
