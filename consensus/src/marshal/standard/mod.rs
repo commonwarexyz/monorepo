@@ -78,10 +78,10 @@ mod tests {
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
     };
-    use bytes::Bytes;
+    use bytes::{Buf, BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::{DecodeExt as _, Encode};
+    use commonware_codec::{DecodeExt as _, Encode, FixedSize, Read, Write};
     use commonware_cryptography::{
         Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -1311,7 +1311,7 @@ mod tests {
                     (),
                 )
                 .await;
-                let (_mgr, handle) = mgr.put_notarized(round, digest, block.clone()).await;
+                let (_mgr, handle) = mgr.put_notarized(round, digest, &block).await;
                 handle.await.expect("failed to sync block");
             }
 
@@ -1371,7 +1371,7 @@ mod tests {
                     (),
                 )
                 .await;
-                let (mgr, handle) = mgr.put_notarization(round, digest, notarization).await;
+                let (mgr, handle) = mgr.put_notarization(round, digest, &notarization).await;
                 drop(handle);
                 let (_mgr, sync) = mgr.start_sync_notarizations(round).await;
                 sync.await.expect("failed to sync notarizations");
@@ -7807,13 +7807,13 @@ mod tests {
     }
 
     type Finalizations = prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>;
-    type FinalizedBlocks = prunable::Archive<EightCap, deterministic::Context, D, B>;
+    type FinalizedBlocks<T = B> = prunable::Archive<EightCap, deterministic::Context, D, T>;
 
     /// Initialize prunable finalized stores for direct actor tests.
-    async fn prunable_finalized_stores(
+    async fn prunable_finalized_stores<T: crate::Block<Digest = D> + Read<Cfg = ()>>(
         context: &deterministic::Context,
         partition_prefix: &str,
-    ) -> (Finalizations, FinalizedBlocks) {
+    ) -> (Finalizations, FinalizedBlocks<T>) {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let finalizations_by_height = prunable::Archive::init(
             context.child("finalizations_by_height"),
@@ -7900,6 +7900,109 @@ mod tests {
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         }
+    }
+
+    /// Counts full block clones through a zero-byte mock context.
+    #[derive(Debug, Default)]
+    struct CloneCounter(Arc<AtomicUsize>);
+
+    impl Clone for CloneCounter {
+        fn clone(&self) -> Self {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Self(Arc::clone(&self.0))
+        }
+    }
+
+    impl FixedSize for CloneCounter {
+        const SIZE: usize = 0;
+    }
+
+    impl Write for CloneCounter {
+        fn write(&self, _: &mut impl BufMut) {}
+    }
+
+    impl Read for CloneCounter {
+        type Cfg = ();
+
+        fn read_cfg(_: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+            Ok(Self::default())
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_cache_writes_borrow_shared_blocks() {
+        type CountedBlock = crate::marshal::mocks::block::Block<D, CloneCounter>;
+        const PREFIX: &str = "borrowed-cache";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = CountedBlock::new::<Sha256>(
+                CloneCounter::default(),
+                Sha256::hash(&[b""]),
+                Height::zero(),
+                0,
+            );
+            let parent = genesis.digest();
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PREFIX).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<CountedBlock>, _, _, _, _, _>::init(
+                context.child("actor"),
+                finalizations,
+                blocks,
+                Config {
+                    provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    start: Start::Genesis(genesis),
+                    mailbox_size: NZUsize!(100),
+                    view_retention: ViewDelta::new(10),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    block_codec_config: (),
+                    partition_prefix: PREFIX.to_string(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NZUsize!(1024),
+                    key_write_buffer: NZUsize!(1024),
+                    value_write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let _actor_handle = actor.start_unbuffered(
+                Application::<CountedBlock>::default(),
+                (resolver_rx, resolver),
+            );
+
+            for (view, certified) in [(1, false), (2, true)] {
+                let round = Round::new(Epoch::zero(), View::new(view));
+                let block = Arc::new(CountedBlock::new::<Sha256>(
+                    CloneCounter::default(),
+                    parent,
+                    Height::new(1),
+                    view,
+                ));
+
+                // Keep an external owner through both insertion and duplicate delivery
+                for _ in 0..2 {
+                    let durable = if certified {
+                        mailbox.certified(round, Arc::clone(&block)).await
+                    } else {
+                        mailbox.verified(round, Arc::clone(&block)).await
+                    };
+                    assert!(durable);
+                    assert_eq!(
+                        block.context.0.load(Ordering::Relaxed),
+                        0,
+                        "cache persistence must borrow the shared block (certified={certified})"
+                    );
+                    assert_eq!(
+                        mailbox.get_block(&block.digest()).await.unwrap().digest(),
+                        block.digest()
+                    );
+                }
+            }
+        });
     }
 
     /// A slow finalized-archive sync must not block the marshal mailbox.

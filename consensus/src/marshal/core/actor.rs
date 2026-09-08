@@ -718,10 +718,8 @@ where
                     debug!(?round, "certified block covered by verified write");
                     (self.cache, block_sync) = self.cache.start_sync_verified(round).await;
                 } else {
-                    (self.cache, block_sync) = self
-                        .cache
-                        .put_notarized(round, digest, Arc::unwrap_or_clone(block).into())
-                        .await;
+                    (self.cache, block_sync) =
+                        self.cache.put_notarized(round, digest, &block).await;
                 }
 
                 // Hold the certify barrier until the round's notarization
@@ -762,7 +760,7 @@ where
                 let handle;
                 (self.cache, handle) = self
                     .cache
-                    .put_notarization(round, digest, notarization)
+                    .put_notarization(round, digest, &notarization)
                     .await;
                 syncs.push(async move {
                     handle.durable(round, "notarization").await;
@@ -780,10 +778,8 @@ where
                         debug!(?round, "notarized block covered by verified write");
                     } else {
                         let handle;
-                        (self.cache, handle) = self
-                            .cache
-                            .put_notarized(round, digest, Arc::unwrap_or_clone(block).into())
-                            .await;
+                        (self.cache, handle) =
+                            self.cache.put_notarized(round, digest, &block).await;
                         syncs.push(async move {
                             handle.durable(round, "notarized").await;
                             PooledSync::Observed
@@ -801,7 +797,7 @@ where
                 // Cache finalization by round.
                 self.cache = self
                     .cache
-                    .put_finalization(round, digest, finalization.clone())
+                    .put_finalization(round, digest, &finalization)
                     .await;
 
                 // Search for the finalized block locally, otherwise fetch it remotely.
@@ -1231,7 +1227,7 @@ where
         let digest = V::commitment_to_inner(commitment);
         self.cache = self
             .cache
-            .put_finalization(round, digest, finalization.clone())
+            .put_finalization(round, digest, &finalization)
             .await;
 
         // A pending anchor at the same or a newer floor already blocks
@@ -1282,10 +1278,7 @@ where
             .await;
         let digest = block.digest();
         let handle;
-        (self.cache, handle) = self
-            .cache
-            .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
-            .await;
+        (self.cache, handle) = self.cache.put_verified(round, digest, &block).await;
         ack.send_lossy(handle);
         self
     }
@@ -1569,12 +1562,7 @@ where
                 {
                     self.cache = self
                         .cache
-                        .put_certified(
-                            bounds.epoch(),
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block).into(),
-                        )
+                        .put_certified(bounds.epoch(), height, digest, &block)
                         .await;
                 }
                 debug!(?digest, %height, "received block");
@@ -1811,14 +1799,12 @@ where
                     let height = block.height();
                     let block = Arc::new(block);
                     let block_sync;
-                    (self.cache, block_sync) = self
-                        .cache
-                        .put_notarized(round, digest, block.as_ref().clone().into())
-                        .await;
+                    (self.cache, block_sync) =
+                        self.cache.put_notarized(round, digest, &block).await;
                     let notarization_sync;
                     (self.cache, notarization_sync) = self
                         .cache
-                        .put_notarization(round, digest, notarization)
+                        .put_notarization(round, digest, &notarization)
                         .await;
                     join(
                         block_sync.durable(round, "notarized"),
