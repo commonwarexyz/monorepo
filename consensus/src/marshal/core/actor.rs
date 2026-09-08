@@ -816,6 +816,8 @@ where
                         return self;
                     }
 
+                    // Updating the round floor can release a superseded anchor and resume dispatch,
+                    // so check staging eligibility only after it completes
                     let height = block.height();
                     self = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
