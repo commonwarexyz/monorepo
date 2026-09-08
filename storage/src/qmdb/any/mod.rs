@@ -2811,7 +2811,8 @@ pub(crate) mod test {
 #[cfg(test)]
 mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
-    //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
+    //! `apply_batch`, `prune_bitmap_to_log_boundary`, and `rewind` is independent of the snapshot
+    //! index variant,
     //! so one variant (`unordered::variable`) suffices as the test bed.
     use crate::qmdb::any::unordered::variable::test::{AnyTest, create_test_config};
     use commonware_cryptography::{Hasher as _, Sha256};

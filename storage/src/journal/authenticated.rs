@@ -3203,6 +3203,33 @@ mod tests {
         executor.start(test_speculative_batch_sequential_inner::<mmb::Family>);
     }
 
+    /// The trait-level `prune_boundary` predicts the boundary `prune` establishes, including
+    /// the capped and no-op cases.
+    async fn test_prune_boundary_matches_prune_inner<F: Family + PartialEq>(context: Context) {
+        let mut journal = create_journal_with_ops::<F>(context, "prune-boundary", 17).await;
+        for target in [0u64, 3, 5, 12, 11, 17, 40] {
+            let predicted =
+                crate::journal::contiguous::Mutable::prune_boundary(&journal, target).unwrap();
+            let boundary;
+            (journal, boundary) = journal.prune(Location::<F>::new(target)).await.unwrap();
+            assert_eq!(*boundary, predicted, "target={target}");
+            assert_eq!(journal.bounds().start, predicted, "target={target}");
+        }
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_boundary_matches_prune_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_boundary_matches_prune_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_boundary_matches_prune_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_boundary_matches_prune_inner::<mmb::Family>);
+    }
+
     async fn test_stale_batch_sibling_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_empty_journal::<F>(context.child("open"), "stale-sibling").await;
         let op_a = create_operation::<F>(1);

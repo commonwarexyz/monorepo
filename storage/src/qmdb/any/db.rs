@@ -110,8 +110,10 @@ pub struct Db<
     /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
     /// - CommitFloor: only the current `last_commit_loc` carries bit = 1; earlier commits
     ///   are 0.
-    /// - `bitmap.pruned_bits() <= log.bounds().start`: the bitmap is never pruned past the
-    ///   retained log, so rewinding to any retained commit can restore its active bits.
+    /// - Pruning never advances `bitmap.pruned_bits()` past `log.bounds().start`, so every commit
+    ///   the log retains after a prune stays rewindable. State sync and recovery from an
+    ///   interrupted `current` prune may leave the bitmap ahead of the log; the bits in between
+    ///   are inactive and stay zero.
     pub(crate) bitmap: Arc<Shared<N>>,
 
     /// Metrics for this database.
@@ -420,9 +422,10 @@ where
     Operation<F, U>: Codec,
 {
     /// Prune the bitmap to the boundary the operations log lands on when pruned to `prune_loc`,
-    /// and return that boundary. The bitmap never advances past the retained log: rewinding to a
-    /// commit restores the activity bits within its active range, so every commit the log
-    /// retains stays a valid rewind target.
+    /// and return that boundary. Pruning never advances the bitmap past the retained log:
+    /// rewinding to a commit restores the activity bits within its active range, so every commit
+    /// the log retains after a prune stays a valid rewind target. A bitmap already ahead of the
+    /// log (after state sync or an interrupted `current` prune) is left where it is.
     ///
     /// # Errors
     ///
@@ -466,10 +469,6 @@ where
 
         let boundary;
         (self.log, boundary) = self.log.prune(prune_loc).await?;
-        assert!(
-            self.bitmap.write().pruned_bits() <= *boundary,
-            "bitmap pruned past the retained log"
-        );
         Ok((self, boundary))
     }
 
