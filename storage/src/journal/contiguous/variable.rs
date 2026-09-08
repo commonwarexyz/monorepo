@@ -31,7 +31,7 @@ use crate::{
         },
     },
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
@@ -540,7 +540,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     /// Read the varint-framed item for `position` at byte `offset` from cached bytes, returning
     /// `None` on any miss.
-    fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
+    fn try_read_frame_sync(&self, position: u64, offset: u64, buf: &mut BytesMut) -> Option<V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
@@ -589,7 +589,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         if !blob.try_read_sync_into(buf, offset) {
             return None;
         }
-        let bytes = Bytes::from(std::mem::take(buf));
+        // Splitting keeps reusable sharing metadata; release the unused mutable tail
+        let bytes = buf.split().freeze();
+        *buf = BytesMut::new();
         let item = decode_item::<V>(
             bytes.slice(varint_len..varint_len + data_len),
             &self.codec_config,
@@ -597,9 +599,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         )
         .ok();
 
-        // Reuse the scratch allocation when the decoded value retained no byte views
-        if bytes.is_unique() {
-            *buf = bytes.into();
+        // Reuse initialized scratch and its shared owner when no decoded fields retain it
+        if let Ok(reclaimed) = bytes.try_into_mut() {
+            *buf = reclaimed;
         }
         item
     }
@@ -802,7 +804,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             }
         }
 
-        let mut buf = Vec::new();
+        let mut buf = BytesMut::new();
         let mut hits = 0u64;
 
         // Serve known-extent frames: one batched cache read per data blob group.
@@ -828,7 +830,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let total: usize = ranges.iter().map(|&(_, len)| len).sum();
             buf.resize(total, 0);
             let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
-            let bytes = Bytes::from(std::mem::take(&mut buf));
+            // Splitting keeps reusable sharing metadata; release the unused mutable tail
+            let bytes = buf.split().freeze();
+            buf = BytesMut::new();
             let mut missed = missed.into_iter().peekable();
             let mut local = 0usize;
             for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
@@ -847,14 +851,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 }
             }
 
-            // Reuse the scratch allocation when no decoded value retained byte views
-            if bytes.is_unique() {
-                buf = bytes.into();
+            // Reuse initialized scratch and its shared owner when no decoded fields retain it
+            if let Ok(reclaimed) = bytes.try_into_mut() {
+                buf = reclaimed;
             }
         }
 
         // Per-frame path for frames whose extent is unknown.
-        let mut frame_buf = Vec::new();
+        let mut frame_buf = BytesMut::new();
         for (idx, offset) in singles {
             if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut frame_buf) {
                 out[idx] = Some(item);
@@ -987,7 +991,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         // offsets journal is not consulted twice.
         let cached_offset = self.offsets.try_read_sync(position);
         if let Some(offset) = cached_offset {
-            let mut buf = Vec::new();
+            let mut buf = BytesMut::new();
             if let Some(item) = self.try_read_frame_sync(position, offset, &mut buf) {
                 self.metrics.cache_hits.inc();
                 self.metrics.items_read.inc();
@@ -1024,7 +1028,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     fn try_read_sync(&self, position: u64) -> Option<V> {
         self.validate_readable(position).ok()?;
         let offset = self.offsets.try_read_sync(position)?;
-        let mut buf = Vec::new();
+        let mut buf = BytesMut::new();
         let item = self.try_read_frame_sync(position, offset, &mut buf)?;
         self.metrics.cache_hits.inc();
         self.metrics.items_read.inc();
@@ -3188,7 +3192,7 @@ mod tests {
         context: deterministic::Context,
         value: V,
         codec_config: V::Cfg,
-    ) -> (V, Vec<u8>, Range<usize>) {
+    ) -> (V, BytesMut, Range<usize>) {
         let cfg = Config {
             partition: "scratch-ownership".into(),
             items_per_section: NZU64!(5),
@@ -3204,7 +3208,7 @@ mod tests {
         let (journal, reader) = journal.snapshot().await.unwrap();
         drop(reader.read(0).await.unwrap());
         let offset = reader.offsets.try_read_sync(0).unwrap();
-        let mut scratch = Vec::with_capacity(1024);
+        let mut scratch = BytesMut::with_capacity(1024);
         let base = scratch.as_ptr() as usize;
         let allocation = base..base + scratch.capacity();
         let decoded = reader.try_read_frame_sync(0, offset, &mut scratch).unwrap();
@@ -3218,7 +3222,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let fields = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
-            let (decoded, scratch, allocation) = read_cached_with_scratch(
+            let (decoded, mut scratch, allocation) = read_cached_with_scratch(
                 context.child("bytes"),
                 fields.clone(),
                 ((..).into(), (..).into()),
@@ -3230,11 +3234,14 @@ mod tests {
                     .iter()
                     .all(|field| allocation.contains(&(field.as_ptr() as usize)))
             );
-            assert_eq!(scratch.capacity(), 0);
+            scratch.clear();
+            scratch.resize(allocation.len(), 0);
+            assert_eq!(decoded, fields);
 
             let (decoded, scratch, allocation) =
                 read_cached_with_scratch(context.child("scalar"), 42u64, ()).await;
             assert_eq!(decoded, 42);
+            assert_eq!(scratch.len(), 9);
             assert_eq!(scratch.as_ptr() as usize, allocation.start);
             assert_eq!(scratch.capacity(), allocation.len());
         });

@@ -1,12 +1,10 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
-use commonware_codec::{
-    CodecFixed, Copying, FixedSize, Read, ReadBuf, ReadExt, Write as CodecWrite,
-};
+use commonware_codec::{CodecFixed, FixedSize, Read, ReadBuf, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, WriteOptions,
+    Blob, BufMut, Error as RError, IoBuf, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -38,9 +36,9 @@ impl<V: CodecFixed<Cfg = ()>> Record<V> {
 
     /// Deserialize a record, returning the value only if the stored CRC matches the raw
     /// value bytes.
-    fn decode_valid(buf: &[u8]) -> Option<V> {
-        let crc = Crc32::checksum(buf.get(..V::SIZE)?);
-        let record = Self::read(&mut Copying(buf)).ok()?;
+    fn decode_valid(mut buf: IoBuf) -> Option<V> {
+        let crc = Crc32::checksum(buf.as_ref().get(..V::SIZE)?);
+        let record = Self::read(&mut buf).ok()?;
         (record.crc == crc).then_some(record.value)
     }
 }
@@ -245,7 +243,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                     if let Some(replay_blob) = replay_blob.as_mut() {
                         replay_blob.seek_to(offset)?;
                         let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
-                        if Record::<V>::decode_valid(record_buf.as_ref()).is_none() {
+                        if Record::<V>::decode_valid(record_buf).is_none() {
                             return Err(Error::MissingRecord(index));
                         }
                     }
@@ -343,8 +341,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let read_buf = blob.read_at(offset, Record::<V>::SIZE).await?.coalesce();
 
         // If record is valid, return it
-        let value =
-            Record::<V>::decode_valid(read_buf.as_ref()).ok_or(Error::InvalidRecord(index))?;
+        let value = Record::<V>::decode_valid(read_buf).ok_or(Error::InvalidRecord(index))?;
         Ok(Some(value))
     }
 
@@ -580,7 +577,25 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::codec::FixedByteView;
     use commonware_runtime::deterministic::Context;
+
+    #[test]
+    fn test_record_preserves_owned_byte_fields() {
+        let value = FixedByteView::new(7);
+        let encoded = Record::encode(&value);
+        let source = IoBuf::from(encoded.clone());
+        let decoded = Record::<FixedByteView>::decode_valid(source).unwrap();
+        assert_eq!(decoded.bytes, value.bytes);
+        decoded.assert_shared();
+
+        let mut corrupt = encoded.clone();
+        corrupt[0] ^= 1;
+        assert!(Record::<FixedByteView>::decode_valid(corrupt.into()).is_none());
+        let mut truncated = encoded;
+        truncated.pop();
+        assert!(Record::<FixedByteView>::decode_valid(truncated.into()).is_none());
+    }
 
     type TestOrdinal = Ordinal<Context, u64>;
 

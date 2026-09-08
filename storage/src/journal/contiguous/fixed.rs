@@ -145,6 +145,7 @@ use crate::{
         durability::Barrier,
     },
 };
+use bytes::Bytes;
 use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
@@ -1462,9 +1463,9 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
-        #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-        for slice in reusable_buf.chunks_exact(A::SIZE) {
-            result.push(A::decode(Copying(slice)).map_err(Error::Codec)?);
+        let mut bytes = Bytes::from(reusable_buf);
+        for _ in positions {
+            result.push(A::decode((&mut bytes).take(A::SIZE)).map_err(Error::Codec)?);
         }
 
         self.metrics.cache_hits.inc_by(hits);
@@ -1593,9 +1594,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let mut buf = vec![0u8; A::SIZE];
         let item = match self.locate(pos) {
-            Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => {
-                A::decode(Copying(&buf[..])).ok()
-            }
+            Ok((blob, offset)) if blob.try_read_sync_into(&mut buf, offset) => A::decode(buf).ok(),
             _ => None,
         };
         if item.is_some() {
@@ -1746,7 +1745,7 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::Contiguous as _;
+    use crate::{journal::contiguous::Contiguous as _, utils::codec::FixedByteView};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1784,6 +1783,36 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_read_preserves_owned_byte_fields() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+            (journal, _) = journal.append(&FixedByteView::new(7)).await.unwrap();
+            let decoded = journal.try_read_sync(0).unwrap();
+            journal.destroy().await.unwrap();
+            assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+            decoded.assert_shared();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_batch_read_preserves_owned_byte_fields() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+            for i in 0..5 {
+                (journal, _) = journal.append(&FixedByteView::new(i)).await.unwrap();
+            }
+            let decoded = journal.read_many(&[0, 2, 3, 4]).await.unwrap();
+            journal.destroy().await.unwrap();
+            for (value, expected) in decoded.iter().zip([0u64, 2, 3, 4]) {
+                assert_eq!(value.bytes.as_ref(), &expected.to_be_bytes());
+                value.assert_shared();
+            }
+        });
     }
 
     #[test]
