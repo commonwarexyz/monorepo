@@ -347,7 +347,7 @@ where
         event_codec: DomainEventCodecConfig::from_profile(&profile),
         max_events_per_record: tuning.max_events_per_record,
         max_record_bytes: tuning.max_record_bytes,
-        page_cache: CacheRef::from_pooler(context, paged::page_size(4_096), NZUsize!(8)),
+        page_cache: CacheRef::from_pooler(context, paged::page_size(16_384), NZUsize!(2)),
         write_buffer: WRITE_BUFFER,
     };
     let mut journal = SafetyJournal::open(context.child("journal"), journal_config, covered)

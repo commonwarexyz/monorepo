@@ -662,7 +662,7 @@ fn main() {
         let broadcast_handle = broadcast_engine.start(marshal_broadcast);
         let archive = ArchiveConfig::new(
             EightCap,
-            CacheRef::from_pooler(&context, paged::page_size(4_096), NZUsize!(1_024)),
+            CacheRef::from_pooler(&context, paged::page_size(16_384), NZUsize!(256)),
         );
         let mut marshal_config = MarshalConfig::<EightCap, MinPk, application::Body>::new(
             committee.config.epoch(),
