@@ -330,7 +330,7 @@ pub(crate) async fn prunable_marshal_fixture(
     .expect("failed to initialize blocks archive");
     if let Some(block) = options.block {
         finalized_blocks = finalized_blocks
-            .put(block.height().get(), block.digest(), block.clone())
+            .put(block.height().get(), block.digest(), block)
             .await
             .expect("failed to seed finalized block")
             .sync()
@@ -371,7 +371,7 @@ async fn marshal_fixture_inner(
     .expect("failed to initialize blocks archive");
     if let Some(block) = options.block {
         finalized_blocks = finalized_blocks
-            .put(block.height().get(), block.digest(), block.clone())
+            .put(block.height().get(), block.digest(), block)
             .await
             .expect("failed to seed finalized block")
             .sync()
@@ -380,7 +380,7 @@ async fn marshal_fixture_inner(
     }
     if let Some((block, finalization)) = options.seed.take() {
         finalizations_by_height = finalizations_by_height
-            .put(block.height().get(), block.digest(), finalization)
+            .put(block.height().get(), block.digest(), &finalization)
             .await
             .expect("failed to seed finalization")
             .sync()

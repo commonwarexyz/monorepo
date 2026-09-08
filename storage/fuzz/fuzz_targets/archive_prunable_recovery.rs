@@ -493,12 +493,12 @@ fn fuzz(input: FuzzInput) {
                 }
                 archive = if first_phase_input.multi {
                     archive
-                        .put_multi(entry.index, entry.key, entry.value)
+                        .put_multi(entry.index, entry.key, &entry.value)
                         .await
                         .expect("put_multi failed")
                 } else {
                     archive
-                        .put(entry.index, entry.key, entry.value)
+                        .put(entry.index, entry.key, &entry.value)
                         .await
                         .expect("put failed")
                 };
@@ -729,12 +729,12 @@ fn fuzz(input: FuzzInput) {
             }
             archive = if input.multi {
                 archive
-                    .put_multi(entry.index, entry.key.clone(), entry.value.clone())
+                    .put_multi(entry.index, entry.key.clone(), &entry.value)
                     .await
                     .expect("put_multi repair failed")
             } else {
                 archive
-                    .put(entry.index, entry.key.clone(), entry.value.clone())
+                    .put(entry.index, entry.key.clone(), &entry.value)
                     .await
                     .expect("put repair failed")
             };

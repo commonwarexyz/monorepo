@@ -505,7 +505,7 @@ mod tests {
 
         for block in blocks {
             finalized_blocks = finalized_blocks
-                .put(block.height().get(), block.digest(), block.clone())
+                .put(block.height().get(), block.digest(), block)
                 .await
                 .expect("failed to seed finalized block");
         }
@@ -516,11 +516,7 @@ mod tests {
 
         for (height, finalization) in finalizations {
             finalizations_by_height = finalizations_by_height
-                .put(
-                    height.get(),
-                    finalization.proposal.payload,
-                    finalization.clone(),
-                )
+                .put(height.get(), finalization.proposal.payload, finalization)
                 .await
                 .expect("failed to seed finalization");
         }
@@ -600,7 +596,7 @@ mod tests {
             .await
             .expect("failed to initialize notarized blocks archive");
         notarized
-            .put_sync(view.get(), block.digest(), block.clone())
+            .put_sync(view.get(), block.digest(), block)
             .await
             .expect("failed to seed notarized block");
     }
@@ -7697,7 +7693,7 @@ mod tests {
         type Block = T::Block;
         type Error = T::Error;
 
-        async fn put(mut self, block: Self::Block) -> Result<Self, Self::Error> {
+        async fn put(mut self, block: &Self::Block) -> Result<Self, Self::Error> {
             self.inner = self.inner.put(block).await?;
             Ok(self)
         }
@@ -7758,7 +7754,7 @@ mod tests {
             mut self,
             height: Height,
             digest: Self::BlockDigest,
-            finalization: Finalization<Self::Scheme, Self::Commitment>,
+            finalization: &Finalization<Self::Scheme, Self::Commitment>,
         ) -> Result<Self, Self::Error> {
             self.inner = self.inner.put(height, digest, finalization).await?;
             Ok(self)
@@ -8430,13 +8426,106 @@ mod tests {
             let ops = ops.lock().clone();
             let written = ops
                 .iter()
-                .position(|op| *op == Op::Put(Height::new(1)))
+                .position(|op| matches!(op, Op::Put(height, _) if *height == Height::new(1)))
                 .expect("finalized block written");
+            assert_eq!(
+                ops[written],
+                Op::Put(Height::new(1), Arc::as_ptr(&delivered).addr()),
+                "storage must borrow the block object dispatched to the application"
+            );
             assert!(
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
                 "dispatch must not read the finalized block back from the archive: {ops:?}"
             );
         });
+    }
+
+    fn staged_dispatch_preserves_first_write(preexisting: bool) {
+        const PARTITION_PREFIX: &str = "staged-first-write";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let first = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let conflicting = make_raw_block(genesis.digest(), Height::new(1), 200);
+            assert_ne!(first.digest(), conflicting.digest());
+            let (finalizations_by_height, mut finalized_blocks) =
+                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
+            if preexisting {
+                finalized_blocks = finalized_blocks
+                    .put_sync(first.height().get(), first.digest(), &first)
+                    .await
+                    .unwrap();
+            }
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                test_config(
+                    &context,
+                    PARTITION_PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let buffer = RecordingBuffer::default();
+            let _actor_handle =
+                actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
+
+            // Hold genesis so both finalizations precede dispatch at height one
+            while application.pending_ack_heights() != vec![Height::zero()] {
+                reschedule().await;
+            }
+
+            // A Byzantine quorum can certify conflicting blocks at the same height
+            // Local durable delivery must still match the archive's first write
+            for (view, block) in [(1, &first), (2, &conflicting)] {
+                if preexisting && view == 1 {
+                    continue;
+                }
+                buffer.insert(block.clone());
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(view)),
+                        View::zero(),
+                        block.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+                // A served read proves the preceding finalization arm has run
+                let archived = mailbox.get_block(Height::new(1)).await.unwrap();
+                assert_eq!(archived.digest(), first.digest());
+            }
+
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while !application.blocks().contains_key(&Height::new(1)) {
+                reschedule().await;
+            }
+            let delivered = application.blocks()[&Height::new(1)].clone();
+            let archived = mailbox.get_block(Height::new(1)).await.unwrap();
+            assert_eq!(
+                delivered.digest(),
+                archived.digest(),
+                "dispatch must deliver the block retained by the archive"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_staged_dispatch_preserves_first_write() {
+        staged_dispatch_preserves_first_write(false);
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_staged_dispatch_preserves_preexisting_write() {
+        staged_dispatch_preserves_first_write(true);
     }
 
     /// Staging retains twice the ack capacity until dispatch or a floor skips the blocks.

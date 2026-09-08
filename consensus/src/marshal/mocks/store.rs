@@ -8,8 +8,8 @@ use std::sync::Arc;
 /// A finalized-block store operation observed by [`Recording`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
-    /// A `put` of the block at this height.
-    Put(Height),
+    /// A `put` of the block at this height and the address passed to storage.
+    Put(Height, usize),
     /// A `get` by height, or by digest when `None`.
     Get(Option<Height>),
 }
@@ -39,8 +39,10 @@ impl<T: Blocks> Blocks for Recording<T> {
     type Block = T::Block;
     type Error = T::Error;
 
-    async fn put(mut self, block: Self::Block) -> Result<Self, Self::Error> {
-        self.ops.lock().push(Op::Put(block.height()));
+    async fn put(mut self, block: &Self::Block) -> Result<Self, Self::Error> {
+        self.ops
+            .lock()
+            .push(Op::Put(block.height(), std::ptr::from_ref(block).addr()));
         self.inner = self.inner.put(block).await?;
         Ok(self)
     }

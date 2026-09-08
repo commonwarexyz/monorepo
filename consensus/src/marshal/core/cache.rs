@@ -356,7 +356,7 @@ where
                 } else {
                     let result = cache
                         .verified_blocks
-                        .put_multi_start_sync(view, digest, block)
+                        .put_multi_start_sync(view, digest, &block)
                         .await;
                     (cache.verified_blocks, handle) =
                         Self::handle_start_result(result, round, "verified");
@@ -386,7 +386,7 @@ where
                 if !exists {
                     cache.certified_blocks = cache
                         .certified_blocks
-                        .put_multi_sync(height.get(), digest, block)
+                        .put_multi_sync(height.get(), digest, &block)
                         .await
                         .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
                     debug!(%height, "cached certified block");
@@ -410,7 +410,7 @@ where
             .with_epoch(round.epoch(), |mut cache| async move {
                 let result = cache
                     .notarized_blocks
-                    .put_start_sync(view, digest, block)
+                    .put_start_sync(view, digest, &block)
                     .await;
                 let handle;
                 (cache.notarized_blocks, handle) =
@@ -471,7 +471,7 @@ where
             .with_epoch(round.epoch(), |mut cache| async move {
                 let result = cache
                     .notarizations
-                    .put_start_sync(view, digest, notarization)
+                    .put_start_sync(view, digest, &notarization)
                     .await;
                 let handle;
                 (cache.notarizations, handle) =
@@ -499,7 +499,7 @@ where
             .with_epoch(round.epoch(), |mut cache| async move {
                 cache.finalizations = cache
                     .finalizations
-                    .put_sync(view, digest, finalization)
+                    .put_sync(view, digest, &finalization)
                     .await
                     .unwrap_or_else(|e| panic!("failed to insert finalization: {e}"));
                 debug!(?round, "cached finalization");

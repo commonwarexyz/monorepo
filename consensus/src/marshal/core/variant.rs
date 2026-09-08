@@ -17,7 +17,7 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, marker::PhantomData, sync::Arc};
+use std::{borrow::Cow, future::Future, marker::PhantomData, sync::Arc};
 
 /// An atomic retirement from a buffer's retained state.
 ///
@@ -62,6 +62,14 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// The [`Digest`] type used by consensus.
     type Commitment: Digest;
+
+    /// Obtain the storage representation of a borrowed working block.
+    ///
+    /// Must preserve the same encoded value and commitment as converting
+    /// `block.clone()` into [Self::StoredBlock].
+    fn stored(block: &Self::Block) -> Cow<'_, Self::StoredBlock> {
+        Cow::Owned(block.clone().into())
+    }
 
     /// Computes the consensus commitment for a block.
     ///

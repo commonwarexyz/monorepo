@@ -160,7 +160,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive = archive.put(1, Sha256::hash(&[b"data"]), 10).await.unwrap();
+//!     archive = archive.put(1, Sha256::hash(&[b"data"]), &10).await.unwrap();
 //!
 //!     // Sync the archive
 //!     archive.sync().await.unwrap();
@@ -302,7 +302,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (mut archive, handle) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             let pending_after_start = pending.lock().len();
@@ -312,7 +312,7 @@ mod tests {
             );
 
             archive = archive
-                .put(2, test_key("bbb"), 20)
+                .put(2, test_key("bbb"), &20)
                 .await
                 .expect("archive should remain usable before sync completion");
             assert_eq!(
@@ -363,13 +363,13 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             assert_eq!(pending.lock().len(), 2);
 
             let (archive, second) = archive
-                .put_start_sync(1, test_key("duplicate"), 99)
+                .put_start_sync(1, test_key("duplicate"), &99)
                 .await
                 .expect("Failed to start duplicate sync");
             assert_eq!(
@@ -427,7 +427,7 @@ mod tests {
             // section 2.
             let archive = archive.prune(1).await.expect("Failed to set prune floor");
             let archive = archive
-                .put(2, test_key("pending"), 20)
+                .put(2, test_key("pending"), &20)
                 .await
                 .expect("Failed to buffer retained write");
 
@@ -436,7 +436,7 @@ mod tests {
             // value syncs.
             assert!(pending.lock().is_empty());
             let (archive, handle) = archive
-                .put_start_sync(0, test_key("pruned"), 0)
+                .put_start_sync(0, test_key("pruned"), &0)
                 .await
                 .expect("Failed to request sync through below-floor put");
             assert_eq!(
@@ -472,7 +472,7 @@ mod tests {
             // section 2.
             let archive = archive.prune(1).await.expect("Failed to set prune floor");
             let archive = archive
-                .put_multi(2, test_key("pending"), 20)
+                .put_multi(2, test_key("pending"), &20)
                 .await
                 .expect("Failed to buffer retained write");
 
@@ -482,7 +482,7 @@ mod tests {
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
             let task = context.inner.child("put_multi_sync").spawn(|_| async move {
-                let result = archive.put_multi_sync(0, test_key("pruned"), 0).await;
+                let result = archive.put_multi_sync(0, test_key("pruned"), &0).await;
                 completed_clone.store(1, Ordering::Relaxed);
                 result
             });
@@ -525,7 +525,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             let pending_after_first = pending.lock().len();
@@ -538,7 +538,7 @@ mod tests {
             let waiter = context.inner.child("second").spawn(|_| async move {
                 started_clone.fetch_add(1, Ordering::Relaxed);
                 let (archive, second) = archive
-                    .put_start_sync(2, test_key("bbb"), 20)
+                    .put_start_sync(2, test_key("bbb"), &20)
                     .await
                     .expect("Failed to start second sync");
                 completed_clone.fetch_add(1, Ordering::Relaxed);
@@ -586,7 +586,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             assert!(!pending.lock().is_empty());
@@ -637,7 +637,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             assert!(!pending.lock().is_empty());
@@ -686,7 +686,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             assert!(!pending.lock().is_empty());
@@ -739,7 +739,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             fail_pending_syncs(&pending);
@@ -773,7 +773,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             release_pending_syncs(&pending);
@@ -784,7 +784,7 @@ mod tests {
             // If pruning left section 1 in the retained sync-request set, these calls would trip
             // the journal's prune guard.
             let (archive, second) = archive
-                .put_start_sync(2, test_key("bbb"), 20)
+                .put_start_sync(2, test_key("bbb"), &20)
                 .await
                 .expect("put_start_sync after prune should succeed");
             release_pending_syncs(&pending);
@@ -813,13 +813,13 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start first sync");
             assert_eq!(pending.lock().len(), 2);
 
             let (_archive, second) = archive
-                .put_start_sync(2, test_key("bbb"), 20)
+                .put_start_sync(2, test_key("bbb"), &20)
                 .await
                 .expect("Failed to start second sync");
             assert_eq!(
@@ -859,11 +859,11 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start first sync");
             let (archive, second) = archive
-                .put_start_sync(2, test_key("bbb"), 20)
+                .put_start_sync(2, test_key("bbb"), &20)
                 .await
                 .expect("Failed to start second sync");
             assert_eq!(pending.lock().len(), 4);
@@ -901,14 +901,14 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let (archive, first) = archive
-                .put_start_sync(1, test_key("aaa"), 10)
+                .put_start_sync(1, test_key("aaa"), &10)
                 .await
                 .expect("Failed to start sync");
             assert_eq!(pending.lock().len(), 2);
             fail_pending_syncs(&pending);
 
             let archive = archive
-                .put(2, test_key("bbb"), 20)
+                .put(2, test_key("bbb"), &20)
                 .await
                 .expect("write should be accepted before observing the failed sync");
 
@@ -940,7 +940,7 @@ mod tests {
                     .unwrap();
                 for (index, value) in [10, 20, 30].into_iter().enumerate() {
                     archive = archive
-                        .put(index as u64, test_key(&format!("key-{index}")), value)
+                        .put(index as u64, test_key(&format!("key-{index}")), &value)
                         .await
                         .unwrap();
                 }
@@ -1003,7 +1003,7 @@ mod tests {
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
-            let archive = archive.put(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put(0, test_key("zero"), &10).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
             context.remove(&cfg.metadata_partition, None).await.unwrap();
@@ -1074,7 +1074,7 @@ mod tests {
 
             // The repaired empty section accepts a fresh write at the reclaimed offsets, and
             // the write survives reopen.
-            let archive = archive.put(0, test_key("new"), 20).await.unwrap();
+            let archive = archive.put(0, test_key("new"), &20).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
             let (_, value_size) = context
@@ -1101,8 +1101,8 @@ mod tests {
             let mut archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
-            archive = archive.put(0, test_key("zero"), 10).await.unwrap();
-            archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            archive = archive.put(0, test_key("zero"), &10).await.unwrap();
+            archive = archive.put(1, test_key("one"), &20).await.unwrap();
             archive = archive.sync().await.unwrap();
             drop(archive);
 
@@ -1132,7 +1132,7 @@ mod tests {
 
             // Append a third value above the marker. Its boundary stays debt, so the third open
             // must validate the suffix and adopt the covered pair into one contiguous range.
-            let archive = archive.put(2, test_key("two"), 30).await.unwrap();
+            let archive = archive.put(2, test_key("two"), &30).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
@@ -1157,8 +1157,8 @@ mod tests {
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
-            let archive = archive.put(0, test_key("zero"), 10).await.unwrap();
-            let archive = archive.put(1, test_key("one"), 20).await.unwrap();
+            let archive = archive.put(0, test_key("zero"), &10).await.unwrap();
+            let archive = archive.put(1, test_key("one"), &20).await.unwrap();
 
             // The first sync proves the data durable. The second publishes the resulting marker.
             let archive = archive.sync().await.unwrap();
@@ -1215,7 +1215,7 @@ mod tests {
                 let archive = Archive::init(case.child("seed"), cfg.clone())
                     .await
                     .unwrap();
-                let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+                let archive = archive.put_sync(0, test_key("zero"), &10).await.unwrap();
                 let archive = archive.sync().await.unwrap();
                 drop(archive);
 
@@ -1351,7 +1351,7 @@ mod tests {
                 Archive::<_, _, FixedBytes<64>, i32>::init(context.child("seed"), cfg.clone())
                     .await
                     .unwrap();
-            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put_sync(0, test_key("zero"), &10).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
@@ -1421,7 +1421,7 @@ mod tests {
                 .unwrap();
 
             // Publish a marker for one record while its index occupies only part of the first page.
-            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put_sync(0, test_key("zero"), &10).await.unwrap();
             let archive = archive.sync().await.unwrap();
 
             // A physical page is the logical page plus a two-slot trailer, where each slot is a
@@ -1457,7 +1457,7 @@ mod tests {
             // Capture Archive's same-page extension, then persist only the prefix through the new
             // slot's length. This is the exact Prefix fault cut: the old slot remains valid while
             // the new slot's checksum retains its prior zero bytes.
-            let archive = archive.put_sync(1, test_key("one"), 20).await.unwrap();
+            let archive = archive.put_sync(1, test_key("one"), &20).await.unwrap();
             drop(archive);
             let (index, size) = context
                 .open(&cfg.key_partition, &0u64.to_be_bytes())
@@ -1568,7 +1568,7 @@ mod tests {
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
-            let archive = archive.put(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put(0, test_key("zero"), &10).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
@@ -1633,7 +1633,7 @@ mod tests {
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
-            let archive = archive.put(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put(0, test_key("zero"), &10).await.unwrap();
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
@@ -1679,14 +1679,14 @@ mod tests {
             // call 1: section 0 data durable, marker absent
             // call 2: section 4 data pending, section 0 marker pending
             let (archive, first) = archive
-                .put_start_sync(0, test_key("zero"), 10)
+                .put_start_sync(0, test_key("zero"), &10)
                 .await
                 .unwrap();
             assert_eq!(pending.lock().len(), 2);
             release_pending_syncs(&pending);
             first.await.unwrap();
 
-            let archive = archive.put(4, test_key("four"), 40).await.unwrap();
+            let archive = archive.put(4, test_key("four"), &40).await.unwrap();
             let (archive, second) = archive.start_sync().await.unwrap();
             assert_eq!(pending.lock().len(), 3);
             release_pending_syncs(&pending);
@@ -1730,7 +1730,7 @@ mod tests {
 
             // Prove section 0's single item durable so its boundary becomes publishable debt.
             let (archive, first) = archive
-                .put_start_sync(0, test_key("zero"), 10)
+                .put_start_sync(0, test_key("zero"), &10)
                 .await
                 .unwrap();
             assert_eq!(pending.lock().len(), 2);
@@ -1738,7 +1738,7 @@ mod tests {
             first.await.unwrap();
 
             // Buffer section 4 and park its blocking sync behind the armed gate.
-            let archive = archive.put(4, test_key("four"), 40).await.unwrap();
+            let archive = archive.put(4, test_key("four"), &40).await.unwrap();
             pending.arm();
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
@@ -1825,7 +1825,7 @@ mod tests {
                 .await
                 .unwrap();
             let initial_starts = pending.starts();
-            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
+            let archive = archive.put_sync(0, test_key("zero"), &10).await.unwrap();
 
             // The unblocked wrapper returns immediately-ready data-sync handles while retaining
             // the number of durability operations. The current boundary must still become
@@ -1861,14 +1861,14 @@ mod tests {
 
             // Repeated writes in one active section start only the index and value durability
             // operations. Its marker remains debt until writes move to another section.
-            let archive = archive.put_sync(0, test_key("zero"), 10).await.unwrap();
-            let archive = archive.put_sync(1, test_key("one"), 20).await.unwrap();
+            let archive = archive.put_sync(0, test_key("zero"), &10).await.unwrap();
+            let archive = archive.put_sync(1, test_key("one"), &20).await.unwrap();
             assert_eq!(pending.starts() - initial_starts, 4);
 
             // Moving to section 4 publishes section 0's completed boundary alongside the two data
             // operations for section 4. An explicit empty sync then flushes the final partial
             // section once. Another empty sync has no durability work.
-            let archive = archive.put_sync(4, test_key("four"), 40).await.unwrap();
+            let archive = archive.put_sync(4, test_key("four"), &40).await.unwrap();
             assert_eq!(pending.starts() - initial_starts, 7);
             let archive = archive.sync().await.unwrap();
             assert_eq!(pending.starts() - initial_starts, 8);
@@ -1895,14 +1895,14 @@ mod tests {
 
             // Prove section 0's single item so it owns publishable marker debt.
             let (archive, first) = archive
-                .put_start_sync(0, test_key("zero"), 10)
+                .put_start_sync(0, test_key("zero"), &10)
                 .await
                 .unwrap();
             release_pending_syncs(&pending);
             first.await.unwrap();
 
             // Moving to section 4 starts its data syncs and publishes section 0's boundary.
-            let archive = archive.put(4, test_key("four"), 40).await.unwrap();
+            let archive = archive.put(4, test_key("four"), &40).await.unwrap();
             let (archive, second) = archive.start_sync().await.unwrap();
             assert_eq!(pending.lock().len(), 3);
 
@@ -1920,7 +1920,7 @@ mod tests {
             // its unproven length as a marker would let a crash that keeps the marker but
             // loses the in-flight items make every reopen fail. The two operations started
             // here are section 8's index and value syncs.
-            let archive = archive.put(8, test_key("eight"), 80).await.unwrap();
+            let archive = archive.put(8, test_key("eight"), &80).await.unwrap();
             let before = pending.starts();
             let (archive, third) = archive.start_sync().await.unwrap();
             assert_eq!(pending.starts() - before, 2);
@@ -1961,13 +1961,13 @@ mod tests {
 
             // Three items land in three single-item sections, each through its own blocking
             // sync.
-            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), 10))
+            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), &10))
                 .await
                 .unwrap();
-            let archive = drive_pending_syncs(&pending, archive.put_sync(1, test_key("one"), 20))
+            let archive = drive_pending_syncs(&pending, archive.put_sync(1, test_key("one"), &20))
                 .await
                 .unwrap();
-            let archive = drive_pending_syncs(&pending, archive.put_sync(2, test_key("two"), 30))
+            let archive = drive_pending_syncs(&pending, archive.put_sync(2, test_key("two"), &30))
                 .await
                 .unwrap();
             drop(archive);
@@ -2017,7 +2017,7 @@ mod tests {
                 .unwrap();
 
             // Seed one durable item. The two starts are section 0's index and value syncs.
-            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), 10))
+            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), &10))
                 .await
                 .unwrap();
             assert_eq!(pending.starts(), 2);
@@ -2060,15 +2060,15 @@ mod tests {
             // Each successful call publishes the preceding section and retains the current one as
             // marker debt. Returning to section 0 must start its new barrier at the retained
             // one-item prefix rather than at zero.
-            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), 10))
+            let archive = drive_pending_syncs(&pending, archive.put_sync(0, test_key("zero"), &10))
                 .await
                 .unwrap();
             assert_eq!(pending.starts(), 2);
-            let archive = drive_pending_syncs(&pending, archive.put_sync(2, test_key("two"), 30))
+            let archive = drive_pending_syncs(&pending, archive.put_sync(2, test_key("two"), &30))
                 .await
                 .unwrap();
             assert_eq!(pending.starts(), 5);
-            let archive = drive_pending_syncs(&pending, archive.put_sync(1, test_key("one"), 20))
+            let archive = drive_pending_syncs(&pending, archive.put_sync(1, test_key("one"), &20))
                 .await
                 .unwrap();
             assert_eq!(pending.starts(), 8);
@@ -2104,7 +2104,7 @@ mod tests {
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
-            let archive = archive.put_sync(0, test_key("old"), 10).await.unwrap();
+            let archive = archive.put_sync(0, test_key("old"), &10).await.unwrap();
             let archive = archive.sync().await.unwrap();
             let archive = archive.prune(2).await.unwrap();
             drop(archive);
@@ -2125,7 +2125,7 @@ mod tests {
             let archive = Archive::init(delayed.child("reuse"), cfg.clone())
                 .await
                 .unwrap();
-            let archive = archive.put(0, test_key("new"), 20).await.unwrap();
+            let archive = archive.put(0, test_key("new"), &20).await.unwrap();
             let (archive, handle) = archive.start_sync().await.unwrap();
             assert_eq!(pending.lock().len(), 2);
             release_pending_syncs(&pending);
@@ -2167,7 +2167,7 @@ mod tests {
             let key = test_key("testkey");
             let data = 1;
             archive = archive
-                .put(index, key.clone(), data)
+                .put(index, key.clone(), &data)
                 .await
                 .expect("Failed to put data");
 
@@ -2240,13 +2240,13 @@ mod tests {
 
             // Put the key-data pair
             archive = archive
-                .put(index1, key1.clone(), data1)
+                .put(index1, key1.clone(), &data1)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive = archive
-                .put(index2, key2.clone(), data2)
+                .put(index2, key2.clone(), &data2)
                 .await
                 .expect("Failed to put data");
 
@@ -2306,13 +2306,13 @@ mod tests {
 
             // Put the key-data pair
             archive = archive
-                .put(index1, key1.clone(), data1)
+                .put(index1, key1.clone(), &data1)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive = archive
-                .put(index2, key2.clone(), data2)
+                .put(index2, key2.clone(), &data2)
                 .await
                 .expect("Failed to put data");
 
@@ -2368,7 +2368,7 @@ mod tests {
 
             for (index, key, data) in &keys {
                 archive = archive
-                    .put(*index, key.clone(), *data)
+                    .put(*index, key.clone(), data)
                     .await
                     .expect("Failed to put data");
             }
@@ -2407,7 +2407,7 @@ mod tests {
 
             // Trigger lazy removal of keys
             archive = archive
-                .put(6, test_key("key2-blfh"), 5)
+                .put(6, test_key("key2-blfh"), &5)
                 .await
                 .expect("Failed to put data");
 
@@ -2419,7 +2419,7 @@ mod tests {
 
             // A put below the prune floor is satisfied without storing
             let archive = archive
-                .put(1, test_key("key1-blah"), 1)
+                .put(1, test_key("key1-blah"), &1)
                 .await
                 .expect("Failed to put below floor");
             assert_eq!(
@@ -2433,12 +2433,12 @@ mod tests {
             // With no earlier pending writes, the below-floor sync combinators complete without
             // storing the pruned item.
             let (archive, handle) = archive
-                .put_start_sync(1, test_key("key1-blah"), 1)
+                .put_start_sync(1, test_key("key1-blah"), &1)
                 .await
                 .expect("Failed to put_start_sync below floor");
             handle.await.expect("handle must resolve");
             let archive = archive
-                .put_sync(2, test_key("key2-blfh"), 2)
+                .put_sync(2, test_key("key2-blfh"), &2)
                 .await
                 .expect("Failed to put_sync below floor");
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), None);
@@ -2484,7 +2484,7 @@ mod tests {
                 let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
 
                 archive = archive
-                    .put(index, key.clone(), data.clone())
+                    .put(index, key.clone(), &data)
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (index, data));
@@ -2646,8 +2646,8 @@ mod tests {
             // to make it observable which entry wins; a real caller would
             // store the same value (e.g. the same block) at both indices.
             let key = test_key("dupe-key");
-            archive = archive.put(2, key.clone(), 20).await.unwrap();
-            archive = archive.put(5, key.clone(), 50).await.unwrap();
+            archive = archive.put(2, key.clone(), &20).await.unwrap();
+            archive = archive.put(5, key.clone(), &50).await.unwrap();
 
             // Before pruning, either entry is a permitted answer per the
             // trait contract. The implementation happens to return the
@@ -2694,9 +2694,9 @@ mod tests {
                 .await
                 .expect("Failed to initialize archive");
 
-            archive = archive.put_multi(1, test_key("aaa"), 10).await.unwrap();
-            archive = archive.put_multi(1, test_key("bbb"), 20).await.unwrap();
-            archive = archive.put_multi(3, test_key("ccc"), 30).await.unwrap();
+            archive = archive.put_multi(1, test_key("aaa"), &10).await.unwrap();
+            archive = archive.put_multi(1, test_key("bbb"), &20).await.unwrap();
+            archive = archive.put_multi(3, test_key("ccc"), &30).await.unwrap();
 
             // Prune below index 3
             let archive = archive.prune(3).await.unwrap();
@@ -2724,7 +2724,7 @@ mod tests {
             assert!(!archive.has_at(1, &test_key("aaaa1")).await.unwrap());
 
             // Exact key at the index
-            archive = archive.put_multi(1, test_key("aaaa1"), 10).await.unwrap();
+            archive = archive.put_multi(1, test_key("aaaa1"), &10).await.unwrap();
             assert!(archive.has_at(1, &test_key("aaaa1")).await.unwrap());
 
             // Same key is not reported at other indices
@@ -2735,14 +2735,14 @@ mod tests {
             assert!(!archive.has_at(1, &test_key("aaaa2")).await.unwrap());
 
             // A second entry at the same index is visible alongside the first
-            archive = archive.put_multi(1, test_key("aaaa2"), 20).await.unwrap();
+            archive = archive.put_multi(1, test_key("aaaa2"), &20).await.unwrap();
             assert!(archive.has_at(1, &test_key("aaaa1")).await.unwrap());
             assert!(archive.has_at(1, &test_key("aaaa2")).await.unwrap());
 
             // A different key at an occupied index is absent
             assert!(!archive.has_at(1, &test_key("bbbb")).await.unwrap());
 
-            archive = archive.put_multi(3, test_key("cccc"), 30).await.unwrap();
+            archive = archive.put_multi(3, test_key("cccc"), &30).await.unwrap();
             archive.sync().await.unwrap();
         });
 
@@ -2781,20 +2781,20 @@ mod tests {
             assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
 
             // Exact key
-            archive = archive.put(1, key.clone(), 10).await.unwrap();
+            archive = archive.put(1, key.clone(), &10).await.unwrap();
             assert!(archive.has(Identifier::Key(&key)).await.unwrap());
 
             // A translated-key collision (FourCap shares the "aaaa" prefix)
             // must not produce a false positive
             let collision = test_key("aaaa2");
             assert!(!archive.has(Identifier::Key(&collision)).await.unwrap());
-            archive = archive.put(2, collision.clone(), 20).await.unwrap();
+            archive = archive.put(2, collision.clone(), &20).await.unwrap();
             assert!(archive.has(Identifier::Key(&collision)).await.unwrap());
 
             // Pruned keys report absent. Pruning is section-granular
             // (items_per_section = 2), so prune at a section boundary that
             // drops indices 1 and 2 while retaining index 4.
-            archive = archive.put(4, test_key("cccc"), 30).await.unwrap();
+            archive = archive.put(4, test_key("cccc"), &30).await.unwrap();
             let archive = archive.prune(4).await.unwrap();
             assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
             assert!(!archive.has(Identifier::Key(&collision)).await.unwrap());
@@ -2831,9 +2831,9 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             // Two items at index 1, one at index 3
-            archive = archive.put_multi(1, test_key("aaa"), 10).await.unwrap();
-            archive = archive.put_multi(1, test_key("bbb"), 20).await.unwrap();
-            archive = archive.put_multi(3, test_key("ccc"), 30).await.unwrap();
+            archive = archive.put_multi(1, test_key("aaa"), &10).await.unwrap();
+            archive = archive.put_multi(1, test_key("bbb"), &20).await.unwrap();
+            archive = archive.put_multi(3, test_key("ccc"), &30).await.unwrap();
 
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 2));
@@ -2872,7 +2872,7 @@ mod tests {
 
             // put_multi below the prune floor is satisfied without storing
             let archive = archive
-                .put_multi(2, test_key("ddd"), 40)
+                .put_multi(2, test_key("ddd"), &40)
                 .await
                 .expect("Failed to put below floor");
             assert_eq!(
@@ -2886,7 +2886,7 @@ mod tests {
             // With no earlier pending writes, put_multi_start_sync below the prune floor returns
             // a ready handle without storing the pruned item.
             let (archive, handle) = archive
-                .put_multi_start_sync(2, test_key("ddd"), 41)
+                .put_multi_start_sync(2, test_key("ddd"), &41)
                 .await
                 .expect("Failed to put_multi_start_sync below floor");
             handle.await.expect("handle must resolve");
@@ -2894,7 +2894,7 @@ mod tests {
 
             // put_multi_sync below the prune floor stores nothing.
             let archive = archive
-                .put_multi_sync(2, test_key("ddd"), 42)
+                .put_multi_sync(2, test_key("ddd"), &42)
                 .await
                 .expect("Failed to put_multi_sync below floor");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);

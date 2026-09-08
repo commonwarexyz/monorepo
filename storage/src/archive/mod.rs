@@ -60,7 +60,7 @@ pub trait Archive: Send + Sized {
     type Key: Array;
 
     /// The type of the value.
-    type Value: Codec + Send;
+    type Value: Codec + Send + Sync;
 
     /// Store an item in [Archive].
     ///
@@ -74,7 +74,7 @@ pub trait Archive: Send + Sized {
         self,
         index: u64,
         key: Self::Key,
-        value: Self::Value,
+        value: &Self::Value,
     ) -> impl Future<Output = Result<Self, Error>> + Send;
 
     /// Perform a [Archive::put] and [Archive::sync] in a single operation.
@@ -82,7 +82,7 @@ pub trait Archive: Send + Sized {
         self,
         index: u64,
         key: Self::Key,
-        value: Self::Value,
+        value: &Self::Value,
     ) -> impl Future<Output = Result<Self, Error>> + Send {
         async move { self.put(index, key, value).await?.sync().await }
     }
@@ -96,7 +96,7 @@ pub trait Archive: Send + Sized {
         self,
         index: u64,
         key: Self::Key,
-        value: Self::Value,
+        value: &Self::Value,
     ) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send {
         async move { self.put(index, key, value).await?.start_sync().await }
     }
@@ -198,7 +198,7 @@ pub trait MultiArchive: Archive {
         self,
         index: u64,
         key: Self::Key,
-        value: Self::Value,
+        value: &Self::Value,
     ) -> impl Future<Output = Result<Self, Error>> + Send;
 
     /// Perform a [MultiArchive::put_multi] and [Archive::sync] in a single operation.
@@ -206,7 +206,7 @@ pub trait MultiArchive: Archive {
         self,
         index: u64,
         key: Self::Key,
-        value: Self::Value,
+        value: &Self::Value,
     ) -> impl Future<Output = Result<Self, Error>> + Send {
         async move { self.put_multi(index, key, value).await?.sync().await }
     }
@@ -216,7 +216,7 @@ pub trait MultiArchive: Archive {
         self,
         index: u64,
         key: Self::Key,
-        value: Self::Value,
+        value: &Self::Value,
     ) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send {
         async move { self.put_multi(index, key, value).await?.start_sync().await }
     }
@@ -317,7 +317,7 @@ mod tests {
 
         // Put the key-data pair
         archive = archive
-            .put(index, key.clone(), data)
+            .put(index, key.clone(), &data)
             .await
             .expect("Failed to put data");
 
@@ -395,13 +395,13 @@ mod tests {
 
         // Put the key-data pair
         archive = archive
-            .put(index, key.clone(), data1)
+            .put(index, key.clone(), &data1)
             .await
             .expect("Failed to put data");
 
         // Put the key-data pair again (should be idempotent)
         archive = archive
-            .put(index, key.clone(), data2)
+            .put(index, key.clone(), &data2)
             .await
             .expect("Duplicate put should not fail");
 
@@ -454,8 +454,8 @@ mod tests {
         // Store the same key at two different indices; distinct values only so
         // the test can observe which entry wins a key lookup.
         let key = test_key("dupe-xindex");
-        archive = archive.put(2, key.clone(), 20).await.expect("put(2)");
-        archive = archive.put(5, key.clone(), 50).await.expect("put(5)");
+        archive = archive.put(2, key.clone(), &20).await.expect("put(2)");
+        archive = archive.put(5, key.clone(), &50).await.expect("put(5)");
 
         // Both indices must resolve individually.
         assert_eq!(
@@ -598,7 +598,7 @@ mod tests {
 
             for (index, key, data) in &keys {
                 archive = archive
-                    .put(*index, key.clone(), *data)
+                    .put(*index, key.clone(), data)
                     .await
                     .expect("Failed to put data");
             }
@@ -696,7 +696,7 @@ mod tests {
                 keys.insert(index, (key.clone(), data));
 
                 archive = archive
-                    .put(index, key, data)
+                    .put(index, key, &data)
                     .await
                     .expect("Failed to put data");
             }
@@ -809,7 +809,7 @@ mod tests {
                 let data: i32 = context.random();
 
                 archive = archive
-                    .put(index, key.clone(), data)
+                    .put(index, key.clone(), &data)
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (index, data));
@@ -922,15 +922,15 @@ mod tests {
         let key_c = test_key("ccc");
 
         archive = archive
-            .put_multi(index, key_a.clone(), 10)
+            .put_multi(index, key_a.clone(), &10)
             .await
             .expect("put_multi a");
         archive = archive
-            .put_multi(index, key_b.clone(), 20)
+            .put_multi(index, key_b.clone(), &20)
             .await
             .expect("put_multi b");
         archive = archive
-            .put_multi(index, key_c.clone(), 30)
+            .put_multi(index, key_c.clone(), &30)
             .await
             .expect("put_multi c");
 
@@ -971,8 +971,8 @@ mod tests {
         mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
     ) {
         let key = test_key("dup");
-        archive = archive.put_multi(5, key.clone(), 10).await.unwrap();
-        archive = archive.put_multi(7, key.clone(), 20).await.unwrap();
+        archive = archive.put_multi(5, key.clone(), &10).await.unwrap();
+        archive = archive.put_multi(7, key.clone(), &20).await.unwrap();
 
         // Duplicate key is allowed across indices.
         assert_eq!(archive.get(Identifier::Index(5)).await.unwrap(), Some(10));
@@ -1001,12 +1001,12 @@ mod tests {
 
     async fn test_get_all_impl(mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>) {
         // Three items at the same index
-        archive = archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
-        archive = archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
-        archive = archive.put_multi(5, test_key("ccc"), 30).await.unwrap();
+        archive = archive.put_multi(5, test_key("aaa"), &10).await.unwrap();
+        archive = archive.put_multi(5, test_key("bbb"), &20).await.unwrap();
+        archive = archive.put_multi(5, test_key("ccc"), &30).await.unwrap();
 
         // One item at a different index
-        archive = archive.put_multi(7, test_key("ddd"), 40).await.unwrap();
+        archive = archive.put_multi(7, test_key("ddd"), &40).await.unwrap();
 
         // get_all returns all values at the index in insertion order
         let all = archive.get_all(5).await.unwrap();
@@ -1038,17 +1038,17 @@ mod tests {
     ) {
         // put_multi two items at the same index
         archive = archive
-            .put_multi(1, test_key("aaa"), 10)
+            .put_multi(1, test_key("aaa"), &10)
             .await
             .expect("put_multi");
         archive = archive
-            .put_multi(1, test_key("bbb"), 20)
+            .put_multi(1, test_key("bbb"), &20)
             .await
             .expect("put_multi");
 
         // Archive::put is a no-op when index already exists
         archive = archive
-            .put(1, test_key("ccc"), 30)
+            .put(1, test_key("ccc"), &30)
             .await
             .expect("Archive::put should no-op");
 
@@ -1109,9 +1109,9 @@ mod tests {
                 compression,
             )
             .await;
-            archive = archive.put_multi(5, test_key("aaa"), 10).await.unwrap();
-            archive = archive.put_multi(5, test_key("bbb"), 20).await.unwrap();
-            archive = archive.put_multi(7, test_key("ccc"), 30).await.unwrap();
+            archive = archive.put_multi(5, test_key("aaa"), &10).await.unwrap();
+            archive = archive.put_multi(5, test_key("bbb"), &20).await.unwrap();
+            archive = archive.put_multi(7, test_key("ccc"), &30).await.unwrap();
             archive.sync().await.unwrap();
         }
 
@@ -1162,17 +1162,17 @@ mod tests {
         mut archive: impl MultiArchive<Key = FixedBytes<64>, Value = i32>,
     ) {
         // Mix Archive::put (single-item) and MultiArchive::put_multi
-        archive = archive.put(1, test_key("single"), 100).await.unwrap();
+        archive = archive.put(1, test_key("single"), &100).await.unwrap();
         archive = archive
-            .put_multi(2, test_key("multi-a"), 200)
+            .put_multi(2, test_key("multi-a"), &200)
             .await
             .unwrap();
         archive = archive
-            .put_multi(2, test_key("multi-b"), 201)
+            .put_multi(2, test_key("multi-b"), &201)
             .await
             .unwrap();
         archive = archive
-            .put_multi(3, test_key("multi-c"), 300)
+            .put_multi(3, test_key("multi-c"), &300)
             .await
             .unwrap();
 
@@ -1245,9 +1245,9 @@ mod tests {
         assert_send(archive.has(Identifier::Key(&key)));
         #[allow(clippy::redundant_clone)]
         match 0u8 {
-            0 => assert_send(archive.put(1, key.clone(), value.clone())),
-            1 => assert_send(archive.put_sync(2, key.clone(), value.clone())),
-            2 => assert_send(archive.put_start_sync(3, key, value)),
+            0 => assert_send(archive.put(1, key.clone(), &value)),
+            1 => assert_send(archive.put_sync(2, key.clone(), &value)),
+            2 => assert_send(archive.put_start_sync(3, key, &value)),
             3 => assert_send(archive.sync()),
             4 => assert_send(archive.start_sync()),
             _ => assert_send(archive.destroy()),
@@ -1266,9 +1266,9 @@ mod tests {
         assert_send(archive.get_all(1));
         #[allow(clippy::redundant_clone)]
         match 0u8 {
-            0 => assert_send(archive.put_multi(1, key.clone(), value.clone())),
-            1 => assert_send(archive.put_multi_sync(2, key.clone(), value.clone())),
-            2 => assert_send(archive.put_multi_start_sync(3, key.clone(), value.clone())),
+            0 => assert_send(archive.put_multi(1, key.clone(), &value)),
+            1 => assert_send(archive.put_multi_sync(2, key.clone(), &value)),
+            2 => assert_send(archive.put_multi_start_sync(3, key.clone(), &value)),
             _ => assert_archive_futures_are_send(archive, key, value),
         }
     }

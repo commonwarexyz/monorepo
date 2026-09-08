@@ -319,7 +319,7 @@ where
                 }
 
                 finalized_blocks = finalized_blocks
-                    .put(anchor.into())
+                    .put(&anchor.into())
                     .await
                     .expect("failed to store startup anchor")
                     .sync()
@@ -823,25 +823,21 @@ where
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await;
 
-                    // Retain only blocks that can still be dispatched and fit in staging
+                    // Retain only new archive entries that can still be dispatched and fit in staging
+                    // An existing height keeps its first block even if another finalization conflicts
                     let next_height = self
                         .pending_acks
                         .next_dispatch_height(self.stream.next_height());
-                    if height >= next_height
+                    let stage = height >= next_height
                         && self.staged.len() < self.pending_acks.capacity().saturating_mul(2)
-                    {
-                        self.staged.insert(height, Arc::clone(&block));
-                    }
+                        && self.finalized_blocks.next_gap(height).0.is_none();
                     let stored;
                     (self, stored) = self
-                        .store_finalization(
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block),
-                            Some(finalization),
-                            application,
-                        )
+                        .store_finalization(height, digest, &block, Some(finalization), application)
                         .await;
+                    if stage && stored {
+                        self.staged.insert(height, block);
+                    }
                     if stored {
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
@@ -1398,12 +1394,13 @@ where
             .take_pending_anchor()
             .expect("pending floor anchor missing");
         let round = finalization.round();
+        let stored = V::stored(&block);
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             self.finalized_blocks
-                .put(Arc::unwrap_or_clone(block).into())
+                .put(stored.as_ref())
                 .map_err(BoxedError::from),
             self.finalizations_by_height
-                .put(height, digest, finalization)
+                .put(height, digest, &finalization)
                 .map_err(BoxedError::from),
         )
         .expect("failed to store floor anchor");
@@ -1567,13 +1564,7 @@ where
                         .any(|annotation| matches!(annotation, Annotation::Finalized(_)))
                 {
                     (self, _) = self
-                        .store_finalization(
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block),
-                            finalization,
-                            application,
-                        )
+                        .store_finalization(height, digest, &block, finalization, application)
                         .await;
                 } else if annotations.iter().any(|annotation| {
                     matches!(
@@ -1806,13 +1797,7 @@ where
                     (self, _) = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
-                        .store_finalization(
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block),
-                            Some(finalization),
-                            application,
-                        )
+                        .store_finalization(height, digest, &block, Some(finalization), application)
                         .await;
                 }
                 PendingVerification::Notarized {
@@ -1880,7 +1865,7 @@ where
                             .store_finalization(
                                 height,
                                 digest,
-                                Arc::unwrap_or_clone(block),
+                                &block,
                                 Some(finalization),
                                 application,
                             )
@@ -2146,7 +2131,7 @@ where
         mut self: Box<Self>,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
+        block: &V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
@@ -2164,19 +2149,21 @@ where
         }
 
         // Convert block to storage format
-        let stored: V::StoredBlock = block.into();
+        let stored = V::stored(block);
         let round = finalization.as_ref().map(|f| f.round());
 
         // In parallel, update the finalized blocks and finalizations archives
         let finalizations_by_height = self.finalizations_by_height;
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             // Update the finalized blocks archive
-            self.finalized_blocks.put(stored).map_err(BoxedError::from),
+            self.finalized_blocks
+                .put(stored.as_ref())
+                .map_err(BoxedError::from),
             // Update the finalizations archive (if provided)
             async {
                 let store = if let Some(finalization) = finalization {
                     finalizations_by_height
-                        .put(height, digest, finalization)
+                        .put(height, digest, &finalization)
                         .await
                         .map_err(BoxedError::from)?
                 } else {
@@ -2349,7 +2336,7 @@ where
                         .store_finalization(
                             last_finalized,
                             digest,
-                            Arc::unwrap_or_clone(block),
+                            &block,
                             Some(finalization),
                             application,
                         )
@@ -2404,7 +2391,7 @@ where
                         .store_finalization(
                             next.0,
                             parent_digest,
-                            Arc::unwrap_or_clone(block),
+                            &block,
                             finalization,
                             application,
                         )

@@ -17,7 +17,7 @@ use commonware_codec::Read;
 use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::{borrow::Cow, future::Future, sync::Arc};
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -33,6 +33,10 @@ where
     type Block = B;
     type StoredBlock = B;
     type Commitment = <B as Digestible>::Digest;
+
+    fn stored(block: &Self::Block) -> Cow<'_, Self::StoredBlock> {
+        Cow::Borrowed(block)
+    }
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
         // Standard variant commitment is exactly the block digest.

@@ -1235,7 +1235,7 @@ mod tests {
             let ops = ops.lock().clone();
             let written = ops
                 .iter()
-                .position(|op| *op == Op::Put(Height::new(1)))
+                .position(|op| matches!(op, Op::Put(height, _) if *height == Height::new(1)))
                 .expect("finalized block written");
             assert!(
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
