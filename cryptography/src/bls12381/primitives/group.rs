@@ -515,19 +515,18 @@ impl Private {
         }
     }
 
-    /// Reports the storage mode for conversions that preserve hardening.
+    /// Returns whether the private scalar is stored in hardened memory.
     pub(crate) const fn is_hardened(&self) -> bool {
         self.scalar.is_hardened()
     }
 
-    /// Moves the scalar into hardened storage.
+    /// Moves the secret material into hardened storage.
     ///
-    /// Clones then share the protected allocation. Already hardened keys are
-    /// unchanged. Failure consumes the key. Earlier clones and exported material
-    /// are unaffected.
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
     ///
-    /// See [Secret::try_harden] for platform requirements, protection guarantees,
-    /// and limits.
+    /// # Errors
+    ///
+    /// Consumes `self` on failure, including when hardening is unsupported.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             scalar: self.scalar.try_harden()?,
@@ -660,7 +659,7 @@ impl Scalar {
         Self::from_limbs([i, 0, 0, 0])
     }
 
-    /// Returns the canonical big-endian encoding, erased on drop.
+    /// Encodes the scalar into a byte array.
     pub(crate) fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
         let mut slice = Zeroizing::new([0u8; Self::SIZE]);
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
@@ -1012,14 +1011,13 @@ impl Share {
         Self { index, private }
     }
 
-    /// Moves the private scalar into hardened storage.
+    /// Moves the secret material into hardened storage.
     ///
-    /// Clones then share the protected allocation. Already hardened shares are
-    /// unchanged. Failure consumes the share. Earlier clones and exported material
-    /// are unaffected.
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
     ///
-    /// See [Secret::try_harden] for platform requirements, protection guarantees,
-    /// and limits.
+    /// # Errors
+    ///
+    /// Consumes `self` on failure, including when hardening is unsupported.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             index: self.index,

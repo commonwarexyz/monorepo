@@ -88,14 +88,13 @@ impl PrivateKey {
         }
     }
 
-    /// Moves the private scalar and its cached encoding into hardened storage.
+    /// Moves the secret material into hardened storage.
     ///
-    /// Clones then share the protected allocation. Already hardened keys are
-    /// unchanged. Failure consumes the key. Earlier clones and exported material
-    /// are unaffected.
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
     ///
-    /// See [Secret::try_harden](crate::Secret::try_harden) for platform requirements,
-    /// protection guarantees, and limits.
+    /// # Errors
+    ///
+    /// Consumes `self` on failure, including when hardening is unsupported.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             key: self.key.try_harden()?,
@@ -176,7 +175,6 @@ impl crate::Signer for PrivateKey {
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
-        // Hash public input before opening the private allocation.
         let hashed = ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, namespace, msg);
         self.key.access(|value| hashed * &value.scalar).into()
     }
@@ -526,6 +524,7 @@ mod tests {
         let mut rng = test_rng();
         let private = Private::random(&mut rng);
         let private_key = PrivateKey::try_from(private).unwrap();
+        // Verify the key works by signing and verifying
         let msg = b"test message";
         let sig = private_key.sign(b"ns", msg);
         assert!(private_key.public_key().verify(b"ns", msg, &sig));

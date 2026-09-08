@@ -158,10 +158,7 @@ impl SigningSecret {
         &self.seed
     }
 
-    /// Signs with the public key returned alongside this secret by `into_parts`.
-    ///
-    /// Supplying a different public key can reuse a nonce under different
-    /// challenges and reveal the signing scalar. Keep these parts paired.
+    /// Create a signature on `msg` using this key.
     #[allow(non_snake_case)]
     pub fn sign(&self, vk: &VerificationKey, msg: &[u8]) -> Signature {
         let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));

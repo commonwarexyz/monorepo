@@ -33,15 +33,11 @@ struct SigningValue {
 #[derive(Clone, Debug)]
 pub struct PrivateKeyInner {
     inner: Secret<SigningValue>,
-    // SigningKey keeps its own public point. This copy avoids opening private
-    // pages when only the public key is requested.
     public: VerifyingKey,
 }
 
 impl PartialEq for PrivateKeyInner {
     fn eq(&self, other: &Self) -> bool {
-        // SigningKey compares its private scalars with subtle's constant-time
-        // implementation. Secret's generic equality uses a different trait.
         self.access(|key| other.access(|other| key.ct_eq(other).into()))
     }
 }
@@ -63,9 +59,13 @@ impl PrivateKeyInner {
         self.inner.access(|value| f(&value.key))
     }
 
-    /// Protects the signing state according to [Secret::try_harden].
+    /// Moves the secret material into hardened storage.
     ///
-    /// The cached public key stays accessible without opening private pages.
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Consumes `self` on failure, including when hardening is unsupported.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             inner: self.inner.try_harden()?,
@@ -238,14 +238,13 @@ impl arbitrary::Arbitrary<'_> for PublicKeyInner {
 macro_rules! impl_private_key_wrapper {
     ($name:ident) => {
         impl $name {
-            /// Moves the private key into hardened storage.
+            /// Moves the secret material into hardened storage.
             ///
-            /// Clones share the protected allocation. Public-key access leaves it sealed.
-            /// See [crate::Secret::try_harden] for the protections, costs, and ownership contract.
+            /// See [crate::Secret::try_harden] for requirements and guarantees.
             ///
             /// # Errors
             ///
-            /// Consumes the key on failure, including when hardening is unsupported.
+            /// Consumes `self` on failure, including when hardening is unsupported.
             pub fn try_harden(self) -> Result<Self, crate::secret::HardenError> {
                 self.0.try_harden().map(Self)
             }

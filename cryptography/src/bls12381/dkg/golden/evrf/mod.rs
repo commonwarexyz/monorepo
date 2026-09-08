@@ -156,8 +156,7 @@ impl Read for Setup {
 /// A private exponent for Golden DKG VRF evaluation and Schnorr signing.
 ///
 /// The public key is cached separately, so retrieving it does not access the
-/// private scalar. [Self::try_harden] protects the retained scalar, subject to
-/// the [secret storage contract](crate::secret).
+/// private scalar.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     inner: Secret<F>,
@@ -184,7 +183,7 @@ impl crate::Signer for PrivateKey {
             .commit(msg)
             .commit(self.public.raw.as_slice());
 
-        // Derive the deterministic nonce from the key and public transcript state.
+        // Derive deterministic nonce from secret key + public transcript state
         let k = self.inner.access(|x| {
             let mut nonce_t = t.fork(b"nonce");
             let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
@@ -192,8 +191,6 @@ impl crate::Signer for PrivateKey {
             F::random(nonce_t.noise(b"k"))
         });
 
-        // Keep the private pages inaccessible during the group multiplication.
-        // Only nonce derivation and the final response need the retained scalar.
         let k_big = G::generator() * &k;
         let k_big_bytes: [u8; G::SIZE] = k_big.encode_fixed();
         t.commit(k_big_bytes.as_slice());
@@ -210,7 +207,7 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKey {
-    /// Derives the public key before placing the scalar in secret storage.
+    /// Creates a private key from a scalar.
     fn from_scalar(scalar: F) -> Self {
         let public = PublicKey::from_point(G::generator() * &scalar);
         Self {
@@ -219,10 +216,13 @@ impl PrivateKey {
         }
     }
 
-    /// Moves the private scalar into hardened storage.
+    /// Moves the secret material into hardened storage.
     ///
-    /// See [Secret::try_harden] for platform requirements, shared ownership, and
-    /// consumption on failure, and [crate::secret] for the protection boundary.
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Consumes `self` on failure, including when hardening is unsupported.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             inner: self.inner.try_harden()?,
@@ -230,7 +230,7 @@ impl PrivateKey {
         })
     }
 
-    /// Returns the cached [PublicKey] without accessing private storage.
+    /// Get the [`PublicKey`] associated with this private key.
     pub fn public(&self) -> PublicKey {
         crate::Signer::public_key(self)
     }

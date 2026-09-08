@@ -29,7 +29,6 @@ const SIGNATURE_LENGTH: usize = 64;
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     key: Secret<ed_core::SigningSecret>,
-    // Public operations must not make the private pages readable.
     public: VerificationKey,
 }
 
@@ -49,14 +48,13 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKey {
-    /// Moves the private material into hardened storage.
+    /// Moves the secret material into hardened storage.
     ///
-    /// Clones share the protected allocation. Public-key access leaves it sealed.
-    /// See [Secret::try_harden] for the protections, costs, and ownership contract.
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
     ///
     /// # Errors
     ///
-    /// Consumes the key on failure, including when hardening is unsupported.
+    /// Consumes `self` on failure, including when hardening is unsupported.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             key: self.key.try_harden()?,
