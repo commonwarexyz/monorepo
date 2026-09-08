@@ -1796,9 +1796,7 @@ pub mod tests {
             // [b, a), which cyclically covered `c` and verified).
             let kvp = db.key_value_proof(b.clone()).await.unwrap();
             let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
-            assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &c, &forged, &root
-            ));
+            assert!(!forged.verify::<Sha256>(&c, &root));
 
             db.destroy().await.unwrap();
         });

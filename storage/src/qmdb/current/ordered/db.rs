@@ -31,6 +31,27 @@ pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize
     pub next_key: K,
 }
 
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K, D, N> {
+    /// Return true if the proof authenticates that `key` currently has `value` in the database
+    /// with the provided `root`.
+    ///
+    /// `V` selects the fixed or variable value encoding used by the database.
+    pub fn verify<H, V>(&self, key: K, value: V::Value, root: &D) -> bool
+    where
+        H: Hasher<Digest = D>,
+        V: ValueEncoding,
+        Operation<F, K, V>: Codec,
+    {
+        let op = Operation::<F, K, V>::Update(Update {
+            key,
+            value,
+            next_key: self.next_key.clone(),
+        });
+
+        self.proof.verify::<H, _>(op, root)
+    }
+}
+
 impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
@@ -104,23 +125,6 @@ where
         self.any.get(key).await
     }
 
-    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
-    /// the provided `root`.
-    pub fn verify_key_value_proof(
-        key: K,
-        value: V::Value,
-        proof: &KeyValueProof<F, K, H::Digest, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let op = Operation::Update(Update {
-            key,
-            value,
-            next_key: proof.next_key.clone(),
-        });
-
-        proof.proof.verify::<H, _>(op, root)
-    }
-
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
     pub async fn get_span(&self, key: &K) -> Result<Option<(Location<F>, Update<K, V>)>, Error<F>> {
@@ -137,46 +141,6 @@ where
         V: 'a,
     {
         self.any.stream_range(start).await
-    }
-
-    /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
-    /// provided `root`.
-    pub fn verify_exclusion_proof(
-        key: &K,
-        proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let (op_proof, op) = match proof {
-            super::ExclusionProof::KeyValue(op_proof, data) => {
-                if data.key == *key {
-                    // The provided `key` is in the DB if it matches the start of the span.
-                    return false;
-                }
-                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>, N, S>::span_contains(
-                    &data.key,
-                    &data.next_key,
-                    key,
-                ) {
-                    // If the key is not within the span, then this proof cannot prove its
-                    // exclusion.
-                    return false;
-                }
-
-                (op_proof, Operation::Update(data.clone()))
-            }
-            super::ExclusionProof::Commit(op_proof, metadata) => {
-                // Handle the case where the proof shows the db is empty, hence any key is proven
-                // excluded. For the db to be empty, the floor must equal the commit operation's
-                // location.
-                let floor_loc = op_proof.loc;
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), floor_loc),
-                )
-            }
-        };
-
-        op_proof.verify::<H, _>(op, root)
     }
 }
 

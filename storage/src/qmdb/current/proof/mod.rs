@@ -36,7 +36,7 @@ use crate::{
     qmdb::{
         self, Error,
         current::{
-            db::{combine_roots, partial_chunk, pending_chunk},
+            db::{combine_roots, graftable_chunk_window, partial_chunk, pending_chunk},
             grafting,
         },
     },
@@ -48,6 +48,66 @@ use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
+
+#[cfg(test)]
+mod required_chunks_tests;
+
+/// Bitmap chunk indices read by [RangeProof::new] or [OperationProof::new].
+///
+/// Pass `None` for a range proof or the queried operation location for an operation proof.
+/// The returned indices are unique and increasing. At most three chunks are needed: the
+/// trailing partial chunk, a complete chunk awaiting its ops-tree ancestor, and the queried
+/// operation's chunk. This allows a storage adapter to preload bitmap bytes before exposing a
+/// synchronous [BitmapReadable] implementation.
+///
+/// `ops_leaves`, `bitmap_len`, and `pruned_chunks` must describe one consistent snapshot.
+/// `N` is the bitmap chunk size in bytes and must be a nonzero power of two.
+///
+/// # Errors
+///
+/// Returns [Error::DataCorrupted] if more than one complete chunk awaits its ancestor or
+/// pruning exceeds the graftable prefix. Returns [Error::OperationPruned] for a queried
+/// operation in a pruned chunk, and [merkle::Error::RangeOutOfBounds] for a queried operation
+/// outside the snapshot.
+pub fn required_chunks<F: Graftable, const N: usize>(
+    ops_leaves: Location<F>,
+    bitmap_len: u64,
+    pruned_chunks: u64,
+    location: Option<Location<F>>,
+) -> Result<impl Iterator<Item = u64>, Error<F>> {
+    const { assert!(N.is_power_of_two() && N <= usize::MAX / 8) };
+    let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+    let (complete, graftable) = graftable_chunk_window(
+        ops_leaves,
+        bitmap_len / chunk_bits,
+        pruned_chunks,
+        grafting::height::<N>(),
+    )?;
+    let queried = if let Some(loc) = location {
+        if loc >= ops_leaves || *loc >= bitmap_len {
+            return Err(merkle::Error::RangeOutOfBounds(loc).into());
+        }
+        let chunk = *loc / chunk_bits;
+        if chunk < pruned_chunks {
+            return Err(Error::OperationPruned(loc));
+        }
+        Some(chunk)
+    } else {
+        None
+    };
+    let mut chunks = [
+        (!bitmap_len.is_multiple_of(chunk_bits)).then_some(complete),
+        (complete > graftable).then_some(graftable),
+        queried,
+    ];
+    chunks.sort_unstable();
+    let mut previous = None;
+    Ok(chunks.into_iter().flatten().filter(move |&chunk| {
+        let distinct = previous != Some(chunk);
+        previous = Some(chunk);
+        distinct
+    }))
+}
 
 /// Witness that a particular `ops_root` is committed by a `current` canonical root.
 ///
