@@ -474,6 +474,7 @@ impl<T> Secret<T> {
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(clippy::missing_const_for_fn)]
     pub fn try_harden(&mut self) -> Result<(), HardenError> {
         #[cfg(all(target_os = "linux", feature = "std"))]
         {
