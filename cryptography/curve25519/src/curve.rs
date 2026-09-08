@@ -449,6 +449,16 @@ impl G {
         bytes
     }
 
+    /// Converts this point to affine coordinates for mixed addition.
+    pub fn to_affine(self) -> GAffine {
+        let z_inverse = self.z.invert();
+        GAffine {
+            x: self.x.mul(z_inverse),
+            y: self.y.mul(z_inverse),
+            t2d: self.t.mul(z_inverse).mul(F::EDWARDS_D2),
+        }
+    }
+
     /// Negates this point.
     pub fn negate(self) -> Self {
         Self {
@@ -579,6 +589,13 @@ pub struct GAffine {
 }
 
 impl GAffine {
+    /// Compresses this point to its canonical Ed25519 encoding.
+    pub fn to_bytes(self) -> [u8; 32] {
+        let mut bytes = self.y.to_bytes();
+        bytes[31] |= u8::from(self.x.is_odd()) << 7;
+        bytes
+    }
+
     /// The neutral element, `(0, 1)`.
     pub const IDENTITY: Self = Self {
         x: F::ZERO,

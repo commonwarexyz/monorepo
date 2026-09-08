@@ -31,7 +31,7 @@ use crate::{
     signing::{BatchVerifier, Signature, SigningKey, VerifyingKey},
 };
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::DecodeExt as _;
+use commonware_codec::{DecodeExt as _, Encode as _, types::lazy::Lazy};
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
 use commonware_parallel::{Sequential, Strategy};
@@ -309,7 +309,7 @@ impl KeyExchange {
 struct Item {
     namespace: Vec<u8>,
     message: Vec<u8>,
-    verifying_key: VerifyingKey,
+    verifying_key: Lazy<VerifyingKey>,
     signature: Signature,
 }
 
@@ -321,7 +321,7 @@ impl Item {
             None => u.arbitrary()?,
         };
         let signing_key = SigningKey::decode(seed.as_slice()).unwrap();
-        let verifying_key = signing_key.verifying_key();
+        let verifying_key = Lazy::new(signing_key.verifying_key());
         let signature = signing_key.sign(&namespace, &message);
         Ok(Self {
             namespace,
@@ -334,7 +334,7 @@ impl Item {
     fn low_order(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let Payload { namespace, message } = u.arbitrary()?;
         let bytes = u.choose(&LOW_ORDER_ENCODINGS)?;
-        let verifying_key = VerifyingKey::decode(bytes.as_slice()).unwrap();
+        let verifying_key = Lazy::deferred(&mut bytes.as_slice(), ());
         let mut signature = [0; 64];
         signature[..32].copy_from_slice(u.choose(&LOW_ORDER_ENCODINGS)?);
         Ok(Self {
@@ -364,7 +364,7 @@ impl Item {
         Ok(Self {
             namespace,
             message,
-            verifying_key: VerifyingKey::decode(verifying_key.as_slice()).unwrap(),
+            verifying_key: Lazy::deferred(&mut verifying_key.as_slice(), ()),
             signature: Signature::decode(signature.as_slice()).unwrap(),
         })
     }
@@ -375,7 +375,7 @@ impl Item {
             1 => mutate_bytes(&mut self.message, u)?,
             2 => {
                 let EncodedPoint(bytes) = u.arbitrary()?;
-                self.verifying_key = VerifyingKey::decode(bytes.as_slice()).unwrap();
+                self.verifying_key = Lazy::deferred(&mut bytes.as_slice(), ());
             }
             3 => {
                 let EncodedPoint(r) = u.arbitrary()?;
@@ -408,22 +408,29 @@ impl Item {
     }
 
     fn verify(&self) -> bool {
-        let actual = self
-            .verifying_key
-            .verify(&self.namespace, &self.message, &self.signature);
-        let decoded = VerifyingKey::decode(self.verifying_key.as_ref()).unwrap();
+        let bytes = self.verifying_key.encode();
+        let decoded = VerifyingKey::decode(bytes.clone());
+        let consensus_key = ed25519_consensus::VerificationKey::try_from(bytes.as_ref());
         assert_eq!(
-            decoded.verify(&self.namespace, &self.message, &self.signature),
+            decoded.is_ok(),
+            consensus_key.is_ok(),
+            "public key decoding: {self:#?}"
+        );
+        let cached = self.verifying_key.get();
+        assert_eq!(cached, decoded.as_ref().ok(), "cached key: {self:#?}");
+        let actual =
+            cached.is_some_and(|key| key.verify(&self.namespace, &self.message, &self.signature));
+        assert_eq!(
+            decoded.is_ok_and(|key| key.verify(&self.namespace, &self.message, &self.signature)),
             actual,
             "item: {self:#?}"
         );
 
         let signature = ed25519_consensus::Signature::try_from(self.signature.as_ref()).unwrap();
-        let expected = ed25519_consensus::VerificationKey::try_from(self.verifying_key.as_ref())
-            .is_ok_and(|key| {
-                key.verify(&signature, &union_unique(&self.namespace, &self.message))
-                    .is_ok()
-            });
+        let expected = consensus_key.is_ok_and(|key| {
+            key.verify(&signature, &union_unique(&self.namespace, &self.message))
+                .is_ok()
+        });
         assert_eq!(actual, expected, "item: {self:#?}");
         actual
     }
@@ -489,21 +496,48 @@ impl Arbitrary<'_> for Batch {
 }
 
 impl Batch {
-    fn run(self) {
+    fn run(mut self) {
+        for item in &mut self.items {
+            item.verifying_key = Lazy::deferred(&mut item.verifying_key.encode(), ());
+        }
+
+        // Keep independent deferred wrappers so both strategies exercise batch decoding before
+        // individual verification initializes their caches.
+        #[cfg(test)]
+        let parallel_batch = Self {
+            rng_seed: self.rng_seed,
+            items: self.items.clone(),
+        };
+        let cold_sequential = self.verify(&Sequential);
+        #[cfg(test)]
+        let (strategy, cold_parallel) = {
+            let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                .unwrap()
+                .manual();
+            let verified = parallel_batch.verify(&strategy);
+            (strategy, verified)
+        };
+
         let mut expected = !self.items.is_empty();
         for item in &self.items {
             expected &= item.verify();
         }
+        assert_eq!(cold_sequential, expected, "cold batch: {self:#?}");
         assert_eq!(self.verify(&Sequential), expected, "batch: {self:#?}");
 
         // The fuzz target stays single-threaded, so only the unit test exercises the pool.
         #[cfg(test)]
         {
-            let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                .unwrap()
-                .manual();
+            assert_eq!(cold_parallel, expected, "cold parallel batch: {self:#?}");
+            for (item, parallel_item) in self.items.iter().zip(&parallel_batch.items) {
+                assert_eq!(
+                    item.verifying_key.get(),
+                    parallel_item.verifying_key.get(),
+                    "parallel cached key: {self:#?}"
+                );
+            }
             assert_eq!(
-                self.verify(&strategy),
+                parallel_batch.verify(&strategy),
                 expected,
                 "parallel batch: {self:#?}"
             );
@@ -513,7 +547,7 @@ impl Batch {
     fn verify(&self, strategy: &impl Strategy) -> bool {
         let mut batch = BatchVerifier::new(self.items.len());
         for item in &self.items {
-            batch.add(
+            batch.add_lazy(
                 &item.namespace,
                 &item.message,
                 &item.verifying_key,
@@ -521,7 +555,13 @@ impl Batch {
             );
         }
         let SecretBytes(rng_seed) = self.rng_seed;
-        batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), strategy)
+        let verified = batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), strategy);
+        if verified {
+            for item in &self.items {
+                assert!(matches!(item.verifying_key.get_cached(), Some(Some(_))));
+            }
+        }
+        verified
     }
 }
 
@@ -608,9 +648,39 @@ mod tests {
         key_exchange::SecretKey,
         signing::{BatchVerifier, SigningKey},
     };
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{DecodeExt as _, types::lazy::Lazy};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_utils::{NZUsize, test_rng};
+    use rand_core::Rng as _;
+
+    #[test]
+    fn public_key_decoding_matches_consensus() {
+        let mut malformed = [0; 32];
+        malformed[0] = 2;
+        assert!(VerifyingKey::decode(malformed.as_slice()).is_err());
+
+        let mut rng = test_rng();
+        let random = (0..256).map(|_| {
+            let mut bytes = [0; 32];
+            rng.fill_bytes(&mut bytes);
+            bytes
+        });
+        for bytes in ZIP215_POINTS.into_iter().chain([malformed]).chain(random) {
+            let decoded = VerifyingKey::decode(bytes.as_slice());
+            let consensus = ed25519_consensus::VerificationKey::try_from(bytes.as_slice());
+            assert_eq!(decoded.is_ok(), consensus.is_ok(), "public key: {bytes:?}");
+            if let Ok(key) = decoded {
+                assert_eq!(key.as_ref(), bytes, "public key encoding must be preserved");
+            }
+        }
+
+        // Both decoders require the complete input to be exactly one public key.
+        for len in [0, 1, 31, 33, 64] {
+            let bytes = vec![0; len];
+            assert!(VerifyingKey::decode(bytes.as_slice()).is_err());
+            assert!(ed25519_consensus::VerificationKey::try_from(bytes.as_slice()).is_err());
+        }
+    }
 
     #[test]
     fn rfc8032_ed25519_vectors() {
@@ -639,22 +709,29 @@ mod tests {
     #[test]
     fn wycheproof_ed25519_vectors() {
         for vector in WYCHEPROOF_ED25519 {
-            let verifying_key = VerifyingKey::decode(vector.public_key.as_slice()).unwrap();
+            let verifying_key =
+                Lazy::<VerifyingKey>::deferred(&mut vector.public_key.as_slice(), ());
             let valid = Signature::decode(vector.signature).is_ok_and(|signature| {
-                let valid = verifying_key.verify_raw(vector.message, &signature);
-                let batch = || {
-                    let mut batch = BatchVerifier::new(1);
-                    batch.add_raw(vector.message, &verifying_key, &signature);
-                    batch
-                };
+                let mut batch = BatchVerifier::new(1);
+                batch.add_lazy_raw(vector.message, &verifying_key, &signature);
                 assert_eq!(
-                    batch().verify(&mut test_rng(), &Sequential),
+                    batch.verify(&mut test_rng(), &Sequential),
                     vector.valid_zip215,
                     "sequential Wycheproof test {}",
                     vector.tc_id
                 );
-                valid
+                verifying_key
+                    .get()
+                    .is_some_and(|key| key.verify_raw(vector.message, &signature))
             });
+            assert_eq!(
+                verifying_key.get(),
+                VerifyingKey::decode(vector.public_key.as_slice())
+                    .as_ref()
+                    .ok(),
+                "Wycheproof cached key {}",
+                vector.tc_id,
+            );
             assert_eq!(
                 valid, vector.valid_zip215,
                 "Wycheproof Ed25519 test {}",

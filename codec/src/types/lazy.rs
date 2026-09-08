@@ -1,6 +1,6 @@
 //! This module exports the [`Lazy`] type.
 
-use crate::{BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
+use crate::{BufsMut, Decode, DecodeWith, Encode, EncodeSize, FixedSize, Read, Write};
 use bytes::{Buf, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
@@ -125,29 +125,73 @@ impl<T: Read> Lazy<T> {
 }
 
 impl<T: Read> Lazy<T> {
-    /// Force decoding of the underlying value.
-    ///
-    /// This will return `None` only if decoding the value fails.
-    ///
-    /// This function wil incur the cost of decoding the value only once,
-    /// so there's no need to cache its output.
+    /// Initializes the cache using the pending bytes and configuration.
     #[cfg(feature = "std")]
-    pub fn get(&self) -> Option<&T> {
+    fn initialize_with(
+        &self,
+        decode: impl FnOnce(&[u8], &T::Cfg) -> Result<T, crate::Error>,
+    ) -> Option<&T> {
         self.value
             .get_or_init(|| {
                 let Pending { bytes, cfg } = self
                     .pending
                     .as_ref()
                     .expect("Lazy should have pending if value is not initialized");
-                T::decode_cfg(bytes.as_ref(), cfg).ok()
+                decode(bytes.as_ref(), cfg).ok()
             })
             .as_ref()
+    }
+
+    /// Force decoding of the underlying value.
+    ///
+    /// This will return `None` only if decoding the value fails.
+    ///
+    /// This function will incur the cost of decoding the value only once,
+    /// so there's no need to cache its output.
+    #[cfg(feature = "std")]
+    pub fn get(&self) -> Option<&T> {
+        self.initialize_with(|bytes, cfg| T::decode_cfg(bytes, cfg))
     }
 
     /// Returns a reference to the underlying value, or `None` if decoding failed.
     #[cfg(not(feature = "std"))]
     pub const fn get(&self) -> Option<&T> {
         self.value.as_ref()
+    }
+
+    /// Returns the cached decoding result without initializing it.
+    ///
+    /// `None` means decoding has not completed, `Some(None)` means decoding failed, and
+    /// `Some(Some(value))` contains the decoded value. Without `std`, decoding is eager, so this
+    /// always returns `Some`.
+    pub fn get_cached(&self) -> Option<Option<&T>> {
+        #[cfg(feature = "std")]
+        {
+            self.value.get().map(Option::as_ref)
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Some(self.value.as_ref())
+        }
+    }
+}
+
+impl<T: DecodeWith> Lazy<T> {
+    /// Accesses the value, reusing decoding work when the cache is uninitialized.
+    ///
+    /// This shares its cache with [`Self::get`], including failed decoding. The context must
+    /// preserve ordinary decoding semantics as required by [`DecodeWith`]. Without `std`, this
+    /// returns the value decoded eagerly at construction.
+    pub fn get_with(&self, context: &T::Context) -> Option<&T> {
+        #[cfg(feature = "std")]
+        {
+            self.initialize_with(|bytes, cfg| T::decode_with(bytes, cfg, context))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = context;
+            self.value.as_ref()
+        }
     }
 }
 
@@ -259,8 +303,14 @@ impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
 #[cfg(test)]
 mod test {
     use super::Lazy;
-    use crate::{DecodeExt, Encode, FixedSize, Read, Write};
+    use crate::{Decode, DecodeExt, DecodeWith, Encode, Error, FixedSize, Read, Write};
     use proptest::prelude::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[cfg(feature = "std")]
+    use std::{sync::Barrier, thread};
 
     /// A byte that's always <= 100
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -294,6 +344,235 @@ mod test {
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
             (0..=100u8).prop_map(Small).boxed()
+        }
+    }
+
+    #[derive(Default)]
+    struct DecodeCalls {
+        ordinary: AtomicUsize,
+        contextual: AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    struct CountingCfg {
+        max: u8,
+        calls: Arc<DecodeCalls>,
+    }
+
+    impl CountingCfg {
+        fn new(max: u8) -> Self {
+            Self {
+                max,
+                calls: Arc::default(),
+            }
+        }
+
+        fn counts(&self) -> (usize, usize) {
+            (
+                self.calls.ordinary.load(Ordering::Relaxed),
+                self.calls.contextual.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    /// A configured byte that also accepts encodings with the high bit set.
+    #[derive(Debug, PartialEq, Eq)]
+    struct CachedByte(u8);
+
+    impl FixedSize for CachedByte {
+        const SIZE: usize = 1;
+    }
+
+    impl Write for CachedByte {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for CachedByte {
+        type Cfg = CountingCfg;
+
+        fn read_cfg(buf: &mut impl bytes::Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+            cfg.calls.ordinary.fetch_add(1, Ordering::Relaxed);
+            let value = u8::read_cfg(buf, &())? & 0x7f;
+            if value > cfg.max {
+                return Err(Error::Invalid("CachedByte", "value exceeds maximum"));
+            }
+            Ok(Self(value))
+        }
+    }
+
+    struct ByteContext {
+        encoding: u8,
+        value: u8,
+    }
+
+    impl ByteContext {
+        fn new(encoding: u8) -> Self {
+            Self {
+                encoding,
+                value: encoding & 0x7f,
+            }
+        }
+    }
+
+    impl DecodeWith for CachedByte {
+        type Context = ByteContext;
+
+        fn decode_with(
+            bytes: &[u8],
+            cfg: &Self::Cfg,
+            context: &Self::Context,
+        ) -> Result<Self, Error> {
+            cfg.calls.contextual.fetch_add(1, Ordering::Relaxed);
+            if bytes.first() != Some(&context.encoding) {
+                return Self::decode_cfg(bytes, cfg);
+            }
+            if context.value > cfg.max {
+                return Err(Error::Invalid("CachedByte", "value exceeds maximum"));
+            }
+            if bytes.len() > Self::SIZE {
+                return Err(Error::ExtraData(bytes.len() - Self::SIZE));
+            }
+            Ok(Self(context.value))
+        }
+    }
+
+    #[test]
+    fn contextual_and_ordinary_access_share_cache() {
+        for contextual_first in [false, true] {
+            let cfg = CountingCfg::new(10);
+            let lazy = Lazy::<CachedByte>::deferred(&mut &[0x87][..], cfg.clone());
+            let context = ByteContext::new(0x87);
+            if cfg!(feature = "std") {
+                assert_eq!(lazy.get_cached(), None);
+                assert_eq!(cfg.counts(), (0, 0));
+            } else {
+                assert_eq!(lazy.get_cached(), Some(Some(&CachedByte(7))));
+                assert_eq!(cfg.counts(), (1, 0));
+            }
+
+            let value = if contextual_first {
+                lazy.get_with(&context)
+            } else {
+                lazy.get()
+            }
+            .unwrap();
+            assert_eq!(value, &CachedByte(7));
+            assert!(core::ptr::eq(value, lazy.get().unwrap()));
+            assert!(core::ptr::eq(value, lazy.get_with(&context).unwrap()));
+            assert_eq!(lazy.get_cached(), Some(Some(value)));
+            let expected = if cfg!(feature = "std") && contextual_first {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            assert_eq!(cfg.counts(), expected);
+        }
+
+        let lazy = Lazy::new(CachedByte(7));
+        assert_eq!(lazy.get_cached(), Some(Some(&CachedByte(7))));
+        assert_eq!(lazy.get_with(&ByteContext::new(12)), Some(&CachedByte(7)));
+    }
+
+    #[test]
+    fn contextual_and_ordinary_access_cache_failures() {
+        for contextual_first in [false, true] {
+            let cfg = CountingCfg::new(6);
+            let lazy = Lazy::<CachedByte>::deferred(&mut &[7][..], cfg.clone());
+            let context = ByteContext::new(7);
+            if contextual_first {
+                assert_eq!(lazy.get_with(&context), None);
+            } else {
+                assert_eq!(lazy.get(), None);
+            }
+            assert_eq!(lazy.get_cached(), Some(None));
+            assert_eq!(lazy.get(), None);
+            assert_eq!(lazy.get_with(&context), None);
+            let expected = if cfg!(feature = "std") && contextual_first {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            assert_eq!(cfg.counts(), expected);
+        }
+    }
+
+    #[test]
+    fn contextual_decode_matches_ordinary_constraints() {
+        let inputs: &[&[u8]] = &[&[], &[7], &[0x87], &[12], &[7, 0], &[12, 0]];
+        for bytes in inputs {
+            for max in [7, 20] {
+                for encoding in [7, 0x87, 12] {
+                    let cfg = CountingCfg::new(max);
+                    let context = ByteContext::new(encoding);
+                    let expected =
+                        CachedByte::decode_cfg(*bytes, &cfg).map_err(|error| error.to_string());
+                    let actual = CachedByte::decode_with(bytes, &cfg, &context)
+                        .map_err(|error| error.to_string());
+                    assert_eq!(actual, expected);
+
+                    let mut encoded = *bytes;
+                    let lazy = Lazy::<CachedByte>::deferred(&mut encoded, cfg);
+                    assert_eq!(lazy.get_with(&context), expected.ok().as_ref());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_context_falls_back_to_ordinary_decode() {
+        let cfg = CountingCfg::new(10);
+        let lazy = Lazy::<CachedByte>::deferred(&mut &[7][..], cfg.clone());
+        assert_eq!(lazy.get_with(&ByteContext::new(8)), Some(&CachedByte(7)));
+        assert_eq!(cfg.counts(), (1, usize::from(cfg!(feature = "std"))));
+        assert_eq!(lazy.get(), Some(&CachedByte(7)));
+        assert_eq!(cfg.counts(), (1, usize::from(cfg!(feature = "std"))));
+    }
+
+    #[test]
+    fn contextual_decode_preserves_original_serialization() {
+        for max in [6, 7] {
+            let lazy = Lazy::<CachedByte>::deferred(&mut &[0x87][..], CountingCfg::new(max));
+            assert_eq!(lazy.encode().as_ref(), &[0x87]);
+            let value = lazy.get_with(&ByteContext::new(0x87));
+            assert_eq!(value.is_some(), max == 7);
+            assert_eq!(lazy.encode().as_ref(), &[0x87]);
+            if let Some(value) = value {
+                assert_eq!(value.encode().as_ref(), &[7]);
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn concurrent_contextual_and_ordinary_access_initialize_once() {
+        for max in [6, 7] {
+            let cfg = CountingCfg::new(max);
+            let lazy = Lazy::<CachedByte>::deferred(&mut &[7][..], cfg.clone());
+            let context = ByteContext::new(7);
+            let barrier = Barrier::new(3);
+            thread::scope(|scope| {
+                let ordinary = scope.spawn(|| {
+                    barrier.wait();
+                    lazy.get()
+                });
+                let contextual = scope.spawn(|| {
+                    barrier.wait();
+                    lazy.get_with(&context)
+                });
+                barrier.wait();
+                let ordinary = ordinary.join().unwrap();
+                let contextual = contextual.join().unwrap();
+                assert_eq!(ordinary, contextual);
+                assert_eq!(ordinary.is_some(), max == 7);
+                if let Some(ordinary) = ordinary {
+                    assert!(core::ptr::eq(ordinary, contextual.unwrap()));
+                }
+            });
+            let (ordinary, contextual) = cfg.counts();
+            assert_eq!(ordinary + contextual, 1);
+            assert_eq!(lazy.get_cached().unwrap().is_some(), max == 7);
         }
     }
 

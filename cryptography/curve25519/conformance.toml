@@ -12,4 +12,4 @@ hash = "e7b94402b6621a7345af31d64a348f1686ded896cd4eb999376d162a748f2d6f"
 
 ["commonware_cryptography_curve25519::signing::tests::conformance::CodecConformance<VerifyingKey>"]
 n_cases = 65536
-hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
+hash = "07f0a3201f8d78b28cfb111074e364599688c9ae06bccb87eac1f48a1edf431c"

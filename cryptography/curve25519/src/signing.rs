@@ -23,7 +23,7 @@
 mod core;
 
 use self::core::Scalar;
-use crate::curve::{G, GAffine};
+use crate::curve::GAffine;
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
@@ -31,7 +31,9 @@ use ::core::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
-use commonware_codec::{FixedSize, Read, Write};
+use commonware_codec::{
+    Decode, DecodeWith, EncodeSize, Error as CodecError, FixedSize, Read, Write, types::lazy::Lazy,
+};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -93,10 +95,11 @@ impl SigningKey {
         let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide_scalar));
         let point = GAffine::BASEPOINT
             .to_extended()
-            .scalar_mul_secret(&scalar_le_bytes);
+            .scalar_mul_secret(&scalar_le_bytes)
+            .to_affine();
         let verifying_key = VerifyingKey {
             bytes: core::VerifyingKeyBytes::new(point.to_bytes()),
-            point: Some(point),
+            point,
         };
 
         Self {
@@ -209,19 +212,29 @@ impl SigningKey {
 
 /// A public key used to check signatures.
 ///
-/// Decoding accepts any 32 bytes and defers point validation until signature verification.
-/// Encodings that do not represent a curve point can never verify a signature.
+/// Decoding validates that the encoding represents a curve point under ZIP215.
+/// Use [`Lazy<VerifyingKey>`] to defer this validation and [`BatchVerifier::add_lazy`] to
+/// populate the lazy value's cache during batch verification.
 /// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
 /// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
 #[derive(Clone)]
 pub struct VerifyingKey {
     /// The encoded point.
     ///
-    /// When deserializing, we just have the bytes, deferring parsing of them until
-    /// signature verification, so that we can more efficiently parse them in batch.
+    /// Verification and key identity preserve this encoding, including non-canonical aliases.
     bytes: core::VerifyingKeyBytes,
-    /// If available, the point associated with these bytes.
-    point: Option<G>,
+    /// The validated point associated with these exact bytes.
+    point: GAffine,
+}
+
+/// A reusable point-decoding result for one exact public-key encoding.
+///
+/// This context preserves both successful and failed point decoding. It does not represent
+/// a signature-verification result. Contexts are constructed by the batch verifier, and a
+/// different input encoding always falls back to ordinary decoding.
+pub struct VerifyingKeyContext {
+    bytes: [u8; 32],
+    point: Option<GAffine>,
 }
 
 impl PartialEq for VerifyingKey {
@@ -281,25 +294,53 @@ impl FixedSize for VerifyingKey {
 impl Read for VerifyingKey {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
-            point: None,
-        })
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        let bytes = <[u8; Self::SIZE]>::read_cfg(buf, cfg)?;
+        Self::from_point(bytes, GAffine::decompress(&bytes))
+    }
+}
+
+impl DecodeWith for VerifyingKey {
+    type Context = VerifyingKeyContext;
+
+    fn decode_with(
+        bytes: &[u8],
+        cfg: &Self::Cfg,
+        context: &Self::Context,
+    ) -> Result<Self, CodecError> {
+        if bytes == context.bytes {
+            Self::from_point(context.bytes, context.point)
+        } else {
+            Self::decode_cfg(bytes, cfg)
+        }
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VerifyingKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes = u.arbitrary()?;
+        let point = GAffine::decompress(&bytes).ok_or(arbitrary::Error::IncorrectFormat)?;
         Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(u.arbitrary()?),
-            point: None,
+            bytes: core::VerifyingKeyBytes::new(bytes),
+            point,
         })
     }
 }
 
 impl VerifyingKey {
+    /// Associates an exact encoding with its point-decoding result.
+    fn from_point(bytes: [u8; 32], point: Option<GAffine>) -> Result<Self, CodecError> {
+        let point = point.ok_or(CodecError::Invalid(
+            "curve25519::VerifyingKey",
+            "Invalid point encoding",
+        ))?;
+        Ok(Self {
+            bytes: core::VerifyingKeyBytes::new(bytes),
+            point,
+        })
+    }
+
     fn verify_message(&self, msg: &[u8], sig: &Signature) -> bool {
         let r_bytes: [u8; 32] = sig.bytes[..32].try_into().expect("signature is 64 bytes");
         let s_bytes: [u8; 32] = sig.bytes[32..].try_into().expect("signature is 64 bytes");
@@ -309,15 +350,7 @@ impl VerifyingKey {
         let Some(r) = GAffine::decompress(&r_bytes) else {
             return false;
         };
-        let a = match self.point {
-            Some(point) => point,
-            None => {
-                let Some(point) = GAffine::decompress(self.bytes.as_bytes()) else {
-                    return false;
-                };
-                point.to_extended()
-            }
-        };
+        let a = self.point.to_extended();
 
         let digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
@@ -418,8 +451,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
 /// Inputs retained for batch verification.
 ///
-/// The encoded key is the batch pipeline's authoritative identity. Its optional decoded point is
-/// an individual-verification cache and is not part of the queued state.
+/// The encoded key is the batch pipeline's authoritative identity.
 struct BatchItem {
     message: Vec<u8>,
     public_key: core::VerifyingKeyBytes,
@@ -427,11 +459,34 @@ struct BatchItem {
 }
 
 /// A batch verification context.
-pub struct BatchVerifier {
+///
+/// Lazy keys are borrowed so point decoding can populate caches in the caller's retained objects.
+pub struct BatchVerifier<'a> {
     items: Vec<BatchItem>,
+    lazy_keys: Vec<Option<&'a Lazy<VerifyingKey>>>,
+    valid: bool,
 }
 
-impl BatchVerifier {
+impl core::KeyCache for BatchVerifier<'_> {
+    fn get(&self, index: usize) -> Option<Option<GAffine>> {
+        self.lazy_keys
+            .get(index)?
+            .as_ref()?
+            .get_cached()
+            .map(|key| key.map(|key| key.point))
+    }
+
+    fn store(&self, index: usize, bytes: &[u8; 32], point: Option<GAffine>) {
+        if let Some(Some(key)) = self.lazy_keys.get(index) {
+            key.get_with(&VerifyingKeyContext {
+                bytes: *bytes,
+                point,
+            });
+        }
+    }
+}
+
+impl<'a> BatchVerifier<'a> {
     /// Creates a verifier with space for `capacity` signatures.
     ///
     /// `capacity` is a trusted allocation hint. Bound externally supplied counts before passing
@@ -439,6 +494,8 @@ impl BatchVerifier {
     pub fn new(capacity: usize) -> Self {
         Self {
             items: Vec::with_capacity(capacity),
+            lazy_keys: Vec::new(),
+            valid: true,
         }
     }
 
@@ -461,19 +518,57 @@ impl BatchVerifier {
         });
     }
 
-    /// Queues an unframed message for raw Ed25519 test-vector checks.
-    #[cfg(test)]
-    pub(crate) fn add_raw(
+    /// Queues a signature without forcing decoding of its lazy public key.
+    ///
+    /// Verification caches each point-decoding result in the original lazy key. Repeated key
+    /// encodings share the decompression work, and later [`Lazy::get`] calls reuse the result.
+    /// A batch rejected before its point-processing phase can leave keys uninitialized.
+    /// Incorrectly sized encodings invalidate the batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
+    pub fn add_lazy(
         &mut self,
+        namespace: &[u8],
         message: &[u8],
-        public_key: &VerifyingKey,
+        public_key: &'a Lazy<VerifyingKey>,
         signature: &Signature,
     ) {
+        self.add_lazy_message(union_unique(namespace, message), public_key, signature);
+    }
+
+    /// Queues the original key encoding and retains its cache destination.
+    fn add_lazy_message(
+        &mut self,
+        message: Vec<u8>,
+        public_key: &'a Lazy<VerifyingKey>,
+        signature: &Signature,
+    ) {
+        if public_key.encode_size() != VerifyingKey::SIZE {
+            self.valid = false;
+            return;
+        }
+        let mut bytes = [0u8; VerifyingKey::SIZE];
+        public_key.write(&mut bytes.as_mut_slice());
+        self.lazy_keys.resize(self.items.len(), None);
+        self.lazy_keys.push(Some(public_key));
         self.items.push(BatchItem {
-            message: message.to_vec(),
-            public_key: public_key.bytes,
+            message,
+            public_key: core::VerifyingKeyBytes::new(bytes),
             signature: core::Signature::from_bytes(signature.bytes),
         });
+    }
+
+    /// Queues an unframed message with a lazy key for raw Ed25519 test vectors.
+    #[cfg(test)]
+    pub(crate) fn add_lazy_raw(
+        &mut self,
+        message: &[u8],
+        public_key: &'a Lazy<VerifyingKey>,
+        signature: &Signature,
+    ) {
+        self.add_lazy_message(message.to_vec(), public_key, signature);
     }
 
     /// Checks all the signatures in the batch.
@@ -488,19 +583,28 @@ impl BatchVerifier {
     /// `rng` lets an attacker construct an invalid batch that passes verification.
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
+        if !self.valid {
+            return false;
+        }
         let items = self
             .items
             .iter()
             .map(|item| (&item.public_key, &item.signature, item.message.as_slice()));
-        core::verify_batch_bytes(rng, items, strategy)
+        if self.lazy_keys.is_empty() {
+            core::verify_batch_bytes(rng, items, strategy)
+        } else {
+            core::verify_batch_bytes_cached(rng, items, strategy, &self)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchItem, BatchVerifier, SigningKey};
-    use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use super::{BatchItem, BatchVerifier, SigningKey, VerifyingKey, VerifyingKeyContext};
+    use crate::curve::GAffine;
+    use commonware_codec::{DecodeExt, DecodeWith, Encode, types::lazy::Lazy};
+    use commonware_parallel::{Rayon, Sequential, Strategy};
+    use commonware_utils::{NZUsize, test_rng};
 
     #[test]
     fn batch_items_do_not_retain_decoded_key_cache() {
@@ -513,6 +617,102 @@ mod tests {
     #[test]
     fn empty_batch_is_invalid() {
         assert!(!BatchVerifier::new(0).verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn contextual_key_decoding_preserves_the_exact_encoding() {
+        for bytes in crate::test::ZIP215_POINTS {
+            let context = VerifyingKeyContext {
+                bytes,
+                point: GAffine::decompress(&bytes),
+            };
+            let lazy = Lazy::<VerifyingKey>::deferred(&mut bytes.as_slice(), ());
+            let key = lazy.get_with(&context).unwrap();
+            assert_eq!(key.as_ref(), bytes);
+            assert_eq!(lazy.encode().as_ref(), bytes);
+            assert!(::core::ptr::eq(key, lazy.get().unwrap()));
+
+            let other_bytes = SigningKey::from_seed([42; 32]).verifying_key().encode();
+            let other = Lazy::<VerifyingKey>::deferred(&mut other_bytes.as_ref(), ());
+            assert_eq!(
+                other.get_with(&context),
+                VerifyingKey::decode(other_bytes).ok().as_ref(),
+            );
+
+            let mut malformed = [0u8; 32];
+            malformed[0] = 2;
+            assert!(VerifyingKey::decode_with(&malformed, &(), &context).is_err());
+            let mut trailing = bytes.to_vec();
+            trailing.push(0);
+            assert!(VerifyingKey::decode_with(&trailing, &(), &context).is_err());
+        }
+    }
+
+    #[test]
+    fn lazy_batch_populates_retained_keys_and_preserves_mixed_indices() {
+        const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_LAZY_KEYS_TEST";
+        fn run(strategy: &impl Strategy) {
+            let fixtures = [42, 43, 44].map(|seed| {
+                let signing_key = SigningKey::from_seed([seed; 32]);
+                (
+                    signing_key.verifying_key(),
+                    signing_key.sign(NAMESPACE, b"message"),
+                )
+            });
+            let keys: Vec<_> = (0..17)
+                .map(|i| Lazy::<VerifyingKey>::deferred(&mut fixtures[i % 3].0.as_ref(), ()))
+                .collect();
+            for _ in 0..2 {
+                let mut batch = BatchVerifier::new(keys.len() * 2);
+                for (i, key) in keys.iter().enumerate() {
+                    let (public_key, signature) = &fixtures[(i + 1) % 3];
+                    batch.add(NAMESPACE, b"message", public_key, signature);
+                    batch.add_lazy(NAMESPACE, b"message", key, &fixtures[i % 3].1);
+                }
+                batch.add(NAMESPACE, b"message", &fixtures[0].0, &fixtures[0].1);
+                assert!(batch.verify(&mut test_rng(), strategy));
+                for (i, key) in keys.iter().enumerate() {
+                    let public_key = &fixtures[i % 3].0;
+                    assert_eq!(key.get_cached(), Some(Some(public_key)));
+                    assert_eq!(key.get(), Some(public_key));
+                }
+            }
+        }
+        run(&Sequential);
+        run(&Rayon::new(NZUsize!(4)).unwrap());
+    }
+
+    #[test]
+    fn lazy_batch_caches_malformed_points_and_rejects_wrong_lengths() {
+        const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_LAZY_INVALID_TEST";
+        let signing_key = SigningKey::from_seed([42; 32]);
+        let public_key = signing_key.verifying_key();
+        let signature = signing_key.sign(NAMESPACE, b"message");
+        let mut malformed = [0u8; 32];
+        malformed[0] = 2;
+        let keys: Vec<_> = (0..17)
+            .map(|_| Lazy::<VerifyingKey>::deferred(&mut malformed.as_slice(), ()))
+            .collect();
+        for _ in 0..2 {
+            let mut batch = BatchVerifier::new(keys.len());
+            for key in &keys {
+                batch.add_lazy(NAMESPACE, b"message", key, &signature);
+            }
+            assert!(!batch.verify(&mut test_rng(), &Sequential));
+            for key in &keys {
+                assert_eq!(key.get_cached(), Some(None));
+                assert!(key.get().is_none());
+            }
+        }
+
+        for size in [0, 31, 33, 64] {
+            let bytes = vec![0u8; size];
+            let key = Lazy::<VerifyingKey>::deferred(&mut bytes.as_slice(), ());
+            let mut batch = BatchVerifier::new(2);
+            batch.add(NAMESPACE, b"message", &public_key, &signature);
+            batch.add_lazy(NAMESPACE, b"message", &key, &signature);
+            assert!(!batch.verify(&mut test_rng(), &Sequential));
+        }
     }
 
     #[test]
