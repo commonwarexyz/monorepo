@@ -36,8 +36,8 @@ impl<C: Digest> Certified<C> {
             .is_some_and(|commitments| commitments.contains(commitment))
     }
 
-    /// Drops entries below `min`.
-    pub(super) fn prune(&mut self, min: Height) {
+    /// Retains entries at or above `min`.
+    pub(super) fn retain(&mut self, min: Height) {
         self.entries = self.entries.split_off(&min);
     }
 }
@@ -48,7 +48,7 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256};
 
     #[test]
-    fn contains_is_height_scoped_and_prune_drops_below_min() {
+    fn contains_is_height_scoped_and_retain_keeps_from_min() {
         let mut certified = Certified::new();
         let a = Sha256::hash(&[b"a"]);
         let b = Sha256::hash(&[b"b"]);
@@ -61,7 +61,7 @@ mod tests {
         assert!(!certified.contains(Height::new(6), &a));
         assert!(!certified.contains(Height::new(5), &b));
 
-        certified.prune(Height::new(6));
+        certified.retain(Height::new(6));
         assert!(!certified.contains(Height::new(5), &a));
         assert!(certified.contains(Height::new(6), &c));
         assert!(certified.contains(Height::new(7), &b));

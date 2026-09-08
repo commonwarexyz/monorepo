@@ -837,7 +837,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_round(commitment, round),
+                            Request::finalized_by_round(commitment, round),
                         )
                         .ignore();
                 }
@@ -1149,9 +1149,9 @@ where
                 // Ancestry may be only notarized, so skipping commitment recomputation
                 // requires certification evidence
                 let request = if self.certified.contains(height, &commitment) {
-                    Request::certified_block(commitment, height)
+                    Request::certified(commitment, height)
                 } else {
-                    Request::ancestry_block(commitment, height)
+                    Request::untrusted(commitment, height)
                 };
                 self.floor.fetch_if_permitted(resolver, request).ignore();
                 debug!(%height, ?commitment, ?digest, "ancestry block unavailable");
@@ -1233,10 +1233,7 @@ where
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
         self.floor
-            .fetch_if_permitted(
-                resolver,
-                Request::finalized_block_by_round(commitment, round),
-            )
+            .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round))
             .ignore();
         self
     }
@@ -1639,12 +1636,8 @@ where
                     return self;
                 }
 
-                // Use the notarization payload to derive the block decode config. Below, the
-                // decoded block is checked against the same payload.
-                //
-                // A notarization is not finalization evidence. Notarize votes need not have
-                // reconstructed the block, so the payload may name a block its variant-specific
-                // components do not encode. The decode recomputes those components from the bytes.
+                // Notarization alone does not prove the commitment encodes the block,
+                // so decoding must recompute it
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
@@ -2316,7 +2309,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_height(commitment, last_finalized),
+                            Request::finalized_by_height(commitment, last_finalized),
                         )
                         .ignore();
                 }
@@ -2380,7 +2373,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_height(parent_commitment, parent_height),
+                            Request::finalized_by_height(parent_commitment, parent_height),
                         )
                         .ignore();
                     break 'cache_repair;
@@ -2423,7 +2416,7 @@ where
 
         // Certification evidence at or below the processed height can no longer
         // gate a fetch.
-        self.certified.prune(height.next());
+        self.certified.retain(height.next());
     }
 
     /// Returns the latest recoverable round at or immediately after the processed height.

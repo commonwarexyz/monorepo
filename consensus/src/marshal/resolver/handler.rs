@@ -268,14 +268,14 @@ pub(crate) enum RequestKind<D: Digest> {
     Notarized { round: Round },
     /// Fetch a finalization for a height.
     Finalized { height: Height },
-    /// Fetch a block by commitment while walking ancestry without certification evidence.
-    AncestryBlock { commitment: D, height: Height },
+    /// Fetch a block by commitment without certification evidence.
+    Untrusted { commitment: D, height: Height },
     /// Fetch a block this node certified, or an ancestor of one, by commitment.
-    CertifiedBlock { commitment: D, height: Height },
+    Certified { commitment: D, height: Height },
     /// Fetch a finalized-chain block by commitment when its height is known.
-    FinalizedBlockByHeight { commitment: D, height: Height },
+    FinalizedByHeight { commitment: D, height: Height },
     /// Fetch a finalized-chain block by commitment when only its finalization round is known.
-    FinalizedBlockByRound { commitment: D, round: Round },
+    FinalizedByRound { commitment: D, round: Round },
 }
 
 /// A marshal backfill fetch with a request and local processing annotation that match.
@@ -299,14 +299,13 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    /// Fetch a block by commitment while walking ancestry without certification
-    /// evidence for `commitment`.
+    /// Fetch a block by commitment without certification evidence.
     ///
     /// Deliveries recompute variant-specific commitment material from the block
     /// bytes.
-    pub const fn ancestry_block(commitment: D, height: Height) -> Self {
+    pub const fn untrusted(commitment: D, height: Height) -> Self {
         Self {
-            kind: RequestKind::AncestryBlock { commitment, height },
+            kind: RequestKind::Untrusted { commitment, height },
         }
     }
 
@@ -314,9 +313,9 @@ impl<D: Digest> Request<D> {
     ///
     /// Deliveries take variant-specific commitment material from `commitment`
     /// instead of recomputing it from the block bytes.
-    pub const fn certified_block(commitment: D, height: Height) -> Self {
+    pub const fn certified(commitment: D, height: Height) -> Self {
         Self {
-            kind: RequestKind::CertifiedBlock { commitment, height },
+            kind: RequestKind::Certified { commitment, height },
         }
     }
 
@@ -325,9 +324,9 @@ impl<D: Digest> Request<D> {
     /// `commitment` must be the payload of a verified finalization or the parent
     /// commitment of an archived finalized block. Deliveries take variant-specific
     /// commitment material from it instead of recomputing it from the block bytes.
-    pub const fn finalized_block_by_height(commitment: D, height: Height) -> Self {
+    pub const fn finalized_by_height(commitment: D, height: Height) -> Self {
         Self {
-            kind: RequestKind::FinalizedBlockByHeight { commitment, height },
+            kind: RequestKind::FinalizedByHeight { commitment, height },
         }
     }
 
@@ -336,31 +335,31 @@ impl<D: Digest> Request<D> {
     /// `commitment` must be the payload of a verified finalization. Deliveries take
     /// variant-specific commitment material from it instead of recomputing it from the
     /// block bytes.
-    pub const fn finalized_block_by_round(commitment: D, round: Round) -> Self {
+    pub const fn finalized_by_round(commitment: D, round: Round) -> Self {
         Self {
-            kind: RequestKind::FinalizedBlockByRound { commitment, round },
+            kind: RequestKind::FinalizedByRound { commitment, round },
         }
     }
 
     pub(crate) fn above_height_floor(&self, floor: Height) -> bool {
         match self.kind {
             RequestKind::Finalized { height }
-            | RequestKind::AncestryBlock { height, .. }
-            | RequestKind::CertifiedBlock { height, .. }
-            | RequestKind::FinalizedBlockByHeight { height, .. } => height > floor,
-            RequestKind::Notarized { .. } | RequestKind::FinalizedBlockByRound { .. } => true,
+            | RequestKind::Untrusted { height, .. }
+            | RequestKind::Certified { height, .. }
+            | RequestKind::FinalizedByHeight { height, .. } => height > floor,
+            RequestKind::Notarized { .. } | RequestKind::FinalizedByRound { .. } => true,
         }
     }
 
     pub(crate) fn above_round_floor(&self, floor: Round) -> bool {
         match self.kind {
-            RequestKind::Notarized { round } | RequestKind::FinalizedBlockByRound { round, .. } => {
+            RequestKind::Notarized { round } | RequestKind::FinalizedByRound { round, .. } => {
                 round > floor
             }
             RequestKind::Finalized { .. }
-            | RequestKind::AncestryBlock { .. }
-            | RequestKind::CertifiedBlock { .. }
-            | RequestKind::FinalizedBlockByHeight { .. } => true,
+            | RequestKind::Untrusted { .. }
+            | RequestKind::Certified { .. }
+            | RequestKind::FinalizedByHeight { .. } => true,
         }
     }
 
@@ -373,17 +372,17 @@ impl<D: Digest> Request<D> {
                 Key::Finalized { height },
                 Annotation::Finalized(Finalized::ByHeight { height }),
             ),
-            RequestKind::AncestryBlock { commitment, height } => {
+            RequestKind::Untrusted { commitment, height } => {
                 (Key::Block(commitment), Annotation::Ancestry { height })
             }
-            RequestKind::CertifiedBlock { commitment, height } => {
+            RequestKind::Certified { commitment, height } => {
                 (Key::Block(commitment), Annotation::Certified { height })
             }
-            RequestKind::FinalizedBlockByHeight { commitment, height } => (
+            RequestKind::FinalizedByHeight { commitment, height } => (
                 Key::Block(commitment),
                 Annotation::Finalized(Finalized::ByHeight { height }),
             ),
-            RequestKind::FinalizedBlockByRound { commitment, round } => (
+            RequestKind::FinalizedByRound { commitment, round } => (
                 Key::Block(commitment),
                 Annotation::Finalized(Finalized::ByRound { round }),
             ),
