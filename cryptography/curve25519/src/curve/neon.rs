@@ -795,7 +795,7 @@ impl msm::Backend for Backend {
         weighted
     }
 
-    // Scalar recombination computes each point once, avoiding duplicate SIMD lanes.
+    /// Scalar recombination computes each point once, avoiding duplicate SIMD lanes.
     fn combine_windows(
         self,
         partials: impl IntoIterator<Item = (usize, G)>,
