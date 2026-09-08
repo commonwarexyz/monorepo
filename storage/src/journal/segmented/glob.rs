@@ -695,6 +695,40 @@ mod tests {
         });
     }
 
+    /// Rewind into a buffered suffix, then crash without another sync.
+    /// Recovery must retain the kept frame and discard the frame beyond the rewind target.
+    #[test_traced]
+    fn test_glob_rewind_persists_retained_buffered_values() {
+        // Keep the last two frames buffered so rewind must flush the retained prefix
+        let cfg = || Config {
+            write_buffer: NZUsize!(1024),
+            ..test_cfg()
+        };
+        let ((first, second), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let glob: Glob<_, i32> = Glob::init(context.child("first"), cfg()).await.unwrap();
+                let (glob, first_offset, first_size) = glob.append(1, &1).await.unwrap();
+                let glob = glob.sync(1).await.unwrap();
+                let (glob, second_offset, second_size) = glob.append(1, &2).await.unwrap();
+                let (glob, _, _) = glob.append(1, &3).await.unwrap();
+
+                let glob = glob
+                    .rewind_section(1, second_offset + u64::from(second_size))
+                    .await
+                    .unwrap();
+                drop(glob);
+                ((first_offset, first_size), (second_offset, second_size))
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let glob: Glob<_, i32> = Glob::init(context.child("reopen"), cfg()).await.unwrap();
+            assert_eq!(glob.size(1).unwrap(), second.0 + u64::from(second.1));
+            assert_eq!(glob.get(1, first.0, first.1).await.unwrap(), 1);
+            assert_eq!(glob.get(1, second.0, second.1).await.unwrap(), 2);
+            glob.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_glob_persistence() {
         let executor = deterministic::Runner::default();

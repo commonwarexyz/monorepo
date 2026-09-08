@@ -62,8 +62,7 @@ pub trait SectionBuffer: Send + Sync {
 
     /// Resize the logical size of the buffer.
     ///
-    /// A shrink, and every byte it retains, is durable when this returns. Growth is not durable
-    /// until the next sync.
+    /// A shrink and all retained bytes are durable when this returns.
     fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
@@ -107,7 +106,9 @@ impl<B: Blob> SectionBuffer for Write<B> {
     }
 
     async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+        // Raw resizes need an explicit sync to meet the section buffer's durability guarantee
+        Self::resize(self, len).await?;
+        Self::sync(self).await
     }
 }
 
