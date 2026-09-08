@@ -447,6 +447,7 @@ pub(crate) mod test {
             for _ in 0..100 {
                 keys.push(Digest::random(&mut rng));
             }
+
             // Repeat present and absent keys, some more than once, so one operation resolves
             // several slots in both the cached pass and the miss fallback.
             let repeats: Vec<Digest> = keys.iter().step_by(37).copied().collect();

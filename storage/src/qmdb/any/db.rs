@@ -30,7 +30,7 @@ use std::{collections::HashMap, sync::Arc};
 type ShardReads<T> = (Vec<Option<T>>, Vec<(usize, u64)>);
 
 /// Whether two `(key index, position)` candidates share a position.
-fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
+const fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
     a.1 == b.1
 }
 
@@ -344,10 +344,9 @@ where
 
     /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
     fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
-        candidates
-            .chunk_by(same_position)
-            .map(|group| group[0].1)
-            .collect()
+        let mut positions = Vec::with_capacity(candidates.len());
+        positions.extend(candidates.chunk_by(same_position).map(|group| group[0].1));
+        positions
     }
 
     /// Match the operations read for the deduplicated positions of position-sorted
@@ -374,6 +373,7 @@ where
             let Operation::Update(data) = op else {
                 panic!("location does not reference update operation. loc={pos}");
             };
+
             // The candidates sharing this position match the update only for repeated input
             // keys. Defer each match so every slot but the last takes a clone and the last
             // takes the update itself.
