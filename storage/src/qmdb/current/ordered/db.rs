@@ -18,8 +18,8 @@ use crate::{
         operation::Key,
     },
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Codec, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use futures::stream::Stream;

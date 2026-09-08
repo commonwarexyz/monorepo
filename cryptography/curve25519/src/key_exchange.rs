@@ -18,8 +18,8 @@
 //! ```
 
 use crate::curve::{F, montgomery};
-use bytes::{Buf, BufMut};
-use commonware_codec::{FixedSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_math::algebra::Random;
 use subtle::ConstantTimeEq;
 use zeroize::{ZeroizeOnDrop, Zeroizing};

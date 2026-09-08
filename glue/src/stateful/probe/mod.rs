@@ -131,9 +131,11 @@ mod wire;
 #[cfg(test)]
 mod test {
     use super::{Config, Mailbox, Probe, wire};
-    use bytes::{Buf, BufMut};
+    use bytes::BufMut;
     use commonware_actor::Feedback;
-    use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+    use commonware_codec::{
+        Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
+    };
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
         marshal::{

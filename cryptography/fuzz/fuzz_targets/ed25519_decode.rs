@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Copying, DecodeExt, Encode};
 use commonware_cryptography::{
     Signer, Verifier,
     ed25519::{PrivateKey, PublicKey, Signature},
@@ -124,7 +124,7 @@ fn split_namespace_message(bytes: &[u8]) -> (&[u8], &[u8]) {
 
 fn test_pubkey(pubkey: &[u8]) {
     let consensus_result = ConsensusPublicKey::try_from(pubkey);
-    let our_result = PublicKey::decode(pubkey);
+    let our_result = PublicKey::decode(Copying(pubkey));
 
     // Consensus implements the same ZIP-215 validation rules.
     assert_eq!(consensus_result.is_err(), our_result.is_err());
@@ -138,7 +138,7 @@ fn test_pubkey(pubkey: &[u8]) {
 
 fn test_signature(signature: &[u8]) {
     let consensus_result = ConsensusSignature::try_from(signature);
-    let our_result = Signature::decode(signature);
+    let our_result = Signature::decode(Copying(signature));
 
     // Consensus implements the same ZIP-215 validation rules.
     assert_eq!(consensus_result.is_err(), our_result.is_err());
@@ -160,7 +160,10 @@ fn test_verification(pubkey: &[u8], signature: &[u8], namespace: &[u8], message:
         (Ok(public_key), Ok(signature)) => Some(public_key.verify(&signature, &payload).is_ok()),
         _ => None,
     };
-    let our_result = match (PublicKey::decode(pubkey), Signature::decode(signature)) {
+    let our_result = match (
+        PublicKey::decode(Copying(pubkey)),
+        Signature::decode(Copying(signature)),
+    ) {
         (Ok(public_key), Ok(signature)) => Some(public_key.verify(namespace, message, &signature)),
         _ => None,
     };
@@ -174,7 +177,7 @@ fn test_signing(seed: [u8; 32], namespace: &[u8], message: &[u8]) {
 
     // Construct equivalent signing keys from the same raw seed
     let consensus_private_key = ConsensusPrivateKey::from(seed);
-    let our_private_key = PrivateKey::decode(seed.as_ref()).unwrap();
+    let our_private_key = PrivateKey::decode(Copying(seed.as_ref())).unwrap();
 
     // The derived public keys should have identical encodings
     let consensus_public_key = ConsensusPublicKey::from(&consensus_private_key);

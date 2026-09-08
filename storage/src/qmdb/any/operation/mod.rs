@@ -2,9 +2,9 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{any::value::ValueEncoding, operation::Committable},
 };
-use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use std::fmt;
 
 pub(crate) mod fixed;
@@ -215,7 +215,7 @@ mod tests {
         let mut buf: Vec<u8> = op.encode().to_vec();
         assert!(buf.len() > 1 + 1 + u64::SIZE + u64::SIZE);
         *buf.last_mut().unwrap() = 0x01;
-        assert!(Op::decode_cfg(buf.as_ref(), &()).is_err());
+        assert!(Op::decode_cfg(buf, &()).is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::types::{Height, Round};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
 use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
 use commonware_runtime::Metrics;
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(encoded[0], 0); // Block variant
 
         // Test decoding
-        let mut buf = encoded.as_ref();
+        let mut buf = encoded;
         let decoded = Key::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
         assert_eq!(decoded, Key::Block(commitment));
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(encoded[0], 1); // Finalized variant
 
         // Test decoding
-        let mut buf = encoded.as_ref();
+        let mut buf = encoded;
         let decoded = Key::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
         assert_eq!(decoded, Key::Finalized { height });
@@ -623,7 +623,7 @@ mod tests {
         assert_eq!(encoded[0], 2); // Notarized variant
 
         // Test decoding
-        let mut buf = encoded.as_ref();
+        let mut buf = encoded;
         let decoded = Key::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
         assert_eq!(decoded, Key::Notarized { round });
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn test_subject_decode_rejects_invalid_enum_tag() {
         let bad = [3u8];
-        let mut buf = bad.as_ref();
+        let mut buf = commonware_codec::Copying(&bad);
         assert!(matches!(
             Key::<D>::read(&mut buf),
             Err(CodecError::InvalidEnum(3))

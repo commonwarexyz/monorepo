@@ -29,8 +29,8 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
-use bytes::{Buf, BufMut};
+use crate::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
 
@@ -426,7 +426,7 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeExt, Encode, error::Error};
+    use crate::{Copying, DecodeExt, Encode, error::Error};
     use bytes::Bytes;
 
     #[test]
@@ -508,10 +508,10 @@ mod tests {
             assert_eq!(buf.len(), size(value));
 
             // decode matches original value
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf[..]);
             let decoded: T = read(&mut slice).unwrap();
             assert_eq!(decoded, value);
-            assert!(slice.is_empty());
+            assert!(slice.0.is_empty());
 
             // UInt wrapper
             let encoded = UInt(value).encode();
@@ -563,10 +563,10 @@ mod tests {
             assert_eq!(buf.len(), size_signed(value));
 
             // decode matches original value
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf[..]);
             let decoded: T = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value);
-            assert!(slice.is_empty());
+            assert!(slice.0.is_empty());
 
             // SInt wrapper
             let encoded = SInt(value).encode();
@@ -671,11 +671,11 @@ mod tests {
             );
 
             // Verify we can decode it back correctly
-            let mut slice = &buf[..];
+            let mut slice = Copying(&buf[..]);
             let decoded: i16 = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value, "Decode mismatch for value {value}");
             assert!(
-                slice.is_empty(),
+                slice.0.is_empty(),
                 "Buffer not fully consumed for value {value}",
             );
         }

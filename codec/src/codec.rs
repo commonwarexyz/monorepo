@@ -1,9 +1,9 @@
 //! Core traits for encoding and decoding.
 
-use crate::error::Error;
+use crate::{Buf, Copying, DecodeInput, error::Error};
 #[cfg(not(feature = "std"))]
 use alloc::{sync::Arc, vec::Vec};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf as _, BufMut, Bytes, BytesMut};
 #[cfg(feature = "std")]
 use std::{sync::Arc, vec::Vec};
 
@@ -193,7 +193,7 @@ impl<T: Write + ?Sized> Write for Arc<T> {
     }
 }
 
-/// Trait for types that can be read (decoded) from a byte buffer.
+/// Trait for types that can be read (decoded) from a [Buf].
 pub trait Read: Sized {
     /// The `Cfg` type parameter allows passing configuration during the read process. This is
     /// crucial for safely decoding untrusted data, for example, by providing size limits for
@@ -309,9 +309,13 @@ impl<T: Encode + Send + Sync> EncodeShared for T {}
 pub trait Decode: Read {
     /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is consumed.
     ///
+    /// Accepts [Buf] inputs and owned [`Vec<u8>`] values through [DecodeInput]. Borrowed
+    /// slices require an explicit [Copying] adapter.
+    ///
     /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes in
     /// `buf` after reading.
-    fn decode_cfg(mut buf: impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn decode_cfg(buf: impl DecodeInput, cfg: &Self::Cfg) -> Result<Self, Error> {
+        let mut buf = buf.into();
         let result = Self::read_cfg(&mut buf, cfg)?;
 
         // Check that the buffer is fully consumed.
@@ -381,7 +385,7 @@ pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
             Self::SIZE
         );
 
-        Self::decode_cfg(bytes.as_ref(), &())
+        Self::decode_cfg(Copying(bytes.as_ref()), &())
     }
 }
 
@@ -446,7 +450,7 @@ mod tests {
     fn test_encode_fixed() {
         let value = 42u32;
         let encoded: [u8; 4] = value.encode_fixed();
-        let decoded = <u32>::decode(&encoded[..]).unwrap();
+        let decoded = <u32>::decode(Copying(&encoded[..])).unwrap();
         assert_eq!(value, decoded);
     }
 

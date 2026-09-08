@@ -24,7 +24,7 @@ use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
-use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
@@ -414,7 +414,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         let mut items = Vec::with_capacity(positions.len());
         for i in 0..positions.len() {
             let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
-            items.push(A::decode(slice).map_err(Error::Codec)?);
+            items.push(A::decode(Copying(slice)).map_err(Error::Codec)?);
         }
         Ok((items, hits))
     }
@@ -431,7 +431,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
-        A::decode(&buf[..]).ok()
+        A::decode(buf).ok()
     }
 
     /// See [Journal::last].
@@ -1049,6 +1049,7 @@ async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::codec::FixedByteView;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1092,6 +1093,19 @@ mod tests {
             page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(128),
         }
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_get_preserves_owned_byte_fields() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+            (journal, _) = journal.append(1, &FixedByteView::new(7)).await.unwrap();
+            let decoded = journal.try_get_sync(1, 0).unwrap();
+            journal.destroy().await.unwrap();
+            assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+            decoded.assert_shared();
+        });
     }
 
     fn lazy_recovery_cfg(pooler: &impl BufferPooler, partition: &str) -> Config {

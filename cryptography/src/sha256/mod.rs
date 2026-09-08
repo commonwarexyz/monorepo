@@ -21,9 +21,9 @@
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
+    Buf, DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -170,7 +170,7 @@ impl Sha256 {
     /// Convenience function for testing that creates an easily recognizable digest by repeating a
     /// single byte.
     pub fn fill(b: u8) -> <Self as Hasher>::Digest {
-        <Self as Hasher>::Digest::decode(vec![b; DIGEST_LENGTH].as_ref()).unwrap()
+        <Self as Hasher>::Digest::decode(vec![b; DIGEST_LENGTH]).unwrap()
     }
 }
 
@@ -290,7 +290,7 @@ impl Zeroize for Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode};
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -307,7 +307,7 @@ mod tests {
         let mut hasher = Sha256::default();
         hasher.update(msg);
         let (_, digest) = hasher.finalize();
-        assert!(Digest::decode(digest.as_ref()).is_ok());
+        assert!(Digest::decode(Copying(digest.as_ref())).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test one-shot hasher

@@ -1,10 +1,11 @@
 //! Blob header layouts shared by every storage backend: the on-disk prelude, the per-layout
 //! geometry, and reopen-time resolution (including torn-creation recovery).
 
+use commonware_codec::{Buf, Copying};
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use crate::{BlobLayout as Layout, BlobVersion, Buf, BufMut};
+    use crate::{BlobLayout as Layout, BlobVersion, BufMut};
     use commonware_codec::{DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
@@ -344,7 +345,7 @@ stability_scope!(BETA {
             layouts: &RangeInclusive<Layout>,
             versions: &RangeInclusive<BlobVersion>,
         ) -> Result<(u64, BlobVersion, u64), HeaderError> {
-            let header: Self = Self::decode(&raw[..Self::PRELUDE_SIZE])
+            let header: Self = Self::decode(Copying(&raw[..Self::PRELUDE_SIZE]))
                 .expect("header decode should never fail for correct size input");
             let layout = header.validate()?;
             layout.validate_region(raw, raw_len)?;
@@ -1055,7 +1056,7 @@ pub(crate) mod tests {
     fn test_header_bytes_round_trip() {
         let header = v0_header(123);
         let bytes = header.encode();
-        let decoded: Header = Header::decode(bytes.as_ref()).unwrap();
+        let decoded: Header = Header::decode(bytes).unwrap();
         assert_eq!(header, decoded);
     }
 

@@ -27,8 +27,8 @@ pub mod storage;
 pub mod verification;
 
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};

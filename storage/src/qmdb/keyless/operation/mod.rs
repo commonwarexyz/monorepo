@@ -5,9 +5,9 @@ use crate::{
         operation::{Committable, Floored},
     },
 };
-use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use core::fmt::Display;
 
 pub(crate) mod fixed;

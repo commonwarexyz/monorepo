@@ -20,8 +20,8 @@
 
 use crate::Hasher;
 use blake3::Hash;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -181,7 +181,7 @@ impl Zeroize for Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode};
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
@@ -195,14 +195,14 @@ mod tests {
         let mut hasher = Blake3::default();
         hasher.update(msg);
         let (hasher, digest) = hasher.finalize();
-        assert!(Digest::decode(digest.as_ref()).is_ok());
+        assert!(Digest::decode(Copying(digest.as_ref())).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse the reset hasher
         let mut hasher = hasher;
         hasher.update(msg);
         let (_, digest) = hasher.finalize();
-        assert!(Digest::decode(digest.as_ref()).is_ok());
+        assert!(Digest::decode(Copying(digest.as_ref())).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test one-shot hasher

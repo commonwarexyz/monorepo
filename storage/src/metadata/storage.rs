@@ -174,7 +174,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let buf = blob
             .read_at(0, len, ReadOptions::DONT_CACHE)
             .await?
-            .coalesce_with_pool(context.storage_buffer_pool());
+            .coalesce_with_pool(context.storage_buffer_pool())
+            .freeze();
 
         // Verify integrity.
         //
@@ -211,22 +212,23 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
-            let key = K::read(&mut buf.as_ref()[cursor..].as_ref())
-                .expect("unable to read key from blob");
+            let key = K::read(&mut buf.slice(cursor..)).expect("unable to read key from blob");
             cursor += key.encode_size();
 
             // Read value
-            let value = V::read_cfg(&mut buf.as_ref()[cursor..].as_ref(), codec_config)
+            let value = V::read_cfg(&mut buf.slice(cursor..), codec_config)
                 .expect("unable to read value from blob");
             lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
             cursor += value.encode_size();
             data.insert(key, value);
         }
 
-        // Return info
+        // Values with byte fields are views of `buf`, in which case the mirror is copied so it
+        // stays mutable for in-place overwrites.
+        let mirror = buf.into_mut_with_pool(context.storage_buffer_pool());
         Ok(Loaded::Valid(
             data,
-            Wrapper::new(blob, version, lengths, buf),
+            Wrapper::new(blob, version, lengths, mirror),
         ))
     }
 

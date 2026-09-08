@@ -1,7 +1,7 @@
 //! Compact encoding for ordered, extensible mode values.
 
-use crate::{EncodeSize, Error, Read, ReadExt, Write};
-use bytes::{Buf, BufMut};
+use crate::{Buf, EncodeSize, Error, Read, ReadExt, Write};
+use bytes::BufMut;
 
 // The high bit is packet framing rather than mode value data.
 const CONTINUATION_BIT: u8 = 1 << 7;
@@ -247,7 +247,7 @@ impl<'a, const N: usize> arbitrary::Arbitrary<'a> for Modes<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DecodeExt, Encode};
+    use crate::{Copying, DecodeExt, Encode};
 
     fn assert_encoding<const N: usize>(modes: [u8; N], expected: &[u8]) {
         let modes = Modes::new(modes.map(|value| mode!(value))).unwrap();
@@ -320,23 +320,23 @@ mod tests {
     #[test]
     fn rejects_truncated_and_oversized_packets() {
         assert!(matches!(
-            Modes::<2>::decode(&[][..]),
+            Modes::<2>::decode(Copying(&[][..])),
             Err(Error::EndOfBuffer)
         ));
         assert!(matches!(
-            Modes::<2>::decode(&[0x80][..]),
+            Modes::<2>::decode(Copying(&[0x80][..])),
             Err(Error::EndOfBuffer)
         ));
         assert!(matches!(
-            Modes::<1>::decode(&[0x80][..]),
+            Modes::<1>::decode(Copying(&[0x80][..])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(&[0x80, 0x80][..]),
+            Modes::<2>::decode(Copying(&[0x80, 0x80][..])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(&[0x80, 0x80, 0x01][..]),
+            Modes::<2>::decode(Copying(&[0x80, 0x80, 0x01][..])),
             Err(Error::Invalid("Modes", _))
         ));
     }
@@ -344,27 +344,27 @@ mod tests {
     #[test]
     fn rejects_non_canonical_packets() {
         assert!(matches!(
-            Modes::<1>::decode(&[0x00][..]),
+            Modes::<1>::decode(Copying(&[0x00][..])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(&[0x80, 0x00][..]),
+            Modes::<2>::decode(Copying(&[0x80, 0x00][..])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(&[0x81, 0x00][..]),
+            Modes::<2>::decode(Copying(&[0x81, 0x00][..])),
             Err(Error::Invalid("Modes", _))
         ));
     }
 
     #[test]
     fn read_stops_at_packet_boundary() {
-        let mut encoded = &[0x01, 0x02][..];
+        let mut encoded = Copying(&[0x01, 0x02][..]);
         let modes = Modes::<2>::read(&mut encoded).unwrap();
         assert_eq!(modes.encode().as_ref(), &[0x01]);
-        assert_eq!(encoded, &[0x02]);
+        assert_eq!(encoded.0, &[0x02]);
         assert!(matches!(
-            Modes::<2>::decode(&[0x01, 0x02][..]),
+            Modes::<2>::decode(Copying(&[0x01, 0x02][..])),
             Err(Error::ExtraData(1))
         ));
     }

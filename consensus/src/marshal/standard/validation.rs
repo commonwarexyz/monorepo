@@ -234,8 +234,8 @@ where
 mod tests {
     use super::*;
     use crate::types::Height;
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use bytes::BufMut;
+    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
     use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest};
 
     #[derive(Clone, Debug, PartialEq, Eq)]

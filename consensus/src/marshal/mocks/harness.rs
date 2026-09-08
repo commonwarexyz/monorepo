@@ -24,9 +24,9 @@ use crate::{
     },
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_broadcast::buffered;
-use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digestible, Hasher, Signer,

@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Copying, DecodeExt, Encode};
 use commonware_cryptography::{
     Signer, Verifier,
     secp256r1::recoverable::{PrivateKey, PublicKey, Signature},
@@ -32,7 +32,7 @@ pub struct FuzzInput {
 // Test private key validation and encoding
 fn test_private_key(data: &[u8]) {
     let ref_result = RefSigningKey::from_slice(data);
-    let our_result = PrivateKey::decode(data);
+    let our_result = PrivateKey::decode(Copying(data));
 
     // The reference P256 implements the following policy:
     // Deserialize secret key from an encoded secret scalar passed as a byte slice.
@@ -69,7 +69,7 @@ fn test_private_key(data: &[u8]) {
 // Test public key validation and encoding
 fn test_public_key(data: &[u8]) {
     let ref_result = RefVerifyingKey::from_sec1_bytes(data);
-    let our_result = PublicKey::decode(data);
+    let our_result = PublicKey::decode(Copying(data));
     assert_eq!(ref_result.is_err(), our_result.is_err());
 
     if let (Ok(ref_key), Ok(our_key)) = (ref_result, our_result) {
@@ -80,7 +80,7 @@ fn test_public_key(data: &[u8]) {
 }
 
 fn test_public_key_roundtrip(data: &[u8]) {
-    if let Ok(public_key) = PublicKey::decode(data) {
+    if let Ok(public_key) = PublicKey::decode(Copying(data)) {
         let encoded = public_key.encode();
         assert_eq!(
             data,
@@ -99,7 +99,7 @@ fn test_signature(data: &[u8]) {
     }
 
     let ref_result = RefSignature::from_slice(&data[1..]);
-    let our_result = Signature::decode(data);
+    let our_result = Signature::decode(Copying(data));
 
     if data[0] >= 4 {
         assert!(
@@ -131,7 +131,7 @@ fn test_signature(data: &[u8]) {
 // Test sign and verify operations
 fn test_sign_verify(private_key_data: &[u8; 32], message: &[u8]) {
     // Create private key
-    if let Ok(private_key) = PrivateKey::decode(private_key_data.as_ref()) {
+    if let Ok(private_key) = PrivateKey::decode(Copying(private_key_data.as_ref())) {
         let signature = private_key.sign(b"", message);
         let public_key = private_key.public_key();
         assert!(public_key.verify(b"", message, &signature));
@@ -144,14 +144,14 @@ fn test_sign_verify(private_key_data: &[u8; 32], message: &[u8]) {
 
         // Test encoding round-trip
         let encoded_sig = signature.encode();
-        let decoded_sig = Signature::decode(encoded_sig.as_ref()).unwrap();
+        let decoded_sig = Signature::decode(encoded_sig).unwrap();
         assert!(public_key.verify(b"", message, &decoded_sig));
     }
 }
 
 // Test public key derivation
 fn test_public_key_derivation(private_key_data: &[u8]) {
-    if let Ok(private_key) = PrivateKey::decode(private_key_data) {
+    if let Ok(private_key) = PrivateKey::decode(Copying(private_key_data)) {
         let public_key1 = private_key.public_key();
         let public_key2 = PublicKey::from(private_key.clone());
         assert_eq!(public_key1.encode(), public_key2.encode());

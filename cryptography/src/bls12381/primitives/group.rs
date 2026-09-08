@@ -32,9 +32,9 @@ use blst::{
     blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
     blst_scalar_from_fr,
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize,
+    Buf, EncodeSize,
     Error::{self, Invalid},
     FixedArray, FixedSize, Read, ReadExt, Write,
 };
@@ -1910,7 +1910,7 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
+    use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{Random, test_suites};
@@ -2055,16 +2055,24 @@ mod tests {
         let s = Scalar::random(test_rng());
         let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
         assert_eq!(
-            Scalar::decode_cfg(bytes.as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::decode_cfg(Copying(bytes.as_ref()), &ScalarReadCfg::AllowZero).unwrap(),
             s
         );
         assert_eq!(
-            Scalar::decode_cfg([0u8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::decode_cfg(
+                Copying([0u8; Scalar::SIZE].as_ref()),
+                &ScalarReadCfg::AllowZero
+            )
+            .unwrap(),
             Scalar::zero()
         );
         // Non-canonical encodings (>= r) are rejected.
         assert!(
-            Scalar::decode_cfg([0xffu8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).is_err()
+            Scalar::decode_cfg(
+                Copying([0xffu8; Scalar::SIZE].as_ref()),
+                &ScalarReadCfg::AllowZero
+            )
+            .is_err()
         );
     }
 

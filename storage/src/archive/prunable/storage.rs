@@ -8,9 +8,9 @@ use crate::{
     },
     rmap::RMap,
 };
-use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut, Handle,
+    BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;

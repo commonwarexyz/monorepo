@@ -293,7 +293,7 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
     };
     use commonware_actor::Feedback;
-    use commonware_codec::Encode;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         Signer,
         ed25519::{PrivateKey, PublicKey},
@@ -752,6 +752,36 @@ mod tests {
             values.sort_unstable();
 
             assert_eq!(values, (0..count).collect::<Vec<u32>>());
+        });
+    }
+
+    #[test_traced]
+    fn test_recv_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let sender = pk(0);
+            let value: Vec<IoBuf> = (0..8).map(|_| IoBuf::from(vec![1u8; 17])).collect();
+            let frame = value.encode();
+            let cfg = ((..).into(), (..).into());
+            let range = frame.as_ptr_range();
+
+            // Decoding the received frame by value hands out views of it
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send((sender.clone(), IoBuf::from(frame.clone())))
+                .expect("mock receiver should be open");
+            let mut receiver =
+                WrappedReceiver::<_, Vec<IoBuf>>::new(cfg, MockReceiver { receiver: rx });
+            let (from, decoded) = receiver.recv().await.unwrap();
+            let decoded = decoded.unwrap();
+            assert_eq!(from, sender);
+            assert_eq!(decoded, value);
+            assert!(decoded.iter().all(|b| range.contains(&b.as_ref().as_ptr())));
+
+            // Decoding a slice of the frame copies every field
+            let copied =
+                Vec::<IoBuf>::decode_cfg(commonware_codec::Copying(frame.as_ref()), &cfg).unwrap();
+            assert_eq!(copied, value);
+            assert!(copied.iter().all(|b| !range.contains(&b.as_ref().as_ptr())));
         });
     }
 }

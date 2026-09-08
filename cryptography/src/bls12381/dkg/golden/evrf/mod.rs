@@ -10,10 +10,10 @@ use crate::{
     },
 };
 use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
-    Write,
+    Buf, Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize,
+    Read, ReadExt, Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
@@ -311,7 +311,7 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let x: F = ReadExt::read(&mut raw.as_slice())?;
+        let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
         Ok(Self {
             inner: Secret::new(x),
         })
@@ -400,11 +400,11 @@ impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
-        let k_big: G = match ReadExt::read(&mut &sig.raw[..G::SIZE]) {
+        let k_big: G = match ReadExt::read(&mut Copying(&sig.raw[..G::SIZE])) {
             Ok(p) => p,
             Err(_) => return false,
         };
-        let s: F = match ReadExt::read(&mut &sig.raw[G::SIZE..]) {
+        let s: F = match ReadExt::read(&mut Copying(&sig.raw[G::SIZE..])) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -437,7 +437,7 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let point: G = ReadExt::read(&mut raw.as_slice())?;
+        let point: G = ReadExt::read(&mut Copying(raw.as_slice()))?;
         Ok(Self { raw, point })
     }
 }
@@ -636,7 +636,7 @@ impl VrfCommitments {
         let outputs: Vec<(PublicKey, Bytes, Self)> = outputs
             .into_iter()
             .filter_map(|(sender, msg, commitments)| {
-                let mut buf: &[u8] = msg.as_ref();
+                let mut buf = msg.clone();
                 let _: Summary = ReadExt::read(&mut buf).ok()?;
                 if commitments.proof.pedersen_to_plain.len() != commitments.commitments.len() {
                     return None;
@@ -955,7 +955,7 @@ mod tests {
     fn setup_codec_roundtrip() {
         let s = Setup::new(NonZeroU32::new(3).unwrap());
         let bytes = s.encode();
-        let decoded = Setup::read_cfg(&mut bytes.as_ref(), &NonZeroU32::new(3).unwrap()).unwrap();
+        let decoded = Setup::read_cfg(&mut bytes.clone(), &NonZeroU32::new(3).unwrap()).unwrap();
         assert_eq!(decoded.max_players(), s.max_players());
         // Re-encode and compare to make sure the roundtrip is bit-exact.
         assert_eq!(decoded.encode(), bytes);

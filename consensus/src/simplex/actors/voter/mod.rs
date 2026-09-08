@@ -2827,11 +2827,8 @@ mod tests {
                 }
             }
             let (_, encoded) = certificates.recv().await.unwrap();
-            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
-                &mut encoded.as_ref(),
-                &schemes[0].certificate_codec_config(),
-            )
-            .unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config()).unwrap();
             assert!(matches!(
                 certificate,
                 Certificate::Finalization(finalization) if finalization.view() == View::new(1)
@@ -2841,11 +2838,8 @@ mod tests {
                 build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
             mailbox.resolved(Certificate::Nullification(nullification.clone()));
             let (_, encoded) = certificates.recv().await.unwrap();
-            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
-                &mut encoded.as_ref(),
-                &schemes[0].certificate_codec_config(),
-            )
-            .unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config()).unwrap();
             assert!(matches!(
                 certificate,
                 Certificate::Nullification(received) if received == nullification
@@ -2876,11 +2870,8 @@ mod tests {
             }
 
             let (_, encoded) = certificates.recv().await.unwrap();
-            let certificate: Certificate<ed25519::Scheme, Sha256Digest> = Certificate::decode_cfg(
-                &mut encoded.as_ref(),
-                &schemes[0].certificate_codec_config(),
-            )
-            .unwrap();
+            let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config()).unwrap();
             assert!(matches!(
                 certificate,
                 Certificate::Nullification(received) if received == nullification

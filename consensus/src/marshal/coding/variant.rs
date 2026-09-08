@@ -201,8 +201,8 @@ mod tests {
         marshal::{coding::types::StoredCodedBlock, mocks::block::Block},
         types::{Epoch, Height, View},
     };
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, Error, Read, Write};
+    use bytes::BufMut;
+    use commonware_codec::{Buf, EncodeSize, Error, Read, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Digest as _, Digestible, Signer as _,

@@ -58,9 +58,9 @@ use crate::{
     },
     types::{Epoch, Participant, Round, View},
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
+    Buf, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
 };
 #[commonware_macros::stability(ALPHA)]
 use commonware_cryptography::bls12381::tle;
@@ -1379,7 +1379,7 @@ mod tests {
             })
             .collect();
         let malformed_signer = votes[0].signer;
-        let mut malformed = &[0u8][..];
+        let mut malformed = commonware_codec::Copying(&[0]);
         votes[0].signature = Lazy::deferred(&mut malformed, ());
 
         assert_eq!(
