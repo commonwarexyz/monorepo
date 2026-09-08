@@ -45,21 +45,13 @@ the resulting stream to an application reporter. In terminal mode the reporter r
 coordinates and digests for the total-order pane, then acknowledges every `Exact`; headless mode
 acknowledges without retaining the stream.
 
-# Network Planes
+# Network
 
-Every node runs two authenticated `commonware-p2p` networks over one identity key, so the two
-kinds of traffic get separate TCP connections to each peer:
-
-- **Consensus plane** (`port`): the data-availability channel, consensus artifacts, certificates,
-  and the engine's artifact resolver.
-- **Bulk plane** (`port + 1`): complete block bodies only, meaning `commonware-broadcast` body
-  gossip and `commonware-resolver` body backfill.
-
-A peer sender writes whole messages in priority order, so on one connection a vote queued behind a
-512 KiB body waits for that body to drain. On a 50-node cluster a third of the peer connections
-held an unsent body frame at any instant. Separate listeners remove that head-of-line term from
-every consensus hop. Both planes track the same peer set at the same index and a peer blocked on
-one plane is blocked on both.
+Every node runs one authenticated `commonware-p2p` network. Separate channels carry data
+availability, consensus artifacts, certificates, artifact recovery, complete-block broadcast,
+and body backfill. Each channel has its own quota; all channels share each peer's priority
+queues and TCP connection. A message already being written must drain before the next message
+can start. Blocking a peer disconnects all its channels.
 
 # Usage (Run at Least 6 to Make Progress)
 
@@ -76,8 +68,7 @@ mprocs
 ```
 
 Storage persists under `/tmp/commonware-log-multimmit`, so stopping and restarting a pane resumes
-that node where it left off. Local consensus ports advance by two because every node also binds
-`port + 1`; `--bulk-port` overrides that placement.
+that node where it left off. Each node binds the port specified by `--me`.
 
 ## One at a Time
 
@@ -141,9 +132,9 @@ three in `us-east-1`. `--compute-threads` sizes the bulk verification pool, whil
 verdicts a view waits on; it defaults to one thread per eight validators, and at least two.
 `--nodes` changes the committee size (six is the minimum), `--producers` selects producer keys in
 chain order (and defaults to every validator), while `--bootstrappers`,
-storage IOPS and throughput, marshal cache budgets, profiling, trace sampling, the two P2P ports
-(`--port` and `--bulk-port`), dashboard, and binary filename can also be overridden. The generated
-`config.yaml` opens both ports in the validator security group. `--body-size` controls the complete junk
+storage IOPS and throughput, marshal cache budgets, profiling, trace sampling, the P2P port
+(`--port`), dashboard, and binary filename can also be overridden. The generated `config.yaml`
+opens that port in the validator security group. `--body-size` controls the complete junk
 payload generated for every producer block. The command creates node configs, `dashboard.json`,
 and the deployer's `config.yaml`. Validator gp3 volumes default to 16,000 IOPS and 1,250 MiB/s;
 the monitoring volume remains independently configurable. The command does not create cloud

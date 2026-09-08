@@ -6,8 +6,6 @@
 # Each pane is one participant. Participant 0 is the bootstrapper, so start it first if you launch
 # panes by hand. Storage lives under /tmp/commonware-log-multimmit and survives restarts, which is
 # the point: stop a pane, start it again, and it resumes where it left off.
-#
-# Consensus ports advance by two because each node also binds port + 1 for its bulk block plane.
 procs:
   node0:
     shell: "cargo run --release -- --me 0@3000 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/0"
