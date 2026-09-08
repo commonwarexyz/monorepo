@@ -2966,7 +2966,7 @@ mod tests {
                             && !matches!(
                                 fetch.subscriber,
                                 handler::Annotation::Certified { height }
-                                | handler::Annotation::Ancestry { height }
+                                | handler::Annotation::Untrusted { height }
                                     if height == Height::new(2)
                             )
                     }),

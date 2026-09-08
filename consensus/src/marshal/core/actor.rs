@@ -1538,7 +1538,7 @@ where
                     matches!(
                         annotation,
                         Annotation::Certified { height: bound }
-                        | Annotation::Ancestry { height: bound } if height <= *bound
+                        | Annotation::Untrusted { height: bound } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)

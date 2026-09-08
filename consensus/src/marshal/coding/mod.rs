@@ -3610,7 +3610,7 @@ mod tests {
             // subscriber alone binds the coding root, so the shared delivery
             // decodes without recomputing it and lands in the finalized archive.
             let mut subscribers = NonEmptyVec::new((
-                handler::Annotation::Ancestry { height },
+                handler::Annotation::Untrusted { height },
                 tracing::Span::none(),
             ));
             subscribers.push((
@@ -3752,7 +3752,10 @@ mod tests {
             assert_eq!(fetches.len(), 2);
             assert!(fetches.iter().all(|fetch| matches!(
                 (&fetch.key, &fetch.subscriber),
-                (handler::Key::Block(_), handler::Annotation::Ancestry { .. })
+                (
+                    handler::Key::Block(_),
+                    handler::Annotation::Untrusted { .. }
+                )
             )));
         });
     }

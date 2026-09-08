@@ -181,7 +181,7 @@ impl<D: Digest> Producer for Handler<D> {
 /// annotations may share one peer key when they depend on the same block.
 ///
 /// [`Notarization`](Annotation::Notarization) carries round-bound local
-/// context. [`Ancestry`](Annotation::Ancestry), [`Certified`](Annotation::Certified)
+/// context. [`Untrusted`](Annotation::Untrusted), [`Certified`](Annotation::Certified)
 /// and [`Finalized`](Annotation::Finalized) describe how block-bearing
 /// responses should be validated and stored locally.
 ///
@@ -194,17 +194,16 @@ impl<D: Digest> Producer for Handler<D> {
 pub enum Annotation {
     /// A notarization requested by round.
     Notarization { round: Round },
-    /// A block requested by commitment while walking ancestry without
-    /// certification evidence for the commitment.
+    /// A block requested by commitment without certification evidence.
     ///
     /// The expected height is local pruning metadata and should only be
     /// supplied when the caller has a validated height bound. It must not make
     /// a commitment-matching response invalid. A matching block above this
     /// bound is delivered but not cached.
     ///
-    /// Deliveries recompute any variant-specific commitment material from the
-    /// block bytes.
-    Ancestry { height: Height },
+    /// Commitment material is recomputed unless another subscriber supplies
+    /// certification evidence.
+    Untrusted { height: Height },
     /// A block requested by commitment that this node certified, or an ancestor
     /// of one.
     ///
@@ -214,7 +213,7 @@ pub enum Annotation {
     /// parent. So every ancestor recorded from a certified block encodes its
     /// commitment. Deliveries take variant-specific commitment material from
     /// the commitment instead of recomputing it. The height bound behaves as
-    /// for [`Ancestry`](Annotation::Ancestry).
+    /// for [`Untrusted`](Annotation::Untrusted).
     Certified { height: Height },
     /// A block requested by commitment for the finalized chain.
     ///
@@ -301,8 +300,8 @@ impl<D: Digest> Request<D> {
 
     /// Fetch a block by commitment without certification evidence.
     ///
-    /// Deliveries recompute variant-specific commitment material from the block
-    /// bytes.
+    /// Commitment material is recomputed unless another subscriber supplies
+    /// certification evidence.
     pub const fn untrusted(commitment: D, height: Height) -> Self {
         Self {
             kind: RequestKind::Untrusted { commitment, height },
@@ -373,7 +372,7 @@ impl<D: Digest> Request<D> {
                 Annotation::Finalized(Finalized::ByHeight { height }),
             ),
             RequestKind::Untrusted { commitment, height } => {
-                (Key::Block(commitment), Annotation::Ancestry { height })
+                (Key::Block(commitment), Annotation::Untrusted { height })
             }
             RequestKind::Certified { commitment, height } => {
                 (Key::Block(commitment), Annotation::Certified { height })
@@ -413,7 +412,7 @@ pub(crate) fn above_height_floor<D: Digest>(
         (Key::Finalized { height: requested }, _) => *requested > height,
         (
             Key::Block(_),
-            Annotation::Ancestry { height: requested }
+            Annotation::Untrusted { height: requested }
             | Annotation::Certified { height: requested }
             | Annotation::Finalized(Finalized::ByHeight { height: requested }),
         ) => *requested > height,
@@ -754,10 +753,10 @@ mod tests {
         let stale_certified = Annotation::Certified {
             height: Height::new(100),
         };
-        let fresh_ancestry = Annotation::Ancestry {
+        let fresh_untrusted = Annotation::Untrusted {
             height: Height::new(101),
         };
-        let stale_ancestry = Annotation::Ancestry {
+        let stale_untrusted = Annotation::Untrusted {
             height: Height::new(100),
         };
 
@@ -775,7 +774,7 @@ mod tests {
             }
         ));
         assert!(predicate(&block, &fresh_certified));
-        assert!(predicate(&block, &fresh_ancestry));
+        assert!(predicate(&block, &fresh_untrusted));
 
         let same_height = Key::<D>::Finalized {
             height: Height::new(100),
@@ -788,7 +787,7 @@ mod tests {
         ));
         assert!(!predicate(&block, &stale_finalized));
         assert!(!predicate(&block, &stale_certified));
-        assert!(!predicate(&block, &stale_ancestry));
+        assert!(!predicate(&block, &stale_untrusted));
     }
 
     #[test]
