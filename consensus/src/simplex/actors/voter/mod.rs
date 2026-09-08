@@ -5713,7 +5713,7 @@ mod tests {
     /// When the voter is the leader of a view and builds its own proposal, it
     /// must not subsequently ask the automaton to verify that same proposal.
     ///
-    /// This is guarded by `Slot::built` (which sets `status = Verified` and
+    /// This is guarded by `Slot::record_verified` (which sets `status = Verified` and
     /// `requested_verify = true`) and by `Round::verify_ready` short-circuiting
     /// for leader-owned views. This test asserts the end-to-end invariant on
     /// the live path (no restart): after calling `automaton.propose`, the voter

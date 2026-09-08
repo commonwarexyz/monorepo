@@ -168,10 +168,12 @@ pub fn check<P: Simplex>(
         // Invariant: no_nullification_in_finalized_view
         // If any replica finalized view v, no replica may have a nullification
         // that covers v (a nullification covers the rest of its term).
-        let finalized_views: HashMap<u64, Sha256Digest> = replicas
+        let finalized_views: HashMap<u64, (Sha256Digest, u64)> = replicas
             .iter()
             .flat_map(|(_, _, finalizations)| {
-                finalizations.iter().map(|(&view, d)| (view, d.payload))
+                finalizations
+                    .iter()
+                    .map(|(&view, d)| (view, (d.payload, d.parent)))
             })
             .collect();
         let nullified: HashSet<u64> = replicas
@@ -188,49 +190,60 @@ pub fn check<P: Simplex>(
         }
 
         // Invariant: no_conflicting_notarization_in_finalized_view
-        // If any replica finalized view v for a digest, no replica may have a notarization for a different digest.
+        // If any replica finalized view v for a proposal, no replica may have a
+        // notarization for a different proposal. Certificates sign the parent
+        // alongside the payload, so a differing parent is a different proposal.
         for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
             for (&view, data) in notarizations.iter() {
-                if let Some(&finalized_digest) = finalized_views.get(&view) {
+                if let Some(&(finalized_payload, finalized_parent)) = finalized_views.get(&view) {
                     assert_eq!(
-                        finalized_digest, data.payload,
-                        "Invariant violation: replica {idx} notarized view {view} with {:?} but finalized with {finalized_digest:?}",
-                        data.payload
+                        (finalized_payload, finalized_parent),
+                        (data.payload, data.parent),
+                        "Invariant violation: replica {idx} notarized view {view} with ({:?}, {}) but finalized with ({finalized_payload:?}, {finalized_parent})",
+                        data.payload,
+                        data.parent
                     );
                 }
             }
         }
 
         // Invariant: no_conflicting_quorum_notarizations
-        // In any view, there cannot be quorum notarizations for multiple digests.
-        let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
+        // In any view, there cannot be quorum notarizations for multiple proposals.
+        let mut per_view: HashMap<u64, HashSet<(Sha256Digest, u64)>> = HashMap::new();
         for (notarizations, _, _) in replicas.iter() {
             for (v, d) in notarizations {
                 let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
                 if is_quorum {
-                    per_view.entry(*v).or_default().insert(d.payload);
+                    per_view
+                        .entry(*v)
+                        .or_default()
+                        .insert((d.payload, d.parent));
                 }
             }
         }
-        for (v, payloads) in per_view {
+        for (v, proposals) in per_view {
             assert!(
-                payloads.len() <= 1,
-                "Invariant violation: conflicting quorum notarizations in view {v}: {payloads:?}"
+                proposals.len() <= 1,
+                "Invariant violation: conflicting quorum notarizations in view {v}: {proposals:?}"
             );
         }
 
         // Invariant: finalization_requires_notarization
-        // Any finalization must be backed by some notarization for the same (view, payload).
-        let notarized: HashSet<(u64, Sha256Digest)> = replicas
+        // Any finalization must be backed by some notarization for the same
+        // (view, payload, parent).
+        let notarized: HashSet<(u64, Sha256Digest, u64)> = replicas
             .iter()
-            .flat_map(|(notarizations, _, _)| notarizations.iter().map(|(&v, d)| (v, d.payload)))
+            .flat_map(|(notarizations, _, _)| {
+                notarizations.iter().map(|(&v, d)| (v, d.payload, d.parent))
+            })
             .collect();
         for (_, _, finalizations) in replicas.iter() {
             for (&v, d) in finalizations.iter() {
                 assert!(
-                    notarized.contains(&(v, d.payload)),
-                    "Invariant violation: finalization without notarization: view {v}, payload={:?}",
-                    d.payload
+                    notarized.contains(&(v, d.payload, d.parent)),
+                    "Invariant violation: finalization without notarization: view {v}, payload={:?}, parent={}",
+                    d.payload,
+                    d.parent
                 );
             }
         }
@@ -338,6 +351,7 @@ where
                         view.get(),
                         Notarization {
                             payload: cert.proposal.payload,
+                            parent: cert.proposal.parent.get(),
                             signature_count: get_signature_count::<S>(
                                 &cert.certificate,
                                 max_participants,
@@ -418,6 +432,7 @@ mod tests {
             3,
             Notarization {
                 payload,
+                parent: 2,
                 signature_count: Some(3),
             },
         );
@@ -460,6 +475,7 @@ mod tests {
                 3,
                 Notarization {
                     payload,
+                    parent,
                     signature_count: Some(3),
                 },
             );
@@ -539,6 +555,7 @@ mod tests {
                 view,
                 Notarization {
                     payload,
+                    parent,
                     signature_count: Some(3),
                 },
             );
@@ -576,6 +593,7 @@ mod tests {
                 4,
                 Notarization {
                     payload,
+                    parent: 2,
                     signature_count: Some(3),
                 },
             );
@@ -615,6 +633,7 @@ mod tests {
                 11,
                 Notarization {
                     payload,
+                    parent: 3,
                     signature_count: Some(3),
                 },
             );
@@ -712,6 +731,80 @@ mod tests {
         );
         assert!(
             message.contains("finalization without notarization"),
+            "wrong invariant fired: {message}"
+        );
+    }
+
+    #[test]
+    fn notarization_parent_mismatch_with_finalization_fires() {
+        let payload = Sha256Digest::from([11u8; 32]);
+        let mut notarizations = HashMap::new();
+        notarizations.insert(
+            3,
+            Notarization {
+                payload,
+                parent: 1,
+                signature_count: Some(3),
+            },
+        );
+        let mut finalizations = HashMap::new();
+
+        // Parent 2 keeps the ancestry rules satisfied, so the first arm to
+        // fire is the notarization naming a different parent for the same
+        // payload (the unbacked finalization would fire next).
+        finalizations.insert(
+            3,
+            Finalization {
+                payload,
+                parent: 2,
+                signature_count: Some(3),
+            },
+        );
+
+        let message = check_panics(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            vec![(notarizations, HashMap::new(), finalizations)],
+        );
+        assert!(
+            message.contains("notarized view 3"),
+            "wrong invariant fired: {message}"
+        );
+    }
+
+    #[test]
+    fn quorum_notarization_parent_conflict_fires() {
+        let payload = Sha256Digest::from([12u8; 32]);
+        let replica = |parent| {
+            let mut notarizations = HashMap::new();
+            notarizations.insert(
+                3,
+                Notarization {
+                    payload,
+                    parent,
+                    signature_count: Some(3),
+                },
+            );
+            (notarizations, HashMap::new(), HashMap::new())
+        };
+
+        // Without an honest quorum the parent is not trustworthy, so the rule
+        // must not fire (see `parent_mismatch_requires_honest_quorum`).
+        check::<SimplexEd25519>(
+            N4F3C1,
+            TermLength::new(NZU32!(5)),
+            vec![replica(1), replica(2)],
+        );
+
+        // Two quorum notarizations for the same payload but different parents
+        // are different proposals, so they conflict.
+        let message = check_panics(
+            N4F1C3,
+            TermLength::new(NZU32!(5)),
+            vec![replica(1), replica(2)],
+        );
+        assert!(
+            message.contains("conflicting quorum notarizations in view 3"),
             "wrong invariant fired: {message}"
         );
     }

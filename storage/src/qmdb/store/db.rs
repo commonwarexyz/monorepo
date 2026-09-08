@@ -102,7 +102,6 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
-use commonware_utils::Array;
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
@@ -157,7 +156,7 @@ impl<K: Key, V: CodecShared + Clone, const N: usize> From<[(K, Option<V>); N]> f
 pub struct Batch<'a, E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -168,7 +167,7 @@ where
 impl<'a, E, K, V, T> Batch<'a, E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -213,7 +212,7 @@ where
 pub struct Db<E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -251,7 +250,7 @@ where
 impl<E, K, V, T> std::fmt::Debug for Db<E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -266,7 +265,7 @@ where
 impl<E, K, V, T> Db<E, K, V, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     T: Translator,
 {
@@ -1361,6 +1360,59 @@ mod test {
             assert_eq!(fetched_value.unwrap(), value);
 
             // Destroy the store
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A [Db] keyed by variable-length byte keys.
+    type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap>;
+
+    #[test_traced("DEBUG")]
+    fn test_store_variable_length_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Configure the operation codec for variable-length keys.
+            let cfg = Config {
+                log: JournalConfig {
+                    partition: "journal".into(),
+                    write_buffer: NZUsize!(64 * 1024),
+                    replay_buffer: NZUsize!(64 * 1024),
+                    compression: None,
+                    codec_config: (((0..=64).into(), ()), ((0..=10000).into(), ())),
+                    items_per_section: NZU64!(7),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+                translator: TwoCap,
+                init_cache_size: Some(NZUsize!(1024)),
+                init_buffer: NZUsize!(1 << 21),
+            };
+
+            // Commit two keys of different lengths that share a translated prefix.
+            let db = VecKeyStore::init(
+                context.child("store").with_attribute("index", 0),
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            let short = b"key".to_vec();
+            let long = b"key-extended".to_vec();
+            let batch = db
+                .new_batch()
+                .update(short.clone(), vec![1])
+                .update(long.clone(), vec![2])
+                .finalize(None);
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.commit().await.unwrap();
+            assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
+            assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
+            drop(db);
+
+            // Reopen the store and verify both committed values.
+            let db = VecKeyStore::init(context.child("store").with_attribute("index", 1), cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
+            assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
             db.destroy().await.unwrap();
         });
     }
