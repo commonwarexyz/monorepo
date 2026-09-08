@@ -87,50 +87,22 @@ fn limbs_sub5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 5] {
     limbs_sub_with_borrow(a, b).0
 }
 
-/// Returns the full 512-bit product `a * b` as eight little-endian 64-bit limbs, via the standard
+/// Returns the full product `a * b` as little-endian 64-bit limbs, via the standard
 /// schoolbook multiply-accumulate-with-carry ("Comba") method.
-fn limbs_mul_wide(a: &[u64; 4], b: &[u64; 4]) -> [u64; 8] {
-    let mut t = [0u64; 8];
-    for i in 0..4 {
+fn limbs_mul_wide<const A: usize, const B: usize, const OUT: usize>(
+    a: &[u64; A],
+    b: &[u64; B],
+) -> [u64; OUT] {
+    const { assert!(OUT == A + B) };
+    let mut t = [0u64; OUT];
+    for i in 0..A {
         let mut carry = 0u128;
-        for j in 0..4 {
+        for j in 0..B {
             let sum = t[i + j] as u128 + (a[i] as u128) * (b[j] as u128) + carry;
             t[i + j] = sum as u64;
             carry = sum >> 64;
         }
-        t[i + 4] = carry as u64;
-    }
-    t
-}
-
-/// Returns the full product `a * b` as ten little-endian 64-bit limbs, via the same
-/// schoolbook method as [`limbs_mul_wide`].
-fn mul5x5(a: &[u64; 5], b: &[u64; 5]) -> [u64; 10] {
-    let mut t = [0u64; 10];
-    for i in 0..5 {
-        let mut carry = 0u128;
-        for j in 0..5 {
-            let sum = t[i + j] as u128 + (a[i] as u128) * (b[j] as u128) + carry;
-            t[i + j] = sum as u64;
-            carry = sum >> 64;
-        }
-        t[i + 5] = carry as u64;
-    }
-    t
-}
-
-/// Returns the full product `a * b` as nine little-endian 64-bit limbs, via the same schoolbook
-/// method as [`limbs_mul_wide`].
-fn mul5x4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 9] {
-    let mut t = [0u64; 9];
-    for i in 0..5 {
-        let mut carry = 0u128;
-        for j in 0..4 {
-            let sum = t[i + j] as u128 + (a[i] as u128) * (b[j] as u128) + carry;
-            t[i + j] = sum as u64;
-            carry = sum >> 64;
-        }
-        t[i + 4] = carry as u64;
+        t[i + B] = carry as u64;
     }
     t
 }
@@ -145,11 +117,11 @@ fn mul5x4(a: &[u64; 5], b: &[u64; 4]) -> [u64; 9] {
 /// at most two trial subtractions of `L` remain to reach the canonical residue.
 fn barrett_reduce(x: [u64; 8]) -> Scalar {
     let q1: [u64; 5] = x[3..8].try_into().expect("slice has 5 elements");
-    let q2 = mul5x5(&q1, &MU);
+    let q2 = limbs_mul_wide::<5, 5, 10>(&q1, &MU);
     let q3: [u64; 5] = q2[5..10].try_into().expect("slice has 5 elements");
 
     let r1: [u64; 5] = x[0..5].try_into().expect("slice has 5 elements");
-    let r2: [u64; 5] = mul5x4(&q3, &L)[0..5]
+    let r2: [u64; 5] = limbs_mul_wide::<5, 4, 9>(&q3, &L)[0..5]
         .try_into()
         .expect("slice has 5 elements");
     let mut r = limbs_sub5(&r1, &r2);
@@ -385,7 +357,7 @@ mod tests {
                 let a: Scalar = u.arbitrary()?;
                 let b: Scalar = u.arbitrary()?;
 
-                let wide = super::limbs_mul_wide(&a.0, &b.0);
+                let wide: [u64; 8] = super::limbs_mul_wide(&a.0, &b.0);
                 let mut bytes = [0u8; 64];
                 for (i, limb) in wide.iter().enumerate() {
                     bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());

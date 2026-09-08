@@ -1,15 +1,9 @@
 use core::array;
 use subtle::{Choice, ConditionallySelectable};
 
-/// How many parallel operations we try and do via SIMD.
+/// Number of independent field or group elements carried by a vector
 ///
-/// This is set to the highest realistic number, targeting AVX-512.
-/// On other backends, this is larger than necessary.
-///
-/// This should not be harmful to performance, because a larger lane count
-/// can be emulated with a smaller lane count.
-/// An exception to this would be if the memory pressure were particularly bad,
-/// but given how small this value is, this shouldn't be an issue.
+/// Backends may process these lanes in smaller native tiles
 pub const LANES: usize = 8;
 
 /// The low 51 bits: what a limb holds once carries have been propagated out of it.
@@ -382,6 +376,15 @@ pub trait FBackend: Copy {
     /// a * a.
     fn square(self, a: FVec) -> FVec {
         self.mul(a, a)
+    }
+
+    /// Squares every lane `k` times, returning `a` unchanged when `k` is zero.
+    #[inline(always)]
+    fn pow2k(self, mut a: FVec, k: u32) -> FVec {
+        for _ in 0..k {
+            a = self.square(a);
+        }
+        a
     }
 
     /// a - b.
@@ -833,14 +836,6 @@ impl GAffineVec {
     }
 }
 
-/// Squares `value` `k` times.
-fn pow2k<B: FBackend>(backend: B, mut value: FVec, k: u32) -> FVec {
-    for _ in 0..k {
-        value = backend.square(value);
-    }
-    value
-}
-
 /// Raises every lane to `2^250 - 1` using the standard addition chain.
 fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
     let a = backend.square(value);
@@ -849,18 +844,18 @@ fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
     let c = backend.mul(a, b);
     let d = backend.square(c);
     let e = backend.mul(b, d);
-    let f = backend.mul(pow2k(backend, e, 5), e);
-    let g = backend.mul(pow2k(backend, f, 10), f);
-    let h = backend.mul(pow2k(backend, g, 20), g);
-    let i = backend.mul(pow2k(backend, h, 10), f);
-    let j = backend.mul(pow2k(backend, i, 50), i);
-    let k = backend.mul(pow2k(backend, j, 100), j);
-    backend.mul(pow2k(backend, k, 50), i)
+    let f = backend.mul(backend.pow2k(e, 5), e);
+    let g = backend.mul(backend.pow2k(f, 10), f);
+    let h = backend.mul(backend.pow2k(g, 20), g);
+    let i = backend.mul(backend.pow2k(h, 10), f);
+    let j = backend.mul(backend.pow2k(i, 50), i);
+    let k = backend.mul(backend.pow2k(j, 100), j);
+    backend.mul(backend.pow2k(k, 50), i)
 }
 
 /// Raises every lane to `(p - 5) / 8 = 2^252 - 3` for point decompression.
 fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
-    backend.mul(value, pow2k(backend, pow_2_250_minus_1(backend, value), 2))
+    backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
 }
 
 /// Abstracts over group operations.
@@ -876,6 +871,28 @@ pub trait GBackend: FBackend {
     ///
     /// This can be faster than [`Self::g_add`].
     fn g_add_mixed(self, a: GVec, b: GAffineVec) -> GVec;
+
+    /// Adds a signed affine point to each of two extended points
+    ///
+    /// Each result is `a[i] + b[i]` or `a[i] - b[i]` according to `negative[i]`.
+    /// Variable-time, so the signs must be public
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn g_add_mixed_pair(self, a: [G; 2], b: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
+        let mut current = [G::IDENTITY; LANES];
+        let mut incoming = [GAffine::IDENTITY; LANES];
+        let mut signs = [false; LANES];
+        current[..2].copy_from_slice(&a);
+        incoming[..2].copy_from_slice(&b);
+        signs[..2].copy_from_slice(&negative);
+        let updated = self
+            .g_add_mixed(
+                GVec::transpose(current),
+                GAffineVec::from_signed_lanes(self, &incoming, &signs),
+            )
+            .untranspose();
+        [updated[0], updated[1]]
+    }
 
     /// Add a point to itself.
     fn g_double(self, a: GVec) -> GVec {

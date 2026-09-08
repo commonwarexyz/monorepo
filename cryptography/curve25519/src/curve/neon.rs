@@ -7,7 +7,9 @@
 //! only while multiplying. Loose input digits can each occupy 26 bits. The surrounding group
 //! formulas keep their compact five-limb representation.
 
-use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51};
+use super::{
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES, MASK_51,
+};
 use core::arch::aarch64::*;
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
@@ -155,48 +157,35 @@ fn digit_product(a: uint32x2_t, b: uint32x2_t) -> uint64x2_t {
     unsafe { vmull_u32(a, b) }
 }
 
+/// Reduces ten alternating 26/25-bit product columns into five loose radix-`2^51` limbs
+///
+/// With `M = 2^26 - 1`, column bounds are `M^2` times
+/// `[267, 154, 213, 118, 159, 82, 105, 46, 51, 10]`.
+/// Each pair satisfies `c[2*i] + 2^26*c[2*i + 1] = low[i] + 2^51*carry[i]`, with
+/// `low[i] < 2^51`. Carries move to the next limb, wrapping the top carry by `2^255 = 19 (mod p)`
 #[inline(always)]
-fn reduce_columns(mut c: [uint64x2_t; 10]) -> Regs {
-    // SAFETY: AArch64 targets provide NEON. All accumulators and carry additions fit in `u64`.
+fn reduce_columns(c: [uint64x2_t; 10]) -> Regs {
+    // SAFETY: AArch64 targets provide NEON. Paired columns and carry additions fit in u64
     unsafe {
         let mask26 = vdupq_n_u64((1 << 26) - 1);
         let mask25 = vdupq_n_u64((1 << 25) - 1);
-        c[1] = vaddq_u64(c[1], vshrq_n_u64(c[0], 26));
-        c[0] = vandq_u64(c[0], mask26);
-        c[2] = vaddq_u64(c[2], vshrq_n_u64(c[1], 25));
-        c[1] = vandq_u64(c[1], mask25);
-        c[3] = vaddq_u64(c[3], vshrq_n_u64(c[2], 26));
-        c[2] = vandq_u64(c[2], mask26);
-        c[4] = vaddq_u64(c[4], vshrq_n_u64(c[3], 25));
-        c[3] = vandq_u64(c[3], mask25);
-        c[5] = vaddq_u64(c[5], vshrq_n_u64(c[4], 26));
-        c[4] = vandq_u64(c[4], mask26);
-        c[6] = vaddq_u64(c[6], vshrq_n_u64(c[5], 25));
-        c[5] = vandq_u64(c[5], mask25);
-        c[7] = vaddq_u64(c[7], vshrq_n_u64(c[6], 26));
-        c[6] = vandq_u64(c[6], mask26);
-        c[8] = vaddq_u64(c[8], vshrq_n_u64(c[7], 25));
-        c[7] = vandq_u64(c[7], mask25);
-        c[9] = vaddq_u64(c[9], vshrq_n_u64(c[8], 26));
-        c[8] = vandq_u64(c[8], mask26);
-        // Narrowing this carry is lossless, which needs a tighter bound than the worst-case
-        // column (`267 * (2^26 - 1)^2 < 2^61`): column 9 is where terms fold *from*, never
-        // *into*, so it accumulates at most ten unscaled products plus column 8's carry,
-        // `c[9] < 10 * (2^26 - 1)^2 + 2^32 < 2^56`, making the carry `c[9] >> 25` less than
-        // `2^31`. Narrowing enables one widening multiply instead of the longer packed-u64
-        // shift/add sequence.
-        let top = vmovn_u64(vshrq_n_u64(c[9], 25));
-        c[0] = vaddq_u64(c[0], vmull_n_u32(top, 19));
-        c[9] = vandq_u64(c[9], mask25);
-        c[1] = vaddq_u64(c[1], vshrq_n_u64(c[0], 26));
-        c[0] = vandq_u64(c[0], mask26);
-        [
-            vorrq_u64(c[0], vshlq_n_u64(c[1], 26)),
-            vorrq_u64(c[2], vshlq_n_u64(c[3], 26)),
-            vorrq_u64(c[4], vshlq_n_u64(c[5], 26)),
-            vorrq_u64(c[6], vshlq_n_u64(c[7], 26)),
-            vorrq_u64(c[8], vshlq_n_u64(c[9], 26)),
-        ]
+        let paired: Regs =
+            core::array::from_fn(|i| vaddq_u64(c[2 * i + 1], vshrq_n_u64(c[2 * i], 26)));
+        let mut out: Regs = core::array::from_fn(|i| {
+            vorrq_u64(
+                vandq_u64(c[2 * i], mask26),
+                vshlq_n_u64(vandq_u64(paired[i], mask25), 26),
+            )
+        });
+        // Column 8 is at most 51*M^2 and column 9 at most 10*M^2, so the top carry fits
+        // below 2^31 and can narrow losslessly. Its 19-fold and every other carry are
+        // below 2^35, leaving each output below 2^51 + 2^35 < 2^52 without another pass
+        let top = vmovn_u64(vshrq_n_u64(paired[4], 25));
+        out[0] = vaddq_u64(out[0], vmull_n_u32(top, 19));
+        for i in 1..5 {
+            out[i] = vaddq_u64(out[i], vshrq_n_u64(paired[i - 1], 25));
+        }
+        out
     }
 }
 
@@ -546,23 +535,54 @@ impl FBackend for Backend {
     }
 }
 
-/// Returns an all-zero point used as fully overwritten output storage.
+/// Packs two independent field elements into register lanes
 #[inline(always)]
-const fn empty_gvec() -> GVec {
-    let zero = FVec::splat(F::ZERO);
-    GVec {
-        x: zero,
-        y: zero,
-        t: zero,
-        z: zero,
+fn pack_pair(values: [F; 2]) -> Regs {
+    // SAFETY: AArch64 targets provide NEON, and the selected lane is within the two-lane register
+    unsafe {
+        core::array::from_fn(|i| vsetq_lane_u64(values[1].0[i], vdupq_n_u64(values[0].0[i]), 1))
     }
+}
+
+/// Unpacks both register lanes into independent field elements
+#[inline(always)]
+fn unpack_pair(regs: Regs) -> [F; 2] {
+    // SAFETY: AArch64 targets provide NEON, and both lane indices are within the register
+    unsafe {
+        [
+            F(regs.map(|reg| vgetq_lane_u64(reg, 0))),
+            F(regs.map(|reg| vgetq_lane_u64(reg, 1))),
+        ]
+    }
+}
+
+/// Applies the complete mixed-addition formula to two independent register lanes
+///
+/// Extended inputs and outputs use `[x, y, t, z]`; affine inputs use `[x, y, t2d]`
+#[inline(always)]
+fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
+    let [x1, y1, t1, z1] = p;
+    let [x2, y2, t2d] = q;
+    let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+    let b = mul_regs(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+    let c = mul_regs(t1, t2d);
+    let d = add_raw(z1, z1);
+    let e = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(d, c));
+    let g = reduce_regs(add_raw(d, c));
+    let h = reduce_regs(add_raw(b, a));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
 }
 
 impl GBackend for Backend {
     /// Fused point addition, processed two lanes at a time to keep the working set in registers.
     #[inline(always)]
-    fn g_add(self, p: GVec, q: GVec) -> GVec {
-        let mut result = empty_gvec();
+    fn g_add(self, mut p: GVec, q: GVec) -> GVec {
         for tile in 0..TILES {
             // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
             //
@@ -581,51 +601,85 @@ impl GBackend for Backend {
                 load(&EDWARDS_D2.limbs, tile),
             );
             let zz = mul_regs(load(&p.z.limbs, tile), load(&q.z.limbs, tile));
-            let d = reduce_regs(add_raw(zz, zz));
+            let d = add_raw(zz, zz);
             let e = reduce_regs(sub_raw(b, a));
             let f = reduce_regs(sub_raw(d, c));
             let g = reduce_regs(add_raw(d, c));
             let h = reduce_regs(add_raw(b, a));
 
-            store(mul_regs(e, f), &mut result.x.limbs, tile);
-            store(mul_regs(g, h), &mut result.y.limbs, tile);
-            store(mul_regs(e, h), &mut result.t.limbs, tile);
-            store(mul_regs(f, g), &mut result.z.limbs, tile);
+            store(mul_regs(e, f), &mut p.x.limbs, tile);
+            store(mul_regs(g, h), &mut p.y.limbs, tile);
+            store(mul_regs(e, h), &mut p.t.limbs, tile);
+            store(mul_regs(f, g), &mut p.z.limbs, tile);
         }
-        result
+        p
     }
 
     /// Fused mixed point addition, processed two lanes at a time.
     #[inline(always)]
-    fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
-        let mut result = empty_gvec();
+    fn g_add_mixed(self, mut p: GVec, q: GAffineVec) -> GVec {
         for tile in 0..TILES {
-            let x1 = load(&p.x.limbs, tile);
-            let y1 = load(&p.y.limbs, tile);
-            let x2 = load(&q.x.limbs, tile);
-            let y2 = load(&q.y.limbs, tile);
-            let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
-            let b = mul_regs(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
-            let c = mul_regs(load(&p.t.limbs, tile), load(&q.t2d.limbs, tile));
-            let z1 = load(&p.z.limbs, tile);
-            let d = reduce_regs(add_raw(z1, z1));
-            let e = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(d, c));
-            let g = reduce_regs(add_raw(d, c));
-            let h = reduce_regs(add_raw(b, a));
-
-            store(mul_regs(e, f), &mut result.x.limbs, tile);
-            store(mul_regs(g, h), &mut result.y.limbs, tile);
-            store(mul_regs(e, h), &mut result.t.limbs, tile);
-            store(mul_regs(f, g), &mut result.z.limbs, tile);
+            let [x, y, t, z] = add_mixed_regs(
+                [
+                    load(&p.x.limbs, tile),
+                    load(&p.y.limbs, tile),
+                    load(&p.t.limbs, tile),
+                    load(&p.z.limbs, tile),
+                ],
+                [
+                    load(&q.x.limbs, tile),
+                    load(&q.y.limbs, tile),
+                    load(&q.t2d.limbs, tile),
+                ],
+            );
+            store(x, &mut p.x.limbs, tile);
+            store(y, &mut p.y.limbs, tile);
+            store(t, &mut p.t.limbs, tile);
+            store(z, &mut p.z.limbs, tile);
         }
-        result
+        p
+    }
+
+    #[inline(always)]
+    fn g_add_mixed_pair(self, p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
+        let mut x2 = pack_pair(q.map(|point| point.x));
+        let mut t2d = pack_pair(q.map(|point| point.t2d));
+        if negative.iter().any(|&sign| sign) {
+            // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes
+            unsafe {
+                let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
+                let mask = vld1q_u64(masks.as_ptr());
+                let zero = [vdupq_n_u64(0); 5];
+                let neg_x = reduce_regs(sub_raw(zero, x2));
+                let neg_t2d = reduce_regs(sub_raw(zero, t2d));
+                x2 = core::array::from_fn(|i| vbslq_u64(mask, neg_x[i], x2[i]));
+                t2d = core::array::from_fn(|i| vbslq_u64(mask, neg_t2d[i], t2d[i]));
+            }
+        }
+        let [x, y, t, z] = add_mixed_regs(
+            [
+                pack_pair(p.map(|point| point.x)),
+                pack_pair(p.map(|point| point.y)),
+                pack_pair(p.map(|point| point.t)),
+                pack_pair(p.map(|point| point.z)),
+            ],
+            [x2, pack_pair(q.map(|point| point.y)), t2d],
+        );
+        let x = unpack_pair(x);
+        let y = unpack_pair(y);
+        let t = unpack_pair(t);
+        let z = unpack_pair(z);
+        core::array::from_fn(|i| G {
+            x: x[i],
+            y: y[i],
+            t: t[i],
+            z: z[i],
+        })
     }
 
     /// Fused point doubling using the dedicated `dbl-2008-hwcd` formula.
     #[inline(always)]
-    fn g_double(self, p: GVec) -> GVec {
-        let mut result = empty_gvec();
+    fn g_double(self, mut p: GVec) -> GVec {
         for tile in 0..TILES {
             let x = load(&p.x.limbs, tile);
             let y = load(&p.y.limbs, tile);
@@ -643,12 +697,12 @@ impl GBackend for Backend {
             let zero = unsafe { [vdupq_n_u64(0); 5] };
             let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
 
-            store(mul_regs(e, f), &mut result.x.limbs, tile);
-            store(mul_regs(g, h), &mut result.y.limbs, tile);
-            store(mul_regs(e, h), &mut result.t.limbs, tile);
-            store(mul_regs(f, g), &mut result.z.limbs, tile);
+            store(mul_regs(e, f), &mut p.x.limbs, tile);
+            store(mul_regs(g, h), &mut p.y.limbs, tile);
+            store(mul_regs(e, h), &mut p.t.limbs, tile);
+            store(mul_regs(f, g), &mut p.z.limbs, tile);
         }
-        result
+        p
     }
 }
 

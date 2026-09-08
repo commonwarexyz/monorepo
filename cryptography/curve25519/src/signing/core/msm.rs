@@ -1,7 +1,7 @@
 //! Variable-time Pippenger multi-scalar multiplication for batch signature verification.
 //!
 //! [`Term`]s arrive decompressed and recoded into signed digits. The bucket kernel processes
-//! [`LANES`] terms at once, with one private bucket stripe per SIMD lane so updates never collide.
+//! one term per private bucket stripe at once, so updates within each wave never collide.
 //!
 //! [`multiscalar_mul`] exposes one execution shape for every [`Strategy`]: `(window, term range)`
 //! tiles. A window can be split across several point ranges when there are fewer windows than
@@ -9,7 +9,9 @@
 //! added together, and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
-use crate::curve::{Backend, G, GAffine, GAffineVec, GVec, LANES};
+#[cfg(not(target_arch = "aarch64"))]
+use crate::curve::GAffineVec;
+use crate::curve::{Backend, G, GAffine, GVec, LANES};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use commonware_parallel::Strategy;
@@ -44,7 +46,7 @@ const fn num_buckets(width: u32) -> usize {
 /// Fit to a measured sweep (width 6-10 x batch 1k-64k signatures x 1/32 threads, AMD EPYC 9354P,
 /// AVX-512): the optimum grows at almost exactly half a bit of width per bit of batch size --
 /// shallower than the textbook `log2(terms) - 4` rule, because the wide-window penalty on real
-/// hardware includes the per-lane bucket array (`8 * 2^(width-1)` points, ~320KB at width 9)
+/// hardware includes the AVX-512 bucket array (`8 * 2^(width-1)` points, ~320KB at width 9)
 /// spilling L2, not just the fold-count arithmetic. Parallel runs want one step narrower than
 /// serial: folds replicate once per tile range, and every concurrent tile holds its own bucket
 /// array. Every prediction below matched the sweep's measured optimum (or a runner-up within
@@ -122,32 +124,32 @@ fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> 
 }
 
 mod transposed {
-    use super::{Backend, G, GAffine, GAffineVec, GVec, LANES, Term};
+    #[cfg(not(target_arch = "aarch64"))]
+    use super::GAffineVec;
+    use super::{Backend, G, GAffine, GVec, LANES, Term};
+
+    // NEON fills one stripe per physical mixed-addition lane, keeping wave updates independent
+    // Folds retain LANES independent bucket indices
+    #[cfg(target_arch = "aarch64")]
+    const STRIPES: usize = 2;
+    #[cfg(not(target_arch = "aarch64"))]
+    const STRIPES: usize = LANES;
     #[cfg(not(feature = "std"))]
     use alloc::{vec, vec::Vec};
 
-    /// Every lane's buckets for one window, flattened lane-major (`buckets[lane * nb + m]`, with
-    /// `nb = num_buckets(width)`): within each piece, lane `l` owns the terms whose index is
-    /// `l mod LANES`, plus this private bucket stripe, so the wave loop below can update `LANES`
-    /// buckets with one vectorized addition and no two lanes ever collide on a bucket.
-    /// Heap-allocated because the width (and so the array size) is a per-batch runtime value.
+    /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`
+    ///
+    /// Each wave assigns one term to each stripe, so updates within a wave cannot collide.
+    /// Heap allocation accommodates the per-batch bucket count
     pub(super) fn identity_buckets(nb: usize) -> Vec<G> {
-        vec![G::IDENTITY; LANES * nb]
+        vec![G::IDENTITY; STRIPES * nb]
     }
 
-    /// Adds one contiguous run of terms into one window's bucket stripes via vectorized "wave"
-    /// passes, one wave of `LANES` consecutive terms (one per lane) at a time: gather each
-    /// lane's current bucket value (a scalar array read, cheap and branch-free since a digit of
-    /// 0 just gathers-and-discards the identity), add the wave's incoming (possibly negated, for
-    /// a negative digit) points via one vectorized backend mixed addition, then scatter the
-    /// results back (again cheap scalar writes, skipped only for zero-digit lanes since there is
-    /// no bucket to write into). A wave whose digits are *all* zero is skipped outright before
-    /// any point arithmetic -- common, not rare: batch verification's `R` terms carry 128-bit
-    /// coefficients, so every window above ~128 bits has zero digits for half the term sequence.
-    /// The `terms.len() % LANES` tail rides as a short wave, its missing lanes no-op identity
-    /// additions -- so a caller filling from several pieces pays at most one short wave per
-    /// piece. Accumulating (rather than returning fresh buckets) is what lets those pieces share
-    /// one bucket set and one fold.
+    /// Adds each run in waves of one term per bucket stripe
+    ///
+    /// Missing or zero-digit lanes use identity inputs and never scatter a result. Entirely
+    /// zero waves skip group arithmetic, including the high windows of short coefficients.
+    /// Each piece may restart stripe assignment because the fold sums every stripe
     #[allow(clippy::needless_range_loop)]
     fn fill_buckets<B: Backend>(
         backend: B,
@@ -157,11 +159,11 @@ mod transposed {
         window: usize,
     ) {
         let identity_point = GAffine::IDENTITY;
-        for wave in terms.chunks(LANES) {
-            let mut incoming = [identity_point; LANES];
-            let mut negative = [false; LANES];
-            let mut current = [G::IDENTITY; LANES];
-            let mut bucket_index = [None::<usize>; LANES];
+        for wave in terms.chunks(STRIPES) {
+            let mut incoming = [identity_point; STRIPES];
+            let mut negative = [false; STRIPES];
+            let mut current = [G::IDENTITY; STRIPES];
+            let mut bucket_index = [None::<usize>; STRIPES];
             let mut any = false;
             for (lane, term) in wave.iter().enumerate() {
                 let digit = term.digits[window];
@@ -181,13 +183,16 @@ mod transposed {
             if !any {
                 continue;
             }
+            #[cfg(target_arch = "aarch64")]
+            let updated = backend.g_add_mixed_pair(current, incoming, negative);
+            #[cfg(not(target_arch = "aarch64"))]
             let updated = backend
                 .g_add_mixed(
                     GVec::transpose(current),
                     GAffineVec::from_signed_lanes(backend, &incoming, &negative),
                 )
                 .untranspose();
-            for lane in 0..LANES {
+            for lane in 0..STRIPES {
                 if let Some(i) = bucket_index[lane] {
                     buckets[lane * nb + i] = updated[lane];
                 }
@@ -195,9 +200,11 @@ mod transposed {
         }
     }
 
-    /// Folds `LANES` lanes' worth of one window's bucket stripes into `result` with the standard
-    /// running-sum trick: starting below untouched top buckets is exact because identity buckets
-    /// leave both the running sum and window sum unchanged.
+    /// Folds each bucket stripe into its corresponding result lane with a running sum
+    ///
+    /// Lanes without a stripe contribute the identity. Untouched top buckets can be skipped
+    /// because their identity values leave both running sums unchanged
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     fn fold_buckets<B: Backend>(
         backend: B,
         result: GVec,
@@ -208,11 +215,133 @@ mod transposed {
         let mut sum = GVec::identity();
         let mut window_sum = GVec::identity();
         for d in (0..used).rev() {
-            let bucket_group: [G; LANES] = core::array::from_fn(|lane| buckets[lane * nb + d]);
+            let bucket_group: [G; LANES] = core::array::from_fn(|lane| {
+                if lane < STRIPES {
+                    buckets[lane * nb + d]
+                } else {
+                    G::IDENTITY
+                }
+            });
             sum = backend.g_add(sum, GVec::transpose(bucket_group));
             window_sum = backend.g_add(window_sum, sum);
         }
         backend.g_add(result, window_sum)
+    }
+
+    /// Returns lanes whose sum is the weighted sum of all bucket stripes.
+    ///
+    /// Let `B[k, lane]` sum the stripes at bucket index `k*LANES + lane`. The descending pass
+    /// builds `sum[lane] = sum_k B[k, lane]` and `rows[lane] = sum_k k*B[k, lane]`.
+    /// Final weighting gives `LANES*rows[lane] + (lane + 1)*sum[lane]`, assigning each bucket
+    /// its index-plus-one weight. The lane count is a power of two
+    #[cfg(target_arch = "aarch64")]
+    fn fold_buckets_merged<B: Backend>(backend: B, buckets: &[G], nb: usize, used: usize) -> GVec {
+        // A single used bucket has weight one, so return the stripes without weighting
+        if used == 1 {
+            return GVec::transpose(core::array::from_fn(|lane| {
+                if lane < STRIPES {
+                    buckets[lane * nb]
+                } else {
+                    G::IDENTITY
+                }
+            }));
+        }
+        let mut sum = GVec::identity();
+        let mut rows = GVec::identity();
+        for block in (0..used.div_ceil(LANES)).rev() {
+            let gather = |stripe: usize| {
+                GVec::transpose(core::array::from_fn(|lane| {
+                    let digit = block * LANES + lane;
+                    if digit < used {
+                        buckets[stripe * nb + digit]
+                    } else {
+                        G::IDENTITY
+                    }
+                }))
+            };
+            let mut combined = gather(0);
+            for stripe in 1..STRIPES {
+                combined = backend.g_add(combined, gather(stripe));
+            }
+            rows = backend.g_add(rows, sum);
+            sum = backend.g_add(sum, combined);
+        }
+
+        // Seed the high bit of lane + 1, then fold its remaining bits
+        let lanes = sum.untranspose();
+        let mut weighted = GVec::transpose(core::array::from_fn(|lane| {
+            if lane == LANES - 1 {
+                lanes[lane]
+            } else {
+                G::IDENTITY
+            }
+        }));
+        for bit in (0..3).rev() {
+            rows = backend.g_double(rows);
+            weighted = backend.g_double(weighted);
+            let selected = core::array::from_fn(|lane| {
+                if (lane + 1) & (1 << bit) != 0 {
+                    lanes[lane]
+                } else {
+                    G::IDENTITY
+                }
+            });
+            weighted = backend.g_add(weighted, GVec::transpose(selected));
+        }
+        backend.g_add(rows, weighted)
+    }
+
+    #[cfg(all(test, target_arch = "aarch64"))]
+    mod merged_tests {
+        use super::*;
+
+        #[test]
+        fn merged_fold_preserves_every_bucket_weight() {
+            struct Check;
+            impl crate::curve::WithBackend for Check {
+                type Output = ();
+                fn call<B: Backend>(self, backend: B) {
+                    let base = GAffine::BASEPOINT.to_extended();
+                    let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
+                    for width in [6, 7, 8, 9, 10] {
+                        let nb = super::super::num_buckets(width);
+                        let mut point = base;
+                        let buckets: Vec<G> = (0..STRIPES * nb)
+                            .map(|i| {
+                                point = point.add(base);
+                                match i % 7 {
+                                    0 => torsion,
+                                    1 => point.add(torsion),
+                                    2 => point.negate(),
+                                    3 => G::IDENTITY,
+                                    _ => point,
+                                }
+                            })
+                            .collect();
+                        let mut expected = G::IDENTITY;
+                        for used in 0..=nb {
+                            if used != 0 {
+                                let bucket = (0..STRIPES).fold(G::IDENTITY, |sum, stripe| {
+                                    sum.add(buckets[stripe * nb + used - 1])
+                                });
+                                let weighted = bucket.scalar_mul(
+                                    (0..usize::BITS).rev().map(|bit| used & (1 << bit) != 0),
+                                );
+                                expected = expected.add(weighted);
+                            }
+                            let actual =
+                                fold_buckets_merged(backend, &buckets, nb, used).sum_lanes(backend);
+                            assert!(
+                                actual.add(expected.negate()).is_identity(),
+                                "width={width} used={used}"
+                            );
+                        }
+                    }
+                }
+            }
+            crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+            crate::curve::with_backend(Check);
+        }
     }
 
     /// One window's contribution to the MSM over global term range `[start, end)`, *before* the
@@ -229,13 +358,21 @@ mod transposed {
         buckets: &mut [G],
     ) -> G {
         let nb = super::num_buckets(width);
-        debug_assert_eq!(buckets.len(), LANES * nb);
-        buckets.fill(G::IDENTITY);
+        debug_assert_eq!(buckets.len(), STRIPES * nb);
         let used = super::used_buckets(chunks, start, end, window);
+        // An all-zero window contributes the identity without resetting or folding scratch
+        if used == 0 {
+            return G::IDENTITY;
+        }
+        buckets.fill(G::IDENTITY);
         for piece in super::pieces(chunks, start, end) {
             fill_buckets(backend, buckets, nb, piece, window);
         }
-        fold_buckets(backend, GVec::identity(), buckets, nb, used).sum_lanes(backend)
+        #[cfg(target_arch = "aarch64")]
+        let partial = fold_buckets_merged(backend, buckets, nb, used);
+        #[cfg(not(target_arch = "aarch64"))]
+        let partial = fold_buckets(backend, GVec::identity(), buckets, nb, used);
+        partial.sum_lanes(backend)
     }
 
     /// Computes the full MSM over `chunks` via the lane-transposed Pippenger bucket method,
@@ -295,7 +432,20 @@ fn multiscalar_mul_points_serial<B: Backend>(
 
 /// Horner-folds per-window partial sums into the final MSM result: from the top window down,
 /// `width` doublings shift everything accumulated so far up one window, then the next window's
-/// partial joins.
+/// partial joins. Scalar recombination computes each point once, avoiding duplicate SIMD lanes.
+#[cfg(target_arch = "aarch64")]
+fn fold_windows<B: Backend>(_: B, windows: &[G], width: u32) -> G {
+    let mut result = G::IDENTITY;
+    for window in windows.iter().rev() {
+        for _ in 0..width {
+            result = result.double();
+        }
+        result = result.add(*window);
+    }
+    result
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 fn fold_windows<B: Backend>(backend: B, windows: &[G], width: u32) -> G {
     let mut result = GVec::identity();
     for window in windows.iter().rev() {
@@ -389,14 +539,25 @@ pub(super) fn multiscalar_mul<B: Backend>(
             (tile.window, partial)
         },
     );
-    let mut window_sums = vec![GVec::identity(); windows];
-    for (window, partial) in partials {
-        window_sums[window] = backend.g_add(window_sums[window], GVec::splat(partial));
-    }
-    let window_sums: Vec<G> = window_sums
-        .into_iter()
-        .map(|window| window.untranspose()[0])
-        .collect();
+    #[cfg(target_arch = "aarch64")]
+    let window_sums = {
+        let mut window_sums = vec![G::IDENTITY; windows];
+        for (window, partial) in partials {
+            window_sums[window] = window_sums[window].add(partial);
+        }
+        window_sums
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let window_sums = {
+        let mut window_sums = vec![GVec::identity(); windows];
+        for (window, partial) in partials {
+            window_sums[window] = backend.g_add(window_sums[window], GVec::splat(partial));
+        }
+        window_sums
+            .into_iter()
+            .map(|window| window.untranspose()[0])
+            .collect::<Vec<_>>()
+    };
     fold_windows(backend, &window_sums, width)
 }
 
@@ -626,6 +787,35 @@ mod tests {
                 }
                 Ok(())
             });
+    }
+
+    #[test]
+    fn window_partials_reuse_scratch_across_zero_windows() {
+        let backend = crate::curve::test_backend();
+        let point = GAffine::BASEPOINT;
+        for width in TEST_WIDTHS {
+            let scalar = Scalar::from_u128((1u128 << (2 * width)) | 1);
+            let terms = [Term::new(point, &scalar, width)];
+            let mut buckets = transposed::identity_buckets(num_buckets(width));
+            for (window, expected) in [point.to_extended(), G::IDENTITY, point.to_extended()]
+                .into_iter()
+                .enumerate()
+            {
+                let actual = transposed::window_partial(
+                    backend,
+                    &[&terms],
+                    0,
+                    terms.len(),
+                    window,
+                    width,
+                    &mut buckets,
+                );
+                assert!(
+                    points_equal(actual, expected),
+                    "window={window} width={width}"
+                );
+            }
+        }
     }
 
     /// Splitting a window's bucket fill at an arbitrary global index (deliberately not a slice

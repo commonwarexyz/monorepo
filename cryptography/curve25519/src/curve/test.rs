@@ -318,6 +318,46 @@ fn fuzz_group<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
 
 #[cfg(test)]
 #[test]
+fn repeated_squaring_matches_scalar() {
+    #[derive(Clone, Copy)]
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) -> Self::Output {
+            let max = FVec {
+                limbs: [[MASK_52; LANES]; 5],
+            };
+            let mixed = FVec::transpose([
+                F::ZERO,
+                F::ONE,
+                F([MASK_52; 5]),
+                F([MASK_51; 5]),
+                F([19, 0, 0, 0, 0]),
+                F([0, MASK_52, 0, MASK_52, 0]),
+                F([1 << 51; 5]),
+                F([0x123456789abcd, 7, MASK_52 - 1, 42, 1]),
+            ]);
+            for input in [max, mixed] {
+                for k in [0, 1, 2, 5, 10, 20, 50, 100] {
+                    let actual = backend.pow2k(input, k);
+                    if k == 0 {
+                        assert_eq!(actual.limbs, input.limbs);
+                    }
+                    let expected = FVec::transpose(input.untranspose().map(|v| v.pow2k(k)));
+                    assert_f_eq(actual, expected, "repeated squaring");
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
+
+#[cfg(test)]
+#[test]
 fn backend_at_bounds() {
     struct CheckBackendAtBounds;
 
@@ -652,4 +692,81 @@ fn with_backend_matches_portable() {
         expected.1,
         "runtime-dispatched group computation",
     );
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+#[test]
+fn mixed_pair_matches_full_width() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let reference = super::portable::Backend::new();
+            let torsion = GAffine::decompress(&[0; 32]).unwrap();
+            let mixed = GAffine::decompress(
+                &GAffine::BASEPOINT
+                    .to_extended()
+                    .add(torsion.to_extended())
+                    .to_bytes(),
+            )
+            .unwrap();
+            let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
+            let max = F([MASK_52; 5]);
+            let loose = G {
+                x: max,
+                y: max,
+                t: max,
+                z: max,
+            };
+            let loose_affine = GAffine {
+                x: max,
+                y: max,
+                t2d: max,
+            };
+            for i in 0..points.len() {
+                for j in 0..points.len() {
+                    let current = [points[i].to_extended(), points[j].to_extended()];
+                    let current = array::from_fn(|lane| {
+                        let factor = F([lane as u64 + 2, 0, 0, 0, 0]);
+                        G {
+                            x: current[lane].x.mul(factor),
+                            y: current[lane].y.mul(factor),
+                            t: current[lane].t.mul(factor),
+                            z: current[lane].z.mul(factor),
+                        }
+                    });
+                    let incoming = [points[j], points[(i + 1) % points.len()]];
+                    for (current, incoming) in [
+                        (current, incoming),
+                        ([loose, current[1]], [loose_affine, incoming[1]]),
+                    ] {
+                        for negative in [[false, false], [false, true], [true, false], [true, true]]
+                        {
+                            let expected = reference.g_add_mixed_pair(current, incoming, negative);
+                            let actual = backend.g_add_mixed_pair(current, incoming, negative);
+                            for lane in 0..2 {
+                                for (actual, expected) in [
+                                    (actual[lane].x, expected[lane].x),
+                                    (actual[lane].y, expected[lane].y),
+                                    (actual[lane].t, expected[lane].t),
+                                    (actual[lane].z, expected[lane].z),
+                                ] {
+                                    assert_f_eq(
+                                        FVec::splat(actual),
+                                        FVec::splat(expected),
+                                        "mixed pair coordinate",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
 }
