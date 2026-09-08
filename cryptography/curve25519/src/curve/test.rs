@@ -8,7 +8,7 @@ use crate::test::ZIP215_POINTS;
 use arbitrary::{Arbitrary, Unstructured};
 use core::array;
 
-const MASK_52: u64 = (1 << 52) - 1;
+pub(super) const MASK_52: u64 = (1 << 52) - 1;
 
 /// A field or group arithmetic fuzzing operation.
 #[derive(Debug, Arbitrary)]

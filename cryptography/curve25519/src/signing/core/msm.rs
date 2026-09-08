@@ -9,9 +9,9 @@
 //! added together, and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
-use crate::curve::{Backend, G, GAffine};
 #[cfg(test)]
-use crate::curve::{GVec, msm::Backend as _};
+use crate::curve::GVec;
+use crate::curve::{Backend, G, GAffine};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;
@@ -462,24 +462,31 @@ mod tests {
     /// one contiguous slice.
     #[test]
     fn chunked_matches_single_chunk() {
-        let backend = crate::curve::test_backend();
-        Builder::default()
-            .with_seed(0)
-            .with_search_limit(8)
-            .test(|u| {
-                let terms = arbitrary_terms(u, 100, 7)?;
-                for n in [1, 2, 5, 8, 9, 32, 64, 100] {
-                    let terms = terms[..n].to_vec();
-                    let single = split_terms(terms.clone(), &[]);
-                    let mut chunks = split_terms(terms, &[1, 3, 7, 9, 24]);
-                    chunks.push(Vec::new());
+        struct Check;
+        impl crate::curve::WithBackend for Check {
+            type Output = ();
+            fn call<B: Backend>(self, backend: B) {
+                Builder::default()
+                    .with_seed(0)
+                    .with_search_limit(8)
+                    .test(|u| {
+                        let terms = arbitrary_terms(u, 100, 7)?;
+                        for n in [1, 2, 5, 8, 9, 32, 64, 100] {
+                            let terms = terms[..n].to_vec();
+                            let single = split_terms(terms.clone(), &[]);
+                            let mut chunks = split_terms(terms, &[1, 3, 7, 9, 24]);
+                            chunks.push(Vec::new());
 
-                    let expected = multiscalar_mul_terms_serial(backend, &refs(&single), 7);
-                    let actual = multiscalar_mul_terms_serial(backend, &refs(&chunks), 7);
-                    assert!(points_equal(actual, expected));
-                }
-                Ok(())
-            });
+                            let expected = multiscalar_mul_terms_serial(backend, &refs(&single), 7);
+                            let actual = multiscalar_mul_terms_serial(backend, &refs(&chunks), 7);
+                            assert!(points_equal(actual, expected));
+                        }
+                        Ok(())
+                    });
+            }
+        }
+        crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+        crate::curve::with_backend(Check);
     }
 
     #[test]
@@ -603,57 +610,65 @@ mod tests {
     /// combine same-window tiles with a single addition.
     #[test]
     fn split_window_partials_match_whole_range() {
-        let backend = crate::curve::test_backend();
-        const WIDTH: u32 = 7;
-        Builder::default()
-            .with_seed(0)
-            .with_search_limit(8)
-            .test(|u| {
-                let terms = arbitrary_terms(u, 100, WIDTH)?;
-                for n in [1, 2, 5, 8, 9, 32, 64, 100] {
-                    let chunks = split_terms(terms[..n].to_vec(), &[n / 3, n / 3]);
-                    let chunks = refs(&chunks);
-                    let total = total_terms(&chunks);
-                    let mid = total / 2;
+        struct Check;
+        impl crate::curve::WithBackend for Check {
+            type Output = ();
+            fn call<B: Backend>(self, backend: B) {
+                const WIDTH: u32 = 7;
+                Builder::default()
+                    .with_seed(0)
+                    .with_search_limit(8)
+                    .test(|u| {
+                        let terms = arbitrary_terms(u, 100, WIDTH)?;
+                        for n in [1, 2, 5, 8, 9, 32, 64, 100] {
+                            let chunks = split_terms(terms[..n].to_vec(), &[n / 3, n / 3]);
+                            let chunks = refs(&chunks);
+                            let total = total_terms(&chunks);
+                            let mid = total / 2;
 
-                    let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
+                            let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
 
-                    let nw = num_windows(WIDTH);
-                    let mut transposed_windows = vec![G::IDENTITY; nw];
-                    let mut buckets = transposed::identity_buckets(backend, num_buckets(WIDTH));
-                    for (window, partial) in transposed_windows.iter_mut().enumerate() {
-                        let left = transposed::window_partial(
-                            backend,
-                            &chunks,
-                            0,
-                            mid,
-                            window,
-                            WIDTH,
-                            &mut buckets,
-                        );
-                        let right = transposed::window_partial(
-                            backend,
-                            &chunks,
-                            mid,
-                            total,
-                            window,
-                            WIDTH,
-                            &mut buckets,
-                        );
-                        *partial = left.add(right);
-                    }
+                            let nw = num_windows(WIDTH);
+                            let mut transposed_windows = vec![G::IDENTITY; nw];
+                            let mut buckets =
+                                transposed::identity_buckets(backend, num_buckets(WIDTH));
+                            for (window, partial) in transposed_windows.iter_mut().enumerate() {
+                                let left = transposed::window_partial(
+                                    backend,
+                                    &chunks,
+                                    0,
+                                    mid,
+                                    window,
+                                    WIDTH,
+                                    &mut buckets,
+                                );
+                                let right = transposed::window_partial(
+                                    backend,
+                                    &chunks,
+                                    mid,
+                                    total,
+                                    window,
+                                    WIDTH,
+                                    &mut buckets,
+                                );
+                                *partial = left.add(right);
+                            }
 
-                    assert!(points_equal(
-                        backend.combine_windows(
-                            transposed_windows.into_iter().enumerate(),
-                            nw,
-                            WIDTH
-                        ),
-                        expected,
-                    ));
-                }
-                Ok(())
-            });
+                            assert!(points_equal(
+                                backend.combine_windows(
+                                    transposed_windows.into_iter().enumerate(),
+                                    nw,
+                                    WIDTH
+                                ),
+                                expected,
+                            ));
+                        }
+                        Ok(())
+                    });
+            }
+        }
+        crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+        crate::curve::with_backend(Check);
     }
 
     /// [`pieces`] must hand back exactly the requested global range, in order, for any cut --

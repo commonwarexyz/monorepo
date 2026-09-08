@@ -728,7 +728,7 @@ impl msm::Backend for Backend {
         terms: &[T],
         term: impl Fn(&T) -> (GAffine, i16),
     ) {
-        msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
+        msm::fill_buckets::<{ Self::STRIPES }, T>(g_add_mixed_pair, buckets, nb, terms, term);
     }
 
     /// Returns lanes whose sum is the weighted sum of all bucket stripes.
@@ -817,7 +817,6 @@ impl msm::Backend for Backend {
     }
 }
 
-#[cfg(test)]
 #[test]
 fn mixed_pair_matches_full_width() {
     let reference = super::portable::Backend::new();
@@ -830,7 +829,7 @@ fn mixed_pair_matches_full_width() {
     )
     .unwrap();
     let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
-    let max = F([(1 << 52) - 1; 5]);
+    let max = F([super::test::MASK_52; 5]);
     let loose = G {
         x: max,
         y: max,
