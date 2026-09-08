@@ -64,12 +64,29 @@ fn store(regs: [__m512i; 5]) -> [[u64; LANES]; 5] {
 /// # Correctness
 ///
 /// `z` must be less than `2^59` per lane so `19*z` fits in `u64`.
+///
+/// The explicit instruction sequence prevents LLVM from recognizing a packed `u64` multiplication
+/// and expanding it into two packed 32-bit multiplications, two shifts, and an addition. These
+/// four AVX-512F instructions preserve the shift-and-add calculation directly.
 #[target_feature(enable = "avx512f")]
 fn mul19(z: __m512i) -> __m512i {
-    _mm512_add_epi64(
-        _mm512_add_epi64(_mm512_slli_epi64(z, 4), _mm512_slli_epi64(z, 1)),
-        z,
-    )
+    let result;
+    // SAFETY: AVX-512F is enabled. The instructions only read their register input, write
+    // their register outputs, preserve flags, and stay within the documented limb bound.
+    unsafe {
+        core::arch::asm!(
+            "vpsllq {times16}, {z}, 4",
+            "vpsllq {doubled}, {z}, 1",
+            "vpaddq {doubled}, {doubled}, {times16}",
+            "vpaddq {result}, {doubled}, {z}",
+            z = in(zmm_reg) z,
+            times16 = out(zmm_reg) _,
+            doubled = out(zmm_reg) _,
+            result = lateout(zmm_reg) result,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    result
 }
 
 /// Reduces each radix-`2^51` lane with one parallel carry pass.
@@ -80,12 +97,13 @@ fn mul19(z: __m512i) -> __m512i {
 /// # Correctness
 ///
 /// Inputs must have limbs below `2^63`. Outputs then have limbs below `2^52`.
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,avx512ifma")]
 fn reduce_regs(l: [__m512i; 5]) -> [__m512i; 5] {
     let mask = _mm512_set1_epi64(MASK_51 as i64);
     let c: [__m512i; 5] = core::array::from_fn(|i| _mm512_srli_epi64(l[i], 51));
+    // Each carry is below 2^12, so IFMA computes the folded carry exactly.
     [
-        _mm512_add_epi64(_mm512_and_si512(l[0], mask), mul19(c[4])),
+        _mm512_madd52lo_epu64(_mm512_and_si512(l[0], mask), c[4], _mm512_set1_epi64(19)),
         _mm512_add_epi64(_mm512_and_si512(l[1], mask), c[0]),
         _mm512_add_epi64(_mm512_and_si512(l[2], mask), c[1]),
         _mm512_add_epi64(_mm512_and_si512(l[3], mask), c[2]),
@@ -204,6 +222,23 @@ fn sub_raw(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
 /// Every input must satisfy [`FVec`]'s limb bound. That bound keeps raw field arithmetic within
 /// its documented ranges and keeps every IFMA operand below its `2^52` ceiling.
 impl Backend {
+    /// Negates selected lanes with reduced output while preserving every unselected limb.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn conditional_neg_field(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        let mask = negative
+            .iter()
+            .enumerate()
+            .fold(0u8, |mask, (lane, &select)| mask | ((select as u8) << lane));
+        let value = load(&value.limbs);
+        let zero = [_mm512_setzero_si512(); 5];
+        let negated = reduce_regs(sub_raw(zero, value));
+        FVec {
+            limbs: store(core::array::from_fn(|limb| {
+                _mm512_mask_blend_epi64(mask, value[limb], negated[limb])
+            })),
+        }
+    }
+
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn add_field(self, a: FVec, b: FVec) -> FVec {
         FVec {
@@ -253,6 +288,12 @@ impl Backend {
 }
 
 impl FBackend for Backend {
+    #[inline(always)]
+    fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.conditional_neg_field(value, negative) }
+    }
+
     #[inline(always)]
     fn add(self, a: FVec, b: FVec) -> FVec {
         // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.

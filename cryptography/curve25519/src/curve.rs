@@ -369,6 +369,14 @@ impl FVec {
 
 /// Abstracts over base field operations.
 pub trait FBackend: Copy {
+    /// Negates the selected lanes and preserves the other lanes' limb representations.
+    ///
+    /// Variable-time, so the mask must be public.
+    #[inline(always)]
+    fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        value.select_lanes(self.neg(value), negative)
+    }
+
     /// a + b.
     fn add(self, a: FVec, b: FVec) -> FVec;
 
@@ -834,9 +842,9 @@ impl GAffineVec {
         }
 
         Self {
-            x: packed.x.select_lanes(backend.neg(packed.x), negative),
+            x: backend.conditional_neg(packed.x, negative),
             y: packed.y,
-            t2d: packed.t2d.select_lanes(backend.neg(packed.t2d), negative),
+            t2d: backend.conditional_neg(packed.t2d, negative),
         }
     }
 }
