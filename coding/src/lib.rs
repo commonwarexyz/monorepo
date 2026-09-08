@@ -170,6 +170,8 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
+        /// The input is a stream of bytes and may borrow its storage.
+        ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
         /// should equal `config.minimum_shards + config.extra_shards`.
         #[allow(clippy::type_complexity)]
@@ -305,6 +307,8 @@ commonware_macros::stability_scope!(ALPHA {
         type Error: std::fmt::Debug + Send;
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
+        ///
+        /// The input is a stream of bytes and may borrow its storage.
         ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
         /// should equal `config.minimum_shards + config.extra_shards`.

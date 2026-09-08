@@ -5,7 +5,7 @@ use commonware_codec::{Buf, Copying};
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use crate::{BlobLayout as Layout, BlobVersion, Buf as _, BufMut};
+    use crate::{BlobLayout as Layout, BlobVersion, BufMut};
     use commonware_codec::{DecodeExt, Encode, FixedSize, Read as CodecRead, Write as CodecWrite};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;

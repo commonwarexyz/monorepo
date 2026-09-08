@@ -1,15 +1,14 @@
-//! Codec utility functions
+//! Helpers for reading and validating encoded values.
 
 use crate::{Buf, Error, FixedSize, Read};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::Buf as _;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
 /// Checks if the buffer has at least `len` bytes remaining. Returns an [Error::EndOfBuffer] if not.
 #[inline]
-pub fn at_least<B: bytes::Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
+pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
     let rem = buf.remaining();
     if rem < len {
         return Err(Error::EndOfBuffer);
@@ -20,11 +19,7 @@ pub fn at_least<B: bytes::Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
 /// Checks if the buffer has at least `len * item_size` bytes remaining, treating multiplication
 /// overflow as insufficient. Returns an [Error::EndOfBuffer] if not.
 #[inline]
-pub fn at_least_items<B: bytes::Buf>(
-    buf: &mut B,
-    len: usize,
-    item_size: usize,
-) -> Result<(), Error> {
+pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Result<(), Error> {
     at_least(buf, len.checked_mul(item_size).ok_or(Error::EndOfBuffer)?)
 }
 
@@ -50,7 +45,7 @@ pub fn read_fixed_vec<T: Read + FixedSize>(
 /// Ensures the next `size` bytes are all zeroes in the provided buffer, returning an [Error]
 /// otherwise.
 #[inline]
-pub fn ensure_zeros<B: bytes::Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
+pub fn ensure_zeros<B: Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
     at_least(buf, size)?;
     let mut remaining = size;
     while remaining > 0 {
@@ -70,27 +65,29 @@ pub fn ensure_zeros<B: bytes::Buf>(buf: &mut B, size: usize) -> Result<(), Error
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Copying;
+    use bytes::Buf as _;
 
     #[test]
     fn test_ensure_zeros() {
         // Consumes exactly `size` bytes of an all-zero region.
-        let mut buf = &[0u8, 0, 0, 0, 7][..];
+        let mut buf = Copying(&[0u8, 0, 0, 0, 7]);
         ensure_zeros(&mut buf, 4).unwrap();
         assert_eq!(buf.remaining(), 1);
 
         // A zero-length check consumes nothing, even on an empty buffer.
-        let mut buf = &[][..];
+        let mut buf = Copying(&[]);
         ensure_zeros(&mut buf, 0).unwrap();
 
         // A short buffer fails without panicking.
-        let mut buf = &[0u8, 0][..];
+        let mut buf = Copying(&[0u8, 0]);
         assert!(matches!(ensure_zeros(&mut buf, 3), Err(Error::EndOfBuffer)));
 
         // A non-zero byte anywhere in the region fails.
         for i in 0..4 {
             let mut bytes = [0u8; 4];
             bytes[i] = 1;
-            let mut buf = &bytes[..];
+            let mut buf = Copying(&bytes);
             assert!(matches!(
                 ensure_zeros(&mut buf, 4),
                 Err(Error::Invalid(_, _))
@@ -101,12 +98,12 @@ mod tests {
     #[test]
     fn test_ensure_zeros_across_chunks() {
         // A chained buffer exposes the region as multiple chunks, exercising the chunk loop.
-        let mut buf = (&[0u8, 0][..]).chain(&[0u8, 0, 0][..]);
+        let mut buf = Copying(&[0u8, 0]).chain(Copying(&[0u8, 0, 0]));
         ensure_zeros(&mut buf, 5).unwrap();
         assert_eq!(buf.remaining(), 0);
 
         // A non-zero byte in the second chunk still fails.
-        let mut buf = (&[0u8, 0][..]).chain(&[0u8, 2][..]);
+        let mut buf = Copying(&[0u8, 0]).chain(Copying(&[0u8, 2]));
         assert!(matches!(
             ensure_zeros(&mut buf, 4),
             Err(Error::Invalid(_, _))

@@ -43,6 +43,14 @@
 //! and byte-array reads can use reusable scratch storage. Fields that retain bytes copy
 //! their contents when decoded through the adapter.
 //!
+//! Use [Buf] for generic readers of serialized values and every helper on that read path,
+//! including fixed-size reads and length or padding validation. Use [DecodeInput] at entry
+//! points that convert owned inputs into readable buffers, then preserve [Buf] internally.
+//!
+//! Use [::bytes::Buf] for raw buffer implementations and byte-stream inputs to I/O,
+//! encoding, or hashing. When its cursor methods must be in scope alongside [Buf],
+//! import it as `use bytes::Buf as _;`.
+//!
 //! # Specialization
 //!
 //! Byte-oriented container paths use hidden trait hooks on [Write], [Read], and [EncodeSize] to

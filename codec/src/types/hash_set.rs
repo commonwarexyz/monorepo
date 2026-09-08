@@ -9,7 +9,7 @@ use crate::{
     error::Error,
     types::read_ordered_set,
 };
-use bytes::{Buf as _, BufMut};
+use bytes::BufMut;
 use std::{collections::HashSet, hash::Hash};
 
 const HASHSET_TYPE: &str = "HashSet";

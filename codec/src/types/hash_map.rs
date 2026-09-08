@@ -9,7 +9,7 @@ use crate::{
     error::Error,
     types::read_ordered_map,
 };
-use bytes::{Buf as _, BufMut};
+use bytes::BufMut;
 use std::{collections::HashMap, hash::Hash};
 
 const HASHMAP_TYPE: &str = "HashMap";

@@ -9,6 +9,9 @@ use bytes::{
 
 /// A buffer accepted by codec readers.
 ///
+/// Use this bound for generic readers of serialized values and their decoding helpers,
+/// including fixed-size reads and length or padding validation.
+///
 /// Implementations backed by shared storage must preserve that ownership in
 /// [`bytes::Buf::copy_to_bytes`] whenever the requested range can be represented without copying.
 /// This lets decoded byte fields retain views of the input allocation. Implement this trait
