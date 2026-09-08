@@ -320,8 +320,7 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         // The log always ends with a commit operation.
-        let Operation::CommitFloor(metadata, _) = self.log.read(self.log.bounds().end - 1).await?
-        else {
+        let Operation::CommitFloor(metadata, _) = self.log.read(*self.size() - 1).await? else {
             unreachable!("last commit should be a commit floor operation");
         };
 

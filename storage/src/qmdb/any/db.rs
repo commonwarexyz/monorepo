@@ -105,7 +105,7 @@ pub struct Db<
     ///
     /// - `bitmap.len() == log.size()`.
     /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
-    /// - CommitFloor: only the current `last_commit_loc` carries bit = 1; earlier commits
+    /// - CommitFloor: only the current last commit carries bit = 1; earlier commits
     ///   are 0.
     pub(crate) bitmap: Arc<Shared<N>>,
 
@@ -680,7 +680,7 @@ where
                 }
             }
 
-            // The rewound tail's preceding op (validated above) is the new `last_commit_loc`.
+            // The rewound tail's preceding op (validated above) is the new last commit.
             // Set its bit to 1 to match the CommitFloor convention; previous intermediate
             // commits in the truncated range stay at 0 from `truncate`. `rewind_size > 0` is
             // guaranteed by the early-return at the top of this function.

@@ -88,7 +88,6 @@ enum Operation {
     Prune,
     Sync,
     OpCount,
-    LastCommitLoc,
     OldestRetainedLoc,
     Root,
     Proof {
@@ -106,7 +105,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 14 {
+        match choice % 13 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
@@ -136,10 +135,9 @@ impl<'a> Arbitrary<'a> for Operation {
             4 => Ok(Operation::Prune),
             5 => Ok(Operation::Sync),
             6 => Ok(Operation::OpCount),
-            7 => Ok(Operation::LastCommitLoc),
-            8 => Ok(Operation::OldestRetainedLoc),
-            9 => Ok(Operation::Root),
-            10 => {
+            7 => Ok(Operation::OldestRetainedLoc),
+            8 => Ok(Operation::Root),
+            9 => {
                 let start_offset = u.arbitrary()?;
                 let max_ops = u.arbitrary()?;
                 Ok(Operation::Proof {
@@ -147,7 +145,7 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            11 => {
+            10 => {
                 let size_offset = u.arbitrary()?;
                 let start_offset = u.arbitrary()?;
                 let max_ops = u.arbitrary()?;
@@ -157,8 +155,8 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            12 => Ok(Operation::SimulateFailure {}),
-            13 => {
+            11 => Ok(Operation::SimulateFailure {}),
+            12 => {
                 // Only Bad* kinds make sense here — the ancestor is guaranteed unapplied.
                 let ancestor_kind = match u.arbitrary::<bool>()? {
                     false => FloorKind::BadRegression,
@@ -424,11 +422,6 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                 Operation::OpCount => {
                     let _ = db.bounds().end;
-                    db
-                }
-
-                Operation::LastCommitLoc => {
-                    let _ = db.bounds().end - 1;
                     db
                 }
 

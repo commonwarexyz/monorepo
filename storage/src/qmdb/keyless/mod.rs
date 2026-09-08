@@ -442,7 +442,7 @@ where
             floor
         };
 
-        // Journal rewind happens before in-memory commit-location updates. If a later step fails,
+        // Journal rewind happens before the in-memory floor and root updates. If a later step fails,
         // this handle may be internally diverged and must be dropped by the caller.
         self.journal = self.journal.rewind(rewind_size).await?;
         self.inactivity_floor_loc = rewind_floor;

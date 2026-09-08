@@ -2861,7 +2861,7 @@ mod bitmap_tests {
         db
     }
 
-    /// CommitFloor convention: only the *current* `last_commit_loc` carries bit=1; every earlier
+    /// CommitFloor convention: only the *current* last commit carries bit=1; every earlier
     /// (now intermediate) commit boundary carries bit=0.
     ///
     /// Maintained by `apply_batch`'s explicit demote-then-promote pair on CommitFloor bits. If
