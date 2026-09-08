@@ -92,14 +92,6 @@ stability_scope!(BETA {
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
     }
-
-    impl<B: CertifiableBlock> CertifiableBlock for Arc<B> {
-        type Context = B::Context;
-
-        fn context(&self) -> Self::Context {
-            self.as_ref().context()
-        }
-    }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;

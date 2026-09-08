@@ -101,11 +101,7 @@ where
         }
     }
 
-    fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
-        Arc::unwrap_or_clone(block).into_inner()
-    }
-
-    fn into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+    fn into_inner(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block.inner_shared()
     }
 
@@ -321,7 +317,7 @@ mod tests {
         let recovered = stored.into();
         assert_eq!(TestVariant::commitment(&recovered), expected);
         assert!(Arc::ptr_eq(
-            &TestVariant::into_inner_shared(recovered),
+            &TestVariant::into_inner(recovered),
             &coded.inner_shared()
         ));
     }

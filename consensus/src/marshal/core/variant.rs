@@ -103,13 +103,8 @@ pub trait Variant: Clone + Send + Sync + 'static {
         expected: ExpectedCommitment<Self::Commitment>,
     ) -> <Self::Block as Read>::Cfg;
 
-    /// Converts a working block to an owned application block.
-    ///
-    /// This may clone the payload if other owners still hold it.
-    fn into_inner(block: Self::Block) -> Self::ApplicationBlock;
-
     /// Converts a working block to a shared application block without copying the payload.
-    fn into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock>;
+    fn into_inner(block: Self::Block) -> Arc<Self::ApplicationBlock>;
 
     /// Reconstructs a working block from an application block and trusted payload.
     fn from_application_block(

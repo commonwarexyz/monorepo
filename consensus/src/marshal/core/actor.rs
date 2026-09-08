@@ -1370,7 +1370,7 @@ where
             .take_pending_anchor()
             .expect("pending floor anchor missing");
         let round = finalization.round();
-        let stored: V::StoredBlock = block.clone().into();
+        let stored: V::StoredBlock = block.into();
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             self.finalized_blocks.put(&stored).map_err(BoxedError::from),
             self.finalizations_by_height
@@ -1918,7 +1918,7 @@ where
             assert_eq!(height, next_height, "finalized block height mismatch");
 
             let (ack, ack_waiter) = A::handle();
-            application.report(Update::Block(V::into_inner_shared(block), ack));
+            application.report(Update::Block(V::into_inner(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,

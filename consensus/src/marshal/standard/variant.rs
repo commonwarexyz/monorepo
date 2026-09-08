@@ -68,11 +68,7 @@ where
         block_cfg.clone()
     }
 
-    fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
-        Arc::unwrap_or_clone(block)
-    }
-
-    fn into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
+    fn into_inner(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block
     }
 
