@@ -1,4 +1,4 @@
-use super::workload::Workload;
+use super::workload::{Schedule, Workload};
 use bytes::{BufMut, Bytes};
 use commonware_actor::Feedback;
 use commonware_codec::{
@@ -496,7 +496,7 @@ impl ApplicationMetrics {
 }
 
 /// How this producer shapes its blocks.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Production {
     /// Bytes of junk data placed in every block body.
     pub body_size: usize,
@@ -505,6 +505,8 @@ pub struct Production {
     pub interval: Duration,
     /// Independent payload arrival rate per producer; absent means saturated input.
     pub offered_bytes_per_second: Option<NonZeroU64>,
+    /// Finite benchmark arrivals, mutually exclusive with the constant input rate.
+    pub schedule: Option<Schedule>,
 }
 
 /// Deterministic application attachment backed by marshal block custody.
@@ -526,7 +528,7 @@ impl<E: Clock + Spawner> Clone for Application<E> {
         Self {
             context: Arc::clone(&self.context),
             seed: self.seed,
-            production: self.production,
+            production: self.production.clone(),
             last_build: Arc::clone(&self.last_build),
             workload: self.workload.clone(),
             publication_retention: self.publication_retention,
@@ -549,13 +551,17 @@ impl<E: Clock + Spawner + Metrics> Application<E> {
         marshal: Marshal,
         metrics: ApplicationMetrics,
     ) -> Self {
-        let workload = production.offered_bytes_per_second.map(|rate| {
-            Arc::new(Mutex::new(Workload::new(
-                &context,
-                rate,
-                production.body_size,
-            )))
-        });
+        assert!(production.schedule.is_none() || production.offered_bytes_per_second.is_none());
+        let workload = match &production.schedule {
+            Some(schedule) => Some(
+                Workload::from_schedule(&context, schedule.clone(), production.body_size)
+                    .expect("valid benchmark schedule"),
+            ),
+            None => production
+                .offered_bytes_per_second
+                .map(|rate| Workload::new(&context, rate, production.body_size)),
+        }
+        .map(|workload| Arc::new(Mutex::new(workload)));
         Self {
             context: Arc::new(context),
             seed,
@@ -591,6 +597,8 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 .lock()
                 .ready_at(context.height().get(), self.context.current())
         });
+        let exhausted = input_ready_at == Some(None);
+        let input_ready_at = input_ready_at.flatten();
         let (mut sender, receiver) = oneshot::channel();
         // The optional block interval and the availability of a full input batch independently
         // constrain the build. Neither moves the input arrival schedule under backpressure.
@@ -608,6 +616,10 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
             .child("propose")
             .shared(true)
             .spawn(move |runtime| async move {
+                if exhausted {
+                    sender.closed().await;
+                    return;
+                }
                 select! {
                     _ = sender.closed() => return,
                     () = runtime.sleep_until(next_build) => {},

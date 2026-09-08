@@ -319,6 +319,7 @@ enum Command {
 }
 
 struct RunConfig {
+    benchmark: Option<deploy::Benchmark>,
     key: u64,
     port: u16,
     participants: Vec<u64>,
@@ -495,6 +496,17 @@ fn main() {
     }
 
     let config = load_run_config(cli);
+    if let Some(benchmark) = &config.benchmark {
+        assert!(config.headless, "benchmarks require headless operation");
+        assert!(
+            config.offered_bytes_per_second.is_none(),
+            "a benchmark schedule cannot be combined with a constant input rate"
+        );
+        benchmark
+            .schedule
+            .validate()
+            .expect("valid benchmark schedule");
+    }
     assert!(
         u32::try_from(config.body_size).is_ok(),
         "body size must fit in the canonical bytes codec"
@@ -527,7 +539,10 @@ fn main() {
     // The mock committee exists so tests can build real BLS material without a ceremony; this
     // example reuses it for the same reason, which is why every node passes the same seed.
     let committee = Committee::<MinPk>::new_with_namespace_and_producers(
-        COMMITTEE_SEED,
+        config
+            .benchmark
+            .as_ref()
+            .map_or(COMMITTEE_SEED, |benchmark| benchmark.committee_seed),
         CONSENSUS_NAMESPACE,
         u32::try_from(config.participants.len()).expect("too many participants"),
         producers,
@@ -742,8 +757,15 @@ fn main() {
         let profile = profile(&committee, index, config.proposal_policy);
         let publication_retention = NonZeroUsize::new(profile.resources().max_outbox_effects())
             .expect("the consensus outbox bound is non-zero");
-        let application_metrics =
+        let mut application_metrics =
             application::ApplicationMetrics::new(&application_context, publication_retention);
+        if config.benchmark.is_some() {
+            application_metrics.proposal_latency =
+                application_metrics.proposal_latency.enable_benchmark(
+                    NonZeroUsize::new(profile.protocol().codec_config().view_quorum())
+                        .expect("nonzero quorum"),
+                );
+        }
         let application_reporter = ApplicationReporter {
             latency: application_metrics.proposal_latency.clone(),
             sink: gui.as_ref().map_or(
@@ -772,6 +794,10 @@ fn main() {
                 body_size: config.body_size,
                 interval: config.production_interval,
                 offered_bytes_per_second: config.offered_bytes_per_second,
+                schedule: config
+                    .benchmark
+                    .as_ref()
+                    .map(|benchmark| benchmark.schedule.clone()),
             },
             publication_retention,
             producer_chain,
@@ -925,6 +951,7 @@ fn load_run_config(cli: Cli) -> RunConfig {
     let port = port.parse::<u16>().expect("port not well-formed");
     RunConfig {
         key: key.parse().expect("key not well-formed"),
+        benchmark: None,
         port,
         participants: cli.participants,
         producers: cli.producers,
@@ -998,6 +1025,7 @@ fn load_remote_config(config_path: PathBuf, hosts_path: PathBuf) -> RunConfig {
 
     RunConfig {
         key: config.key,
+        benchmark: config.benchmark,
         port: config.port,
         participants: config.participants,
         producers: config.producers,

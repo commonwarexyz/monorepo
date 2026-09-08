@@ -70,7 +70,8 @@ impl Schedule {
 
     /// Returns whole bytes arrived by an absolute time, capped at the schedule's end.
     /// The schedule must have passed [`Self::validate`].
-    pub fn arrived_bytes(&self, now: SystemTime) -> u64 {
+    #[cfg(test)]
+    fn arrived_bytes(&self, now: SystemTime) -> u64 {
         let start = UNIX_EPOCH + Duration::from_millis(self.start_unix_ms);
         let mut remaining = now.duration_since(start).unwrap_or_default().as_nanos();
         let mut byte_nanos = 0u128;

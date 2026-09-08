@@ -10,3 +10,4 @@ mod workload;
 pub use actor::{
     Application, ApplicationMetrics, Block, Body, NoopReporter, Production, ProposalLatency,
 };
+pub use workload::Schedule;

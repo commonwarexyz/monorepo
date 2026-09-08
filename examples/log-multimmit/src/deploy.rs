@@ -1,5 +1,6 @@
 //! Remote deployment bundle generation.
 
+use crate::application::Schedule;
 use clap::{Args, ValueEnum};
 use commonware_consensus::multimmit::ProposalPolicy;
 use commonware_deployer::aws;
@@ -170,9 +171,18 @@ pub struct Deploy {
     binary: String,
 }
 
+/// Finite synthetic workload and fresh signing identity for one benchmark repetition.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Benchmark {
+    pub committee_seed: u64,
+    pub schedule: Schedule,
+}
+
 /// Per-node configuration consumed by the deployed binary.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<Benchmark>,
     pub key: u64,
     pub port: u16,
     pub participants: Vec<u64>,
@@ -350,6 +360,7 @@ impl Deploy {
         let bootstrappers = participants[..self.bootstrappers].to_vec();
         for key in &participants {
             let config = NodeConfig {
+                benchmark: None,
                 key: *key,
                 port: self.port,
                 participants: participants.clone(),
