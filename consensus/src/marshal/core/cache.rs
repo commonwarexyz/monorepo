@@ -354,10 +354,10 @@ where
                         "verified",
                     );
                 } else {
-                    let stored = V::stored(block);
+                    let stored: V::StoredBlock = block.clone().into();
                     let result = cache
                         .verified_blocks
-                        .put_multi_start_sync(view, digest, stored.as_ref())
+                        .put_multi_start_sync(view, digest, &stored)
                         .await;
                     (cache.verified_blocks, handle) =
                         Self::handle_start_result(result, round, "verified");
@@ -385,10 +385,10 @@ where
                     Err(e) => panic!("failed to check certified block: {e}"),
                 };
                 if !exists {
-                    let stored = V::stored(block);
+                    let stored: V::StoredBlock = block.clone().into();
                     cache.certified_blocks = cache
                         .certified_blocks
-                        .put_multi_sync(height.get(), digest, stored.as_ref())
+                        .put_multi_sync(height.get(), digest, &stored)
                         .await
                         .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
                     debug!(%height, "cached certified block");
@@ -410,10 +410,10 @@ where
         let handle;
         (self, handle) = self
             .with_epoch(round.epoch(), |mut cache| async move {
-                let stored = V::stored(block);
+                let stored: V::StoredBlock = block.clone().into();
                 let result = cache
                     .notarized_blocks
-                    .put_start_sync(view, digest, stored.as_ref())
+                    .put_start_sync(view, digest, &stored)
                     .await;
                 let handle;
                 (cache.notarized_blocks, handle) =

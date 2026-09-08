@@ -1878,7 +1878,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2110,7 +2110,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2670,7 +2670,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2942,7 +2942,7 @@ impl TestHarness for CodingHarness {
         let config = Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),

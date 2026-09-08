@@ -193,6 +193,15 @@ impl<T: Write + ?Sized> Write for Arc<T> {
     }
 }
 
+impl<T: Read> Read for Arc<T> {
+    type Cfg = T::Cfg;
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        T::read_cfg(buf, cfg).map(Self::new)
+    }
+}
+
 /// Trait for types that can be read (decoded) from a byte buffer.
 pub trait Read: Sized {
     /// The `Cfg` type parameter allows passing configuration during the read process. This is
@@ -451,11 +460,24 @@ mod tests {
     }
 
     #[test]
-    fn test_arc_encode() {
+    fn test_arc_codec() {
         let value = Arc::new(vec![1u8, 2, 3]);
+        let encoded = value.encode();
+        let cfg = ((..=3).into(), ());
 
-        assert_eq!(value.encode(), value.as_ref().encode());
+        assert_eq!(encoded, value.as_ref().encode());
         assert_eq!(value.encode_size(), value.as_ref().encode_size());
+        assert_eq!(
+            Arc::<Vec<u8>>::decode_cfg(encoded.clone(), &cfg).unwrap(),
+            value
+        );
+
+        // Shared decoding enforces the inner type's bounds and rejects truncation
+        assert!(Arc::<Vec<u8>>::decode_cfg(encoded.clone(), &((..=2).into(), ())).is_err());
+        assert!(matches!(
+            Arc::<Vec<u8>>::decode_cfg(&encoded[..encoded.len() - 1], &cfg),
+            Err(Error::EndOfBuffer)
+        ));
     }
 
     #[test]
@@ -754,5 +776,16 @@ mod tests {
             LifetimeFixed::try_from([1u8, 2].as_slice()).unwrap().raw,
             [1, 2]
         );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::Arc;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Arc<u64>>,
+            CodecConformance<Arc<Vec<u8>>>,
+        }
     }
 }

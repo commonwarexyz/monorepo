@@ -323,7 +323,7 @@ where
     let block = if let Some(height) = floor.height()
         && floor.round() >= finalization.round()
     {
-        V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+        V::into_inner_shared(processed_anchor(marshal, height).await)
     } else {
         // Marshal's configured startup floor fetches its anchor when needed. This local-only
         // subscription observes that result without starting a separate fetch.
@@ -340,7 +340,7 @@ where
         // dispatched once.
         match marshal.get_processed_height().await {
             Some(height) if height > selected.height() => {
-                V::owned_into_inner_shared(processed_anchor(marshal, height).await)
+                V::into_inner_shared(processed_anchor(marshal, height).await)
             }
             _ => selected,
         }

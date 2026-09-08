@@ -263,6 +263,17 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
     }
 }
 
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<Arc<CodedBlock<B, C, H>>>
+    for StoredCodedBlock<B, C, H>
+{
+    fn from(block: Arc<CodedBlock<B, C, H>>) -> Self {
+        Self {
+            commitment: block.commitment(),
+            inner: block.inner_shared(),
+        }
+    }
+}
+
 impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
     fn clone(&self) -> Self {
         Self {
@@ -477,6 +488,12 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
 impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for CodedBlock<B, C, H> {
     fn from(stored: StoredCodedBlock<B, C, H>) -> Self {
         Self::new_trusted_shared(stored.inner, stored.commitment)
+    }
+}
+
+impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for Arc<CodedBlock<B, C, H>> {
+    fn from(stored: StoredCodedBlock<B, C, H>) -> Self {
+        Self::new(stored.into())
     }
 }
 

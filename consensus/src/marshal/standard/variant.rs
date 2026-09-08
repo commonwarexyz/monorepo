@@ -17,11 +17,12 @@ use commonware_codec::Read;
 use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{borrow::Cow, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
 /// This variant sends the entire block to all peers.
+/// Both the working and stored block types are `Arc<B>`.
 #[derive(Default, Clone, Copy)]
 pub struct Standard<B: Block>(std::marker::PhantomData<B>);
 
@@ -30,13 +31,9 @@ where
     B: Block,
 {
     type ApplicationBlock = B;
-    type Block = B;
-    type StoredBlock = B;
+    type Block = Arc<B>;
+    type StoredBlock = Arc<B>;
     type Commitment = <B as Digestible>::Digest;
-
-    fn stored(block: &Self::Block) -> Cow<'_, Self::StoredBlock> {
-        Cow::Borrowed(block)
-    }
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
         // Standard variant commitment is exactly the block digest.
@@ -72,22 +69,18 @@ where
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
-        block
+        Arc::unwrap_or_clone(block)
     }
 
-    fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock> {
+    fn into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block
-    }
-
-    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
-        Arc::new(block)
     }
 
     fn from_application_block(
         block: Self::ApplicationBlock,
         _payload: Self::Commitment,
     ) -> Self::Block {
-        block
+        Arc::new(block)
     }
 }
 

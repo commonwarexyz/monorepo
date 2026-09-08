@@ -64,12 +64,16 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    use alloc::sync::Arc;
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
+    #[cfg(feature = "std")]
+    use std::sync::Arc;
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -227,6 +231,14 @@ commonware_macros::stability_scope!(BETA {
         /// If many objects with [Digest]s are related (map to some higher-level
         /// group [Digest]), you should also implement [Committable].
         fn digest(&self) -> Self::Digest;
+    }
+
+    impl<T: Digestible> Digestible for Arc<T> {
+        type Digest = T::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.as_ref().digest()
+        }
     }
 
     /// An object that can produce a commitment of itself.

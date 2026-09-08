@@ -8,24 +8,26 @@ use std::sync::Arc;
 /// A finalized-block store operation observed by [`Recording`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
-    /// A `put` of the block at this height and the address passed to storage.
+    /// A `put` of the block at this height and the payload address passed to storage.
     Put(Height, usize),
     /// A `get` by height, or by digest when `None`.
     Get(Option<Height>),
 }
 
 /// A finalized-block store that records `put` and `get` calls in order.
-pub struct Recording<T> {
+pub struct Recording<T: Blocks> {
     inner: T,
     ops: Arc<Mutex<Vec<Op>>>,
+    payload_address: fn(&T::Block) -> usize,
 }
 
-impl<T> Recording<T> {
-    /// Wraps `inner` with an empty operation log.
-    pub fn new(inner: T) -> Self {
+impl<T: Blocks> Recording<T> {
+    /// Wraps `inner`, recording payload addresses with `payload_address`.
+    pub fn new(inner: T, payload_address: fn(&T::Block) -> usize) -> Self {
         Self {
             inner,
             ops: Arc::new(Mutex::new(Vec::new())),
+            payload_address,
         }
     }
 
@@ -42,7 +44,7 @@ impl<T: Blocks> Blocks for Recording<T> {
     async fn put(mut self, block: &Self::Block) -> Result<Self, Self::Error> {
         self.ops
             .lock()
-            .push(Op::Put(block.height(), std::ptr::from_ref(block).addr()));
+            .push(Op::Put(block.height(), (self.payload_address)(block)));
         self.inner = self.inner.put(block).await?;
         Ok(self)
     }

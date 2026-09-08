@@ -200,7 +200,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(buffer),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -875,7 +875,7 @@ mod tests {
             );
             assert_eq!(
                 recovering.mailbox.get_block(Height::new(2)).await,
-                Some(block_two.clone()),
+                Some(block_two.clone().into()),
                 "block without a finalization row should still be queryable by height"
             );
             assert_eq!(
@@ -1299,7 +1299,7 @@ mod tests {
                 key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let block = Arc::new(make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100));
             let digest = block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
 
@@ -2476,7 +2476,7 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
                 )
                 .await;
                 let buffer = buffer.expect("buffer was provided");
@@ -2552,7 +2552,7 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
                 )
                 .await;
                 let buffer = buffer.expect("buffer was provided");
@@ -2634,7 +2634,7 @@ mod tests {
             ConstantProvider::new(schemes[0].clone()),
             Application::<B>::manual_ack(),
             Some(RecordingBuffer::default()),
-            Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
         )
         .await;
         let buffer = buffer.expect("buffer was provided");
@@ -2827,7 +2827,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
@@ -2908,7 +2908,7 @@ mod tests {
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
                     Some(RecordingBuffer::default()),
-                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                    Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
                 )
                 .await;
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
@@ -4285,7 +4285,7 @@ mod tests {
         provider: P,
         application: R,
         buffer: Option<Buf>,
-        start: Start<S, D, B>,
+        start: Start<S, D, Arc<B>>,
     ) -> (
         Mailbox<S, Standard<B>>,
         Option<Buf>,
@@ -4433,7 +4433,7 @@ mod tests {
                 provider.clone(),
                 ApplicationReporter { updates },
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone()),
+                Start::Genesis(genesis.clone().into()),
             )
             .await;
 
@@ -4476,7 +4476,7 @@ mod tests {
                 provider,
                 restart_application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis),
+                Start::Genesis(genesis.into()),
             )
             .await;
             select! {
@@ -4514,7 +4514,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 None::<RecordingBuffer>,
-                Start::Genesis(genesis.clone()),
+                Start::Genesis(genesis.clone().into()),
             )
             .await;
 
@@ -4607,7 +4607,7 @@ mod tests {
                 ConstantProvider::new(wrong_schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             mailbox.set_floor(floor_finalization);
@@ -4836,7 +4836,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -4920,7 +4920,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5024,7 +5024,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(buffer.clone()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5127,7 +5127,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5300,7 +5300,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5490,7 +5490,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(buffer.clone()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5546,7 +5546,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5662,7 +5662,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone()),
+                Start::Genesis(genesis.clone().into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5739,7 +5739,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone()),
+                Start::Genesis(genesis.clone().into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5873,7 +5873,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -5966,7 +5966,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -6066,7 +6066,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -6150,7 +6150,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -6233,7 +6233,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -6282,7 +6282,7 @@ mod tests {
                 VerifierProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -6332,7 +6332,7 @@ mod tests {
                 VerifierProvider::new(verifier.clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -6378,7 +6378,7 @@ mod tests {
                 VerifierProvider::new(verifier),
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -6417,7 +6417,7 @@ mod tests {
                 VerifierProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -6469,7 +6469,7 @@ mod tests {
                 provider.clone(),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             assert!(
@@ -6533,7 +6533,7 @@ mod tests {
                 provider.clone(),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             assert!(
@@ -6603,7 +6603,7 @@ mod tests {
                 provider.clone(),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             assert!(
@@ -6688,7 +6688,7 @@ mod tests {
                 provider.clone(),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             assert!(
@@ -6762,7 +6762,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -6844,7 +6844,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -6911,7 +6911,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(original_genesis.clone()),
+                Start::Genesis(original_genesis.clone().into()),
             )
             .await;
             assert_eq!(
@@ -6931,7 +6931,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(replacement_genesis.clone()),
+                Start::Genesis(replacement_genesis.clone().into()),
             )
             .await;
         });
@@ -6963,7 +6963,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -6998,7 +6998,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -7069,7 +7069,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -7159,7 +7159,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -7192,7 +7192,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -7241,7 +7241,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let missing = Sha256::hash(&[b"missing-before-set-floor"]);
@@ -7458,7 +7458,7 @@ mod tests {
             let config = Config {
                 provider: EmptyProvider,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
@@ -7619,7 +7619,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -7653,7 +7653,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -7807,7 +7807,7 @@ mod tests {
     }
 
     type Finalizations = prunable::Archive<EightCap, deterministic::Context, D, Finalization<S, D>>;
-    type FinalizedBlocks<T = B> = prunable::Archive<EightCap, deterministic::Context, D, T>;
+    type FinalizedBlocks<T = Arc<B>> = prunable::Archive<EightCap, deterministic::Context, D, T>;
 
     /// Initialize prunable finalized stores for direct actor tests.
     async fn prunable_finalized_stores<T: crate::Block<Digest = D> + Read<Cfg = ()>>(
@@ -7882,11 +7882,11 @@ mod tests {
         partition_prefix: &str,
         provider: harness::P,
         max_pending_acks: NonZeroUsize,
-    ) -> Config<harness::P, FixedEpocher, Sequential, B, B, D> {
+    ) -> Config<harness::P, FixedEpocher, Sequential, B, Arc<B>, D> {
         Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -7930,9 +7930,9 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_cache_writes_borrow_shared_blocks() {
+    fn test_standard_cache_writes_do_not_clone_block_payloads() {
         type CountedBlock = crate::marshal::mocks::block::Block<D, CloneCounter>;
-        const PREFIX: &str = "borrowed-cache";
+        const PREFIX: &str = "shared-cache";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -7952,7 +7952,7 @@ mod tests {
                 Config {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                    start: Start::Genesis(genesis),
+                    start: Start::Genesis(genesis.into()),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
                     max_repair: NZUsize!(10),
@@ -7994,7 +7994,7 @@ mod tests {
                     assert_eq!(
                         block.context.0.load(Ordering::Relaxed),
                         0,
-                        "cache persistence must borrow the shared block (certified={certified})"
+                        "cache persistence must not clone the block payload (certified={certified})"
                     );
                     assert_eq!(
                         mailbox.get_block(&block.digest()).await.unwrap().digest(),
@@ -8472,7 +8472,8 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations_by_height, finalized_blocks) =
                 prunable_finalized_stores(&context, PARTITION_PREFIX).await;
-            let finalized_blocks = Recording::new(finalized_blocks);
+            let finalized_blocks =
+                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
             let ops = finalized_blocks.ops();
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
@@ -8534,7 +8535,7 @@ mod tests {
             assert_eq!(
                 ops[written],
                 Op::Put(Height::new(1), Arc::as_ptr(&delivered).addr()),
-                "storage must borrow the block object dispatched to the application"
+                "storage must share the block payload dispatched to the application"
             );
             assert!(
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
@@ -8543,21 +8544,23 @@ mod tests {
         });
     }
 
-    fn staged_dispatch_preserves_first_write(preexisting: bool) {
-        const PARTITION_PREFIX: &str = "staged-first-write";
+    fn staged_dispatch_deduplicates_finalizations(preexisting: bool) {
+        const PARTITION_PREFIX: &str = "staged-dedup";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let first = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let conflicting = make_raw_block(genesis.digest(), Height::new(1), 200);
-            assert_ne!(first.digest(), conflicting.digest());
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             let (finalizations_by_height, mut finalized_blocks) =
                 prunable_finalized_stores(&context, PARTITION_PREFIX).await;
             if preexisting {
                 finalized_blocks = finalized_blocks
-                    .put_sync(first.height().get(), first.digest(), &first)
+                    .put_sync(
+                        block.height().get(),
+                        block.digest(),
+                        &Arc::new(block.clone()),
+                    )
                     .await
                     .unwrap();
             }
@@ -8584,34 +8587,50 @@ mod tests {
                 reschedule().await;
             }
 
-            // A Byzantine quorum can certify conflicting blocks at the same height
-            // Local durable delivery must still match the archive's first write
-            for (view, block) in [(1, &first), (2, &conflicting)] {
-                if preexisting && view == 1 {
-                    continue;
-                }
-                buffer.insert(block.clone());
-                let finalization = StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), View::new(view)),
-                        View::zero(),
-                        block.digest(),
-                    ),
-                    &schemes,
-                    QUORUM,
-                );
-                StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            // Repeated finalizations retain the first staged object
+            buffer.insert(block.clone());
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let mut handed = Vec::new();
+            for _ in 0..2 {
+                StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
 
                 // A served read proves the preceding finalization arm has run
                 let archived = mailbox.get_block(Height::new(1)).await.unwrap();
-                assert_eq!(archived.digest(), first.digest());
+                assert_eq!(archived.digest(), block.digest());
+                handed.push(
+                    buffer
+                        .last_handed()
+                        .expect("buffer must have served the finalized block"),
+                );
             }
+            assert!(
+                handed[0].upgrade().is_some(),
+                "the first buffered object must remain staged even if already archived"
+            );
+            assert!(
+                handed[1].upgrade().is_none(),
+                "a duplicate finalization must not replace the staged object"
+            );
 
             assert_eq!(application.acknowledged().await, Height::zero());
             while !application.blocks().contains_key(&Height::new(1)) {
                 reschedule().await;
             }
             let delivered = application.blocks()[&Height::new(1)].clone();
+            assert!(
+                handed[0]
+                    .upgrade()
+                    .is_some_and(|block| Arc::ptr_eq(&block, &delivered)),
+                "dispatch must reuse the first staged object"
+            );
             let archived = mailbox.get_block(Height::new(1)).await.unwrap();
             assert_eq!(
                 delivered.digest(),
@@ -8622,13 +8641,13 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_staged_dispatch_preserves_first_write() {
-        staged_dispatch_preserves_first_write(false);
+    fn test_standard_staged_dispatch_deduplicates_finalizations() {
+        staged_dispatch_deduplicates_finalizations(false);
     }
 
     #[test_traced("WARN")]
-    fn test_standard_staged_dispatch_preserves_preexisting_write() {
-        staged_dispatch_preserves_first_write(true);
+    fn test_standard_staged_dispatch_deduplicates_preexisting_block() {
+        staged_dispatch_deduplicates_finalizations(true);
     }
 
     /// Staging retains twice the ack capacity until dispatch or a floor skips the blocks.
@@ -8646,7 +8665,8 @@ mod tests {
                 );
                 let (finalizations_by_height, finalized_blocks) =
                     prunable_finalized_stores(&context, PARTITION_PREFIX).await;
-                let finalized_blocks = Recording::new(finalized_blocks);
+                let finalized_blocks =
+                    Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
                 let ops = finalized_blocks.ops();
                 let (actor, mut mailbox, _) = Actor::init(
                     context.child("actor"),
@@ -8987,7 +9007,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -9030,7 +9050,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -9092,7 +9112,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -9160,7 +9180,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -9235,7 +9255,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -9281,7 +9301,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
             let buffer = buffer.expect("buffer was provided");
@@ -9326,7 +9346,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -9389,7 +9409,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -9430,7 +9450,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 
@@ -9480,7 +9500,7 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             )
             .await;
 

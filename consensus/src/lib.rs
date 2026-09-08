@@ -14,6 +14,7 @@ use commonware_macros::stability_scope;
 stability_scope!(BETA {
     use commonware_codec::{Codec, Encode};
     use commonware_cryptography::Digestible;
+    use std::sync::Arc;
 
     pub mod simplex;
 
@@ -32,6 +33,12 @@ stability_scope!(BETA {
     pub trait Heightable {
         /// Returns the height associated with this object.
         fn height(&self) -> Height;
+    }
+
+    impl<T: Heightable + ?Sized> Heightable for Arc<T> {
+        fn height(&self) -> Height {
+            self.as_ref().height()
+        }
     }
 
     /// Viewable is a trait that provides access to the view (round) number.
@@ -63,6 +70,12 @@ stability_scope!(BETA {
         fn parent(&self) -> Self::Digest;
     }
 
+    impl<B: Block> Block for Arc<B> {
+        fn parent(&self) -> Self::Digest {
+            self.as_ref().parent()
+        }
+    }
+
     /// CertifiableBlock extends [Block] with consensus context information.
     ///
     /// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
@@ -78,6 +91,14 @@ stability_scope!(BETA {
 
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
+    }
+
+    impl<B: CertifiableBlock> CertifiableBlock for Arc<B> {
+        type Context = B::Context;
+
+        fn context(&self) -> Self::Context {
+            self.as_ref().context()
+        }
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {

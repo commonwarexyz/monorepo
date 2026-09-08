@@ -400,13 +400,13 @@ mod tests {
         FixedEpocher,
         Sequential,
         CodingB,
-        TestCodedBlock,
+        Arc<TestCodedBlock>,
         TestCommitment,
     > {
         Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16)),
+            start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -435,7 +435,7 @@ mod tests {
             FixedEpocher,
             Sequential,
             CodingB,
-            TestCodedBlock,
+            Arc<TestCodedBlock>,
             TestCommitment,
         >,
     ) -> (Finalizations, FinalizedBlocks) {
@@ -1185,7 +1185,9 @@ mod tests {
             );
             let (finalizations_by_height, finalized_blocks) =
                 immutable_finalized_stores(&context, PARTITION_PREFIX, &config).await;
-            let finalized_blocks = Recording::new(finalized_blocks);
+            let finalized_blocks = Recording::new(finalized_blocks, |block| {
+                std::ptr::from_ref(block.inner()).addr()
+            });
             let ops = finalized_blocks.ops();
             let (actor, mut mailbox, _) = core::Actor::init(
                 context.child("actor"),
@@ -1237,6 +1239,11 @@ mod tests {
                 .iter()
                 .position(|op| matches!(op, Op::Put(height, _) if *height == Height::new(1)))
                 .expect("finalized block written");
+            assert_eq!(
+                ops[written],
+                Op::Put(Height::new(1), Arc::as_ptr(&delivered).addr()),
+                "storage must share the block payload dispatched to the application"
+            );
             assert!(
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
                 "dispatch must not read the finalized block back from the archive: {ops:?}"

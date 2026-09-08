@@ -59,11 +59,6 @@ impl<V: Variant, A: Acknowledgement> PendingAcks<V, A> {
         &mut self.current
     }
 
-    /// Returns the maximum number of in-flight acknowledgements.
-    pub(super) const fn capacity(&self) -> usize {
-        self.max
-    }
-
     /// Returns whether we can dispatch another block without exceeding capacity.
     pub(super) fn has_capacity(&self) -> bool {
         let reserved = usize::from(self.current.is_some());
