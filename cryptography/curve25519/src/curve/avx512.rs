@@ -199,9 +199,6 @@ fn sub_raw(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
     })
 }
 
-// Complete operations carry their own target features so arithmetic stays fused even when
-// generic callers are outlined outside the feature-enabled dispatch function
-
 /// # Correctness
 ///
 /// Every input must satisfy [`FVec`]'s limb bound. That bound keeps raw field arithmetic within
