@@ -147,6 +147,7 @@ where
     // covering them completes
     dispatch_gate: DispatchGate,
     // Finalized blocks awaiting durable dispatch, capped at twice the pending-ack capacity
+    // to absorb bursts of finalizations while the application processes earlier blocks
     staged: BTreeMap<Height, Arc<V::Block>>,
 
     // ---------- Storage ----------
