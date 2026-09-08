@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
     APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
@@ -126,7 +127,7 @@ fn main() {
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Sharing<MinSig> = Sharing::decode_cfg(
-        identity.as_ref(),
+        Bytes::from(identity),
         &(NZU32!(validators.len() as u32), ModeVersion::v0()),
     )
     .expect("Identity not well-formed");
@@ -134,7 +135,7 @@ fn main() {
         .get_one::<String>("share")
         .expect("Please provide share");
     let share = from_hex(share).expect("Share not well-formed");
-    let share = group::Share::decode(share.as_ref()).expect("Share not well-formed");
+    let share = group::Share::decode(Bytes::from(share)).expect("Share not well-formed");
 
     // Configure indexer
     let indexer = matches

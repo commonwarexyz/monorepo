@@ -1,0 +1,278 @@
+error: `Frame` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:59:34
+   |
+LL |         Vec::<Bytes>::decode_cfg(self.frame.as_ref(), cfg)
+   |                                  ----------^^^^^^^^^
+   |                                  |
+   |                                  view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `self.frame.clone()`, a refcount bump on `Bytes` and `IoBuf`, or `self.frame.slice(..)` for a sub-range
+   = note: `#[deny(slice_decode)]` on by default
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:131:30
+   |
+LL |     Vec::<Bytes>::decode_cfg(bytes.as_ref(), cfg)
+   |                              -----^^^^^^^^^
+   |                              |
+   |                              view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes.clone()`, a refcount bump on `Bytes` and `IoBuf`, or `bytes.slice(..)` for a sub-range
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:135:30
+   |
+LL |     Vec::<Bytes>::decode_cfg(bytes.as_ref(), cfg)
+   |                              -----^^^^^^^^^
+   |                              |
+   |                              view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `&mut *bytes`: a `&mut impl Buf` is itself a `Buf`
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:141:19
+   |
+LL |     T::decode_cfg(bytes.as_ref(), cfg)
+   |                   -----^^^^^^^^^
+   |                   |
+   |                   view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes.clone()`, a refcount bump on `Bytes` and `IoBuf`, or `bytes.slice(..)` for a sub-range
+
+error: `Vec<u8>` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:145:19
+   |
+LL |     V::decode_cfg(vec.as_slice(), cfg)
+   |                   ---^^^^^^^^^^^
+   |                   |
+   |                   view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: convert once with `Bytes::from(vec)` and pass that, or a `slice(..)` of it
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:166:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(bytes.as_ref(), &cfg);
+   |                                      -----^^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:167:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(&bytes[..], &cfg);
+   |                                      ^-----^^^^
+   |                                       |
+   |                                       view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:168:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(&bytes[1..], &cfg);
+   |                                      ^-----^^^^^
+   |                                       |
+   |                                       view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:169:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(&*bytes, &cfg);
+   |                                      ^^-----
+   |                                        |
+   |                                        view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:170:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(bytes.deref(), &cfg);
+   |                                      -----^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:171:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(bytes.chunk(), &cfg);
+   |                                      -----^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:172:36
+   |
+LL |     let _ = Vec::<Bytes>::read_cfg(&mut bytes.as_ref(), &cfg);
+   |                                    ^^^^^-----^^^^^^^^^
+   |                                         |
+   |                                         view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `BytesMut` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:176:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(bytes_mut.as_ref(), &cfg);
+   |                                      ---------^^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes_mut` itself, or `bytes_mut.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Frame` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:180:36
+   |
+LL |     let _ = Vec::<Bytes>::read_cfg(&mut frame.as_ref(), &cfg);
+   |                                    ^^^^^-----^^^^^^^^^
+   |                                         |
+   |                                         view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `frame` itself, or `frame.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Frame` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:181:36
+   |
+LL |     let _ = Vec::<Bytes>::read_cfg(&mut frame.as_ref()[1..].as_ref(), &cfg);
+   |                                    ^^^^^-----^^^^^^^^^^^^^^^^^^^^^^^
+   |                                         |
+   |                                         view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `frame` itself, or `frame.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Frame` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:182:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(frame.chunk(), &cfg);
+   |                                      -----^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `frame` itself, or `frame.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Frame` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:186:38
+   |
+LL |     let view = &frame.as_ref()[..frame.remaining()];
+   |                 ----- view of this buffer
+LL |     let _ = Vec::<Bytes>::decode_cfg(view, &cfg);
+   |                                      ^^^^
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `frame` itself, or `frame.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Vec<u8>` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:190:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(vec.as_slice(), &cfg);
+   |                                      ---^^^^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: convert once with `Bytes::from(vec)` and pass that, or a `slice(..)` of it
+
+error: `Vec<u8>` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:191:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(make_vec().as_ref(), &cfg);
+   |                                      ----------^^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: convert once with `Bytes::from(make_vec())` and pass that, or a `slice(..)` of it
+
+error: `Vec<u8>` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:192:35
+   |
+LL |     let _ = Lazy::<u64>::deferred(&mut vec.as_slice(), ());
+   |                                   ^^^^^---^^^^^^^^^^^
+   |                                        |
+   |                                        view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: convert once with `Bytes::from(vec)` and pass that, or a `slice(..)` of it
+
+error: `Frame` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:203:38
+   |
+LL |     let _ = Vec::<Bytes>::decode_cfg(holder.frame().as_ref(), &cfg);
+   |                                      --------------^^^^^^^^^
+   |                                      |
+   |                                      view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `holder.frame().clone()`, a refcount bump on `Bytes` and `IoBuf`, or `holder.frame().slice(..)` for a sub-range
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:206:35
+   |
+LL |     let _ = forward::<Vec<Bytes>>(bytes.as_ref(), &cfg);
+   |                                   -----^^^^^^^^^
+   |                                   |
+   |                                   view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:207:27
+   |
+LL |     let _ = forward_where(bytes.as_ref(), &cfg);
+   |                           -----^^^^^^^^^
+   |                           |
+   |                           view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:208:28
+   |
+LL |     let _ = Decoder.decode(bytes.as_ref(), &cfg);
+   |                            -----^^^^^^^^^
+   |                            |
+   |                            view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: `Bytes` passed to a `Buf` parameter as a `&[u8]` view
+  --> $DIR/main.rs:209:20
+   |
+LL |     let _ = absorb(bytes.as_ref());
+   |                    -----^^^^^^^^^
+   |                    |
+   |                    view of this buffer
+   |
+   = help: a `&[u8]` cannot hand out views of its storage, so every `Bytes`, `IoBuf` and `Lazy` the codec reads from it is allocated and copied
+   = help: pass `bytes` itself, or `bytes.slice(..)` for a sub-range (`freeze()` a mutable buffer first)
+
+error: aborting due to 25 previous errors
+

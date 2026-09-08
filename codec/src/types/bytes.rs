@@ -91,6 +91,24 @@ mod tests {
         assert_eq!(long_bytes.encode(), expected.as_slice());
     }
 
+    #[test]
+    fn test_view() {
+        let value: Vec<Bytes> = (0..64).map(|_| Bytes::from(vec![7u8; 17])).collect();
+        let source = value.encode();
+        let cfg = ((..).into(), (..).into());
+        let range = source.as_ptr_range();
+
+        // Decoding from the owned buffer hands out views of it
+        let decoded = Vec::<Bytes>::decode_cfg(source.clone(), &cfg).unwrap();
+        assert_eq!(decoded, value);
+        assert!(decoded.iter().all(|b| range.contains(&b.as_ptr())));
+
+        // Decoding from a slice of it copies every field
+        let copied = Vec::<Bytes>::decode_cfg(source.as_ref(), &cfg).unwrap();
+        assert_eq!(copied, value);
+        assert!(copied.iter().all(|b| !range.contains(&b.as_ptr())));
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

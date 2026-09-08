@@ -540,7 +540,7 @@ mod tests {
         [1u8, 2, 3].write_bufs(&mut buf);
         assert_eq!(buf.put_slice_calls, 1);
         assert_eq!(buf.put_u8_calls, 0);
-        assert_eq!(buf.push_calls, 0);
+        assert!(buf.pushed.is_empty());
 
         // Arrays delegate `write_bufs` to element implementations that push chunks.
         let mut buf = TrackingWriteBuf::new();
@@ -551,7 +551,7 @@ mod tests {
         .write_bufs(&mut buf);
         assert_eq!(buf.put_slice_calls, 0);
         assert_eq!(buf.put_u8_calls, 2);
-        assert_eq!(buf.push_calls, 2);
+        assert_eq!(buf.pushed.len(), 2);
 
         // `[u8; N]` reads the fixed-size payload with one bulk copy.
         let mut buf = TrackingReadBuf::new(&[0x01, 0x02, 0x03]);

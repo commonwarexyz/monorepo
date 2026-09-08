@@ -91,6 +91,7 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
@@ -1774,6 +1775,53 @@ mod tests {
             metadata.retain(|_, _| false);
             assert_eq!(metadata.keys().count(), 0);
 
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_bytes_values_reload() {
+        // A value with byte fields decodes as a view of the load buffer, so the mirror is copied
+        // on load and later overwritten in place.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: (..).into(),
+            };
+            let first = U64::new(1);
+            let second = U64::new(2);
+            let mut metadata = Metadata::<_, U64, Bytes>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            metadata.put(first.clone(), Bytes::from(vec![1u8; 8]));
+            metadata.put(second.clone(), Bytes::from(vec![2u8; 8]));
+            metadata = metadata.sync().await.unwrap();
+            drop(metadata);
+
+            // Reload, then overwrite an equal-size value twice: the first sync rebuilds the
+            // stale copy and the second writes into the copied mirror of the loaded one.
+            let mut metadata =
+                Metadata::<_, U64, Bytes>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(metadata.get(&first), Some(&Bytes::from(vec![1u8; 8])));
+            assert_eq!(metadata.get(&second), Some(&Bytes::from(vec![2u8; 8])));
+            metadata.put(first.clone(), Bytes::from(vec![3u8; 8]));
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(first.clone(), Bytes::from(vec![4u8; 8]));
+            metadata = metadata.sync().await.unwrap();
+
+            // A longer value rewrites the blob
+            metadata.put(second.clone(), Bytes::from(vec![5u8; 16]));
+            metadata = metadata.sync().await.unwrap();
+            drop(metadata);
+
+            let metadata = Metadata::<_, U64, Bytes>::init(context.child("third"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&first), Some(&Bytes::from(vec![4u8; 8])));
+            assert_eq!(metadata.get(&second), Some(&Bytes::from(vec![5u8; 16])));
             metadata.destroy().await.unwrap();
         });
     }

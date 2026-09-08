@@ -116,7 +116,7 @@ impl<T: Read> Lazy<T> {
                 }
             } else {
                 Self {
-                    value: T::decode_cfg(bytes.as_ref(), &cfg).ok(),
+                    value: T::decode_cfg(bytes.clone(), &cfg).ok(),
                     pending: Some(Pending { bytes, cfg }),
                 }
             }
@@ -139,7 +139,7 @@ impl<T: Read> Lazy<T> {
                     .pending
                     .as_ref()
                     .expect("Lazy should have pending if value is not initialized");
-                T::decode_cfg(bytes.as_ref(), cfg).ok()
+                T::decode_cfg(bytes.clone(), cfg).ok()
             })
             .as_ref()
     }
@@ -259,7 +259,9 @@ impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
 #[cfg(test)]
 mod test {
     use super::Lazy;
-    use crate::{DecodeExt, Encode, FixedSize, Read, Write};
+    use crate::{
+        Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
+    };
     use proptest::prelude::*;
 
     /// A byte that's always <= 100
@@ -337,5 +339,29 @@ mod test {
             prop_assert_eq!(a < b, la < lb);
             prop_assert_eq!(a >= b, la >= lb);
         }
+    }
+
+    #[test]
+    fn test_lazy_view() {
+        let value: Vec<Lazy<Small>> = (0..64u8).map(|i| Lazy::new(Small(i))).collect();
+        let source = value.encode();
+        let cfg = ((..).into(), ());
+        let range = source.as_ptr_range();
+
+        // Decoding from the owned buffer defers every element as a view of it
+        let decoded = Vec::<Lazy<Small>>::decode_cfg(source.clone(), &cfg).unwrap();
+        assert_eq!(decoded, value);
+        let mut buf = TrackingWriteBuf::new();
+        decoded.write_bufs(&mut buf);
+        assert_eq!(buf.pushed.len(), value.len());
+        assert!(buf.pushed.iter().all(|b| range.contains(&b.as_ptr())));
+
+        // Decoding from a slice of it copies every element
+        let copied = Vec::<Lazy<Small>>::decode_cfg(source.as_ref(), &cfg).unwrap();
+        assert_eq!(copied, value);
+        let mut buf = TrackingWriteBuf::new();
+        copied.write_bufs(&mut buf);
+        assert_eq!(buf.pushed.len(), value.len());
+        assert!(buf.pushed.iter().all(|b| !range.contains(&b.as_ptr())));
     }
 }

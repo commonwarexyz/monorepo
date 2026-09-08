@@ -142,8 +142,8 @@ pub(crate) mod tests {
         pub put_slice_calls: usize,
         /// Number of single-byte writes.
         pub put_u8_calls: usize,
-        /// Number of externally pushed chunks.
-        pub push_calls: usize,
+        /// Externally pushed chunks, in order.
+        pub pushed: Vec<Bytes>,
     }
 
     impl TrackingWriteBuf {
@@ -152,7 +152,7 @@ pub(crate) mod tests {
                 inner: BytesMut::new(),
                 put_slice_calls: 0,
                 put_u8_calls: 0,
-                push_calls: 0,
+                pushed: Vec::new(),
             }
         }
 
@@ -194,8 +194,8 @@ pub(crate) mod tests {
     impl BufsMut for TrackingWriteBuf {
         fn push(&mut self, bytes: impl Into<Bytes>) {
             let bytes = bytes.into();
-            self.push_calls += 1;
             self.inner.extend_from_slice(&bytes);
+            self.pushed.push(bytes);
         }
     }
 

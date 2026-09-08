@@ -87,6 +87,7 @@ use crate::journal::{
         FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
     },
 };
+use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
@@ -298,17 +299,15 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             .ok();
         }
 
-        // Otherwise try reading the full item from cache.
+        // Otherwise try reading the full item from cache. The buffer holds exactly the frame, so
+        // skipping the varint leaves the item.
         let mut buf = vec![0u8; item_len];
         if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
-        decode_item::<V>(
-            &buf[varint_len..varint_len + data_len],
-            &self.codec_config,
-            compressed,
-        )
-        .ok()
+        let mut buf = Bytes::from(buf);
+        buf.advance(varint_len);
+        decode_item::<V>(buf, &self.codec_config, compressed).ok()
     }
 
     /// See [Journal::size].
@@ -3608,6 +3607,47 @@ mod tests {
             ));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_try_get_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (compression, partition) in [(None, "plain"), (Some(3), "compressed")] {
+                let cfg = Config {
+                    partition: partition.into(),
+                    compression,
+                    codec_config: (..).into(),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024),
+                };
+                let journal = Journal::<_, Bytes>::init(context.child(partition), cfg)
+                    .await
+                    .expect("Failed to initialize journal");
+
+                // Uncompressed, the short frame fits the header read and is decoded from it.
+                // The long frame is read in full from the write buffer.
+                let short = Bytes::from(vec![1u8; 3]);
+                let (journal, short_offset, _) =
+                    journal.append(1, &short).await.expect("Failed to append");
+                let long = Bytes::from(vec![7u8; 32]);
+                let (journal, long_offset, _) =
+                    journal.append(1, &long).await.expect("Failed to append");
+                assert_eq!(journal.try_get_sync(1, short_offset), Some(short.clone()));
+                assert_eq!(journal.try_get_sync(1, long_offset), Some(long.clone()));
+
+                // Once synced and read back, the item is served from the page cache
+                let journal = journal.sync(1).await.expect("Failed to sync");
+                journal.get(1, long_offset).await.expect("Failed to get");
+                assert_eq!(journal.try_get_sync(1, long_offset), Some(long.clone()));
+
+                // An offset at the end of the section is a miss
+                let size = journal.size(1).expect("Failed to size");
+                assert!(journal.try_get_sync(1, size).is_none());
+
+                journal.destroy().await.expect("Failed to destroy");
+            }
         });
     }
 }

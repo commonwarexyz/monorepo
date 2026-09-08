@@ -24,6 +24,7 @@ use crate::{
         sync::{CompactTarget, Request, Response},
     },
 };
+use bytes::Bytes;
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -225,7 +226,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             pinned_nodes,
             ..
         } = entry;
-        let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
+        let op = Op::decode_cfg(Bytes::from(op_bytes), cfg)
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
         // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
         // pinned nodes for this request.

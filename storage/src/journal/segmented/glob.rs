@@ -474,6 +474,35 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_glob_get_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (..).into(),
+                write_buffer: NZUsize!(1024),
+            };
+            let glob: Glob<_, Bytes> = Glob::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to init glob");
+
+            // Append a value that stays in the buffered tip
+            let value = Bytes::from(vec![7u8; 32]);
+            let (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
+
+            // Two live reads decode views of the same tip buffer
+            let a = glob.get(1, offset, size).await.expect("Failed to get");
+            let b = glob.get(1, offset, size).await.expect("Failed to get");
+            assert_eq!(a, value);
+            assert_eq!(b, value);
+            assert_eq!(a.as_ptr(), b.as_ptr());
+
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_glob_multiple_values() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

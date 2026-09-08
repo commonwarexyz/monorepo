@@ -495,7 +495,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
         let bytes = blob_handle.read_at(start, range_len).await?.coalesce();
-        let bytes = bytes.as_ref();
 
         let mut items = Vec::with_capacity(offsets.len());
         let mut local_offset = 0usize;
@@ -505,7 +504,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let item_len =
                 usize::try_from(next_offset - offset).map_err(|_| Error::OffsetOverflow)?;
 
-            let mut cursor = Cursor::new(&bytes[local_offset..]);
+            let mut cursor = Cursor::new(&bytes.as_ref()[local_offset..]);
             let (size, varint_len) = decode_length_prefix(&mut cursor)?;
             let actual_len = size.checked_add(varint_len).ok_or(Error::OffsetOverflow)?;
             if actual_len != item_len {
@@ -526,7 +525,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 .checked_add(item_len)
                 .ok_or(Error::OffsetOverflow)?;
             items.push(decode_item::<V>(
-                &bytes[data_start..data_end],
+                bytes.slice(data_start..data_end),
                 &self.codec_config,
                 self.compressed,
             )?);

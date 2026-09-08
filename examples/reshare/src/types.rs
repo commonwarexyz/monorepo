@@ -1,6 +1,7 @@
 //! Types, constants, and storage config shared across the example.
 
 use crate::config::NetworkConfig;
+use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_codec::{
     Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
@@ -408,7 +409,7 @@ impl dkg::SecretStore for FileSecretStore {
     async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {
         let raw = self.inner.lock().shares.get(&epoch.get()).cloned()?;
         let bytes = from_hex(&raw)?;
-        Share::decode(bytes.as_slice()).ok()
+        Share::decode(Bytes::from(bytes)).ok()
     }
 
     async fn put_seed(&mut self, epoch: Epoch, seed: Summary) {
@@ -447,7 +448,7 @@ impl dkg::SecretStore for FileSecretStore {
         let key = Self::dealing_key(epoch, dealer);
         let raw = self.inner.lock().dealings.get(&key).cloned()?;
         let bytes = from_hex(&raw)?;
-        DealerPrivMsg::decode(bytes.as_slice()).ok()
+        DealerPrivMsg::decode(Bytes::from(bytes)).ok()
     }
 
     async fn prune(&mut self, min: Epoch) {
@@ -571,8 +572,11 @@ mod epoch_info_hex {
     ) -> Result<dkg::types::EpochInfo<MinSig, ed25519::PublicKey>, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        dkg::types::EpochInfo::decode_cfg(bytes.as_slice(), &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE))
-            .map_err(D::Error::custom)
+        dkg::types::EpochInfo::decode_cfg(
+            Bytes::from(bytes),
+            &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
+        )
+        .map_err(D::Error::custom)
     }
 }
 
