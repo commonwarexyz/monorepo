@@ -439,7 +439,6 @@ impl Transcript {
         Summary { hash }
     }
 
-    // Utility methods which can be created using the other methods.
     /// Use a signer to create a signature over this transcript.
     ///
     /// Conceptually, this is the same as:
