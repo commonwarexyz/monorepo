@@ -766,7 +766,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .get()
                 .max(needed)
                 .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-            let (mut buf, read) = self
+            let (buf, read) = self
                 .blob
                 .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
                 .await?;
@@ -776,7 +776,6 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .ok_or(Error::OffsetOverflow)?;
             // An external owner lets decoded byte fields slice by refcount instead of boxing an
             // owner per field
-            buf.truncate(read);
             self.buf.append(IoBuf::from(Bytes::from(buf.freeze())));
             if self.offset == blob_size {
                 self.exhausted = true;
