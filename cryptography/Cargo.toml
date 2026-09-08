@@ -125,7 +125,6 @@ std = [
 	"p256/std",
 	"rand/std",
 	"rand/std_rng",
-	"rand/sys_rng",
 	"rand_chacha/std",
 	"thiserror/std",
 	"zeroize/std",

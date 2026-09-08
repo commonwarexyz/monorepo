@@ -355,7 +355,7 @@ use crate::{
     transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{
-    Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
+    Encode, EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
@@ -1057,7 +1057,7 @@ impl DealerPrivMsg {
 
 impl EncodeSize for DealerPrivMsg {
     fn encode_size(&self) -> usize {
-        self.share.access(|share| share.encode_size())
+        Scalar::SIZE
     }
 }
 

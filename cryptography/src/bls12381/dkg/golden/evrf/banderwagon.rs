@@ -177,6 +177,11 @@ fn build_circuit<'ctx>(
 ///
 /// The committed values, in order, are the VRF outputs for `receivers`; recover
 /// them with [`Witness::values`].
+///
+/// The returned witness includes the private exponent's bits in ordinary memory.
+/// Its [Scalar] elements erase themselves on drop, but temporary exponent copies
+/// and bit buffers require a separate scratch-erasure review. Protecting `x` does
+/// not protect these allocations or the complete proving computation.
 pub fn vrf_batch_checked(msg: &[u8], x: &F, receivers: &[G]) -> (Circuit<Scalar>, Witness<Scalar>) {
     let sender = G::generator() * x;
     let outputs: Vec<Scalar> = receivers

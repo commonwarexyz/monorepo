@@ -153,16 +153,20 @@ impl Read for Setup {
     }
 }
 
+/// A private exponent for Golden DKG VRF evaluation and Schnorr signing.
+///
+/// The public key is cached separately, so retrieving it does not access the
+/// private scalar. [Self::try_harden] protects the retained scalar, subject to
+/// the [secret storage contract](crate::secret).
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     inner: Secret<F>,
+    public: PublicKey,
 }
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRng) -> Self {
-        Self {
-            inner: Secret::new(F::random(rng)),
-        }
+        Self::from_scalar(F::random(rng))
     }
 }
 
@@ -171,16 +175,16 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.inner
-            .access(|x| PublicKey::from_point(G::generator() * x))
+        self.public.clone()
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
-        let pk = self.public();
         let mut t = Transcript::new(SCHNORR_NS, Version::V1);
-        t.commit(namespace).commit(msg).commit(pk.raw.as_slice());
+        t.commit(namespace)
+            .commit(msg)
+            .commit(self.public.raw.as_slice());
 
-        // Derive deterministic nonce from secret key + public transcript state
+        // Derive the deterministic nonce from the key and public transcript state.
         let k = self.inner.access(|x| {
             let mut nonce_t = t.fork(b"nonce");
             let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
@@ -188,6 +192,8 @@ impl crate::Signer for PrivateKey {
             F::random(nonce_t.noise(b"k"))
         });
 
+        // Keep the private pages inaccessible during the group multiplication.
+        // Only nonce derivation and the final response need the retained scalar.
         let k_big = G::generator() * &k;
         let k_big_bytes: [u8; G::SIZE] = k_big.encode_fixed();
         t.commit(k_big_bytes.as_slice());
@@ -204,19 +210,27 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKey {
+    /// Derives the public key before placing the scalar in secret storage.
+    fn from_scalar(scalar: F) -> Self {
+        let public = PublicKey::from_point(G::generator() * &scalar);
+        Self {
+            inner: Secret::new(scalar),
+            public,
+        }
+    }
+
     /// Moves the private scalar into hardened storage.
     ///
-    /// Clones share storage, erased when its last owner drops. Already hardened
-    /// keys are unchanged. Earlier copies and exported material remain unprotected.
-    ///
-    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    /// See [Secret::try_harden] for platform requirements, shared ownership, and
+    /// consumption on failure, and [crate::secret] for the protection boundary.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             inner: self.inner.try_harden()?,
+            public: self.public,
         })
     }
 
-    /// Get the [`PublicKey`] associated with this private key.
+    /// Returns the cached [PublicKey] without accessing private storage.
     pub fn public(&self) -> PublicKey {
         crate::Signer::public_key(self)
     }
@@ -237,6 +251,11 @@ impl PrivateKey {
     /// Compute the VRF output for each receiver, along with [`VrfCommitments`]
     /// that bind those outputs and prove they were evaluated correctly.
     ///
+    /// The witness contains the private exponent's bits in ordinary allocations.
+    /// Hardening the retained scalar does not protect that witness or the proof's
+    /// scratch storage. Temporary exponent copies and bit buffers need a separate
+    /// scratch-erasure review, even though witness scalars erase on drop.
+    ///
     /// # Panics
     ///
     /// Panics if `receivers` contains duplicate public keys.
@@ -253,6 +272,8 @@ impl PrivateKey {
             let point = x.point.clone();
             (x, point)
         }));
+        // The witness outlives this access and includes the secret exponent's bits.
+        // Keeping the scalar readable during proving would not protect those copies.
         let (circuit, witness) = self
             .inner
             .access(|x| vrf_batch_checked(msg, x, receivers.values()));
@@ -313,8 +334,10 @@ impl PrivateKey {
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.inner
-            .access(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
+        self.inner.access(|x| {
+            let raw = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
+            buf.put_slice(raw.as_slice());
+        });
     }
 }
 
@@ -324,9 +347,7 @@ impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let x: F = ReadExt::read(&mut raw.as_slice())?;
-        Ok(Self {
-            inner: Secret::new(x),
-        })
+        Ok(Self::from_scalar(x))
     }
 }
 

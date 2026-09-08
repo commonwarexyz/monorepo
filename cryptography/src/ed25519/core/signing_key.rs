@@ -5,14 +5,20 @@ use curve25519_dalek::{constants, scalar::Scalar};
 use rand_core::{CryptoRng, Rng};
 use sha2::{Digest, Sha512, digest::Update};
 
+/// The private seed, scalar, and nonce prefix of an Ed25519 signing key.
+#[derive(Clone)]
+pub struct SigningSecret {
+    seed: [u8; 32],
+    s: Scalar,
+    prefix: [u8; 32],
+}
+
 /// An Ed25519 signing key.
 ///
 /// This is also called a secret key by other implementations.
 #[derive(Clone)]
 pub struct SigningKey {
-    seed: [u8; 32],
-    s: Scalar,
-    prefix: [u8; 32],
+    secret: SigningSecret,
     vk: VerificationKey,
 }
 
@@ -21,26 +27,31 @@ impl SigningKey {
     ///
     /// This is the same as `.into()`, but does not require type inference.
     pub const fn to_bytes(&self) -> [u8; 32] {
-        self.seed
+        self.secret.seed
     }
 
     /// View the byte encoding of the signing key.
     pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.seed
+        &self.secret.seed
     }
 
     /// Obtain the verification key associated with this signing key.
     pub const fn verification_key(&self) -> VerificationKey {
         self.vk
     }
+
+    /// Separates the private material from its matching cached public key.
+    pub const fn into_parts(self) -> (SigningSecret, VerificationKey) {
+        (self.secret, self.vk)
+    }
 }
 
 impl core::fmt::Debug for SigningKey {
     fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         fmt.debug_struct("SigningKey")
-            .field("seed", &Hex(&self.seed))
-            .field("s", &self.s)
-            .field("prefix", &Hex(&self.prefix))
+            .field("seed", &Hex(&self.secret.seed))
+            .field("s", &self.secret.s)
+            .field("prefix", &Hex(&self.secret.prefix))
             .field("vk", &self.vk)
             .finish()
     }
@@ -60,13 +71,13 @@ impl<'a> From<&'a SigningKey> for VerificationKeyBytes {
 
 impl AsRef<[u8]> for SigningKey {
     fn as_ref(&self) -> &[u8] {
-        &self.seed[..]
+        &self.secret.seed[..]
     }
 }
 
 impl From<SigningKey> for [u8; 32] {
     fn from(sk: SigningKey) -> [u8; 32] {
-        sk.seed
+        sk.secret.seed
     }
 }
 
@@ -110,9 +121,7 @@ impl From<[u8; 32]> for SigningKey {
         let A = &s * constants::ED25519_BASEPOINT_TABLE;
 
         Self {
-            seed,
-            s,
-            prefix,
+            secret: SigningSecret { seed, s, prefix },
             vk: VerificationKey {
                 minus_A: -A,
                 A_bytes: VerificationKeyBytes(A.compress().to_bytes()),
@@ -123,9 +132,9 @@ impl From<[u8; 32]> for SigningKey {
 
 impl zeroize::Zeroize for SigningKey {
     fn zeroize(&mut self) {
-        self.seed.zeroize();
-        self.s.zeroize();
-        self.prefix.zeroize()
+        self.secret.seed.zeroize();
+        self.secret.s.zeroize();
+        self.secret.prefix.zeroize()
     }
 }
 
@@ -138,8 +147,23 @@ impl SigningKey {
     }
 
     /// Create a signature on `msg` using this key.
-    #[allow(non_snake_case)]
     pub fn sign(&self, msg: &[u8]) -> Signature {
+        self.secret.sign(&self.vk, msg)
+    }
+}
+
+impl SigningSecret {
+    /// Returns the seed encoding.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.seed
+    }
+
+    /// Signs with the public key returned alongside this secret by `into_parts`.
+    ///
+    /// Supplying a different public key can reuse a nonce under different
+    /// challenges and reveal the signing scalar. Keep these parts paired.
+    #[allow(non_snake_case)]
+    pub fn sign(&self, vk: &VerificationKey, msg: &[u8]) -> Signature {
         let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
 
         let R_bytes = (&r * constants::ED25519_BASEPOINT_TABLE)
@@ -149,7 +173,7 @@ impl SigningKey {
         let k = Scalar::from_hash(
             Sha512::default()
                 .chain(&R_bytes[..])
-                .chain(&self.vk.A_bytes.0[..])
+                .chain(&vk.A_bytes.0[..])
                 .chain(msg),
         );
 

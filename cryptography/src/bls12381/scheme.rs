@@ -28,7 +28,7 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Private},
+    group::{self, Private, Scalar, ScalarReadCfg},
     ops,
     variant::{MinPk, Variant},
 };
@@ -37,10 +37,11 @@ use crate::{BatchVerifier, HardenError, Secret, Signer as _};
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
+    Decode, DecodeExt, EncodeFixed, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
+    Write,
 };
 use commonware_formatting::Hex;
-use commonware_math::algebra::Random;
+use commonware_math::algebra::{CryptoGroup, Random};
 use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span};
 use core::{
@@ -48,28 +49,55 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
+use ctutils::{Choice, CtEq};
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "bls12381";
 
+/// A scalar and its cached canonical encoding.
+///
+/// Both fields remain immutable and occupy the same protected value after hardening.
+#[derive(Clone)]
+struct PrivateValue {
+    raw: Zeroizing<[u8; group::PRIVATE_KEY_LENGTH]>,
+    scalar: Scalar,
+}
+
+impl CtEq for PrivateValue {
+    fn ct_eq(&self, other: &Self) -> Choice {
+        // The immutable cache is determined by the scalar, whose comparison is constant-time.
+        self.scalar.ct_eq(&other.scalar)
+    }
+}
+
 /// BLS12-381 private key.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
-    raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
-    key: Private,
+    key: Secret<PrivateValue>,
 }
 
 impl PrivateKey {
-    /// Moves the serialized private key and its scalar into hardened storage.
+    /// Creates an inline key and caches its canonical encoding.
+    fn new(scalar: Scalar) -> Self {
+        Self {
+            key: Secret::new(PrivateValue {
+                raw: scalar.as_slice(),
+                scalar,
+            }),
+        }
+    }
+
+    /// Moves the private scalar and its cached encoding into hardened storage.
     ///
-    /// Clones share storage, erased when its last owner drops. Already hardened
-    /// keys are unchanged. Earlier copies and exported material remain unprotected.
+    /// Clones then share the protected allocation. Already hardened keys are
+    /// unchanged. Failure consumes the key. Earlier clones and exported material
+    /// are unaffected.
     ///
-    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    /// See [Secret::try_harden](crate::Secret::try_harden) for platform requirements,
+    /// protection guarantees, and limits.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
-            raw: self.raw.try_harden()?,
             key: self.key.try_harden()?,
         })
     }
@@ -77,7 +105,8 @@ impl PrivateKey {
 
 impl PartialEq for PrivateKey {
     fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
+        // PrivateValue compares its scalar through Secret's constant-time equality.
+        self.key == other.key
     }
 }
 
@@ -85,7 +114,7 @@ impl Eq for PrivateKey {}
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.access(|raw| raw.write(buf));
+        self.key.access(|value| value.raw.write(buf));
     }
 }
 
@@ -94,11 +123,10 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key =
-            Private::decode(raw.as_ref()).map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        let scalar = Scalar::decode_cfg(raw.as_ref(), &ScalarReadCfg::RejectZero)
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self {
-            raw: Secret::new(*raw),
-            key,
+            key: Secret::new(PrivateValue { raw, scalar }),
         })
     }
 }
@@ -107,13 +135,24 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl From<Private> for PrivateKey {
-    fn from(key: Private) -> Self {
-        let raw = Zeroizing::new(key.access(|s| s.encode_fixed()));
-        Self {
-            raw: Secret::new(*raw),
-            key,
-        }
+impl TryFrom<Private> for PrivateKey {
+    type Error = HardenError;
+
+    /// Converts a primitive private key, preserving whether its storage is hardened.
+    ///
+    /// Inline input produces an inline key without allocating. Hardened input
+    /// requires a new protected allocation containing the scalar and its encoding.
+    /// Existing clones retain their original storage and do not share the new allocation.
+    /// The scalar passes through ordinary temporary storage during conversion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [HardenError] if hardening the new allocation fails. The input is
+    /// consumed on success or failure. See [Secret::try_harden] for protection limits.
+    fn try_from(key: Private) -> Result<Self, Self::Error> {
+        let hardened = key.is_hardened();
+        let key = Self::new(key.extract_or_clone());
+        if hardened { key.try_harden() } else { Ok(key) }
     }
 }
 
@@ -130,18 +169,22 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        PublicKey::from(ops::compute_public::<MinPk>(&self.key))
+        let public = self
+            .key
+            .access(|value| <MinPk as Variant>::Public::generator() * &value.scalar);
+        public.into()
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
-        ops::sign_message::<MinPk>(&self.key, namespace, msg).into()
+        // Hash public input before opening the private allocation.
+        let hashed = ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, namespace, msg);
+        self.key.access(|value| hashed * &value.scalar).into()
     }
 }
 
 impl Random for PrivateKey {
-    fn random(mut rng: impl CryptoRng) -> Self {
-        let (private, _) = ops::keypair::<_, MinPk>(&mut rng);
-        private.into()
+    fn random(rng: impl CryptoRng) -> Self {
+        Self::new(Scalar::random(rng))
     }
 }
 
@@ -482,8 +525,7 @@ mod tests {
     fn test_from_private() {
         let mut rng = test_rng();
         let private = Private::random(&mut rng);
-        let private_key = PrivateKey::from(private);
-        // Verify the key works by signing and verifying
+        let private_key = PrivateKey::try_from(private).unwrap();
         let msg = b"test message";
         let sig = private_key.sign(b"ns", msg);
         assert!(private_key.public_key().verify(b"ns", msg, &sig));

@@ -515,12 +515,19 @@ impl Private {
         }
     }
 
+    /// Reports the storage mode for conversions that preserve hardening.
+    pub(crate) const fn is_hardened(&self) -> bool {
+        self.scalar.is_hardened()
+    }
+
     /// Moves the scalar into hardened storage.
     ///
-    /// Clones share storage, erased when its last owner drops. Already hardened
-    /// keys are unchanged. Earlier copies and exported material remain unprotected.
+    /// Clones then share the protected allocation. Already hardened keys are
+    /// unchanged. Failure consumes the key. Earlier clones and exported material
+    /// are unaffected.
     ///
-    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    /// See [Secret::try_harden] for platform requirements, protection guarantees,
+    /// and limits.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             scalar: self.scalar.try_harden()?,
@@ -653,8 +660,8 @@ impl Scalar {
         Self::from_limbs([i, 0, 0, 0])
     }
 
-    /// Encodes the scalar into a byte array.
-    fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
+    /// Returns the canonical big-endian encoding, erased on drop.
+    pub(crate) fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
         let mut slice = Zeroizing::new([0u8; Self::SIZE]);
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
@@ -1007,10 +1014,12 @@ impl Share {
 
     /// Moves the private scalar into hardened storage.
     ///
-    /// Clones share storage, erased when its last owner drops. Already hardened
-    /// shares are unchanged. Earlier copies and exported material remain unprotected.
+    /// Clones then share the protected allocation. Already hardened shares are
+    /// unchanged. Failure consumes the share. Earlier clones and exported material
+    /// are unaffected.
     ///
-    /// Returns an error if hardening is unsupported or its protections cannot be established.
+    /// See [Secret::try_harden] for platform requirements, protection guarantees,
+    /// and limits.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             index: self.index,
@@ -1030,7 +1039,7 @@ impl Share {
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
-        self.private.access(|private| private.write(buf));
+        self.private.write(buf);
     }
 }
 
@@ -1046,7 +1055,7 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.access(|private| private.encode_size())
+        self.index.encode_size() + Scalar::SIZE
     }
 }
 
@@ -1936,6 +1945,8 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
+    #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
+    use crate::bls12381::primitives::variant::MinPk;
     use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
@@ -2427,6 +2438,88 @@ mod tests {
         assert_eq!(s1, s2);
         // Different scalars should (very likely) be different
         assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_private_encoding() {
+        // Keep construction usable in const contexts without an encoding cache.
+        const fn private_from_scalar(scalar: Scalar) -> Private {
+            Private::new(scalar)
+        }
+
+        let original = Private::random(test_rng());
+        let encoded = original.access(|scalar| scalar.encode());
+        let index = Participant::new(1);
+        let mut share_bytes = Vec::new();
+        index.write(&mut share_bytes);
+        share_bytes.extend_from_slice(&encoded);
+
+        for private in [
+            original.clone(),
+            private_from_scalar(original.access(Clone::clone)),
+            Private::decode(encoded.as_ref()).unwrap(),
+        ] {
+            assert!(!private.is_hardened());
+            assert_eq!(private, original);
+            assert_eq!(private.encode(), encoded);
+            let share = Share::new(index, private.clone());
+            assert_eq!(share.encode().as_ref(), share_bytes);
+            assert_eq!(Share::decode(share_bytes.as_slice()).unwrap(), share);
+            assert_eq!(private.extract_or_clone(), original.access(Clone::clone));
+        }
+
+        // Construction still accepts zero even though private-key decoding rejects it.
+        let zero = Private::new(Scalar::zero());
+        assert_eq!(zero.encode().as_ref(), &[0; PRIVATE_KEY_LENGTH]);
+        assert_eq!(zero.extract_or_clone(), Scalar::zero());
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
+    #[test]
+    fn test_hardened_private_extraction() {
+        let original = Private::random(test_rng());
+        let encoded = original.encode();
+        let hardened = original.clone().try_harden().unwrap();
+        let cloned = hardened.clone();
+        assert!(hardened.is_hardened());
+        hardened.access(|value| cloned.access(|other| assert!(core::ptr::eq(value, other))));
+
+        let shared_scalar = hardened.extract_or_clone();
+        cloned.access(|scalar| assert_eq!(scalar, &shared_scalar));
+        assert_eq!(cloned.encode(), encoded);
+        assert_eq!(cloned, original);
+
+        // The remaining owner can move out its scalar.
+        let unique_scalar = cloned.extract_or_clone();
+        assert_eq!(unique_scalar, shared_scalar);
+        assert_eq!(unique_scalar, original.extract_or_clone());
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
+    #[test]
+    fn test_hardened_share() {
+        let original = Share::new(Participant::new(1), Private::random(test_rng()));
+        let encoded = original.encode();
+        let public = original.public::<MinPk>();
+        let hardened = original.clone().try_harden().unwrap();
+        assert_eq!(hardened, original);
+        assert_eq!(hardened.encode(), encoded);
+        assert_eq!(hardened.public::<MinPk>(), public);
+
+        let cloned = hardened.clone();
+        hardened
+            .private
+            .access(|a| cloned.private.access(|b| assert!(core::ptr::eq(a, b))));
+        let hardened = hardened.try_harden().unwrap();
+        hardened
+            .private
+            .access(|a| cloned.private.access(|b| assert!(core::ptr::eq(a, b))));
+        let exported = hardened.private.extract_or_clone();
+        cloned
+            .private
+            .access(|scalar| assert_eq!(scalar, &exported));
+        assert_eq!(cloned.public::<MinPk>(), public);
+        assert_eq!(Share::decode(encoded).unwrap(), cloned);
     }
 
     #[test]

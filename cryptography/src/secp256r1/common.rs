@@ -11,7 +11,7 @@ use core::{
 };
 use p256::{
     ecdsa::{SigningKey, VerifyingKey},
-    elliptic_curve::Generate,
+    elliptic_curve::{Generate, subtle::ConstantTimeEq},
 };
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
@@ -20,16 +20,29 @@ pub const CURVE_NAME: &str = "secp256r1";
 pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
+/// A signing key and its canonical private encoding.
+///
+/// Both fields remain immutable and occupy the same protected value after hardening.
+#[derive(Clone)]
+struct SigningValue {
+    raw: Zeroizing<[u8; PRIVATE_KEY_LENGTH]>,
+    key: SigningKey,
+}
+
 /// Internal Secp256r1 Private Key storage.
 #[derive(Clone, Debug)]
 pub struct PrivateKeyInner {
-    raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
-    pub(crate) key: Secret<SigningKey>,
+    inner: Secret<SigningValue>,
+    // SigningKey keeps its own public point. This copy avoids opening private
+    // pages when only the public key is requested.
+    public: VerifyingKey,
 }
 
 impl PartialEq for PrivateKeyInner {
     fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
+        // SigningKey compares its private scalars with subtle's constant-time
+        // implementation. Secret's generic equality uses a different trait.
+        self.access(|key| other.access(|other| key.ct_eq(other).into()))
     }
 }
 
@@ -37,24 +50,32 @@ impl Eq for PrivateKeyInner {}
 
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
-        let raw = Zeroizing::new(key.to_bytes().into());
+        let public = *key.verifying_key();
+        let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::from(key.to_bytes()));
         Self {
-            raw: Secret::new(*raw),
-            key: Secret::new(key),
+            inner: Secret::new(SigningValue { raw, key }),
+            public,
         }
     }
 
-    /// Protects both the cached key bytes and the private signing state.
+    /// Lends the signing key for the duration of `f`.
+    pub(super) fn access<R>(&self, f: impl for<'a> FnOnce(&'a SigningKey) -> R) -> R {
+        self.inner.access(|value| f(&value.key))
+    }
+
+    /// Protects the signing state according to [Secret::try_harden].
+    ///
+    /// The cached public key stays accessible without opening private pages.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
-            raw: self.raw.try_harden()?,
-            key: self.key.try_harden()?,
+            inner: self.inner.try_harden()?,
+            public: self.public,
         })
     }
 
     /// Returns the `VerifyingKey` corresponding to this private key.
-    pub fn verifying_key(&self) -> VerifyingKey {
-        self.key.access(|key| *key.verifying_key())
+    pub const fn verifying_key(&self) -> VerifyingKey {
+        self.public
     }
 }
 
@@ -66,7 +87,7 @@ impl Random for PrivateKeyInner {
 
 impl Write for PrivateKeyInner {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.access(|raw| raw.write(buf));
+        self.inner.access(|value| value.raw.write(buf));
     }
 }
 
@@ -219,10 +240,12 @@ macro_rules! impl_private_key_wrapper {
         impl $name {
             /// Moves the private key into hardened storage.
             ///
-            /// Clones share storage, erased when its last owner drops. Already hardened
-            /// keys are unchanged. Earlier copies and exported material remain unprotected.
+            /// Clones share the protected allocation. Public-key access leaves it sealed.
+            /// See [crate::Secret::try_harden] for the protections, costs, and ownership contract.
             ///
-            /// Returns an error if hardening is unsupported or its protections cannot be established.
+            /// # Errors
+            ///
+            /// Consumes the key on failure, including when hardening is unsupported.
             pub fn try_harden(self) -> Result<Self, crate::secret::HardenError> {
                 self.0.try_harden().map(Self)
             }

@@ -1,102 +1,247 @@
-//! Secret values with explicit access and erasure on drop.
+//! Secret values with explicit access and erasure of their retained storage.
 //!
-//! - [Secret] supports inline and hardened storage through a single public wrapper.
-//!   It starts inline and can be converted to hardened storage with [Secret::try_harden].
-//!   Conversion consumes the wrapper, including on failure. Existing clones and
-//!   previously exported values are unaffected.
-//! - `InlineSecret<T>` is the private implementation of inline storage. Dropping
-//!   the wrapper destroys `T`, then zeroizes its storage. Cloning calls `T::clone`
-//!   and places the result in a separate wrapper.
-//! - `HardenedSecret<T>` is the private implementation of hardened storage.
-//!   It stores `T` in locked memory excluded from core dumps.
-//!   The allocation is read-only during `access()` calls and inaccessible between
-//!   them. Clones share the allocation, which is erased when the last owner drops.
-//!   Hardened storage is available on Linux with `std`.
+//! [Secret] provides two storage modes through one wrapper. [Secret::new] stores
+//! `T` inline without allocating. [Secret::try_harden] moves it into protected
+//! memory on Linux with `std`. [Secret::try_init] initializes a byte array directly
+//! in that memory. [Secret::is_hardened] reports the mode without accessing the
+//! value or changing permissions.
 //!
-//! All three redact `Debug` output and provide access to `T` through a closure taking `&T`.
-//! Borrows into the stored value cannot escape that closure. Copies, raw pointers,
-//! and references already stored inside `T` can escape. The wrappers do not erase
-//! or protect values copied out by the caller. When `T: CtEq`, equality delegates
-//! to `T`'s constant-time comparison.
+//! # Ownership and access
 //!
-//! [Secret::try_extract] and [Secret::extract_or_clone] consume the wrapper and
-//! return an ordinary, unprotected `T`. The caller becomes responsible for its
-//! erasure. Moving a value out erases the source storage without destroying `T`.
-//! If hardened storage is shared, `try_extract` returns the wrapper unchanged,
-//! while `extract_or_clone` clones the value through `access()`.
+//! Inline clones call `T::clone` and own separate values. Hardened clones share
+//! one allocation without copying `T` or changing its permissions. The public
+//! `Secret<T>: Clone` implementation requires `T: Clone` for both modes.
 //!
-//! # Choosing the stored type
+//! ```text
+//! Inline storage                         Hardened storage
 //!
-//! Store sensitive bytes directly in `T`, for example in an array or a struct of
-//! arrays. Protection covers the storage occupied by `T`, including its padding.
-//! It does not extend to memory reached through pointers. Wrapping a `Vec`,
-//! `String`, or `Box` does not make its heap allocation protected or zeroize it.
-//! Any cleanup of referenced allocations depends on `T`'s own destructor.
+//! Secret A       Secret B                Secret A       Secret B
+//! +----------+   +----------+             +--------+     +--------+
+//! | T        |   | T::clone |             | handle |     | handle |
+//! +----------+   +----------+             +----+---+     +---+----+
+//!                                             |             |
+//! Separate values, each with                  +------+------+
+//! its own destruction and erasure                    |
+//!                                                    v
+//!                                         shared allocation metadata
+//!                                                    |
+//!                                                    v
+//!                                      protected data containing one T
+//!                                      erased on final release
+//! ```
 //!
-//! For hardened storage, operations on `&T` must not write to its storage, even
-//! through interior mutability. The pages are read-only during access, so such
-//! writes can terminate the process. `T`'s destructor must not panic, since a
-//! panic can interrupt erasure of inline storage, including during a failed
-//! hardening attempt. Callers must choose types that meet these requirements.
+//! Allocation metadata lives in ordinary memory. The secret-storage protections
+//! apply to the data containing `T`. A separate readable page records fork
+//! identity, contains no secret, and is not locked. Public cached values belong
+//! outside protected data.
 //!
-//! # Limits of erasure
+//! [Secret::access] lends `&T` to a closure. Borrows into `T` cannot escape, but
+//! copies, raw pointers, and references already stored inside `T` can escape.
+//! These results receive no protection. The wrapper redacts its own `Debug` and
+//! `Display` output. Callers can still print the value inside the closure.
+//! Equality uses `T`'s constant-time comparison when `T: CtEq`.
 //!
-//! Erasure covers the wrapper's current storage. Moving a value can leave bytes
-//! at earlier locations, and computations can leave copies in registers or on
-//! the stack. Those copies are outside the wrapper's control. Explicitly manage
-//! exported sensitive values, for example with [zeroize::Zeroizing]. Cleanup
-//! also requires the wrapper to be dropped, so leaking it or terminating the
-//! process without running destructors prevents erasure by the wrapper.
+//! [Secret::try_extract] consumes a uniquely owned wrapper, moves out ordinary
+//! `T`, erases its source, and releases any protected allocation. It never clones.
+//! If hardened storage is shared, it returns `Err(self)` unchanged without
+//! reading `T` or changing permissions. [Secret::extract_or_clone] instead clones
+//! through an access callback when shared. Both produce an unprotected value
+//! whose cleanup belongs to the caller, for example through [zeroize::Zeroizing].
 //!
 //! # Hardened storage
 //!
-//! Hardening requires Linux with `std` and a kernel supporting `MADV_WIPEONFORK`
-//! (Linux 4.14 or later). Construction establishes all required protections before
-//! storing sensitive bytes in the allocation:
+//! Hardening requires Linux with `std` and support for `MADV_WIPEONFORK`, introduced
+//! in Linux 4.14. Construction must establish every required protection. It may
+//! fail under the process's actual locked-memory allowance or syscall policy.
+//! Hardening consumes and drops its input on any error, including unsupported
+//! platforms. Earlier inline clones and previously exported bytes are unaffected.
+//! Hardening an already hardened value keeps its existing allocation.
 //!
-//! - [mlock](https://man7.org/linux/man-pages/man2/mlock.2.html) keeps data pages
-//!   resident, preventing them from being swapped out.
-//! - [MADV_DONTDUMP](https://man7.org/linux/man-pages/man2/madvise.2.html) excludes
-//!   them from kernel-generated core dumps.
-//! - `mprotect` grants read-only access during the callback and revokes it afterward.
-//!   Initialization, extraction, and destruction have write access.
-//! - Guard pages surround the data region. A random canary before the value detects
-//!   writes that change it when the canary is next checked.
+//! | Measure | Protection and limits |
+//! |---|---|
+//! | [mlock](https://man7.org/linux/man-pages/man2/mlock.2.html) | Keeps data pages out of swap, without protecting earlier copies or hibernation images. |
+//! | [MADV_DONTDUMP](https://man7.org/linux/man-pages/man2/madvise.2.html) | Excludes these data pages from kernel-generated core dumps, leaving stack, heap, and computation copies unaffected. |
+//! | `MADV_WIPEONFORK` and allocation identity | Wipe inherited bytes and reject typed use of invalid wiped values in descendants. |
+//! | [mprotect](https://man7.org/linux/man-pages/man2/mprotect.2.html) | Blocks ordinary loads while idle and permits read-only access during callbacks. |
+//! | Guard pages | Fault accesses reaching either data-region boundary, without catching all underruns within unused data bytes or arbitrary pointer jumps. |
+//! | Erasure and unmapping | Clear current retained storage during cleanup, subject to the limits below. |
 //!
-//! Each allocation locks at least one data page and reserves two virtual guard
-//! pages, even for a zero-sized value. Clones share this allocation. `access()` calls
-//! synchronize a reader count and change permissions when the first call begins
-//! and the last ends. The allocation stays readable throughout overlapping calls,
-//! including those through other clones.
+//! The first active callback makes the data pages readable. Nested or concurrent
+//! callbacks through any clone keep them readable until the last callback ends.
+//! Pages are readable throughout the process during that interval, including to
+//! other threads. Shared access must not write to the stored value, even through
+//! interior mutability, because the read-only mapping can make such writes fatal.
 //!
-//! Dropping the last owner destroys the value, zeroizes the entire data region, and
-//! releases the mapping. Erasure also runs if that destructor unwinds. Failures
-//! to change permissions after construction, detected canary corruption, or
-//! failures to restore write access or release memory during cleanup abort the
-//! process. Aborting does not run destructors or guarantee erasure.
+//! These measures do not promise protection against arbitrary code execution,
+//! general speculative-execution attacks, or authorized debugger-style inspection.
+//! Page permissions are not the debugger access-control boundary. Same-user
+//! inspection depends on credentials, dumpability, capabilities, and security
+//! policy. See [Linux ptrace access checks](https://man7.org/linux/man-pages/man2/ptrace.2.html).
 //!
-//! During an `access()` call, the pages are readable throughout the process. Hardening
-//! does not defend against arbitrary code execution, privileged memory
-//! inspection, or hibernation images.
+//! # Forking and failures
 //!
-//! # Forking with hardened storage
+//! Fork children inherit zeroed data. Each allocation also has a read-only marker
+//! that is wiped in descendants and never reset. This rejects inherited handles
+//! even if PID reuse or PID namespaces produce a numeric creator-PID match. New
+//! allocations in a child have independent markers and remain usable.
 //!
-//! `MADV_WIPEONFORK` replaces the child's data pages with zeroes. Accessing or moving
-//! out an inherited hardened value aborts before touching its reader mutex or
-//! reading `T`. The final release in the child only unmaps its copy, without calling
-//! `T`'s destructor on the wiped bytes. The parent's allocation is unaffected.
+//! Inherited access and unique extraction abort before touching the reader mutex
+//! or interpreting wiped bytes as `T`. Returning through an inherited access guard
+//! or initializer also aborts. Shared `try_extract` may return `Err(self)` without
+//! accessing the allocation. Final release in a child unmaps its copy without
+//! calling `T`'s destructor. The parent's allocation remains usable.
 //!
-//! A caller using an unsafe fork API during an `access()` call must ensure that the child
-//! never uses references into the inherited allocation. Its bytes have been wiped
-//! and may no longer represent a valid `T`. Returning through an inherited
-//! read guard also aborts in the child. These restrictions do not replace
-//! the fork API's own safety requirements.
+//! A caller using an unsafe fork API must obey that API's safety rules and must
+//! never use an inherited reference into `T` in the child. Wiped bytes may no
+//! longer represent a valid value. These checks cannot revoke references already
+//! handed to a callback.
+//!
+//! Construction returns [HardenError] if setup or final sealing fails and cleanup
+//! succeeds. After publication, permission failures, reader-count overflow, and
+//! inherited typed use abort. Cleanup also aborts if it cannot restore write access
+//! or release mappings. Abort does not run destructors or guarantee erasure.
+//!
+//! # Stored types and erasure
+//!
+//! Store sensitive bytes directly in `T`, for example in an array or a struct of
+//! arrays. Protection and erasure cover `T`'s own storage, including padding. They
+//! do not extend to allocations behind `Vec`, `String`, `Box`, or other pointers.
+//! Cleanup of those allocations depends on `T`'s destructor.
+//!
+//! Each inline value is destroyed and then erased. A panicking inline destructor
+//! can prevent that erasure, including during a failed hardening attempt. In
+//! hardened storage, the final owner destroys `T`, then erases and unmaps the data.
+//! The raw mapping owner still performs cleanup if `T`'s destructor or a byte-array
+//! initializer unwinds, provided cleanup succeeds and the process keeps unwinding.
+//! Dropping a shared handle does not erase storage still owned by another handle.
+//! [Secret] implements [zeroize::ZeroizeOnDrop] for this erasure on final release,
+//! without requiring a zeroization trait on `T`.
+//!
+//! Moves, registers, stacks, serialized exports, and cryptographic scratch memory
+//! can contain other copies outside the wrapper's control. Leaks and termination
+//! without cleanup also prevent erasure. Protecting retained storage does not
+//! protect every step of a computation that uses it.
+//!
+//! # Costs and trait bounds
+//!
+//! Each allocation locks `round_up(max(size_of::<T>(), 1), page_size)` data bytes,
+//! reserves two additional virtual guard pages, and allocates one unlocked page
+//! for fork identity. Mappings also consume kernel bookkeeping and address space.
+//! With 4 KiB pages, a 64 KiB lock allowance, and no other locked memory, sixteen
+//! one-data-page allocations exhaust that allowance. Actual allowances vary.
+//!
+//! Hardened access synchronizes a reader count and changes permissions on first
+//! entry and last exit. Inline access uses neither synchronization nor syscalls.
+//! The inline variant keeps even hardened handles proportional to `size_of::<T>()`.
+//!
+//! Trait bounds are the same on every platform, including builds without `std`:
+//!
+//! | Trait on `Secret<T>` | Required traits on `T` |
+//! |---|---|
+//! | `Clone` | `Clone` |
+//! | `Debug`, `Display`, `ZeroizeOnDrop` | None |
+//! | `PartialEq`, `Eq` | `CtEq` |
+//! | `Send`, `Sync` | `Send + Sync` |
+//! | `Unpin` | `Unpin` |
+//! | `RefUnwindSafe` | `RefUnwindSafe` |
+//! | `UnwindSafe` | `UnwindSafe + RefUnwindSafe` |
+//!
+//! Sending or sharing a secret between threads requires both thread traits because
+//! hardened handles can share ownership. Non-thread-safe values remain usable
+//! locally, but the wrapper cannot be sent or shared across threads:
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use core::cell::Cell;
+//!
+//! fn require_send<T: Send>() {}
+//! require_send::<Secret<Cell<u8>>>();
+//! ```
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use core::cell::Cell;
+//!
+//! fn require_sync<T: Sync>() {}
+//! require_sync::<Secret<Cell<u8>>>();
+//! ```
+//!
+//! A payload that supports shared access but cannot move between threads, such
+//! as a mutex guard, also prevents either thread trait on the wrapper:
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use std::sync::MutexGuard;
+//!
+//! fn require_send<T: Send>() {}
+//! fn require_sync<T: Sync>() {}
+//! require_sync::<MutexGuard<'static, ()>>();
+//! require_send::<Secret<MutexGuard<'static, ()>>>();
+//! ```
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use std::sync::MutexGuard;
+//!
+//! fn require_sync<T: Sync>() {}
+//! require_sync::<MutexGuard<'static, ()>>();
+//! require_sync::<Secret<MutexGuard<'static, ()>>>();
+//! ```
+//!
+//! Access guards restore the reader count and permissions during unwinding. They
+//! do not repair invariants inside `T`. Even when a closure owns its handle,
+//! another hardened clone can observe the same value after a caught panic, so
+//! owned unwind safety also requires `T: RefUnwindSafe`:
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use core::{cell::Cell, panic::UnwindSafe};
+//!
+//! fn require_unwind_safe<T: UnwindSafe>() {}
+//! require_unwind_safe::<Box<Cell<u8>>>();
+//! require_unwind_safe::<Secret<Box<Cell<u8>>>>();
+//! ```
+//!
+//! Borrowed access likewise retains `T`'s unwind-safety requirement:
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use core::{cell::Cell, panic::RefUnwindSafe};
+//!
+//! fn require_ref_unwind_safe<T: RefUnwindSafe>() {}
+//! require_ref_unwind_safe::<Secret<Cell<u8>>>();
+//! ```
+//!
+//! Owned unwind safety additionally preserves `T: UnwindSafe`. A mutable
+//! reference can satisfy the borrowed bound while failing the owned bound:
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use core::panic::{RefUnwindSafe, UnwindSafe};
+//!
+//! fn require_ref_unwind_safe<T: RefUnwindSafe>() {}
+//! fn require_unwind_safe<T: UnwindSafe>() {}
+//! require_ref_unwind_safe::<Secret<&'static mut ()>>();
+//! require_unwind_safe::<Secret<&'static mut ()>>();
+//! ```
+//!
+//! Inline storage contains `T` directly, so the wrapper also preserves its
+//! pinning requirements:
+//!
+//! ```compile_fail
+//! use commonware_cryptography::Secret;
+//! use core::marker::PhantomPinned;
+//!
+//! fn require_unpin<T: Unpin>() {}
+//! require_unpin::<Secret<PhantomPinned>>();
+//! ```
 
 #[cfg(all(target_os = "linux", feature = "std"))]
 use crate::hardened_secret::HardenedSecret;
 use core::{
     fmt::{Debug, Display, Formatter},
     mem::{ManuallyDrop, MaybeUninit},
+    panic::{RefUnwindSafe, UnwindSafe},
 };
 use ctutils::CtEq;
 use thiserror::Error;
@@ -106,6 +251,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 ///
 /// These errors report failures during setup. Once hardened storage has been
 /// constructed, failures to change its memory permissions abort the process.
+///
+/// `Layout` and `System` are available only on Linux with `std`. `Unsupported`
+/// is available on every platform, including builds where it is never returned.
 #[derive(Debug, Error)]
 pub enum HardenError {
     /// Hardening was requested without both Linux and the `std` feature.
@@ -121,7 +269,7 @@ pub enum HardenError {
     #[cfg(all(target_os = "linux", feature = "std"))]
     #[error("unsupported protected allocation layout")]
     Layout,
-    /// Allocation, canary generation, or a required memory protection failed.
+    /// Allocation or a required memory protection failed.
     #[cfg(all(target_os = "linux", feature = "std"))]
     #[error("{operation}: {source}")]
     System {
@@ -202,7 +350,7 @@ impl<T> Secret<T> {
     ///
     /// A panic from `f` propagates. During unwinding, hardened storage becomes
     /// inaccessible if no other call remains active. Failed permission changes
-    /// or detected canary corruption abort the process.
+    /// abort the process.
     ///
     /// # Examples
     ///
@@ -236,8 +384,8 @@ impl<T> Secret<T> {
     /// In that case, no value is read and no memory permissions are changed.
     /// Use [Self::extract_or_clone] to clone the value when shared and `T: Clone`.
     ///
-    /// Permission failures, canary corruption, or moving out an inherited fork-child
-    /// value abort the process, as described in the [module documentation](self).
+    /// Permission failures or moving out an inherited fork-child value abort the
+    /// process, as described in the [module documentation](self).
     ///
     /// # Examples
     ///
@@ -272,8 +420,8 @@ impl<T> Secret<T> {
     /// # Panics
     ///
     /// A panic from `T::clone` propagates after the access call ends and this handle
-    /// is released. Permission failures, canary corruption, and cleanup failures
-    /// abort as described in the [module documentation](self).
+    /// is released. Permission and cleanup failures abort as described in the
+    /// [module documentation](self).
     ///
     /// # Examples
     ///
@@ -304,9 +452,9 @@ impl<T> Secret<T> {
     ///
     /// Returns [HardenError::Unsupported] without Linux and `std`. On supported
     /// builds, returns a layout error if a suitable mapping cannot be represented,
-    /// including when `T`'s alignment exceeds the system page size. Mapping,
-    /// canary generation, and memory-protection failures return an operating-system
-    /// error. Locking is subject to the process's `RLIMIT_MEMLOCK` allowance.
+    /// including when `T`'s alignment exceeds the system page size. Mapping and
+    /// memory-protection failures return an operating-system error. Locking is
+    /// subject to the process's `RLIMIT_MEMLOCK` allowance.
     /// An error consumes and drops the input instead of returning it to the caller.
     ///
     /// Allocating shared ownership metadata follows the ordinary Rust allocator's
@@ -329,9 +477,11 @@ impl<T> Secret<T> {
         #[cfg(all(target_os = "linux", feature = "std"))]
         {
             match self.storage {
-                Storage::Inline(value) => HardenedSecret::try_from_inline(value).map(|value| Self {
-                    storage: Storage::Hardened(value),
-                }),
+                Storage::Inline(value) => {
+                    HardenedSecret::try_from_inline(value).map(|value| Self {
+                        storage: Storage::Hardened(value),
+                    })
+                }
                 Storage::Hardened(_) => Ok(self),
             }
         }
@@ -408,6 +558,24 @@ impl<T: CtEq> PartialEq for Secret<T> {
 
 impl<T: CtEq> Eq for Secret<T> {}
 
+impl<T> ZeroizeOnDrop for Secret<T> {}
+
+// SAFETY: Inline ownership can move across threads when T is Send. Hardened
+// handles share ownership, so T must also be Sync even when moving one handle.
+unsafe impl<T: Send + Sync> Send for Secret<T> {}
+
+// SAFETY: Inline shared access requires T: Sync. Hardened handles may outlive
+// each other on different threads, so transferring final ownership also needs Send.
+unsafe impl<T: Send + Sync> Sync for Secret<T> {}
+
+// User code runs outside the reader mutex, and read guards restore its count
+// and permissions during unwinding. Invariants inside T still require RefUnwindSafe.
+impl<T: RefUnwindSafe> RefUnwindSafe for Secret<T> {}
+
+// An owned hardened handle can leave other clones observing T after a panic.
+// Both inline ownership and shared observation must be unwind-safe.
+impl<T: UnwindSafe + RefUnwindSafe> UnwindSafe for Secret<T> {}
+
 /// Erases the storage for `T`, including padding, using volatile writes.
 ///
 /// This does not run `T`'s destructor and need not leave a valid `T` behind.
@@ -430,18 +598,10 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
     }
 }
 
-/// A value stored inline with explicit access and erasure on drop.
+/// Owns inline `T` so moving between storage variants preserves automatic cleanup.
 ///
-/// The wrapper adds no allocation or OS memory protections. It calls `T`'s
-/// destructor, then zeroizes the bytes occupied by `T`, including padding.
-/// `Debug` prints `InlineSecret([REDACTED])` and `Display` prints `[REDACTED]`.
-/// Cloning calls `T::clone` and stores the result in a separate wrapper.
-///
-/// Store sensitive bytes directly in `T`. Referenced allocations are not erased
-/// by this wrapper. `T`'s destructor must not panic, since that would skip the
-/// subsequent erasure. Earlier copies and locations left behind by moves are
-/// also outside its control. See the [module documentation](self) for details.
-///
+/// Drop destroys the value, then erases its bytes and padding. A destructor panic
+/// skips erasure. Clone creates an independent value. No OS protections apply.
 pub(crate) struct InlineSecret<T>(ManuallyDrop<T>);
 
 impl<T> InlineSecret<T> {
@@ -517,38 +677,104 @@ impl<T> Drop for InlineSecret<T> {
     }
 }
 
-impl<T> Debug for InlineSecret<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.write_str("InlineSecret([REDACTED])")
-    }
-}
-
-impl<T> Display for InlineSecret<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
-}
-
-impl<T> ZeroizeOnDrop for InlineSecret<T> {}
-
 impl<T: Clone> Clone for InlineSecret<T> {
     fn clone(&self) -> Self {
         self.access(|v| Self::new(v.clone()))
     }
 }
 
-impl<T: CtEq> PartialEq for InlineSecret<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.access(|a| other.access(|b| a.ct_eq(b).into()))
-    }
-}
-
-impl<T: CtEq> Eq for InlineSecret<T> {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::cell::Cell;
+
+    #[test]
+    fn test_traits() {
+        fn assert_traits<
+            T: Clone
+                + Debug
+                + Display
+                + Eq
+                + Send
+                + Sync
+                + Unpin
+                + core::panic::UnwindSafe
+                + core::panic::RefUnwindSafe
+                + zeroize::ZeroizeOnDrop,
+        >() {
+        }
+        assert_traits::<Secret<[u8; 32]>>();
+
+        // Erasure and redaction impose no requirements on the stored type.
+        fn assert_unbounded<T>() {
+            fn check<U: Debug + Display + zeroize::ZeroizeOnDrop>() {}
+            check::<Secret<T>>();
+        }
+        assert_unbounded::<Cell<u8>>();
+
+        // Thread bounds do not prevent local use of interior-mutable values.
+        let secret = Secret::new(Cell::new(7));
+        secret.access(|value| value.set(9));
+        assert_eq!(secret.access(Cell::get), 9);
+    }
+
+    #[test]
+    fn test_inline_drop_erases_padding() {
+        #[repr(C)]
+        struct Padded {
+            first: u8,
+            second: u32,
+        }
+
+        // A typed write need not initialize padding. Cleanup must handle it as
+        // MaybeUninit bytes, then leave every storage byte initialized to zero.
+        let mut storage = MaybeUninit::new(InlineSecret::new(Padded {
+            first: 0x71,
+            second: 0x12345678,
+        }));
+        let address = storage.as_mut_ptr();
+        // SAFETY: The value is initialized and uniquely owned. The MaybeUninit
+        // allocation stays live after destruction and does not drop it again.
+        unsafe {
+            core::ptr::drop_in_place(address);
+            let erased = core::slice::from_raw_parts(
+                address.cast::<u8>(),
+                core::mem::size_of::<InlineSecret<Padded>>(),
+            );
+            assert!(erased.iter().all(|byte| *byte == 0));
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "std"))]
+    #[test]
+    fn test_inline_move_transfers_non_clone_ownership() {
+        struct Value<'a> {
+            bytes: Box<[u8; 32]>,
+            drops: &'a Cell<usize>,
+        }
+        impl Drop for Value<'_> {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+
+        let drops = Cell::new(0);
+        let source = InlineSecret::new(Value {
+            bytes: Box::new([42; 32]),
+            drops: &drops,
+        });
+        let mut destination = MaybeUninit::uninit();
+        // SAFETY: Destination is disjoint, aligned, uninitialized storage. The
+        // move initializes it exactly once and transfers ownership to this test.
+        let value = unsafe {
+            source.move_into(destination.as_mut_ptr());
+            destination.assume_init()
+        };
+        assert_eq!(*value.bytes, [42; 32]);
+        assert_eq!(drops.get(), 0);
+        drop(value);
+        assert_eq!(drops.get(), 1);
+    }
 
     #[test]
     fn test_try_extract_non_clone() {
@@ -581,7 +807,7 @@ mod tests {
             }),
             &drops,
         );
-        #[cfg(all(target_os = "linux", feature = "std"))]
+        #[cfg(all(target_os = "linux", feature = "std", not(miri)))]
         check(
             Secret::new(Value {
                 bytes: Box::new([42; 32]),
@@ -629,7 +855,7 @@ mod tests {
         drop(value);
         assert_eq!(drops.get(), 1);
 
-        #[cfg(all(target_os = "linux", feature = "std"))]
+        #[cfg(all(target_os = "linux", feature = "std", not(miri)))]
         {
             let secret = Secret::new(Value {
                 clones: &clones,

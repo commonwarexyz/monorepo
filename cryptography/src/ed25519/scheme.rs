@@ -3,7 +3,7 @@ use crate::{
     ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
-use alloc::borrow::{Cow, ToOwned};
+use alloc::borrow::Cow;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -17,7 +17,7 @@ use core::{
 };
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
-use std::borrow::{Cow, ToOwned};
+use std::borrow::Cow;
 use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "ed25519";
@@ -28,7 +28,9 @@ const SIGNATURE_LENGTH: usize = 64;
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
-    key: Secret<ed_core::SigningKey>,
+    key: Secret<ed_core::SigningSecret>,
+    // Public operations must not make the private pages readable.
+    public: VerificationKey,
 }
 
 impl crate::PrivateKey for PrivateKey {}
@@ -42,25 +44,23 @@ impl crate::Signer for PrivateKey {
     }
 
     fn public_key(&self) -> Self::PublicKey {
-        self.key.access(|key| Self::PublicKey {
-            key: key.verification_key().to_owned(),
-        })
+        Self::PublicKey { key: self.public }
     }
 }
 
 impl PrivateKey {
-    /// Moves the private material into locked, non-dumpable memory that is
-    /// inaccessible between operations.
+    /// Moves the private material into hardened storage.
     ///
-    /// Clones of a hardened key share its protected allocation. Existing copies
-    /// are unaffected. Repeated calls preserve the existing allocation.
+    /// Clones share the protected allocation. Public-key access leaves it sealed.
+    /// See [Secret::try_harden] for the protections, costs, and ownership contract.
     ///
     /// # Errors
     ///
-    /// Returns an error if hardening is unsupported or protection cannot be established.
+    /// Consumes the key on failure, including when hardening is unsupported.
     pub fn try_harden(self) -> Result<Self, HardenError> {
         Ok(Self {
             key: self.key.try_harden()?,
+            public: self.public,
         })
     }
 
@@ -69,16 +69,15 @@ impl PrivateKey {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        self.key.access(|key| Signature::from(key.sign(&payload)))
+        self.key
+            .access(|key| Signature::from(key.sign(&self.public, &payload)))
     }
 }
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRng) -> Self {
         let key = ed_core::SigningKey::new(rng);
-        Self {
-            key: Secret::new(key),
-        }
+        key.into()
     }
 }
 
@@ -94,9 +93,7 @@ impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let key = ed_core::SigningKey::from(*raw);
-        Ok(Self {
-            key: Secret::new(key),
-        })
+        Ok(key.into())
     }
 }
 
@@ -106,8 +103,10 @@ impl FixedSize for PrivateKey {
 
 impl From<ed_core::SigningKey> for PrivateKey {
     fn from(key: ed_core::SigningKey) -> Self {
+        let (key, public) = key.into_parts();
         Self {
             key: Secret::new(key),
+            public,
         }
     }
 }
@@ -144,9 +143,7 @@ pub struct PublicKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        value.key.access(|key| Self {
-            key: key.verification_key(),
-        })
+        Self { key: value.public }
     }
 }
 

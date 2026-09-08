@@ -57,7 +57,8 @@ pub fn hash_with_namespace<V: Variant>(dst: DST, namespace: &[u8], message: &[u8
 
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Private, dst: DST, message: &[u8]) -> V::Signature {
-    private.access(|scalar| hash::<V>(dst, message) * scalar)
+    let hashed = hash::<V>(dst, message);
+    private.access(|scalar| hashed * scalar)
 }
 
 /// Verifies the signature with the provided public key.
