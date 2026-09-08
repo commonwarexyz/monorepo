@@ -982,14 +982,15 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     pub async fn rewind(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, true).await?;
 
-        // Persist the index before freeing values. Sync both journals to cover retained data
-        // even when their sizes already match.
         self.index = self.index.rewind(section, index_size).await?;
 
+        // Keep values through the last retained index entry, or none for an empty section
         let value_size = self.rewound_value_end(section, index_size).await?;
 
+        // Persist the index before freeing values, even if its size did not change
         self.index = self.index.sync(section).await?;
 
+        // Persist retained value bytes even if the rewind does not truncate
         self.values = self.values.rewind(section, value_size).await?;
         self.values = self.values.sync(section).await?;
         Ok(self)
@@ -1004,13 +1005,15 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     pub async fn rewind_section(mut self, section: u64, index_size: u64) -> Result<Self, Error> {
         self.prepare_rewind(section, index_size, false).await?;
 
-        // Persist the index before freeing values; sync both even when sizes already match
         self.index = self.index.rewind_section(section, index_size).await?;
 
+        // Keep values through the last retained index entry, or none for an empty section
         let value_size = self.rewound_value_end(section, index_size).await?;
 
+        // Persist the index before freeing values, even if its size did not change
         self.index = self.index.sync(section).await?;
 
+        // Persist retained value bytes even if the rewind does not truncate
         self.values = self.values.rewind_section(section, value_size).await?;
         self.values = self.values.sync(section).await?;
         Ok(self)
