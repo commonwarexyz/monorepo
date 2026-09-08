@@ -207,20 +207,14 @@ pub enum Annotation {
     /// A block requested by commitment that this node certified, or an ancestor
     /// of one.
     ///
-    /// A certified block arrives bound to its commitment, and its
-    /// certification, by this node or by the honest validators consensus
-    /// required, checked its embedded parent commitment against a root-bound
-    /// parent. So every ancestor recorded from a certified block encodes its
-    /// commitment. Deliveries take variant-specific commitment material from
-    /// the commitment instead of recomputing it. The height bound behaves as
-    /// for [`Untrusted`](Annotation::Untrusted).
+    /// Certification binds the block and its ancestors to their commitments,
+    /// so deliveries reuse commitment material. Height bounds match
+    /// [`Untrusted`](Annotation::Untrusted).
     Certified { height: Height },
     /// A block requested by commitment for the finalized chain.
     ///
-    /// On a [`Key::Block`] delivery this means the requester's commitment is
-    /// the payload of a verified finalization or the parent commitment of an
-    /// archived finalized block, so variant-specific commitment material is
-    /// taken from the commitment instead of recomputed from the block bytes.
+    /// For [`Key::Block`], reuse commitment material authenticated by a verified
+    /// finalization or an archived finalized block's parent link.
     Finalized(Finalized),
 }
 
