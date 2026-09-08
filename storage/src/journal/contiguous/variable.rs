@@ -2239,8 +2239,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// # Warning
     ///
-    /// - Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
-    ///   rewind truncates into their range.
+    /// Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
+    /// rewind truncates into their range.
     pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
         self.0 = self.0.rewind(size).await?;
         Ok(self)

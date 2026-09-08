@@ -293,8 +293,8 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// # Durability
     ///
-    /// - The truncation is durable when this returns. Items appended afterward are not durable
-    ///   until the next commit or sync completes.
+    /// The truncation is durable when this returns. Items appended afterward are not durable
+    /// until the next commit or sync completes.
     ///
     /// # Errors
     ///
@@ -342,7 +342,7 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// # Durability
     ///
-    /// - The rewind, if any, is durable when this returns.
+    /// The rewind, if any, is durable when this returns.
     fn rewind_to<P>(
         mut self,
         predicate: P,

@@ -553,10 +553,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// This removes any data beyond the specified `section` and `size`. The rewind is durable
     /// when this returns. Items appended afterward are not durable until sync is called.
     ///
-    /// # Warnings
+    /// # Warning
     ///
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
-    ///   in the event of failure since blobs are always removed in reverse order of section.
+    /// This operation is not atomic, but it will always leave the journal in a consistent state
+    /// in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.rewind(section, size).await?;
         Ok(self)
