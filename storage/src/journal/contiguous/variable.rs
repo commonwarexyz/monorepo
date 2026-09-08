@@ -492,8 +492,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        // Share one Bytes owner so decoded byte fields slice by refcount instead of boxing an
-        // owner per field
         let bytes = Bytes::from(blob_handle.read_at(start, range_len).await?.coalesce());
 
         let mut items = Vec::with_capacity(offsets.len());

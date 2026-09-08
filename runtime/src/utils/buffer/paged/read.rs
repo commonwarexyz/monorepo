@@ -11,8 +11,7 @@ use tracing::error;
 /// Navigation skips CRCs by computing offsets rather than creating separate
 /// `Bytes` slices per page.
 pub(super) struct BufferState {
-    /// The raw physical buffer containing pages with interleaved CRCs. Held as [`Bytes`] so
-    /// decoded byte fields slice it by refcount instead of boxing an owner per field.
+    /// The raw physical buffer containing pages with interleaved CRCs.
     buffer: Bytes,
     /// Number of pages in this buffer.
     num_pages: usize,

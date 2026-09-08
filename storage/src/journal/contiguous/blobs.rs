@@ -774,8 +774,6 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .offset
                 .checked_add(read as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            // An external owner lets decoded byte fields slice by refcount instead of boxing an
-            // owner per field
             self.buf.append(IoBuf::from(Bytes::from(buf.freeze())));
             if self.offset == blob_size {
                 self.exhausted = true;
