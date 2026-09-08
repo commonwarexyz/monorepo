@@ -177,6 +177,7 @@ fn reduce_columns(c: [uint64x2_t; 10]) -> Regs {
                 vshlq_n_u64(vandq_u64(paired[i], mask25), 26),
             )
         });
+
         // Column 8 is at most 51*M^2 and column 9 at most 10*M^2, so the top carry fits
         // below 2^31 and can narrow losslessly. Its 19-fold and every other carry are
         // below 2^35, leaving each output below 2^51 + 2^35 < 2^52 without another pass

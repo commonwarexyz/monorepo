@@ -1,9 +1,14 @@
 use core::array;
 use subtle::{Choice, ConditionallySelectable};
 
-/// Number of independent field or group elements carried by a vector
+/// Number of independent field or group elements carried by a vector for SIMD operations.
 ///
-/// Backends may process these lanes in smaller native tiles
+/// This targets AVX-512's eight 64-bit lanes, the widest native vector used by these backends.
+/// Backends with narrower registers emulate this lane count by processing smaller native tiles,
+/// such as NEON's two-lane tiles.
+///
+/// A larger logical lane count can increase memory pressure, so operations that do not need
+/// all lanes can use smaller tiles directly.
 pub const LANES: usize = 8;
 
 /// The low 51 bits: what a limb holds once carries have been propagated out of it.
