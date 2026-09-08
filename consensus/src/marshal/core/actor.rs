@@ -2137,6 +2137,7 @@ where
             self.finalized_blocks
                 .put(stored.as_ref())
                 .map_err(BoxedError::from),
+
             // Update the finalizations archive (if provided)
             async {
                 let store = if let Some(finalization) = finalization {
