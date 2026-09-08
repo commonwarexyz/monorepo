@@ -152,7 +152,9 @@ fn config(pooler: &impl BufferPooler) -> Config<()> {
         // 512-byte buffers. Raising the entry count or size, or shrinking these buffers,
         // would tear supposedly lossless sections through an unrecorded early flush.
         index_write_buffer: NZUsize!(512),
+        index_max_open_blobs: NZUsize!(64),
         value_write_buffer: NZUsize!(512),
+        value_max_open_blobs: NZUsize!(64),
         replay_buffer: NZUsize!(4096),
         compression: None,
         codec_config: (),

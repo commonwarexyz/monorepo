@@ -137,6 +137,7 @@ pub struct Engine<
     journal: Option<Journal<E, Activity<P::Scheme, D>>>,
     journal_partition: String,
     journal_write_buffer: NonZeroUsize,
+    journal_max_open_blobs: NonZeroUsize,
     journal_replay_buffer: NonZeroUsize,
     journal_heights_per_section: NonZeroU64,
     journal_compression: Option<u8>,
@@ -188,6 +189,7 @@ impl<
             journal: None,
             journal_partition: cfg.journal_partition,
             journal_write_buffer: cfg.journal_write_buffer,
+            journal_max_open_blobs: cfg.journal_max_open_blobs,
             journal_replay_buffer: cfg.journal_replay_buffer,
             journal_heights_per_section: cfg.journal_heights_per_section,
             journal_compression: cfg.journal_compression,
@@ -249,6 +251,7 @@ impl<
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
+            max_open_blobs: self.journal_max_open_blobs,
         };
         let journal = Journal::init(self.context.child("journal"), journal_cfg)
             .await
@@ -1044,6 +1047,7 @@ mod tests {
                     activity_timeout: HeightDelta::new(10),
                     journal_partition: "aggregation-recovery-failure".to_string(),
                     journal_write_buffer: NZUsize!(4096),
+                    journal_max_open_blobs: NZUsize!(64),
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: NonZeroU64::new(6).unwrap(),
                     journal_compression: None,

@@ -51,10 +51,12 @@ pub async fn init(ctx: Context, checkpoint: Option<Checkpoint>) -> FreezerType {
     let cfg = Config {
         key_partition: KEY_PARTITION.into(),
         key_write_buffer: NZUsize!(WRITE_BUFFER),
+        key_max_open_blobs: NZUsize!(64),
         key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
         value_partition: VALUE_PARTITION.into(),
         value_compression: None,
         value_write_buffer: NZUsize!(WRITE_BUFFER),
+        value_max_open_blobs: NZUsize!(64),
         value_target_size: VALUE_TARGET_SIZE,
         table_partition: TABLE_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,

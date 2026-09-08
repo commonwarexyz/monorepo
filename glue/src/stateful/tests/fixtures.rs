@@ -161,7 +161,9 @@ fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()
         codec_config: (),
         replay_buffer: NZUsize!(64),
         freezer_key_write_buffer: NZUsize!(64),
+        freezer_key_max_open_blobs: NZUsize!(64),
         freezer_value_write_buffer: NZUsize!(64),
+        freezer_value_max_open_blobs: NZUsize!(64),
         ordinal_write_buffer: NZUsize!(64),
     }
 }
@@ -177,7 +179,9 @@ fn prunable_archive_config(page_cache: CacheRef, partition: &str) -> prunable::C
         codec_config: (),
         items_per_section: NZU64!(4),
         key_write_buffer: NZUsize!(64),
+        key_max_open_blobs: NZUsize!(64),
         value_write_buffer: NZUsize!(64),
+        value_max_open_blobs: NZUsize!(64),
         replay_buffer: NZUsize!(64),
     }
 }
@@ -436,7 +440,9 @@ where
             page_cache,
             replay_buffer: NZUsize!(64),
             key_write_buffer: NZUsize!(64),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(64),
+            value_max_open_blobs: NZUsize!(64),
             block_codec_config: (),
             max_repair: NZUsize!(1),
             max_pending_acks: options.max_pending_acks,

@@ -34,6 +34,8 @@ pub(crate) struct Config {
     pub replay_buffer: NonZeroUsize,
     pub key_write_buffer: NonZeroUsize,
     pub value_write_buffer: NonZeroUsize,
+    pub key_max_open_blobs: NonZeroUsize,
+    pub value_max_open_blobs: NonZeroUsize,
     pub key_page_cache: CacheRef,
 }
 
@@ -306,6 +308,8 @@ where
             replay_buffer: cfg.replay_buffer,
             key_write_buffer: cfg.key_write_buffer,
             value_write_buffer: cfg.value_write_buffer,
+            key_max_open_blobs: cfg.key_max_open_blobs,
+            value_max_open_blobs: cfg.value_max_open_blobs,
         };
         let archive = prunable::Archive::init(ctx.child(name), archive_cfg)
             .await

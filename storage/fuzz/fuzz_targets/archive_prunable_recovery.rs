@@ -119,7 +119,9 @@ fn config(
         codec_config: (),
         items_per_section,
         key_write_buffer: NZUsize!(4096),
+        key_max_open_blobs: NZUsize!(64),
         value_write_buffer: NZUsize!(4096),
+        value_max_open_blobs: NZUsize!(64),
         replay_buffer: NZUsize!(4096),
     }
 }

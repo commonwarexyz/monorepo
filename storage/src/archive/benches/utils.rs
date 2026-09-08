@@ -74,7 +74,9 @@ impl Archive {
                     ordinal_partition: "archive-bench-ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
                     freezer_key_write_buffer: NZUsize!(WRITE_BUFFER),
+                    freezer_key_max_open_blobs: NZUsize!(64),
                     freezer_value_write_buffer: NZUsize!(WRITE_BUFFER),
+                    freezer_value_max_open_blobs: NZUsize!(64),
                     ordinal_write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                     codec_config: (RangeCfg::new(..), ()),
@@ -92,7 +94,9 @@ impl Archive {
                     codec_config: (RangeCfg::new(..), ()),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
                     key_write_buffer: NZUsize!(WRITE_BUFFER),
+                    key_max_open_blobs: NZUsize!(64),
                     value_write_buffer: NZUsize!(WRITE_BUFFER),
+                    value_max_open_blobs: NZUsize!(64),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
                 };
                 Self::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())

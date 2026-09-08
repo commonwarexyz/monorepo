@@ -166,6 +166,7 @@ impl StorageWorkload for SegmentedFixedWorkload {
             partition: format!("segmented-fixed-conformance-{seed}"),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
+            max_open_blobs: NZUsize!(64),
         };
         let mut journal =
             segmented_fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
@@ -198,6 +199,7 @@ impl StorageWorkload for SegmentedGlobWorkload {
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
             write_buffer: WRITE_BUFFER,
+            max_open_blobs: NZUsize!(64),
         };
         let mut journal = glob::Glob::<_, Vec<u8>>::init(context.child("journal"), config).await?;
 
@@ -232,6 +234,7 @@ impl StorageWorkload for SegmentedVariableWorkload {
             partition: format!("segmented-variable-conformance-{seed}"),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
+            max_open_blobs: NZUsize!(64),
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),
         };
@@ -318,7 +321,9 @@ impl StorageWorkload for SegmentedOversizedWorkload {
             value_partition: format!("segmented-oversized-value-conformance-{seed}"),
             index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             index_write_buffer: WRITE_BUFFER,
+            index_max_open_blobs: NZUsize!(64),
             value_write_buffer: WRITE_BUFFER,
+            value_max_open_blobs: NZUsize!(64),
             replay_buffer: REPLAY_BUFFER,
             compression: None,
             codec_config: (RangeCfg::new(0..256), ()),

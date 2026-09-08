@@ -84,6 +84,7 @@ fn config(
             NZUsize!(8),
         ),
         write_buffer: NZUsize!(4096),
+        max_open_blobs: NZUsize!(64),
     }
 }
 

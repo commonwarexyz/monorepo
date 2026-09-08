@@ -95,6 +95,14 @@ impl<B: Blob> Write<B> {
         self.buffer.size()
     }
 
+    /// Whether every byte accepted by this buffer has been written to the blob.
+    ///
+    /// A flushed buffer can be dropped without losing an accepted write. Durability is a
+    /// separate guarantee that still requires a completed [Self::sync].
+    pub const fn is_flushed(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Ensure the read doesn't overflow.

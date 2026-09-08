@@ -109,6 +109,12 @@ pub struct Config<C> {
     /// Write buffer size for the value journal.
     pub value_write_buffer: NonZeroUsize,
 
+    /// Maximum blobs to keep open per tier in the index journal.
+    pub index_max_open_blobs: NonZeroUsize,
+
+    /// Maximum blobs to keep open per tier in the value journal.
+    pub value_max_open_blobs: NonZeroUsize,
+
     /// Buffer size for sequential index recovery.
     pub replay_buffer: NonZeroUsize,
 
@@ -348,6 +354,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             partition: cfg.index_partition,
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
+            max_open_blobs: cfg.index_max_open_blobs,
         };
         let index_context = context.child("index");
         let value_cfg = GlobConfig {
@@ -355,6 +362,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             write_buffer: cfg.value_write_buffer,
+            max_open_blobs: cfg.value_max_open_blobs,
         };
         let value_context = context.child("values");
 
@@ -1286,7 +1294,9 @@ mod tests {
             value_partition: "test-values".into(),
             index_page_cache: CacheRef::from_pooler(pooler, NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
+            index_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             replay_buffer: NZUsize!(4096),
             compression: None,
             codec_config: (),
@@ -3044,6 +3054,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
@@ -3709,6 +3720,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
@@ -3765,6 +3777,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
@@ -3808,6 +3821,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
@@ -3865,6 +3879,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
@@ -3999,6 +4014,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
@@ -4067,6 +4083,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await
@@ -4740,6 +4757,7 @@ mod tests {
                 compression: cfg.compression,
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
+                max_open_blobs: NZUsize!(64),
             };
             let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
                 .await

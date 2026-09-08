@@ -61,6 +61,8 @@
 //!         items_per_section: NZU64!(1024),
 //!         freezer_key_write_buffer: NZUsize!(1024),
 //!         freezer_value_write_buffer: NZUsize!(1024),
+//!         freezer_key_max_open_blobs: NZUsize!(64),
+//!         freezer_value_max_open_blobs: NZUsize!(64),
 //!         ordinal_write_buffer: NZUsize!(1024),
 //!         replay_buffer: NZUsize!(1024),
 //!         codec_config: (),
@@ -136,6 +138,12 @@ pub struct Config<C> {
 
     /// The [commonware_codec::Codec] configuration to use for the value stored in the archive.
     pub codec_config: C,
+
+    /// The maximum number of the archive's freezer key journal blobs to keep open per tier.
+    pub freezer_key_max_open_blobs: NonZeroUsize,
+
+    /// The maximum number of the archive's freezer value journal blobs to keep open per tier.
+    pub freezer_value_max_open_blobs: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -168,7 +176,9 @@ mod tests {
                 ordinal_partition: "test-ordinal2".into(),
                 items_per_section: NZU64!(512),
                 freezer_key_write_buffer: NZUsize!(1024),
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: NZUsize!(1024),
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 codec_config: (),
@@ -235,7 +245,9 @@ mod tests {
                 ordinal_partition: "empty-ordinal".into(),
                 items_per_section: NZU64!(512),
                 freezer_key_write_buffer: NZUsize!(1024),
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: NZUsize!(1024),
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 codec_config: (),

@@ -53,6 +53,9 @@ pub struct Config<C> {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+
+    /// The maximum number of blobs to keep open per tier.
+    pub max_open_blobs: NonZeroUsize,
 }
 
 /// The glob's state, boxed so the public [Glob] handle stays pointer-sized.
@@ -75,6 +78,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 capacity: cfg.write_buffer,
                 pool: context.storage_buffer_pool().clone(),
             },
+            max_open_blobs: cfg.max_open_blobs,
         };
         let manager = Manager::init(context, manager_cfg).await?;
 
@@ -119,7 +123,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         let writer = self
             .manager
-            .get(section)?
+            .get(section)
+            .await?
             .ok_or(Error::SectionOutOfRange(section))?;
 
         // Read via buffered writer (handles read-through for buffered data)
@@ -162,7 +167,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         if (size as usize) < CHECKSUM_SIZE {
             return Ok(false);
         }
-        let Some(writer) = self.manager.get(section)? else {
+        let Some(writer) = self.manager.get(section).await? else {
             return Ok(false);
         };
 
@@ -442,6 +447,7 @@ mod tests {
             compression: None,
             codec_config: (),
             write_buffer: NZUsize!(1024),
+            max_open_blobs: NZUsize!(64),
         }
     }
 
@@ -509,6 +515,7 @@ mod tests {
                 compression: Some(3), // zstd level 3
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
+                max_open_blobs: NZUsize!(64),
             };
             let glob: Glob<_, [u8; 100]> = Glob::init(context.child("storage"), cfg)
                 .await
@@ -559,9 +566,9 @@ mod tests {
             assert!(glob.get(2, 0, 8).await.is_err());
 
             // Sections 3-5 should still exist
-            assert!(glob.0.manager.blobs.contains_key(&3));
-            assert!(glob.0.manager.blobs.contains_key(&4));
-            assert!(glob.0.manager.blobs.contains_key(&5));
+            assert!(glob.0.manager.contains(3));
+            assert!(glob.0.manager.contains(4));
+            assert!(glob.0.manager.contains(5));
 
             glob.destroy().await.expect("Failed to destroy");
         });
@@ -581,7 +588,13 @@ mod tests {
             let mut glob = glob.sync(1).await.expect("Failed to sync");
 
             // Corrupt the data by writing directly to the underlying blob
-            let writer = glob.0.manager.blobs.get_mut(&1).unwrap();
+            let writer = glob
+                .0
+                .manager
+                .resident_mut(1)
+                .await
+                .expect("failed to open section")
+                .expect("section 1 exists");
             writer
                 .write_at(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
                 .await

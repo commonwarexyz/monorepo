@@ -679,7 +679,9 @@ pub(crate) async fn closed_marshal_mailbox(
             page_cache,
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             block_codec_config: (),
             max_repair: NZUsize!(4),
             max_pending_acks: NZUsize!(4),
@@ -713,7 +715,9 @@ fn archive_config<C>(
         codec_config,
         replay_buffer: NZUsize!(1024),
         freezer_key_write_buffer: NZUsize!(1024),
+        freezer_key_max_open_blobs: NZUsize!(64),
         freezer_value_write_buffer: NZUsize!(1024),
+        freezer_value_max_open_blobs: NZUsize!(64),
         ordinal_write_buffer: NZUsize!(1024),
     }
 }
@@ -724,6 +728,7 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         mailbox_size: NZUsize!(16),
         replay_buffer: NZUsize!(1024),
         write_buffer: NZUsize!(1024),
+        max_open_blobs: NZUsize!(64),
         page_cache_page_size: NZU16!(1024),
         page_cache_pages: NZUsize!(8),
         leader_timeout: Duration::from_millis(100),

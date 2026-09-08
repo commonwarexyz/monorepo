@@ -451,7 +451,9 @@ where
                 page_cache: page_cache.clone(),
                 replay_buffer: IO_BUFFER_SIZE,
                 key_write_buffer: IO_BUFFER_SIZE,
+                key_max_open_blobs: NZUsize!(64),
                 value_write_buffer: IO_BUFFER_SIZE,
+                value_max_open_blobs: NZUsize!(64),
                 block_codec_config,
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
@@ -522,6 +524,7 @@ where
                 floor: Floor::Genesis(genesis.digest()),
                 replay_buffer: IO_BUFFER_SIZE,
                 write_buffer: IO_BUFFER_SIZE,
+                max_open_blobs: NZUsize!(64),
                 page_cache,
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
@@ -650,7 +653,9 @@ fn archive_config<C>(
         codec_config,
         items_per_section: ARCHIVE_ITEMS_PER_SECTION,
         key_write_buffer: IO_BUFFER_SIZE,
+        key_max_open_blobs: NZUsize!(64),
         value_write_buffer: IO_BUFFER_SIZE,
+        value_max_open_blobs: NZUsize!(64),
         replay_buffer: IO_BUFFER_SIZE,
     }
 }

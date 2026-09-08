@@ -266,7 +266,9 @@ mod tests {
             codec_config: (),
             items_per_section: NZU64!(1024),
             key_write_buffer: NZUsize!(1024),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             replay_buffer: NZUsize!(1024),
         };
         prunable::Archive::init(context, cfg).await.unwrap()
@@ -290,7 +292,9 @@ mod tests {
             ordinal_partition: "test-ordinal".into(),
             items_per_section: NZU64!(1024),
             freezer_key_write_buffer: NZUsize!(1024 * 1024),
+            freezer_key_max_open_blobs: NZUsize!(64),
             freezer_value_write_buffer: NZUsize!(1024 * 1024),
+            freezer_value_max_open_blobs: NZUsize!(64),
             ordinal_write_buffer: NZUsize!(1024 * 1024),
             replay_buffer: NZUsize!(1024 * 1024),
             codec_config: (),

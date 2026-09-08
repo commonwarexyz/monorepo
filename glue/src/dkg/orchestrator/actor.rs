@@ -104,6 +104,9 @@ pub struct SimplexConfig<L> {
     /// Number of bytes to buffer when writing consensus journal blobs.
     pub write_buffer: NonZeroUsize,
 
+    /// Maximum number of consensus journal blobs to keep open per tier.
+    pub max_open_blobs: NonZeroUsize,
+
     /// Page size used by the consensus journal page cache.
     pub page_cache_page_size: NonZeroU16,
 
@@ -753,6 +756,7 @@ where
                 floor,
                 replay_buffer: self.simplex.replay_buffer,
                 write_buffer: self.simplex.write_buffer,
+                max_open_blobs: self.simplex.max_open_blobs,
                 page_cache: self.page_cache_ref.clone(),
                 leader_timeout: self.simplex.leader_timeout,
                 certification_timeout: self.simplex.certification_timeout,

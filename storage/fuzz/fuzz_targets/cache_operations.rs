@@ -125,6 +125,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: (),
             compression: input.config.compression,
             write_buffer: NZUsize!(input.config.write_buffer),
+            max_open_blobs: NZUsize!(64),
             replay_buffer: NZUsize!(input.config.replay_buffer),
             items_per_blob: NZU64!(input.config.items_per_blob),
             page_cache: CacheRef::from_pooler(

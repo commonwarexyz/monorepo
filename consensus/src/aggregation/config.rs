@@ -68,6 +68,9 @@ pub struct Config<
     /// The size of the write buffer to use for each blob in the journal.
     pub journal_write_buffer: NonZeroUsize,
 
+    /// The maximum number of journal blobs to keep open per tier.
+    pub journal_max_open_blobs: NonZeroUsize,
+
     /// Number of bytes to buffer when replaying a journal.
     pub journal_replay_buffer: NonZeroUsize,
 

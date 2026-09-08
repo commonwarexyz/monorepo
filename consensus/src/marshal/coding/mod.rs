@@ -340,7 +340,9 @@ mod tests {
             prunable_items_per_section: NZU64!(10),
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
+            key_max_open_blobs: NZUsize!(64),
             value_write_buffer: NZUsize!(1024),
+            value_max_open_blobs: NZUsize!(64),
             page_cache: CacheRef::from_pooler(
                 &context,
                 harness::PAGE_SIZE,
@@ -373,7 +375,9 @@ mod tests {
                 codec_config: S::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: config.value_write_buffer,
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: config.key_write_buffer,
             },
         )
@@ -402,7 +406,9 @@ mod tests {
                 codec_config: config.block_codec_config,
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
+                freezer_key_max_open_blobs: NZUsize!(64),
                 freezer_value_write_buffer: config.value_write_buffer,
+                freezer_value_max_open_blobs: NZUsize!(64),
                 ordinal_write_buffer: config.key_write_buffer,
             },
         )

@@ -63,7 +63,9 @@ pub(super) fn archive_config<C>(
         codec_config,
         items_per_section: NZU64!(10),
         key_write_buffer: IO_BUFFER_SIZE,
+        key_max_open_blobs: NZUsize!(64),
         value_write_buffer: IO_BUFFER_SIZE,
+        value_max_open_blobs: NZUsize!(64),
         replay_buffer: IO_BUFFER_SIZE,
     }
 }

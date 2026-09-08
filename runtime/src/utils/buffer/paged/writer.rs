@@ -396,6 +396,14 @@ impl<B: Blob> Writer<B> {
             && (full_pages > 0 || flushed.is_none_or(|state| state.len as usize != partial_len))
     }
 
+    /// Whether every byte accepted by this writer has been written to the blob.
+    ///
+    /// A flushed writer can be dropped without losing an accepted write. Durability is a
+    /// separate guarantee that still requires a completed [Self::sync].
+    pub fn is_flushed(&self) -> bool {
+        !self.has_flush_work(true)
+    }
+
     /// Whether a flush would emit any physical page write.
     fn has_flush_work(&self, write_partial_page: bool) -> bool {
         let page_size: usize = self.cache_ref.page_size().widen();

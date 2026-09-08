@@ -28,10 +28,12 @@ impl StorageWorkload for FreezerWorkload {
         let config = Config {
             key_partition: format!("freezer-key-conformance-{seed}"),
             key_write_buffer: WRITE_BUFFER,
+            key_max_open_blobs: NZUsize!(64),
             key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: format!("freezer-value-conformance-{seed}"),
             value_compression: None,
             value_write_buffer: WRITE_BUFFER,
+            value_max_open_blobs: NZUsize!(64),
             value_target_size: 128,
             table_partition: format!("freezer-table-conformance-{seed}"),
             table_initial_size: 4,
