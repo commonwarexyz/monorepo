@@ -85,9 +85,6 @@
 //! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
 //! every item that may have become durable through `commit` or storage behavior.
 //!
-//! A rewind's truncation is durable before `rewind` returns, so recovery never stitches bytes
-//! appended afterward onto the pre-rewind bytes they replaced.
-//!
 //! # Watermark advancement
 //!
 //! The watermark must never exceed what is durably on disk. `sync()` completes its data sync
@@ -533,9 +530,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             )
             .await?;
 
-        // Apply repair (if any). The short blob becomes the new tail. Blobs strictly newer
-        // than it are removed (newest-first) and the truncation is durable when `resize`
-        // returns, so the repair is durable before sealing.
+        // Make the short blob the new tail, removing newer blobs newest-first. Its resize
+        // makes the repair durable before sealing.
         let tail_blob = super::position_to_blob(size, cfg.items_per_blob.get());
         if let Some(truncate_to) = repair {
             while let Some((&newest, _)) = pending.last_key_value() {
@@ -2977,12 +2973,11 @@ mod tests {
         });
     }
 
-    /// The truncation a recovery repair applies to a short non-tail blob survives a crash that
-    /// follows the repair without any sync: the repaired blob reopens at the repaired size.
+    /// Repair a short non-tail blob, then crash without another sync.
+    /// The repaired blob must reopen at the truncated size.
     #[test_traced]
     fn test_fixed_journal_repair_truncation_survives_crash() {
-        // A 64-byte page makes the four-item repair target page aligned, the shape a crash can
-        // lose when the shrink is not synced.
+        // A 64-byte page makes the four-item repair target page aligned
         const PAGE_SIZE: NonZeroU16 = NZU16!(64);
         const REPAIRED: u64 = 4 * Digest::SIZE as u64;
         fn cfg(pooler: &impl BufferPooler) -> Config {
@@ -3029,8 +3024,7 @@ mod tests {
                 writer.sync().await.unwrap();
             }
 
-            // Pin the crash policy: unsynced resizes are dropped, so the repair's truncation
-            // survives the crash only if the repair synced it.
+            // Drop unsynced resizes at the crash
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 resize_rate: Some(deterministic::ResizeConfig {
                     failure_rate: probability!(0.0),
@@ -5594,11 +5588,8 @@ mod tests {
         });
     }
 
-    /// A rewind's truncation survives a crash even when a later unsynced append reuses the freed
-    /// range. A crash that dropped an unsynced truncation while keeping the append's pages would
-    /// otherwise stitch those pages onto the pre-rewind bytes still on disk. Here the page-aligned
-    /// bulk write of two re-appended items ends inside the second item, so the pre-rewind history
-    /// would supply that item's remaining bytes and resurrect the third item behind it.
+    /// Rewind and append two replacements, then crash with the second only partly written.
+    /// Old bytes must neither complete it nor restore the discarded tail.
     #[test_traced]
     fn test_fixed_journal_rewind_truncation_survives_crash() {
         // A 24-byte page splits 32-byte digests across pages, and the two-page write buffer
@@ -5625,8 +5616,7 @@ mod tests {
             }
             let journal = journal.sync().await.unwrap();
 
-            // The crash keeps every unsynced write and drops every unsynced resize, so the
-            // truncation survives it only if `rewind` synced it.
+            // Keep unsynced writes and drop unsynced resizes at the crash
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: probability!(0.0),

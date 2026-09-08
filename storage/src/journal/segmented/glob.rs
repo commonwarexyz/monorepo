@@ -641,14 +641,13 @@ mod tests {
         });
     }
 
-    /// A rewind's truncation survives a crash even when a later unsynced append reuses the freed
-    /// range: the crash keeps the append but must not resurrect the rewound bytes behind it.
+    /// Rewind a section and reuse its discarded range with an unsynced append, then crash.
+    /// Recovery must retain the new frame without restoring the old frames behind it.
     #[test_traced]
     fn test_glob_rewind_truncation_survives_crash() {
         let executor = deterministic::Runner::default();
 
-        // A write buffer smaller than one 8-byte frame makes every append a direct unsynced
-        // write, so the append after the rewind reaches the blob before the crash.
+        // A buffer smaller than one 8-byte frame sends each append directly to the blob
         let cfg = || Config {
             write_buffer: NZUsize!(4),
             ..test_cfg()
@@ -661,8 +660,7 @@ mod tests {
             (glob, _, _) = glob.append(1, &2).await.expect("Failed to append");
             glob = glob.sync(1).await.expect("Failed to sync");
 
-            // The crash keeps every unsynced write and drops every unsynced resize, so the
-            // truncation survives it only if `rewind_section` synced it.
+            // Keep unsynced writes and drop unsynced resizes at the crash
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: probability!(0.0),

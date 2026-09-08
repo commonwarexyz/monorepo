@@ -546,9 +546,8 @@ pub mod test {
         });
     }
 
-    /// A page-aligned rewind followed by a replacement branch that crashes before it is
-    /// committed recovers exactly that branch: the durable truncation leaves no pre-rewind
-    /// operations behind the new ones for recovery to splice into a hybrid history.
+    /// Rewind a committed branch, apply a shorter replacement without committing, then crash.
+    /// Recovery must yield the replacement without splicing in the discarded branch's tail.
     #[test_traced]
     fn test_current_unordered_fixed_rewind_then_rebranch_crash_recovers_branch() {
         fn key(i: u8) -> Digest {
@@ -559,8 +558,7 @@ pub mod test {
             bytes[31] = i;
             Digest::from(bytes)
         }
-        // One operation per page puts every rewind target on a page boundary, and one blob
-        // keeps the pre-rewind tail in the same file the replacement branch writes into.
+        // Align rewind targets to pages and keep both branches in one blob so their writes overlap
         fn db_config(ctx: &deterministic::Context) -> FixedConfig<TwoCap, Sequential> {
             let page_size = std::num::NonZeroU16::new(
                 <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
@@ -591,7 +589,7 @@ pub mod test {
             }
         }
 
-        // The crash keeps every unsynced write in full and drops every unsynced resize.
+        // Keep unsynced writes and drop unsynced resizes at the crash
         let runtime = DeterministicConfig::default().with_storage_fault_config(
             FaultConfig::default().write(WriteConfig {
                 failure_rate: probability!(0.0),
@@ -605,7 +603,7 @@ pub mod test {
                     .await
                     .unwrap();
 
-                // A: create k1..k100 and commit.
+                // A: create k1..k100 and commit
                 let mut batch = db.new_batch();
                 for i in 1..=100 {
                     batch = batch.write(key(i), Some(value(1, i)));
@@ -616,7 +614,7 @@ pub mod test {
                 assert_eq!(*db.bounds().end, 103);
                 let root_a = db.root();
 
-                // B: update k2..k50 and commit.
+                // B: update k2..k50 and commit
                 let mut batch = db.new_batch();
                 for i in 2..=50 {
                     batch = batch.write(key(i), Some(value(2, i)));
@@ -627,8 +625,7 @@ pub mod test {
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
 
-                // Rewind to A, then apply the replacement branch N over B's old pages without
-                // committing, and crash.
+                // Rewind to A, append the shorter branch N over B, then crash without committing
                 let db = db.rewind(Location::new(103)).await.unwrap();
                 assert_eq!(db.root(), root_a);
                 let mut batch = db.new_batch();
@@ -652,7 +649,7 @@ pub mod test {
                 .await
                 .unwrap();
 
-            // Recovery yields N and nothing from B's discarded tail.
+            // Recover N without B's discarded tail
             assert_eq!(*db.bounds().end, 191);
             assert_eq!(db.root(), root_n);
             assert_ne!(db.root(), root_a);

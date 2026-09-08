@@ -567,16 +567,14 @@ where
     /// before this method finishes rebuilding in-memory rewind state. Callers must drop this
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
-    /// The rewind of the operations journal and its Merkle structure is durable before this
-    /// method returns. A `size` equal to the current size truncates nothing and makes the applied
-    /// state durable, so a completed rewind always leaves the state at `size` durable.
+    /// The state at `size` is durable on return, including when `size` already matches.
     #[tracing::instrument(name = "qmdb.immutable.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
-        // Nothing to truncate, but the applied state may still be unsynced.
+        // An equal target may still have unsynced applied state
         if rewind_size == current_size {
             return self.sync().await;
         }

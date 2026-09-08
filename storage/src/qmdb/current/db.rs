@@ -609,17 +609,14 @@ where
     /// underlying Any database before this Current overlay finishes rebuilding. Callers must drop
     /// this database handle after any `Err` from `rewind` and reopen from storage.
     ///
-    /// The rewind of the operations journal and its Merkle structure is durable before this
-    /// method returns. A `size` equal to the current size truncates nothing and makes the applied
-    /// state durable, so a completed rewind always leaves the state at `size` durable.
+    /// The state at `size` is durable on return, including when `size` already matches.
     #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
         let current_size = *self.any.last_commit_loc + 1;
 
-        // Nothing to truncate, but the applied state may still be unsynced. This also skips the
-        // grafted-tree rebuild and the validation and journal reads below.
+        // An equal target may still have unsynced applied state
         if rewind_size == current_size {
             return self.sync().await;
         }

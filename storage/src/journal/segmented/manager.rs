@@ -506,9 +506,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             debug!(section = s, "removed blob during rewind");
         }
 
-        // If the section exists, truncate it to the given size. No explicit sync is needed
-        // here: the buffer waits for any in-flight sync before mutating the blob and makes the
-        // truncation durable before returning.
+        // The buffer orders the shrink after pending syncs and makes it durable
         if let Some(blob) = self.blobs.get_mut(&section) {
             let current_size = blob.size();
             if size < current_size {

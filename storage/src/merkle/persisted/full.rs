@@ -973,8 +973,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Err(Error::ElementPruned(new_size));
         }
 
-        // Rewind the journal if needed. The truncation is durable when `rewind` returns. The
-        // sync raises the recovery watermark and covers retained nodes not yet synced.
+        // Sync retained nodes and advance the recovery watermark after truncation
         let journal_size = Position::<F>::new(self.journal.size());
         if new_size < journal_size {
             self.journal = self.journal.rewind(*new_size).await?.sync().await?;

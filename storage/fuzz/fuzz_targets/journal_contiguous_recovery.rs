@@ -285,8 +285,7 @@ impl Expected {
         self.durable_prune = bounds.start;
         self.max_prune = bounds.start;
 
-        // The barrier pins every recorded value exactly, so no failed-append alternate remains
-        // admissible.
+        // The barrier pins recorded values exactly, ruling out failed-append alternatives
         self.candidates.clear();
     }
 
@@ -296,13 +295,11 @@ impl Expected {
         self.durable_len = size;
         self.max_size = size;
 
-        // The barrier pins every recorded value exactly, so no failed-append alternate remains
-        // admissible.
+        // The barrier pins recorded values exactly, ruling out failed-append alternatives
         self.candidates.clear();
     }
 
-    /// Successful rewind: the truncation is durable when `rewind` returns, so the recovered size
-    /// is at most `target` until later appends raise it, and no truncated value can resurface.
+    /// A successful rewind durably caps recovery at `target` until later appends.
     fn rewound(&mut self, target: u64) {
         self.durable_len = self.durable_len.min(target);
         self.max_size = target;

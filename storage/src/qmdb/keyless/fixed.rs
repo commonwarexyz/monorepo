@@ -128,12 +128,11 @@ mod tests {
         TestDb::init(context, cfg).await.unwrap()
     }
 
-    /// A rewind to the current size makes applied but uncommitted state durable: after such a
-    /// rewind and a crash with no commit or sync, the reopened db reports the applied state.
+    /// Apply an uncommitted batch, rewind to its size, then crash without another sync.
+    /// Recovery must retain the batch's state.
     #[test_traced]
     fn test_keyless_fixed_rewind_current_size_makes_applied_state_durable() {
-        // Blobs large enough that no append seals one, whose sync would make the applied state
-        // durable on its own.
+        // Avoid rollover so sealing cannot hide a missing rewind sync
         async fn open(context: deterministic::Context) -> TestDb<mmr::Family> {
             let mut cfg = db_config("rcs", &context, Sequential);
             cfg.log.items_per_blob = NZU64!(1000);
@@ -145,7 +144,7 @@ mod tests {
             deterministic::Runner::default().start_and_recover(|context| async move {
                 let db = open(context.child("db")).await;
 
-                // Apply a batch without committing, then rewind to the size it produced.
+                // Leave the batch uncommitted so the equal-size rewind must persist it
                 let merkleized = db
                     .new_batch()
                     .append(U64::new(7))

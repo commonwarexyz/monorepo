@@ -1214,11 +1214,8 @@ impl<B: Blob> Writer<B> {
                 .await;
         }
 
-        // Finish a page-aligned shrink, which needs no CRC-slot rewrite. Sync the truncation
-        // before the freed range can be reused: a later append rewrites those pages, and a
-        // crash that dropped an unsynced truncation while keeping some of the rewritten pages
-        // would stitch them together with the pre-shrink pages still on disk into a
-        // checksum-valid sequence that was never written.
+        // A page-aligned shrink has no CRC-slot rewrite to persist the truncation. Sync before
+        // reuse so a crash cannot join new pages with an old suffix into a checksum-valid history.
         self.sync_state.sync(&self.blob).await?;
         self.partial_page_state = None;
         self.durable_page_state = None;
@@ -5564,15 +5561,15 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            // Shrinking to a page boundary resizes the blob but does not rewrite CRC metadata.
-            // The shrink itself makes the resize durable with a full sync.
+            // A page-aligned shrink persists the resize with a full sync, without rewriting
+            // CRC metadata
             append.resize(PAGE_SIZE.get() as u64).await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 2);
             assert_eq!(range_syncs, 1);
 
-            // Nothing is left for a caller's sync to persist.
+            // A subsequent sync has no remaining work
             append.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);

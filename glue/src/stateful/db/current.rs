@@ -1621,9 +1621,8 @@ mod tests {
         });
     }
 
-    /// A rewind to the already-applied target is durable on its own: after `rewind_to_target`
-    /// with an unfinalized applied state and a crash with no further sync, the reopened database
-    /// reports that target.
+    /// Apply without finalizing, rewind to the same target, then crash without another sync.
+    /// Recovery must retain the applied target.
     #[test]
     fn managed_db_rewind_current_target_survives_crash() {
         let (target, checkpoint) =
@@ -1649,7 +1648,7 @@ mod tests {
                     .unwrap();
                 let target = <FixedDb as ManagedDb<_>>::sync_target(&database);
 
-                // A target equal to the applied state persists its unfinalized checkpoint.
+                // Rewind the applied target without finalizing it
                 let database =
                     <FixedDb as ManagedDb<_>>::rewind_to_target(database, target.clone())
                         .await
@@ -1669,13 +1668,11 @@ mod tests {
         });
     }
 
-    /// A rewind is durable on its own: after `rewind_to_target` and a crash with no further
-    /// sync, the reopened database reports the rewound target.
+    /// Finalize two batches, rewind to the first, then crash without another sync.
+    /// Recovery must report the first batch's target.
     #[test]
     fn managed_db_rewind_to_target_survives_crash() {
-        // One operation per log page puts the rewind's truncation on a page boundary, the shape
-        // a crash can lose when the truncation is not synced. The alias mirrors `FixedDb`'s key
-        // and value types.
+        // One operation per page makes the rewind target page aligned
         type FixedOp = FixedOperation<mmr::Family, Digest, Digest>;
         fn config(pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
             let page_size = NonZeroU16::new(<FixedOp as FixedSize>::SIZE as u16).unwrap();
@@ -1728,7 +1725,7 @@ mod tests {
                     slot.put(apply_and_finalize::<FixedDb>(database, merkleized2).await);
                 }
 
-                // Rewind, then crash without syncing.
+                // Crash after rewind without another sync
                 {
                     let (slot, database) = db.write().await;
                     slot.put(

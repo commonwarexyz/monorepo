@@ -298,9 +298,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         };
         let mut manager = Manager::init(context, manager_cfg).await?;
         if let Some((section, size)) = restore {
-            // The checkpoint preflight authorized this exact truncation, which `rewind` makes
-            // durable before the paired value journal can release any corresponding bytes. The
-            // sync persists the retained section whether or not anything was truncated.
+            // Persist the authorized index boundary before releasing paired values. Rewind
+            // persists any truncation; sync covers the retained section even without a shrink.
             manager.rewind(section, size).await?;
             manager.sync(section).await?;
             return Ok(Self {
@@ -1036,8 +1035,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     }
 }
 
-/// Truncate `section`'s blob to `size`. The shrink is durable when `resize` returns, so a later
-/// append cannot reuse the freed range before the repair is durable.
+/// Durably truncate `section`'s blob to `size`.
 async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
     journal: &mut Journal<E, A>,
     section: u64,

@@ -544,9 +544,7 @@ where
     /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
     /// from `rewind` and reopen from storage.
     ///
-    /// The rewind of the operations journal and its Merkle structure is durable before this
-    /// method returns. A `size` equal to the current size truncates nothing and makes the applied
-    /// state durable, so a completed rewind always leaves the state at `size` durable.
+    /// The state at `size` is durable on return, including when `size` already matches.
     #[tracing::instrument(
         name = "qmdb.any.db.rewind",
         level = "info",
@@ -561,7 +559,7 @@ where
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
-        // Nothing to truncate, but the applied state may still be unsynced.
+        // An equal target may still have unsynced applied state
         if rewind_size == current_size {
             return self.sync().await;
         }
@@ -642,8 +640,7 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
-        // Make the log rewind durable before applying in-memory undo so recovery can
-        // rebuild the derived state from the retained log
+        // Persist the log rewind before applying undo; recovery rebuilds state from the log
         self.log = self.log.rewind(rewind_size).await?;
 
         // Drop bitmap bits for ops at or above the rewind target. Restored locs below

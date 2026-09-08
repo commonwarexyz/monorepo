@@ -1183,17 +1183,18 @@ mod tests {
             assert_eq!(durable.as_slice(), b"abcdefgh");
             assert_eq!(full_syncs, 1);
 
-            // A shrink is durable on return: the truncation reaches the durable image with a
-            // full sync, leaving nothing for a caller's sync.
+            // Shrink with an empty buffer; one full sync persists the truncation
             writer.resize(4).await.unwrap();
             let (durable, _, full_syncs, _) = blob.snapshot();
             assert_eq!(durable.as_slice(), b"abcd");
             assert_eq!(full_syncs, 2);
+
+            // A subsequent sync has no remaining work
             writer.sync().await.unwrap();
             let (_, _, full_syncs, _) = blob.snapshot();
             assert_eq!(full_syncs, 2);
 
-            // Buffered bytes the shrink retains are flushed and covered by the same sync.
+            // Shrink within the buffer and persist its retained prefix with the truncation
             writer.write_at(4, b"wxyz").await.unwrap();
             writer.resize(6).await.unwrap();
             let (durable, _, full_syncs, _) = blob.snapshot();
@@ -1201,7 +1202,7 @@ mod tests {
             assert_eq!(full_syncs, 3);
             assert_eq!(writer.size(), 6);
 
-            // A shrink below the buffered range discards the buffer and still syncs.
+            // Shrink below the buffer, discarding it while still persisting the truncation
             writer.write_at(6, b"pq").await.unwrap();
             writer.resize(2).await.unwrap();
             let (durable, _, full_syncs, _) = blob.snapshot();
