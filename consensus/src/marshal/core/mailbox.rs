@@ -222,10 +222,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The finalization.
         finalization: Finalization<S, V::Commitment>,
     },
-    /// A notarization this node certified, from the consensus engine.
-    ///
-    /// The engine reports it after its own certify verdict, so it is not
-    /// re-verified here.
+    /// A certification from the consensus engine.
     Certification {
         /// The span carried with this request.
         span: Span,

@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 use commonware_codec::{Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
-    marshal::core::Variant,
+    marshal::core::{ExpectedCommitment, Variant},
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
@@ -237,7 +237,7 @@ pub(crate) fn read_block<V>(
 where
     V: Variant,
 {
-    let block_cfg = V::block_cfg(block_codec_config, commitment, true);
+    let block_cfg = V::block_cfg(block_codec_config, ExpectedCommitment::Trusted(commitment));
     V::Block::decode_cfg(reader, &block_cfg)
 }
 

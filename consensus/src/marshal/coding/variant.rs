@@ -6,7 +6,7 @@ use crate::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
         },
-        core::{Buffer, CommitmentFallback, Mailbox, Retirement, Variant},
+        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
@@ -93,13 +93,11 @@ where
 
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
-        expected: Self::Commitment,
-        trusted: bool,
+        expected: ExpectedCommitment<Self::Commitment>,
     ) -> <Self::Block as Read>::Cfg {
         CodedBlockCfg {
             inner: block_cfg.clone(),
             expected,
-            trusted,
         }
     }
 

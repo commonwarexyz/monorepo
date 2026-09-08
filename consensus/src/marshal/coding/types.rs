@@ -2,6 +2,7 @@
 
 use crate::{
     Block, CertifiableBlock, Heightable,
+    marshal::core::ExpectedCommitment,
     types::{Height, coding::Commitment},
 };
 use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
@@ -310,25 +311,15 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
-/// Pairs the inner block's codec config with the [`Commitment`] that the
-/// decoded block must match. The [`Read`] impl rejects a block whose digest or
-/// coding configuration differs from `expected`. Unless `trusted` is set, it
-/// also re-encodes the block and rejects a coding root mismatch.
+/// Decoding checks the expected digest and coding configuration.
+/// [`ExpectedCommitment::Untrusted`] also recomputes the coding root;
+/// [`ExpectedCommitment::Trusted`] reuses it and defers shard generation to
+/// [`CodedBlock::shards`].
 pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
-    /// The commitment the decoded block must match.
-    pub expected: Commitment<B, C, H>,
-    /// Whether this node holds certification evidence for `expected`.
-    ///
-    /// The commitment is on the finalized chain, or it is a block this node
-    /// certified or an ancestor of one. Either way the commitment was already
-    /// checked to encode the bytes that match its block digest, so decoding
-    /// takes the root from `expected` and defers shard generation to
-    /// [`CodedBlock::shards`]. A notarization is not enough: notarize votes
-    /// attest shard validity against the root, not that the root encodes the
-    /// block named by the digest.
-    pub trusted: bool,
+    /// The expected commitment and its certification evidence.
+    pub expected: ExpectedCommitment<Commitment<B, C, H>>,
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
@@ -336,7 +327,6 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
         Self {
             inner: self.inner.clone(),
             expected: self.expected,
-            trusted: self.trusted,
         }
     }
 }
@@ -350,14 +340,16 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, &cfg.inner)?;
         let config = CodingConfig::read(buf)?;
+        let (ExpectedCommitment::Trusted(expected) | ExpectedCommitment::Untrusted(expected)) =
+            cfg.expected;
 
-        if config != cfg.expected.config() {
+        if config != expected.config() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "config mismatch",
             ));
         }
-        if inner.digest() != cfg.expected.block() {
+        if inner.digest() != expected.block() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "block digest mismatch",
@@ -366,8 +358,8 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
 
         // A certified commitment already fixes the coding root of these bytes,
         // so recomputing it would only re-derive the root already in `expected`.
-        if cfg.trusted {
-            return Ok(Self::new_trusted(inner, cfg.expected));
+        if matches!(cfg.expected, ExpectedCommitment::Trusted(_)) {
+            return Ok(Self::new_trusted(inner, expected));
         }
 
         // Recompute the coding root and require it to match the expected
@@ -383,7 +375,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
                 commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
             })?;
-        if commitment != cfg.expected.root() {
+        if commitment != expected.root() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "coding root mismatch",
@@ -692,8 +684,7 @@ mod test {
             encoded,
             &CodedBlockCfg {
                 inner: (),
-                expected: coded_block.commitment(),
-                trusted: false,
+                expected: ExpectedCommitment::Untrusted(coded_block.commitment()),
             },
         )
         .unwrap();
@@ -722,8 +713,7 @@ mod test {
             encoded.as_ref(),
             &CodedBlockCfg {
                 inner: (),
-                expected,
-                trusted: false,
+                expected: ExpectedCommitment::Untrusted(expected),
             },
         ) else {
             panic!("config mismatch should be rejected");
@@ -761,8 +751,7 @@ mod test {
             coded.encode(),
             &CodedBlockCfg {
                 inner: (),
-                expected,
-                trusted: false,
+                expected: ExpectedCommitment::Untrusted(expected),
             },
         ) else {
             panic!("coding root mismatch should be rejected");
@@ -787,8 +776,7 @@ mod test {
             coded.encode(),
             &CodedBlockCfg {
                 inner: (),
-                expected: coded.commitment(),
-                trusted: true,
+                expected: ExpectedCommitment::Trusted(coded.commitment()),
             },
         )
         .unwrap();
@@ -820,8 +808,7 @@ mod test {
             encoded.as_ref(),
             &CodedBlockCfg {
                 inner: (),
-                expected,
-                trusted: true,
+                expected: ExpectedCommitment::Trusted(expected),
             },
         ) else {
             panic!("config mismatch should be rejected");
@@ -850,8 +837,7 @@ mod test {
             encoded.as_ref(),
             &CodedBlockCfg {
                 inner: (),
-                expected,
-                trusted: true,
+                expected: ExpectedCommitment::Trusted(expected),
             },
         ) else {
             panic!("block digest mismatch should be rejected");
@@ -879,8 +865,7 @@ mod test {
             encoded.as_ref(),
             &CodedBlockCfg {
                 inner: (),
-                expected: coded.commitment(),
-                trusted: true,
+                expected: ExpectedCommitment::Trusted(coded.commitment()),
             },
         ) else {
             panic!("trailing bytes should be rejected");
@@ -915,8 +900,7 @@ mod test {
             coded.encode(),
             &CodedBlockCfg {
                 inner: (),
-                expected,
-                trusted: true,
+                expected: ExpectedCommitment::Trusted(expected),
             },
         )
         .unwrap();

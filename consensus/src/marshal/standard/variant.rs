@@ -7,7 +7,7 @@ use crate::{
     Block,
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, Mailbox, Retirement, Variant},
+        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
@@ -62,8 +62,7 @@ where
 
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
-        _expected: Self::Commitment,
-        _trusted: bool,
+        _expected: ExpectedCommitment<Self::Commitment>,
     ) -> <Self::Block as Read>::Cfg {
         block_cfg.clone()
     }

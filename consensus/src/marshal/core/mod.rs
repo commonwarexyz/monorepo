@@ -59,4 +59,4 @@ pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
 
 mod subscriptions;
 mod variant;
-pub use variant::{Buffer, Retirement, Variant};
+pub use variant::{Buffer, ExpectedCommitment, Retirement, Variant};

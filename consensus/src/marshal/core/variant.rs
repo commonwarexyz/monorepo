@@ -31,6 +31,17 @@ pub struct Retirement<C> {
     pub exact_retirements: Vec<C>,
 }
 
+/// A block commitment and the evidence available when decoding it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpectedCommitment<C> {
+    /// A finalized or locally certified block commitment, or an ancestor's.
+    ///
+    /// Decoding may reuse commitment material. Notarization alone is insufficient.
+    Trusted(C),
+    /// A commitment without certification evidence.
+    Untrusted(C),
+}
+
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
@@ -83,17 +94,12 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
-    /// The returned configuration may bind `expected` so that decoding rejects blocks that do
-    /// not match it. `trusted` is true when this node holds certification evidence for
-    /// `expected`: it is on the finalized chain, or it is a block this node certified or an
-    /// ancestor of one. The configuration may then take commitment material from `expected`
-    /// instead of recomputing it from the block bytes. Decoding need not check every component
-    /// of `expected`, so callers that need the full commitment to match compare it after
-    /// decoding.
+    /// The configuration may bind `expected` and reuse trusted commitment material.
+    /// Decoding need not check every component, so callers requiring a full commitment
+    /// match must compare it after decoding.
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
-        expected: Self::Commitment,
-        trusted: bool,
+        expected: ExpectedCommitment<Self::Commitment>,
     ) -> <Self::Block as Read>::Cfg;
 
     /// Converts a working block to an application block.

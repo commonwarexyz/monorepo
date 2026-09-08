@@ -1,5 +1,5 @@
 use super::{
-    Buffer, Retirement, Variant,
+    Buffer, ExpectedCommitment, Retirement, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
     certified::Certified,
@@ -1481,13 +1481,17 @@ where
                 // already bound to the block, so decoding need not recompute it.
                 // `Ancestry` annotations carry no such evidence, so those
                 // deliveries recompute it.
-                let trusted = annotations.iter().any(|annotation| {
+                let expected = if annotations.iter().any(|annotation| {
                     matches!(
                         annotation,
                         Annotation::Finalized(_) | Annotation::Certified { .. }
                     )
-                });
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment, trusted);
+                }) {
+                    ExpectedCommitment::Trusted(commitment)
+                } else {
+                    ExpectedCommitment::Untrusted(commitment)
+                };
+                let block_cfg = V::block_cfg(&self.block_codec_config, expected);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return self;
@@ -1665,7 +1669,10 @@ where
                     response.send_lossy(false);
                     return self;
                 }
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment, false);
+                let block_cfg = V::block_cfg(
+                    &self.block_codec_config,
+                    ExpectedCommitment::Untrusted(commitment),
+                );
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return self;
