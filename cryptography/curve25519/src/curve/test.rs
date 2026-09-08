@@ -8,7 +8,7 @@ use crate::test::ZIP215_POINTS;
 use arbitrary::{Arbitrary, Unstructured};
 use core::array;
 
-const MASK_52: u64 = (1 << 52) - 1;
+pub(super) const MASK_52: u64 = (1 << 52) - 1;
 
 /// A field or group arithmetic fuzzing operation.
 #[derive(Debug, Arbitrary)]
@@ -96,7 +96,7 @@ fn assert_bounded(value: FVec) {
     );
 }
 
-fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
+pub(super) fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
     assert_bounded(actual);
     assert_bounded(expected);
     for lane in 0..LANES {
@@ -318,6 +318,46 @@ fn fuzz_group<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
 
 #[cfg(test)]
 #[test]
+fn repeated_squaring_matches_scalar() {
+    #[derive(Clone, Copy)]
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) -> Self::Output {
+            let max = FVec {
+                limbs: [[MASK_52; LANES]; 5],
+            };
+            let mixed = FVec::transpose([
+                F::ZERO,
+                F::ONE,
+                F([MASK_52; 5]),
+                F([MASK_51; 5]),
+                F([19, 0, 0, 0, 0]),
+                F([0, MASK_52, 0, MASK_52, 0]),
+                F([1 << 51; 5]),
+                F([0x123456789abcd, 7, MASK_52 - 1, 42, 1]),
+            ]);
+            for input in [max, mixed] {
+                for k in [0, 1, 2, 5, 10, 20, 50, 100] {
+                    let actual = backend.pow2k(input, k);
+                    if k == 0 {
+                        assert_eq!(actual.limbs, input.limbs);
+                    }
+                    let expected = FVec::transpose(input.untranspose().map(|v| v.pow2k(k)));
+                    assert_f_eq(actual, expected, "repeated squaring");
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
+
+#[cfg(test)]
+#[test]
 fn backend_at_bounds() {
     struct CheckBackendAtBounds;
 
@@ -404,24 +444,18 @@ fn minifuzz_field() {
 #[cfg(test)]
 #[test]
 fn minifuzz_group() {
-    // The fully inlined NEON group formulas need more than the test harness's default stack in
-    // unoptimized builds.
-    let run = || {
-        commonware_invariants::minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(100)
-            .test(|u| Plan::Group.run(u));
-    };
-    if cfg!(target_arch = "aarch64") {
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(run)
-            .unwrap()
-            .join()
-            .unwrap();
-    } else {
-        run();
-    }
+    // Fully inlined group formulas can exceed the test harness's default stack in debug builds.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| Plan::Group.run(u));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 /// Checks that a backend's field operations match the portable backend.
@@ -652,4 +686,160 @@ fn with_backend_matches_portable() {
         expected.1,
         "runtime-dispatched group computation",
     );
+}
+
+#[test]
+fn backend_conditional_neg_matches_every_mask() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let mixed = FVec {
+                limbs: array::from_fn(|limb| {
+                    array::from_fn(|lane| {
+                        let offset = (limb * LANES + lane) as u64;
+                        if (limb + lane) & 1 == 0 {
+                            offset
+                        } else {
+                            MASK_52 - offset
+                        }
+                    })
+                }),
+            };
+            for value in [FVec::splat(F::ZERO), FVec::splat(F([MASK_52; 5])), mixed] {
+                let lanes = value.untranspose();
+                for mask in 0..1u16 << LANES {
+                    let negative = array::from_fn(|lane| mask & (1 << lane) != 0);
+                    let actual = backend.conditional_neg(value, &negative);
+                    let expected = FVec::transpose(array::from_fn(|lane| {
+                        if negative[lane] {
+                            lanes[lane].neg()
+                        } else {
+                            lanes[lane]
+                        }
+                    }));
+                    assert_f_eq(actual, expected, "conditional negation");
+                    for (lane, negative) in negative.into_iter().enumerate() {
+                        if !negative {
+                            for limb in 0..5 {
+                                assert_eq!(
+                                    actual.limbs[limb][lane], value.limbs[limb][lane],
+                                    "unselected limb {limb}, lane {lane}, mask {mask:#04x}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
+
+#[test]
+fn bucket_fill_matches_scalar_sum_for_every_geometry() {
+    fn check<const STRIPES: usize>() {
+        const NB: usize = 7;
+        let torsion = GAffine::decompress(&[0; 32]).unwrap();
+        let mixed = GAffine::decompress(
+            &GAffine::BASEPOINT
+                .to_extended()
+                .add(torsion.to_extended())
+                .to_bytes(),
+        )
+        .unwrap();
+        let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
+        let digits = [0, 1, -1, 7, -7, 3, 3, -3, 7];
+        let terms: [(GAffine, i16); 53] = array::from_fn(|i| {
+            let digit = if i < 16 {
+                0
+            } else {
+                digits[(i - 16) % digits.len()]
+            };
+            (points[i % points.len()], digit)
+        });
+        let expected = terms.iter().fold(G::IDENTITY, |sum, &(point, digit)| {
+            let point = point.to_extended();
+            let point = if digit < 0 { point.negate() } else { point };
+            (0..digit.unsigned_abs()).fold(sum, |sum, _| sum.add(point))
+        });
+
+        for split in [0, 1, 3, 17, 31, terms.len()] {
+            let mut buckets = [[G::IDENTITY; NB]; STRIPES];
+            for piece in [&terms[..split], &terms[split..]] {
+                super::msm::fill_buckets(
+                    |current: [G; STRIPES], incoming, negative| {
+                        array::from_fn(|lane| {
+                            let mut point = incoming[lane];
+                            if negative[lane] {
+                                point.x = point.x.neg();
+                                point.t2d = point.t2d.neg();
+                            }
+                            current[lane].add_mixed(point)
+                        })
+                    },
+                    buckets.as_flattened_mut(),
+                    NB,
+                    piece,
+                    |term| *term,
+                );
+            }
+            let actual = buckets
+                .iter()
+                .flatten()
+                .enumerate()
+                .fold(G::IDENTITY, |sum, (i, &point)| {
+                    (0..=i % NB).fold(sum, |sum, _| sum.add(point))
+                });
+            assert!(
+                actual.add(expected.negate()).is_identity(),
+                "stripes={STRIPES} split={split}"
+            );
+        }
+    }
+
+    check::<1>();
+    check::<2>();
+    check::<3>();
+    check::<8>();
+    check::<16>();
+}
+
+#[test]
+fn sum_lanes_matches_scalar_sum() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let base = GAffine::BASEPOINT.to_extended();
+            let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
+            let points = [G::IDENTITY, base, torsion, base.add(torsion), base.negate()];
+            for offset in 0..points.len() {
+                for mask in 0..1usize << LANES {
+                    let lanes = array::from_fn(|lane| {
+                        if mask & (1 << lane) != 0 {
+                            points[(lane + offset) % points.len()]
+                        } else {
+                            G::IDENTITY
+                        }
+                    });
+                    let expected = lanes.into_iter().fold(G::IDENTITY, G::add);
+                    let actual = GVec::transpose(lanes).sum_lanes(backend);
+                    assert!(
+                        actual.add(expected.negate()).is_identity(),
+                        "offset={offset} mask={mask:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
 }
