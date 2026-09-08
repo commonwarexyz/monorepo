@@ -1121,7 +1121,6 @@ where
             // An ancestor may be certified through a descendant without its own local notification.
             // Its digest binds the parent commitment, so extend certification evidence here.
             if let Some(parent) = block.height().previous()
-                && parent > self.tip
                 && match key {
                     SubscriptionKey::Commitment(commitment) => {
                         self.certified.contains(block.height(), &commitment)
