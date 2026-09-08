@@ -425,8 +425,8 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(Self::execute(block.height(), batches).await)
     }
 
     async fn capture(

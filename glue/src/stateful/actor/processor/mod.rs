@@ -196,6 +196,7 @@ where
     round: Round,
     parent: PendingDigest<A, E>,
     merkleized: PendingBatches<A, E>,
+    verified: bool,
 }
 
 /// Speculative state shared by independently-polled verification jobs.
@@ -789,7 +790,7 @@ where
             "proposed state must match block commitments",
         );
         assert!(
-            self.cache_pending(block.digest(), parent_digest, round, merkleized),
+            self.cache_pending(block.digest(), parent_digest, round, merkleized, true),
             "proposal parent must remain compatible until the proposal completes",
         );
         self.execution.update_pending_metric();
@@ -911,6 +912,9 @@ where
             None
         } else {
             let batches = self.execution.databases.new_batches().await;
+
+            // A finalized block was certified by a quorum whose honest voters
+            // verified it, so it always executes.
             let batch = self
                 .app
                 .apply(
@@ -918,7 +922,8 @@ where
                     block,
                     batches,
                 )
-                .await;
+                .await
+                .expect("finalize reconstruction must execute the block");
             assert!(
                 A::Databases::matches_sync_targets(&batch, &sync_targets),
                 "finalize reconstruction must match block commitments",
@@ -972,9 +977,10 @@ where
         parent: PendingDigest<A, E>,
         round: Round,
         merkleized: PendingBatches<A, E>,
+        verified: bool,
     ) -> bool {
         self.execution
-            .cache_pending(digest, parent, round, merkleized)
+            .cache_pending(digest, parent, round, merkleized, verified)
     }
 }
 
@@ -1049,8 +1055,17 @@ where
         (state.last_processed, state.pending.len())
     }
 
+    #[cfg(test)]
     fn pending_contains(&self, digest: &PendingDigest<A, E>) -> bool {
         self.state.lock().pending.contains_key(digest)
+    }
+
+    fn pending_verified(&self, digest: &PendingDigest<A, E>) -> bool {
+        self.state
+            .lock()
+            .pending
+            .get(digest)
+            .is_some_and(|entry| entry.verified)
     }
 
     fn pending_len(&self) -> usize {
@@ -1067,11 +1082,15 @@ where
         parent: PendingDigest<A, E>,
         round: Round,
         merkleized: PendingBatches<A, E>,
+        verified: bool,
     ) -> bool {
         let mut state = self.state.lock();
-        if let Some(existing) = state.pending.get(&digest) {
-            debug_assert_eq!(existing.parent, parent, "pending parent changed for digest");
-            debug_assert_eq!(existing.round, round, "pending round changed for digest");
+        if let Some(existing) = state.pending.get_mut(&digest) {
+            assert_eq!(existing.parent, parent, "pending parent changed for digest");
+            assert_eq!(existing.round, round, "pending round changed for digest");
+
+            // Verifying a replayed block upgrades its entry to a verdict.
+            existing.verified |= verified;
             return true;
         }
 
@@ -1113,6 +1132,7 @@ where
                 round,
                 parent,
                 merkleized,
+                verified,
             },
         );
         if state.finalizing.is_some() {
@@ -1208,10 +1228,11 @@ where
         Ok(self.databases.new_batches().await)
     }
 
-    /// Replays one certified block and caches its commitment-matching state.
+    /// Replays one block and caches its commitment-matching state.
     ///
-    /// Cancellation caches nothing. A commitment mismatch or state that cannot
-    /// be cached across active finalization makes the ancestry invalid.
+    /// Cancellation caches nothing. A block that cannot be executed, a
+    /// commitment mismatch, or state that cannot be cached across active
+    /// finalization makes the ancestry invalid.
     async fn replay_block<C>(
         &self,
         app: &mut A,
@@ -1245,6 +1266,10 @@ where
         else {
             return Err(PrepareBatchesError::Cancelled);
         };
+        let Some(merkleized) = merkleized else {
+            warn!(?target_digest, block = ?digest, "rebuild replay could not execute block");
+            return Err(PrepareBatchesError::Invalid);
+        };
 
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
             warn!(
@@ -1255,7 +1280,7 @@ where
             return Err(PrepareBatchesError::Invalid);
         }
 
-        self.cache_pending(digest, parent_digest, round, merkleized)
+        self.cache_pending(digest, parent_digest, round, merkleized, false)
             .then_some(())
             .ok_or(PrepareBatchesError::Invalid)
     }
@@ -1922,11 +1947,11 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
             if let Some(probe) = &self.apply_probe {
                 probe.call(block.digest()).await;
             }
-            Self::execute(block.height(), block.context.round.view(), batches).await
+            Some(Self::execute(block.height(), block.context.round.view(), batches).await)
         }
 
         async fn capture(
@@ -2163,7 +2188,8 @@ mod tests {
                 block.digest(),
                 parent.digest(),
                 round,
-                merkleized
+                merkleized,
+                true,
             ));
             self.provider.insert(block.clone());
             block
@@ -2584,6 +2610,7 @@ mod tests {
                 genesis.digest(),
                 round,
                 initial_batch,
+                true,
             ));
 
             let (gate, started, release) = apply_gate();
@@ -2603,6 +2630,7 @@ mod tests {
                 genesis.digest(),
                 round,
                 during_finalization_batch,
+                true,
             ));
             assert!(!execution.pending_contains(&winner.digest()));
 
@@ -2619,6 +2647,7 @@ mod tests {
                 genesis.digest(),
                 round,
                 after_finalization_batch,
+                true,
             ));
             assert!(!execution.pending_contains(&winner.digest()));
         });
@@ -2958,6 +2987,7 @@ mod tests {
                 genesis.digest(),
                 winner.context().round,
                 merkleized,
+                true,
             ));
 
             let (gate, mut started, release) = apply_gate();
@@ -3127,6 +3157,7 @@ mod tests {
                     loser.digest(),
                     Round::new(Epoch::zero(), late_view),
                     merkleized,
+                    true,
                 ),
                 "completed work on a losing fork must not publish after finalization",
             );

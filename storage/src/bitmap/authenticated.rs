@@ -75,7 +75,7 @@ pub struct Unmerkleized {
     ///
     /// Each dirty chunk is identified by its absolute index, including pruned chunks.
     ///
-    /// Invariant: Indices are always in the range [pruned_chunks, authenticated_len).
+    /// Invariant: Indices are always in the range [pruned_chunks, mmr.leaves()).
     dirty_chunks: AHashSet<usize>,
 }
 
@@ -108,10 +108,6 @@ pub type UnmerkleizedBitMap<E, D, const N: usize, S> = BitMap<E, D, N, Unmerklei
 pub struct BitMap<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
-
-    /// Invariant: Chunks in range [0, authenticated_len) are in `mmr`.
-    /// This is an absolute index that includes pruned chunks.
-    authenticated_len: usize,
 
     /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the bitmap.
     ///
@@ -324,7 +320,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             let cached_root = mmr.root(hasher, 0)?;
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),
-                authenticated_len: 0,
                 mmr,
                 strategy,
                 metadata,
@@ -361,8 +356,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
         let cached_root = mmr.root(hasher, 0)?;
         Ok(Self {
             bitmap,
-            // Pruned chunks are already authenticated in the MMR
-            authenticated_len: pruned_chunks,
             mmr,
             strategy,
             metadata,
@@ -424,9 +417,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
 
         // Prune inner bitmap
         self.bitmap.prune_to_bit(bit);
-
-        // Update authenticated length
-        self.authenticated_len = self.complete_chunks();
 
         self.mmr.prune(Location::new(chunk as u64))?;
         Ok(())
@@ -505,7 +495,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     pub fn into_dirty(self) -> UnmerkleizedBitMap<E, D, N, S> {
         UnmerkleizedBitMap {
             bitmap: self.bitmap,
-            authenticated_len: self.authenticated_len,
             mmr: self.mmr,
             strategy: self.strategy,
             state: Unmerkleized {
@@ -537,26 +526,9 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
 
         // If the updated chunk is already in the MMR, mark it as dirty.
         let chunk = PrunableBitMap::<N>::to_chunk_index(bit);
-        if chunk < self.authenticated_len {
+        if chunk < *self.mmr.leaves() as usize {
             self.state.dirty_chunks.insert(chunk);
         }
-    }
-
-    /// The chunks that have been modified or added since the last call to `merkleize`.
-    pub fn dirty_chunks(&self) -> Vec<Location> {
-        let mut chunks: Vec<Location> = self
-            .state
-            .dirty_chunks
-            .iter()
-            .map(|&chunk| Location::new(chunk as u64))
-            .collect();
-
-        // Include complete chunks that haven't been authenticated yet
-        for i in self.authenticated_len..self.complete_chunks() {
-            chunks.push(Location::new(i as u64));
-        }
-
-        chunks
     }
 
     /// Merkleize all updates not yet reflected in the bitmap's root.
@@ -566,12 +538,11 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
     ) -> Result<MerkleizedBitMap<E, D, N, S>, Error> {
         // Build a batch backed by the configured strategy.
         let mut batch = self.mmr.new_batch_with_strategy(self.strategy.clone());
-        let start = self.authenticated_len;
+        let start = *self.mmr.leaves() as usize;
         let end = self.complete_chunks();
         for i in start..end {
             batch = batch.add(hasher, self.bitmap.get_chunk(i));
         }
-        self.authenticated_len = end;
 
         // Pre-hash dirty chunks into digests and update in the batch.
         let updates: Vec<(Location, &[u8; N])> = self
@@ -609,7 +580,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
 
         Ok(MerkleizedBitMap {
             bitmap: self.bitmap,
-            authenticated_len: self.authenticated_len,
             mmr: self.mmr,
             strategy: self.strategy,
             metadata: self.metadata,

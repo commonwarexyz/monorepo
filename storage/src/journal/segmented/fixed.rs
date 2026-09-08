@@ -24,18 +24,22 @@ use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
+use bytes::BytesMut;
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{Cached, NZUsize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
+
+// Reusable scratch for [`Inner::try_get_sync`], reclaimed unless decoded fields retain it
+commonware_utils::thread_local_cache!(static READ_SCRATCH: BytesMut);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -427,11 +431,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(&mut buf, offset) {
+        let mut scratch =
+            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(BytesMut::new()), |_| Ok(())).unwrap();
+        scratch.resize(Self::CHUNK_SIZE, 0);
+        if !blob.try_read_sync_into(&mut scratch, offset) {
             return None;
         }
-        A::decode(buf).ok()
+        let bytes = std::mem::take(&mut *scratch).freeze();
+        let item = A::decode(bytes.clone()).ok();
+        if let Ok(reclaimed) = bytes.try_into_mut() {
+            *scratch = reclaimed;
+        }
+        item
     }
 
     /// See [Journal::last].
@@ -1333,6 +1344,23 @@ mod tests {
                 .await
                 .expect("failed to reopen");
             journal.append(1, &test_digest(1)).await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
+    fn test_segmented_fixed_gates_older_section_after_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            seed(&context, &cfg, 1..=3).await;
+
+            // Every nonempty retained section is append-locked, not only the oldest or the
+            // newest.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .expect("failed to reopen");
+            journal.append(2, &2).await.unwrap();
         });
     }
 

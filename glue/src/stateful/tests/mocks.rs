@@ -341,8 +341,8 @@ impl<
         _context: (E, Self::Context),
         _block: &Self::Block,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        TestMerkleized
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(TestMerkleized)
     }
 
     async fn capture(

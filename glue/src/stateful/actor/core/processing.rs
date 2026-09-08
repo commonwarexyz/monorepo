@@ -660,8 +660,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> TestMerkleized {
-            TestMerkleized
+        ) -> Option<TestMerkleized> {
+            Some(TestMerkleized)
         }
 
         async fn capture(
@@ -743,8 +743,8 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> TestMerkleized {
-            TestMerkleized
+        ) -> Option<TestMerkleized> {
+            Some(TestMerkleized)
         }
 
         async fn capture(
@@ -772,6 +772,7 @@ mod tests {
         verify_gate: Arc<Mutex<Option<ApplicationGate>>>,
         finalized_gate: Arc<Mutex<Option<ApplicationGate>>>,
         gate_height: Height,
+        unexecutable: Option<Height>,
         apply_calls: Arc<AtomicUsize>,
         capture_calls: Arc<AtomicUsize>,
         verify_calls: Arc<AtomicUsize>,
@@ -825,8 +826,11 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> TestMerkleized {
+        ) -> Option<TestMerkleized> {
             self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            if self.unexecutable == Some(block.height()) {
+                return None;
+            }
             let gate = (block.height() == self.gate_height)
                 .then(|| self.gates.lock().pop_front())
                 .flatten();
@@ -834,7 +838,7 @@ mod tests {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
-            TestMerkleized
+            Some(TestMerkleized)
         }
 
         async fn capture(
@@ -1275,6 +1279,159 @@ mod tests {
             release.send(()).expect("verification should remain active");
             assert!(!verify.await);
             actor.abort();
+        });
+    }
+
+    #[test]
+    fn replayed_parent_is_not_a_verdict() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let child = TestBlock::child(&parent, 2);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"replayed-parent", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "replayed-parent",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::default(),
+                gate_height: parent.height(),
+                unexecutable: None,
+                apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
+                verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            // Verifying the child replays its missing parent through apply.
+            assert!(
+                mailbox
+                    .verify(
+                        (context.child("verify_child"), child.context()),
+                        ancestry::from_iter([Arc::new(child), Arc::new(parent.clone())]),
+                    )
+                    .await
+            );
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+
+            // Replayed state is reusable parent state, not a verdict: verifying the
+            // parent asks the application once and then settles from the cache.
+            for label in ["verify_parent", "verify_parent_again"] {
+                assert!(
+                    mailbox
+                        .verify(
+                            (context.child(label), parent.context()),
+                            ancestry::from_iter([
+                                Arc::new(parent.clone()),
+                                Arc::new(genesis.clone())
+                            ]),
+                        )
+                        .await
+                );
+            }
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
+            actor.abort();
+            drop(marshal.guards);
+        });
+    }
+
+    #[test]
+    fn unexecutable_parent_rejects_child() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let child = TestBlock::child(&parent, 2);
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"unexecutable-parent", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "unexecutable-parent",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let verify_calls = Arc::new(AtomicUsize::new(0));
+            let app = ReplayGatedApp {
+                gates: Arc::default(),
+                verify_gate: Arc::default(),
+                finalized_gate: Arc::default(),
+                gate_height: parent.height(),
+                unexecutable: Some(parent.height()),
+                apply_calls: apply_calls.clone(),
+                capture_calls: Arc::new(AtomicUsize::new(0)),
+                verify_calls: verify_calls.clone(),
+                applied_finalizations: Arc::default(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+
+            // A parent that cannot be executed invalidates the child's ancestry
+            // before the application is asked to verify the child.
+            assert!(
+                !mailbox
+                    .verify(
+                        (context.child("verify_child"), child.context()),
+                        ancestry::from_iter([Arc::new(child), Arc::new(parent)]),
+                    )
+                    .await
+            );
+            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 0);
+            actor.abort();
+            drop(marshal.guards);
         });
     }
 
@@ -1757,6 +1914,7 @@ mod tests {
                 verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
                 finalized_gate: Arc::default(),
                 gate_height: finalized.height(),
+                unexecutable: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -1839,6 +1997,7 @@ mod tests {
                 verify_gate: Arc::default(),
                 finalized_gate: Arc::default(),
                 gate_height: genesis.height(),
+                unexecutable: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -1993,6 +2152,7 @@ mod tests {
                 verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: parent.height(),
+                unexecutable: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -2093,6 +2253,7 @@ mod tests {
                 verify_gate: Arc::new(Mutex::new(None)),
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: finalized.height(),
+                unexecutable: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -2188,6 +2349,7 @@ mod tests {
                 verify_gate: verify_gate.clone(),
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: first.height(),
+                unexecutable: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -2296,6 +2458,7 @@ mod tests {
                 verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: first.height(),
+                unexecutable: None,
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
@@ -2411,6 +2574,7 @@ mod tests {
                 verify_gate: Arc::new(Mutex::new(None)),
                 finalized_gate: Arc::new(Mutex::new(None)),
                 gate_height: parent.height(),
+                unexecutable: None,
                 apply_calls: apply_calls.clone(),
                 capture_calls: Arc::new(AtomicUsize::new(0)),
                 verify_calls: verify_calls.clone(),
@@ -2791,6 +2955,7 @@ mod tests {
                 verify_gate: Arc::default(),
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
                 gate_height: block1.height(),
+                unexecutable: None,
                 apply_calls: Arc::new(AtomicUsize::new(0)),
                 capture_calls: capture_calls.clone(),
                 verify_calls: Arc::new(AtomicUsize::new(0)),
