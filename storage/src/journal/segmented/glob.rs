@@ -294,7 +294,10 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Read value at offset with known size (from index entry).
     ///
     /// The offset should be the byte offset returned by `append()`.
-    /// Reads directly from blob without any caching.
+    /// Reads directly from blob without any caching. The byte fields of the
+    /// returned value are views of the read buffer, so a retained value keeps
+    /// that buffer alive (and, for an unflushed entry, forces the write tip to
+    /// copy on its next append).
     pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         self.0.get(section, offset, size).await
     }

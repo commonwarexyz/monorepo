@@ -587,12 +587,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
-        decode_item::<V>(
-            Bytes::from(buf).slice(varint_len..),
-            &self.codec_config,
-            self.compressed,
-        )
-        .ok()
+        let mut buf = Bytes::from(buf);
+        buf.advance(varint_len);
+        decode_item::<V>(buf, &self.codec_config, self.compressed).ok()
     }
 
     /// Build one replay state for each data blob touched by `[start_pos, bounds.end)`.

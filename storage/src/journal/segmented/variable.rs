@@ -304,12 +304,9 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         if !blob.try_read_sync_into(&mut buf, offset) {
             return None;
         }
-        decode_item::<V>(
-            Bytes::from(buf).slice(varint_len..),
-            &self.codec_config,
-            compressed,
-        )
-        .ok()
+        let mut buf = Bytes::from(buf);
+        buf.advance(varint_len);
+        decode_item::<V>(buf, &self.codec_config, compressed).ok()
     }
 
     /// See [Journal::size].
@@ -1190,6 +1187,37 @@ mod tests {
             // Check metrics
             let buffer = context.encode();
             assert!(buffer.contains("second_tracked 1"));
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_try_get_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg)
+                .await
+                .expect("Failed to initialize journal");
+
+            // A u64 frame is longer than the varint header window, so the hit
+            // path reads the whole item from the cache.
+            let section = 1u64;
+            let data = 0x0102_0304_0506_0708u64;
+            let offset;
+            (journal, offset, _) = journal
+                .append(section, &data)
+                .await
+                .expect("Failed to append data");
+
+            assert_eq!(journal.try_get_sync(section, offset), Some(data));
+            assert_eq!(journal.try_get_sync(section, offset + 1), None);
+            assert_eq!(journal.try_get_sync(section + 1, offset), None);
         });
     }
 
