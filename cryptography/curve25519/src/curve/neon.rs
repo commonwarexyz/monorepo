@@ -9,8 +9,7 @@
 
 use super::{
     BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES,
-    MASK_51,
-    msm::{self, MsmBackend},
+    MASK_51, msm,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec;
@@ -717,7 +716,7 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
     })
 }
 
-impl MsmBackend for Backend {
+impl msm::Backend for Backend {
     // One stripe per physical mixed-addition lane keeps wave updates independent. Folds retain
     // LANES independent bucket indices.
     const STRIPES: usize = WIDTH;

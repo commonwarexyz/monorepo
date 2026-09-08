@@ -1,3 +1,4 @@
+use self::msm::Backend as MBackend;
 use core::array;
 use subtle::{Choice, ConditionallySelectable};
 
@@ -879,7 +880,7 @@ pub trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: FBackend + GBackend + msm::MsmBackend + Send + Sync + 'static {}
+pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///

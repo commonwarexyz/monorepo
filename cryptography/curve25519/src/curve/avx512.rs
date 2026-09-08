@@ -471,7 +471,7 @@ impl Backend {
 
 impl super::Backend for Backend {}
 
-impl super::msm::MsmBackend for Backend {}
+impl super::msm::Backend for Backend {}
 
 impl GBackend for Backend {
     #[inline(always)]

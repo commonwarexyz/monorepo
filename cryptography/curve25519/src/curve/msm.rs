@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 ///
 /// The defaults use one bucket stripe per logical lane and vector point arithmetic. Backends
 /// with narrower physical tiles can override these kernels without changing MSM scheduling.
-pub trait MsmBackend: GBackend {
+pub trait Backend: GBackend {
     /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`.
     ///
     /// Override [`Self::fill_buckets`] when changing this from [`LANES`]. The default fold
@@ -128,7 +128,7 @@ pub fn fill_buckets<const STRIPES: usize, T>(
 ///
 /// Lanes without a stripe contribute the identity. Untouched top buckets can be skipped
 /// because their identity values leave both running sums unchanged.
-pub fn fold_buckets<B: MsmBackend>(
+pub fn fold_buckets<B: Backend>(
     backend: B,
     result: GVec,
     buckets: &[G],

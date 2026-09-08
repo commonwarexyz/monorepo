@@ -11,7 +11,7 @@
 use super::scalar::Scalar;
 use crate::curve::{Backend, G, GAffine};
 #[cfg(test)]
-use crate::curve::{GVec, msm::MsmBackend};
+use crate::curve::{GVec, msm::Backend as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;

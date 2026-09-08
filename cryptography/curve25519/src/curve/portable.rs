@@ -98,4 +98,4 @@ impl GAffineVec {
     }
 }
 
-impl super::msm::MsmBackend for Backend {}
+impl super::msm::Backend for Backend {}
