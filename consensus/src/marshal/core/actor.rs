@@ -1121,7 +1121,8 @@ where
             }
         };
         if let Some(block) = block {
-            // Certification of the block's digest also binds its parent commitment
+            // An ancestor may be certified through a descendant without its own local notification.
+            // Its digest binds the parent commitment, so extend certification evidence here.
             if let Some(parent) = block.height().previous()
                 && parent > self.tip
                 && match key {
