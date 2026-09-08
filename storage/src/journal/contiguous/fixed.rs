@@ -1537,21 +1537,28 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 &blob_offsets,
                 Inner::<E, A>::CHUNK_SIZE,
             );
-            // Freeze so decoded byte fields are views of the scratch
+            // Freeze so decoded byte fields are views of the scratch, and walk the slots with one
+            // cursor instead of slicing (and refcounting) per item
             let bytes = std::mem::take(&mut *scratch).freeze();
+            let mut cursor = bytes.clone();
             let mut misses = misses.into_iter().peekable();
             for idx in 0..group.len() {
                 if misses.peek() == Some(&idx) {
                     misses.next();
+                    cursor.advance(A::SIZE);
                     continue;
                 }
                 // A decode failure declines to a miss: the async completion re-reads the
                 // item and bubbles the failure as [Error::Codec], like every async read path.
-                if let Ok(item) = A::decode(bytes.slice(idx * A::SIZE..(idx + 1) * A::SIZE)) {
+                let slot_end = cursor.remaining() - A::SIZE;
+                if let Ok(item) = A::decode((&mut cursor).take(A::SIZE)) {
                     out[base + idx] = Some(item);
                     hits += 1;
                 }
+                // A failed decode may stop short of the slot boundary
+                cursor.advance(cursor.remaining() - slot_end);
             }
+            drop(cursor);
             // Reclaim the scratch when no decoded fields retain it
             if let Ok(reclaimed) = bytes.try_into_mut() {
                 *scratch = reclaimed;
