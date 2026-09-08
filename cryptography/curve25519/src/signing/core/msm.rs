@@ -292,56 +292,52 @@ mod transposed {
     }
 
     #[cfg(all(test, target_arch = "aarch64"))]
-    mod merged_tests {
-        use super::*;
-
-        #[test]
-        fn merged_fold_preserves_every_bucket_weight() {
-            struct Check;
-            impl crate::curve::WithBackend for Check {
-                type Output = ();
-                fn call<B: Backend>(self, backend: B) {
-                    let base = GAffine::BASEPOINT.to_extended();
-                    let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
-                    for width in [6, 7, 8, 9, 10] {
-                        let nb = super::super::num_buckets(width);
-                        let mut point = base;
-                        let buckets: Vec<G> = (0..STRIPES * nb)
-                            .map(|i| {
-                                point = point.add(base);
-                                match i % 7 {
-                                    0 => torsion,
-                                    1 => point.add(torsion),
-                                    2 => point.negate(),
-                                    3 => G::IDENTITY,
-                                    _ => point,
-                                }
-                            })
-                            .collect();
-                        let mut expected = G::IDENTITY;
-                        for used in 0..=nb {
-                            if used != 0 {
-                                let bucket = (0..STRIPES).fold(G::IDENTITY, |sum, stripe| {
-                                    sum.add(buckets[stripe * nb + used - 1])
-                                });
-                                let weighted = bucket.scalar_mul(
-                                    (0..usize::BITS).rev().map(|bit| used & (1 << bit) != 0),
-                                );
-                                expected = expected.add(weighted);
+    #[test]
+    fn merged_fold_preserves_every_bucket_weight() {
+        struct Check;
+        impl crate::curve::WithBackend for Check {
+            type Output = ();
+            fn call<B: Backend>(self, backend: B) {
+                let base = GAffine::BASEPOINT.to_extended();
+                let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
+                for width in [6, 7, 8, 9, 10] {
+                    let nb = super::num_buckets(width);
+                    let mut point = base;
+                    let buckets: Vec<G> = (0..STRIPES * nb)
+                        .map(|i| {
+                            point = point.add(base);
+                            match i % 7 {
+                                0 => torsion,
+                                1 => point.add(torsion),
+                                2 => point.negate(),
+                                3 => G::IDENTITY,
+                                _ => point,
                             }
-                            let actual =
-                                fold_buckets_merged(backend, &buckets, nb, used).sum_lanes(backend);
-                            assert!(
-                                actual.add(expected.negate()).is_identity(),
-                                "width={width} used={used}"
+                        })
+                        .collect();
+                    let mut expected = G::IDENTITY;
+                    for used in 0..=nb {
+                        if used != 0 {
+                            let bucket = (0..STRIPES).fold(G::IDENTITY, |sum, stripe| {
+                                sum.add(buckets[stripe * nb + used - 1])
+                            });
+                            let weighted = bucket.scalar_mul(
+                                (0..usize::BITS).rev().map(|bit| used & (1 << bit) != 0),
                             );
+                            expected = expected.add(weighted);
                         }
+                        let actual =
+                            fold_buckets_merged(backend, &buckets, nb, used).sum_lanes(backend);
+                        assert!(
+                            actual.add(expected.negate()).is_identity(),
+                            "width={width} used={used}"
+                        );
                     }
                 }
             }
-            crate::curve::WithBackend::call(Check, crate::curve::test_backend());
-            crate::curve::with_backend(Check);
         }
+        crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+        crate::curve::with_backend(Check);
     }
 
     /// One window's contribution to the MSM over global term range `[start, end)`, *before* the
