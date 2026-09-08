@@ -815,19 +815,6 @@ impl GAffineVec {
         }
     }
 
-    /// Untransposes backend lanes into scalar affine points.
-    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
-    pub fn untranspose(self) -> [GAffine; LANES] {
-        let x = self.x.untranspose();
-        let y = self.y.untranspose();
-        let t2d = self.t2d.untranspose();
-        array::from_fn(|i| GAffine {
-            x: x[i],
-            y: y[i],
-            t2d: t2d[i],
-        })
-    }
-
     /// Packs affine points, negating the selected lanes.
     ///
     /// Variable-time, so the lane signs must be public.
@@ -885,28 +872,6 @@ pub trait GBackend: FBackend {
     /// This can be faster than [`Self::g_add`].
     fn g_add_mixed(self, a: GVec, b: GAffineVec) -> GVec;
 
-    /// Adds a signed affine point to each of two extended points.
-    ///
-    /// Each result is `a[i] + b[i]` or `a[i] - b[i]` according to `negative[i]`.
-    /// Variable-time, so the signs must be public.
-    #[cfg(target_arch = "aarch64")]
-    #[inline(always)]
-    fn g_add_mixed_pair(self, a: [G; 2], b: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
-        let mut current = [G::IDENTITY; LANES];
-        let mut incoming = [GAffine::IDENTITY; LANES];
-        let mut signs = [false; LANES];
-        current[..2].copy_from_slice(&a);
-        incoming[..2].copy_from_slice(&b);
-        signs[..2].copy_from_slice(&negative);
-        let updated = self
-            .g_add_mixed(
-                GVec::transpose(current),
-                GAffineVec::from_signed_lanes(self, &incoming, &signs),
-            )
-            .untranspose();
-        [updated[0], updated[1]]
-    }
-
     /// Add a point to itself.
     fn g_double(self, a: GVec) -> GVec {
         self.g_add(a, a)
@@ -914,7 +879,7 @@ pub trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: FBackend + GBackend + Send + Sync + 'static {}
+pub trait Backend: FBackend + GBackend + msm::MsmBackend + Send + Sync + 'static {}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
@@ -933,6 +898,9 @@ pub trait WithBackend {
 
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;
+
+/// Backend bucket kernels for MSM. Signing owns digit recoding and scheduling.
+pub mod msm;
 
 // Now, a module for each backend.
 #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]

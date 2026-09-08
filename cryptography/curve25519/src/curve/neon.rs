@@ -8,8 +8,12 @@
 //! formulas keep their compact five-limb representation.
 
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES, MASK_51,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES,
+    MASK_51,
+    msm::{self, MsmBackend},
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use core::arch::aarch64::*;
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
@@ -559,7 +563,7 @@ fn unpack_pair(regs: Regs) -> [F; 2] {
 
 /// Applies the complete mixed-addition formula to two independent register lanes.
 ///
-/// Extended inputs and outputs use `[x, y, t, z]`; affine inputs use `[x, y, t2d]`.
+/// Extended inputs and outputs use `[x, y, t, z]`. Affine inputs use `[x, y, t2d]`.
 #[inline(always)]
 fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
     let [x1, y1, t1, z1] = p;
@@ -641,43 +645,6 @@ impl GBackend for Backend {
         p
     }
 
-    #[inline(always)]
-    fn g_add_mixed_pair(self, p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
-        let mut x2 = pack_pair(q.map(|point| point.x));
-        let mut t2d = pack_pair(q.map(|point| point.t2d));
-        if negative.iter().any(|&sign| sign) {
-            // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.
-            unsafe {
-                let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
-                let mask = vld1q_u64(masks.as_ptr());
-                let zero = [vdupq_n_u64(0); 5];
-                let neg_x = reduce_regs(sub_raw(zero, x2));
-                let neg_t2d = reduce_regs(sub_raw(zero, t2d));
-                x2 = core::array::from_fn(|i| vbslq_u64(mask, neg_x[i], x2[i]));
-                t2d = core::array::from_fn(|i| vbslq_u64(mask, neg_t2d[i], t2d[i]));
-            }
-        }
-        let [x, y, t, z] = add_mixed_regs(
-            [
-                pack_pair(p.map(|point| point.x)),
-                pack_pair(p.map(|point| point.y)),
-                pack_pair(p.map(|point| point.t)),
-                pack_pair(p.map(|point| point.z)),
-            ],
-            [x2, pack_pair(q.map(|point| point.y)), t2d],
-        );
-        let x = unpack_pair(x);
-        let y = unpack_pair(y);
-        let t = unpack_pair(t);
-        let z = unpack_pair(z);
-        core::array::from_fn(|i| G {
-            x: x[i],
-            y: y[i],
-            t: t[i],
-            z: z[i],
-        })
-    }
-
     /// Fused point doubling using the dedicated `dbl-2008-hwcd` formula.
     #[inline(always)]
     fn g_double(self, mut p: GVec) -> GVec {
@@ -708,3 +675,225 @@ impl GBackend for Backend {
 }
 
 impl super::Backend for Backend {}
+
+/// Adds a signed affine point to each of two extended points.
+///
+/// Each result is `p[i] + q[i]` or `p[i] - q[i]` according to `negative[i]`.
+/// Variable-time, so the signs must be public.
+#[inline(always)]
+fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
+    let mut x2 = pack_pair(q.map(|point| point.x));
+    let mut t2d = pack_pair(q.map(|point| point.t2d));
+    if negative.iter().any(|&sign| sign) {
+        // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.
+        unsafe {
+            let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
+            let mask = vld1q_u64(masks.as_ptr());
+            let zero = [vdupq_n_u64(0); 5];
+            let neg_x = reduce_regs(sub_raw(zero, x2));
+            let neg_t2d = reduce_regs(sub_raw(zero, t2d));
+            x2 = core::array::from_fn(|i| vbslq_u64(mask, neg_x[i], x2[i]));
+            t2d = core::array::from_fn(|i| vbslq_u64(mask, neg_t2d[i], t2d[i]));
+        }
+    }
+    let [x, y, t, z] = add_mixed_regs(
+        [
+            pack_pair(p.map(|point| point.x)),
+            pack_pair(p.map(|point| point.y)),
+            pack_pair(p.map(|point| point.t)),
+            pack_pair(p.map(|point| point.z)),
+        ],
+        [x2, pack_pair(q.map(|point| point.y)), t2d],
+    );
+    let x = unpack_pair(x);
+    let y = unpack_pair(y);
+    let t = unpack_pair(t);
+    let z = unpack_pair(z);
+    core::array::from_fn(|i| G {
+        x: x[i],
+        y: y[i],
+        t: t[i],
+        z: z[i],
+    })
+}
+
+impl MsmBackend for Backend {
+    // One stripe per physical mixed-addition lane keeps wave updates independent. Folds retain
+    // LANES independent bucket indices.
+    const STRIPES: usize = WIDTH;
+
+    fn fill_buckets<T>(
+        self,
+        buckets: &mut [G],
+        nb: usize,
+        terms: &[T],
+        term: impl Fn(&T) -> (GAffine, i16),
+    ) {
+        msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
+    }
+
+    /// Returns lanes whose sum is the weighted sum of all bucket stripes.
+    ///
+    /// Let `B[k, lane]` sum the stripes at bucket index `k*LANES + lane`. The descending pass
+    /// builds `sum[lane] = sum_k B[k, lane]` and `rows[lane] = sum_k k*B[k, lane]`.
+    /// Final weighting gives `LANES*rows[lane] + (lane + 1)*sum[lane]`, assigning each bucket
+    /// its index-plus-one weight. The lane count is a power of two.
+    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> GVec {
+        // A single used bucket has weight one, so return the stripes without weighting.
+        if used == 1 {
+            return GVec::transpose(core::array::from_fn(|lane| {
+                if lane < Self::STRIPES {
+                    buckets[lane * nb]
+                } else {
+                    G::IDENTITY
+                }
+            }));
+        }
+        let mut sum = GVec::identity();
+        let mut rows = GVec::identity();
+        for block in (0..used.div_ceil(LANES)).rev() {
+            let gather = |stripe: usize| {
+                GVec::transpose(core::array::from_fn(|lane| {
+                    let digit = block * LANES + lane;
+                    if digit < used {
+                        buckets[stripe * nb + digit]
+                    } else {
+                        G::IDENTITY
+                    }
+                }))
+            };
+            let mut combined = gather(0);
+            for stripe in 1..Self::STRIPES {
+                combined = self.g_add(combined, gather(stripe));
+            }
+            rows = self.g_add(rows, sum);
+            sum = self.g_add(sum, combined);
+        }
+
+        // Seed the row weight and the high bit of lane + 1. Doubling shifts both together.
+        let lanes = sum.untranspose();
+        let mut weighted = self.g_add(
+            rows,
+            GVec::transpose(core::array::from_fn(|lane| {
+                if lane == LANES - 1 {
+                    lanes[lane]
+                } else {
+                    G::IDENTITY
+                }
+            })),
+        );
+        for bit in (0..LANES.ilog2()).rev() {
+            weighted = self.g_double(weighted);
+            let selected = core::array::from_fn(|lane| {
+                if (lane + 1) & (1 << bit) != 0 {
+                    lanes[lane]
+                } else {
+                    G::IDENTITY
+                }
+            });
+            weighted = self.g_add(weighted, GVec::transpose(selected));
+        }
+        weighted
+    }
+
+    // Scalar recombination computes each point once, avoiding duplicate SIMD lanes.
+    fn combine_windows(
+        self,
+        partials: impl IntoIterator<Item = (usize, G)>,
+        windows: usize,
+        width: u32,
+    ) -> G {
+        let mut window_sums = vec![G::IDENTITY; windows];
+        for (window, partial) in partials {
+            window_sums[window] = window_sums[window].add(partial);
+        }
+        let mut result = G::IDENTITY;
+        for window in window_sums.iter().rev() {
+            for _ in 0..width {
+                result = result.double();
+            }
+            result = result.add(*window);
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn mixed_pair_matches_full_width() {
+    let reference = super::portable::Backend::new();
+    let torsion = GAffine::decompress(&[0; 32]).unwrap();
+    let mixed = GAffine::decompress(
+        &GAffine::BASEPOINT
+            .to_extended()
+            .add(torsion.to_extended())
+            .to_bytes(),
+    )
+    .unwrap();
+    let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
+    let max = F([(1 << 52) - 1; 5]);
+    let loose = G {
+        x: max,
+        y: max,
+        t: max,
+        z: max,
+    };
+    let loose_affine = GAffine {
+        x: max,
+        y: max,
+        t2d: max,
+    };
+    for i in 0..points.len() {
+        for j in 0..points.len() {
+            let current = [points[i].to_extended(), points[j].to_extended()];
+            let current = core::array::from_fn(|lane| {
+                let factor = F([lane as u64 + 2, 0, 0, 0, 0]);
+                G {
+                    x: current[lane].x.mul(factor),
+                    y: current[lane].y.mul(factor),
+                    t: current[lane].t.mul(factor),
+                    z: current[lane].z.mul(factor),
+                }
+            });
+            let incoming = [points[j], points[(i + 1) % points.len()]];
+            for (current, incoming) in [
+                (current, incoming),
+                ([loose, current[1]], [loose_affine, incoming[1]]),
+            ] {
+                for negative in [[false, false], [false, true], [true, false], [true, true]] {
+                    let mut packed_current = [G::IDENTITY; LANES];
+                    let mut packed_incoming = [GAffine::IDENTITY; LANES];
+                    let mut packed_negative = [false; LANES];
+                    packed_current[..WIDTH].copy_from_slice(&current);
+                    packed_incoming[..WIDTH].copy_from_slice(&incoming);
+                    packed_negative[..WIDTH].copy_from_slice(&negative);
+                    let expected = reference
+                        .g_add_mixed(
+                            GVec::transpose(packed_current),
+                            GAffineVec::from_signed_lanes(
+                                reference,
+                                &packed_incoming,
+                                &packed_negative,
+                            ),
+                        )
+                        .untranspose();
+                    let actual = g_add_mixed_pair(current, incoming, negative);
+                    for lane in 0..2 {
+                        for (actual, expected) in [
+                            (actual[lane].x, expected[lane].x),
+                            (actual[lane].y, expected[lane].y),
+                            (actual[lane].t, expected[lane].t),
+                            (actual[lane].z, expected[lane].z),
+                        ] {
+                            super::test::assert_f_eq(
+                                FVec::splat(actual),
+                                FVec::splat(expected),
+                                "mixed pair coordinate",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

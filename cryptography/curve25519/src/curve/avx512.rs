@@ -101,6 +101,7 @@ fn mul19(z: __m512i) -> __m512i {
 fn reduce_regs(l: [__m512i; 5]) -> [__m512i; 5] {
     let mask = _mm512_set1_epi64(MASK_51 as i64);
     let c: [__m512i; 5] = core::array::from_fn(|i| _mm512_srli_epi64(l[i], 51));
+
     // Each carry is below 2^12, so IFMA computes the folded carry exactly.
     [
         _mm512_madd52lo_epu64(_mm512_and_si512(l[0], mask), c[4], _mm512_set1_epi64(19)),
@@ -469,6 +470,8 @@ impl Backend {
 }
 
 impl super::Backend for Backend {}
+
+impl super::msm::MsmBackend for Backend {}
 
 impl GBackend for Backend {
     #[inline(always)]
