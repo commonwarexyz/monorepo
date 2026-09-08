@@ -731,12 +731,7 @@ where
                 ack.send_lossy(handle);
             }
             Message::Certification { notarization, .. } => {
-                // The engine reports a certification after its own certify verdict,
-                // so the notarization is not re-verified. A certified block arrived
-                // bound to its commitment, and its embedded parent commitment was
-                // checked against a root-bound parent, by this node or by the honest
-                // validators whose certification its notarization required. Later
-                // ancestry fetches can trust both commitments.
+                // Certification also authenticates the parent commitment
                 let commitment = notarization.proposal.payload;
                 let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
                     debug!(?commitment, "certified block unavailable locally");
@@ -1151,12 +1146,8 @@ where
                     }
                 };
 
-                // This path serves ancestry walks and caller-driven finalized-gap
-                // repair, never a candidate block's immediate parent. Certification
-                // evidence lets the delivery skip recomputing the commitment.
-                // Without it the delivery re-derives the commitment from the block
-                // bytes, since an optimistic ancestry walk can name a commitment
-                // that is only notarized.
+                // Ancestry may be only notarized, so skipping commitment recomputation
+                // requires certification evidence
                 let request = if self.certified.contains(height, &commitment) {
                     Request::certified_block(commitment, height)
                 } else {
