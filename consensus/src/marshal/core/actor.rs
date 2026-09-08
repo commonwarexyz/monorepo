@@ -1,7 +1,8 @@
 use super::{
-    Buffer, Retirement, Variant,
+    Buffer, ExpectedCommitment, Retirement, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
+    certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
     floor::{Floor, State as FloorState},
@@ -140,6 +141,8 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Commitments known certified above the finalized tip
+    certified: Certified<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
@@ -265,6 +268,7 @@ where
                 cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
                 staged: BTreeMap::new(),
                 cache,
@@ -400,6 +404,7 @@ where
             if let Some((height, digest, round)) = tip {
                 application.report(Update::Tip(round, height, digest));
                 self.tip = height;
+                self.certified.retain(height.next());
                 let _ = self.finalized_height.try_set(height.get());
             }
 
@@ -729,6 +734,19 @@ where
                 });
                 ack.send_lossy(handle);
             }
+            Message::Certification { notarization, .. } => {
+                // Certification also authenticates the parent commitment
+                let commitment = notarization.proposal.payload;
+                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                    debug!(?commitment, "certified block unavailable locally");
+                    return self;
+                };
+                let height = block.height();
+                self.certified.insert(height, commitment);
+                if let Some(parent) = height.previous() {
+                    self.certified.insert(parent, V::parent_commitment(&block));
+                }
+            }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
                 let commitment = notarization.proposal.payload;
@@ -837,7 +855,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_round(commitment, round),
+                            Request::finalized_by_round(commitment, round),
                         )
                         .ignore();
                 }
@@ -1116,6 +1134,22 @@ where
             }
         };
         if let Some(block) = block {
+            // An ancestor may be certified through a descendant without its own local notification.
+            // Its digest binds the parent commitment, so extend certification evidence here.
+            if let Some(parent) = block.height().previous()
+                && match key {
+                    SubscriptionKey::Commitment(commitment) => {
+                        self.certified.contains(block.height(), &commitment)
+                    }
+                    SubscriptionKey::Digest(digest) => self
+                        .certified
+                        .contains_matching(block.height(), |commitment| {
+                            V::commitment_to_inner(*commitment) == digest
+                        }),
+                }
+            {
+                self.certified.insert(parent, V::parent_commitment(&block));
+            }
             response.send_lossy(block);
             return;
         }
@@ -1146,11 +1180,14 @@ where
                     }
                 };
 
-                // This path is only for accepted ancestry or finalized repair,
-                // never for a candidate block's immediate parent.
-                self.floor
-                    .fetch_if_permitted(resolver, Request::certified_block(commitment, height))
-                    .ignore();
+                // Ancestry may be only notarized, so skipping commitment recomputation
+                // requires certification evidence
+                let request = if self.certified.contains(height, &commitment) {
+                    Request::certified(commitment, height)
+                } else {
+                    Request::untrusted(commitment, height)
+                };
+                self.floor.fetch_if_permitted(resolver, request).ignore();
                 debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
             }
             CommitmentFallback::Wait => {}
@@ -1230,10 +1267,7 @@ where
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
         self.floor
-            .fetch_if_permitted(
-                resolver,
-                Request::finalized_block_by_round(commitment, round),
-            )
+            .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round))
             .ignore();
         self
     }
@@ -1377,6 +1411,7 @@ where
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
             self.tip = height;
+            self.certified.retain(height.next());
             let _ = self.finalized_height.try_set(height.get());
         }
 
@@ -1453,7 +1488,23 @@ where
         } = delivery;
         match key {
             Key::Block(commitment) => {
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                // Local annotations determine commitment checks and block storage
+                let annotations = subscribers
+                    .map_into(|(annotation, _)| annotation)
+                    .into_vec();
+
+                // Any `Certified` or `Finalized` subscriber authenticates the shared commitment
+                let expected = if annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation,
+                        Annotation::Certified { .. } | Annotation::Finalized(_)
+                    )
+                }) {
+                    ExpectedCommitment::Trusted(commitment)
+                } else {
+                    ExpectedCommitment::Untrusted(commitment)
+                };
+                let block_cfg = V::block_cfg(&self.block_codec_config, expected);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return self;
@@ -1476,14 +1527,18 @@ where
                     return self;
                 }
 
-                // The peer-visible request only says "give me this block".
-                // Local annotations explain why the block was requested and
-                // therefore where, if anywhere, it should be stored.
                 let height = block.height();
                 let digest = block.digest();
-                let annotations = subscribers
-                    .map_into(|(annotation, _)| annotation)
-                    .into_vec();
+
+                // A certified block's parent link was checked by the validators
+                // that certified it, so the walk keeps trusting as it descends.
+                if annotations
+                    .iter()
+                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
+                    && let Some(parent) = height.previous()
+                {
+                    self.certified.insert(parent, V::parent_commitment(&block));
+                }
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
@@ -1517,7 +1572,8 @@ where
                 } else if annotations.iter().any(|annotation| {
                     matches!(
                         annotation,
-                        Annotation::Certified { height: bound } if height <= *bound
+                        Annotation::Certified { height: bound }
+                        | Annotation::Untrusted { height: bound } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
@@ -1571,14 +1627,9 @@ where
                     return self;
                 };
 
-                // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
-                // is guaranteed to be certified (assuming the certificate verifies). Because of this,
-                // we can skip broader payload checks and just check that the application block matches
-                // the commitment in the finalization proposal.
-                //
-                // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
-                // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
-                // the requested block is certified.
+                // Once the certificate verifies, the finalization authenticates the application
+                // block, so only the height and digest are checked here. The working block is then
+                // rebuilt from the finalized commitment.
                 let commitment = finalization.proposal.payload;
                 if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
@@ -1620,14 +1671,17 @@ where
                     return self;
                 }
 
-                // Use the notarization payload to derive the block decode config. Below, the
-                // decoded block is checked against the same payload.
+                // Notarization alone does not prove the commitment encodes the block,
+                // so decoding must recompute it
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
                     return self;
                 }
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_cfg(
+                    &self.block_codec_config,
+                    ExpectedCommitment::Untrusted(commitment),
+                );
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return self;
@@ -2135,6 +2189,7 @@ where
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest));
             self.tip = height;
+            self.certified.retain(height.next());
             let _ = self.finalized_height.try_set(height.get());
         }
 
@@ -2299,7 +2354,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_height(commitment, last_finalized),
+                            Request::finalized_by_height(commitment, last_finalized),
                         )
                         .ignore();
                 }
@@ -2363,7 +2418,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_height(parent_commitment, parent_height),
+                            Request::finalized_by_height(parent_commitment, parent_height),
                         )
                         .ignore();
                     break 'cache_repair;
