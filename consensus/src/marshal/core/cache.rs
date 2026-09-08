@@ -101,7 +101,7 @@ where
             .certified_blocks
             .prune(min_height.get())
             .await
-            .expect("failed to prune ancestry blocks");
+            .expect("failed to prune certified blocks");
         self
     }
 }
@@ -367,8 +367,8 @@ where
         (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
-    /// Add a block fetched by an ancestry walk to the height-indexed archive.
-    pub(crate) async fn put_ancestry(
+    /// Add a block to the height-indexed certified archive.
+    pub(crate) async fn put_certified(
         mut self,
         epoch: Epoch,
         height: Height,
@@ -381,15 +381,15 @@ where
                 // is exact and avoids fetching values.
                 let exists = match cache.certified_blocks.has_at(height.get(), &digest).await {
                     Ok(exists) => exists,
-                    Err(e) => panic!("failed to check ancestry block: {e}"),
+                    Err(e) => panic!("failed to check certified block: {e}"),
                 };
                 if !exists {
                     cache.certified_blocks = cache
                         .certified_blocks
                         .put_multi_sync(height.get(), digest, block)
                         .await
-                        .unwrap_or_else(|e| panic!("failed to insert ancestry block: {e}"));
-                    debug!(%height, "cached ancestry block");
+                        .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
+                    debug!(%height, "cached certified block");
                 }
                 (cache, ())
             })
@@ -590,7 +590,7 @@ where
         None
     }
 
-    /// Looks for a block (verified, notarized, or fetched by an ancestry walk) that matches `predicate`.
+    /// Looks for a block in the verified, notarized, or certified archives that matches `predicate`.
     pub(crate) async fn find_block_matching(
         &self,
         digest: <V::Block as Digestible>::Digest,
@@ -620,12 +620,12 @@ where
                 return Some(block);
             }
 
-            // Check ancestry blocks
+            // Check certified blocks
             if let Some(block) = cache
                 .certified_blocks
                 .get(Identifier::Key(&digest))
                 .await
-                .expect("failed to get ancestry block")
+                .expect("failed to get certified block")
                 && predicate(&block)
             {
                 return Some(block);
@@ -648,13 +648,13 @@ where
             let Cache {
                 verified_blocks: vb,
                 notarized_blocks: nb,
-                certified_blocks: ab,
+                certified_blocks: cb,
                 notarizations: nv,
                 finalizations: fv,
             } = self.caches.remove(epoch).unwrap();
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
-            ab.destroy().await.expect("failed to destroy ab");
+            cb.destroy().await.expect("failed to destroy cb");
             nv.destroy().await.expect("failed to destroy nv");
             fv.destroy().await.expect("failed to destroy fv");
         }
@@ -675,7 +675,7 @@ where
         self
     }
 
-    /// Prune height-indexed ancestry blocks below the given height.
+    /// Prune height-indexed certified blocks below the given height.
     pub(crate) async fn prune_by_height(mut self, height: Height) -> Self {
         for (epoch, cache) in std::mem::take(&mut self.caches) {
             let cache = cache.prune_by_height(height).await;

@@ -1159,7 +1159,7 @@ where
                     Request::untrusted(commitment, height)
                 };
                 self.floor.fetch_if_permitted(resolver, request).ignore();
-                debug!(%height, ?commitment, ?digest, "ancestry block unavailable");
+                debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
             }
             CommitmentFallback::Wait => {}
         }
@@ -1552,7 +1552,7 @@ where
                 {
                     self.cache = self
                         .cache
-                        .put_ancestry(
+                        .put_certified(
                             bounds.epoch(),
                             height,
                             digest,
@@ -2558,7 +2558,7 @@ where
         self
     }
 
-    /// Prunes finalized archives and the ancestry cache below the durable floor.
+    /// Prunes finalized archives and height-indexed certified cache data below the durable floor.
     async fn prune_after_floor(mut self: Box<Self>, height: Height) -> Box<Self> {
         (
             self.cache,
