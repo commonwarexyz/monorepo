@@ -456,6 +456,13 @@ impl From<BytesMut> for IoBuf {
     }
 }
 
+/// Convert [`IoBufMut`] into an [`IoBuf`] without copying (via [`IoBufMut::freeze`]).
+impl From<IoBufMut> for IoBuf {
+    fn from(buf: IoBufMut) -> Self {
+        buf.freeze()
+    }
+}
+
 /// Zero-copy: creates a static view with no owner.
 impl<const N: usize> From<&'static [u8; N]> for IoBuf {
     fn from(array: &'static [u8; N]) -> Self {
@@ -860,10 +867,6 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBufMut {
 
 impl DecodeInput for IoBufMut {
     type Buf = IoBuf;
-
-    fn into_buf(self) -> Self::Buf {
-        self.freeze()
-    }
 }
 
 impl bytes::Buf for IoBufMut {

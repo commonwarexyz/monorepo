@@ -4,6 +4,7 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
+use bytes::Bytes;
 use commonware_codec::{
     Buf, Codec, EncodeSize, ReadExt as _, Write as _,
     varint::{MAX_U32_VARINT_SIZE, UInt},
@@ -137,7 +138,9 @@ pub(super) async fn read_frame_at<V: Codec>(
             IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
         )
         .await?;
-    let buf = buf.freeze();
+    // Share one Bytes owner so decoded byte fields slice by refcount instead of boxing an owner
+    // per field
+    let buf = Bytes::from(buf.freeze());
     let mut cursor = buf.slice(..available);
     let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
 

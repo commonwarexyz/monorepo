@@ -8,7 +8,7 @@ use bytes::Bytes;
 use commonware_codec::Buf;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf as _, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
+    Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -766,7 +766,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .get()
                 .max(needed)
                 .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-            let (buf, read) = self
+            let (mut buf, read) = self
                 .blob
                 .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
                 .await?;
@@ -774,7 +774,10 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .offset
                 .checked_add(read as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            self.buf.append(buf.freeze().slice(..read));
+            // An external owner lets decoded byte fields slice by refcount instead of boxing an
+            // owner per field
+            buf.truncate(read);
+            self.buf.append(IoBuf::from(Bytes::from(buf.freeze())));
             if self.offset == blob_size {
                 self.exhausted = true;
             }

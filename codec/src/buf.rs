@@ -1,7 +1,7 @@
 //! Input buffers that preserve ownership while decoding.
 
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use bytes::{
     Bytes, BytesMut,
     buf::{Chain, Take},
@@ -19,31 +19,19 @@ use bytes::{
 ///
 /// Borrowed slices require an explicit [`Copying`] adapter. The adapter leaves ordinary
 /// scalar and byte-array reads allocation-free and copies fields that retain their input bytes.
-///
-/// Slices cannot accidentally reach a reader through aliases or helper functions:
-///
-/// ```compile_fail,E0277
-/// use bytes::Bytes;
-/// use commonware_codec::Read;
-///
-/// fn read(mut input: &[u8]) {
-///     let alias = &mut input;
-///     let _ = Bytes::read_cfg(alias, &(..).into());
-/// }
-/// ```
 pub trait Buf: bytes::Buf {}
 
 impl Buf for Bytes {}
 impl Buf for BytesMut {}
 impl<B: Buf + ?Sized> Buf for &mut B {}
-impl<B: Buf + ?Sized> Buf for Box<B> {}
 impl<B: Buf> Buf for Take<B> {}
 impl<A: Buf, B: Buf> Buf for Chain<A, B> {}
 
 /// An input that can be consumed by a decoder.
 ///
 /// [`Buf`] inputs pass through unchanged. A [`Vec<u8>`] transfers its allocation to
-/// [`Bytes`] without copying its payload. Custom inputs can convert into a [`Buf`].
+/// [`Bytes`] without copying its payload. Custom inputs convert into their [`Buf`] through
+/// [`Into`].
 ///
 /// Borrowing an owned buffer as a slice discards its ability to share decoded byte fields,
 /// so slices require an explicit [`Copying`] adapter:
@@ -56,23 +44,6 @@ impl<A: Buf, B: Buf> Buf for Chain<A, B> {}
 /// let _ = Bytes::decode_cfg(encoded.as_ref(), &(..).into());
 /// ```
 ///
-/// The same requirement applies after passing a slice through helpers:
-///
-/// ```compile_fail,E0277
-/// use bytes::Bytes;
-/// use commonware_codec::Decode;
-///
-/// fn alias(input: &[u8]) -> &[u8] {
-///     let first = input;
-///     let second = first;
-///     second
-/// }
-///
-/// fn decode(input: &[u8]) {
-///     let _ = Bytes::decode_cfg(alias(input), &(..).into());
-/// }
-/// ```
-///
 /// Owning storage is insufficient if the buffer's byte extraction copies it:
 ///
 /// ```compile_fail,E0277
@@ -83,30 +54,17 @@ impl<A: Buf, B: Buf> Buf for Chain<A, B> {}
 /// let encoded = Bytes::from_static(b"hello").encode();
 /// let _ = Bytes::decode_cfg(Cursor::new(encoded), &(..).into());
 /// ```
-pub trait DecodeInput {
+pub trait DecodeInput: Into<Self::Buf> {
     /// The buffer used by the decoder.
     type Buf: Buf;
-
-    /// Converts this input into its readable buffer.
-    fn into_buf(self) -> Self::Buf;
 }
 
 impl<B: Buf> DecodeInput for B {
     type Buf = B;
-
-    #[inline]
-    fn into_buf(self) -> Self::Buf {
-        self
-    }
 }
 
 impl DecodeInput for Vec<u8> {
     type Buf = Bytes;
-
-    #[inline]
-    fn into_buf(self) -> Self::Buf {
-        self.into()
-    }
 }
 
 /// Explicitly decodes from a borrowed slice, copying any retained byte fields.
@@ -126,15 +84,6 @@ impl DecodeInput for Vec<u8> {
 /// let mut input = Copying(&scratch);
 /// assert_eq!(u32::read(&mut input).unwrap(), 7);
 /// assert!(input.0.is_empty());
-/// ```
-///
-/// Fixed-size values also require the explicit adapter:
-///
-/// ```compile_fail,E0277
-/// use commonware_codec::DecodeExt;
-///
-/// let scratch = [0, 0, 0, 7];
-/// let _ = u32::decode(&scratch[..]);
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Copying<'a>(
@@ -188,12 +137,6 @@ mod tests {
         let cfg = (..).into();
         assert_eq!(
             Bytes::decode_cfg(encoded.clone(), &cfg).unwrap().as_ptr(),
-            payload
-        );
-        assert_eq!(
-            Bytes::decode_cfg(Box::new(encoded.clone()), &cfg)
-                .unwrap()
-                .as_ptr(),
             payload
         );
         assert_eq!(

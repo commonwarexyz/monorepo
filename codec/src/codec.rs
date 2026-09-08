@@ -315,7 +315,7 @@ pub trait Decode: Read {
     /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes in
     /// `buf` after reading.
     fn decode_cfg(buf: impl DecodeInput, cfg: &Self::Cfg) -> Result<Self, Error> {
-        let mut buf = buf.into_buf();
+        let mut buf = buf.into();
         let result = Self::read_cfg(&mut buf, cfg)?;
 
         // Check that the buffer is fully consumed.

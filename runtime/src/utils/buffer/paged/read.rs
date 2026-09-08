@@ -1,5 +1,5 @@
 use super::Checksum;
-use crate::{Blob, Error, IoBuf, ReadOptions};
+use crate::{Blob, Error, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Buf, FixedSize};
 use std::{collections::VecDeque, num::NonZeroU16};
@@ -11,8 +11,9 @@ use tracing::error;
 /// Navigation skips CRCs by computing offsets rather than creating separate
 /// `Bytes` slices per page.
 pub(super) struct BufferState {
-    /// The raw physical buffer containing pages with interleaved CRCs.
-    buffer: IoBuf,
+    /// The raw physical buffer containing pages with interleaved CRCs. Held as [`Bytes`] so
+    /// decoded byte fields slice it by refcount instead of boxing an owner per field.
+    buffer: Bytes,
     /// Number of pages in this buffer.
     num_pages: usize,
     /// Logical length of the last page (may be partial).
@@ -121,12 +122,13 @@ impl<B: Blob> PageReader<B> {
         let bytes_to_read = pages_to_read * self.physical_page_size;
 
         // Read physical data
-        let physical_buf = self
-            .blob
-            .read_at(start_offset, bytes_to_read, self.read_options)
-            .await?
-            .coalesce()
-            .freeze();
+        let physical_buf = Bytes::from(
+            self.blob
+                .read_at(start_offset, bytes_to_read, self.read_options)
+                .await?
+                .coalesce()
+                .freeze(),
+        );
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
@@ -251,7 +253,7 @@ impl bytes::Buf for ReplayBuf {
         if len <= self.chunk().len() {
             let buffer = &self.buffers.front().expect("readable buffer").buffer;
             let start = self.current_page * self.physical_page_size + self.offset_in_page;
-            let bytes = Bytes::from(buffer.slice(start..start + len));
+            let bytes = buffer.slice(start..start + len);
             self.advance(len);
             return bytes;
         }
@@ -426,7 +428,7 @@ mod tests {
         let mut replay = ReplayBuf::new(16, 4);
         replay.push(
             BufferState {
-                buffer: IoBuf::from(source),
+                buffer: source,
                 num_pages: 2,
                 last_page_len: 4,
             },
