@@ -1,15 +1,15 @@
+use self::msm::Backend as MBackend;
 use core::array;
 use subtle::{Choice, ConditionallySelectable};
 
-/// How many parallel operations we try and do via SIMD.
+/// Number of independent field or group elements carried by a vector for SIMD operations.
 ///
-/// This is set to the highest realistic number, targeting AVX-512.
-/// On other backends, this is larger than necessary.
+/// This targets AVX-512's eight 64-bit lanes, the widest native vector used by these backends.
+/// Backends with narrower registers emulate this lane count by processing smaller native tiles,
+/// such as NEON's two-lane tiles.
 ///
-/// This should not be harmful to performance, because a larger lane count
-/// can be emulated with a smaller lane count.
-/// An exception to this would be if the memory pressure were particularly bad,
-/// but given how small this value is, this shouldn't be an issue.
+/// A larger logical lane count can increase memory pressure, so operations that do not need
+/// all lanes can use smaller tiles directly.
 pub const LANES: usize = 8;
 
 /// The low 51 bits: what a limb holds once carries have been propagated out of it.
@@ -370,6 +370,14 @@ impl FVec {
 
 /// Abstracts over base field operations.
 pub trait FBackend: Copy {
+    /// Negates the selected lanes and preserves the other lanes' limb representations.
+    ///
+    /// Variable-time, so the mask must be public.
+    #[inline(always)]
+    fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        value.select_lanes(self.neg(value), negative)
+    }
+
     /// a + b.
     fn add(self, a: FVec, b: FVec) -> FVec;
 
@@ -382,6 +390,15 @@ pub trait FBackend: Copy {
     /// a * a.
     fn square(self, a: FVec) -> FVec {
         self.mul(a, a)
+    }
+
+    /// Squares every lane `k` times, returning `a` unchanged when `k` is zero.
+    #[inline(always)]
+    fn pow2k(self, mut a: FVec, k: u32) -> FVec {
+        for _ in 0..k {
+            a = self.square(a);
+        }
+        a
     }
 
     /// a - b.
@@ -799,19 +816,6 @@ impl GAffineVec {
         }
     }
 
-    /// Untransposes backend lanes into scalar affine points.
-    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
-    pub fn untranspose(self) -> [GAffine; LANES] {
-        let x = self.x.untranspose();
-        let y = self.y.untranspose();
-        let t2d = self.t2d.untranspose();
-        array::from_fn(|i| GAffine {
-            x: x[i],
-            y: y[i],
-            t2d: t2d[i],
-        })
-    }
-
     /// Packs affine points, negating the selected lanes.
     ///
     /// Variable-time, so the lane signs must be public.
@@ -826,19 +830,11 @@ impl GAffineVec {
         }
 
         Self {
-            x: packed.x.select_lanes(backend.neg(packed.x), negative),
+            x: backend.conditional_neg(packed.x, negative),
             y: packed.y,
-            t2d: packed.t2d.select_lanes(backend.neg(packed.t2d), negative),
+            t2d: backend.conditional_neg(packed.t2d, negative),
         }
     }
-}
-
-/// Squares `value` `k` times.
-fn pow2k<B: FBackend>(backend: B, mut value: FVec, k: u32) -> FVec {
-    for _ in 0..k {
-        value = backend.square(value);
-    }
-    value
 }
 
 /// Raises every lane to `2^250 - 1` using the standard addition chain.
@@ -849,18 +845,18 @@ fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
     let c = backend.mul(a, b);
     let d = backend.square(c);
     let e = backend.mul(b, d);
-    let f = backend.mul(pow2k(backend, e, 5), e);
-    let g = backend.mul(pow2k(backend, f, 10), f);
-    let h = backend.mul(pow2k(backend, g, 20), g);
-    let i = backend.mul(pow2k(backend, h, 10), f);
-    let j = backend.mul(pow2k(backend, i, 50), i);
-    let k = backend.mul(pow2k(backend, j, 100), j);
-    backend.mul(pow2k(backend, k, 50), i)
+    let f = backend.mul(backend.pow2k(e, 5), e);
+    let g = backend.mul(backend.pow2k(f, 10), f);
+    let h = backend.mul(backend.pow2k(g, 20), g);
+    let i = backend.mul(backend.pow2k(h, 10), f);
+    let j = backend.mul(backend.pow2k(i, 50), i);
+    let k = backend.mul(backend.pow2k(j, 100), j);
+    backend.mul(backend.pow2k(k, 50), i)
 }
 
 /// Raises every lane to `(p - 5) / 8 = 2^252 - 3` for point decompression.
 fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
-    backend.mul(value, pow2k(backend, pow_2_250_minus_1(backend, value), 2))
+    backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
 }
 
 /// Abstracts over group operations.
@@ -884,7 +880,7 @@ pub trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: FBackend + GBackend + Send + Sync + 'static {}
+pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
@@ -903,6 +899,9 @@ pub trait WithBackend {
 
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;
+
+// Backend bucket kernels for MSM. Signing owns digit recoding and scheduling.
+pub mod msm;
 
 // Now, a module for each backend.
 #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]

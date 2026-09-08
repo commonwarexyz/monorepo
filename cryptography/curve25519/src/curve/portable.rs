@@ -1,6 +1,6 @@
 //! Plain-Rust lane adapter over scalar field and group arithmetic.
 
-use super::{F, FBackend, FVec, G, GAffineVec, GBackend, GVec};
+use super::{F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES};
 use core::array;
 
 /// The portable backend token.
@@ -83,3 +83,21 @@ impl GBackend for Backend {
 }
 
 impl super::Backend for Backend {}
+
+impl GAffineVec {
+    /// Untransposes backend lanes into scalar affine points.
+    fn untranspose(self) -> [GAffine; LANES] {
+        let x = self.x.untranspose();
+        let y = self.y.untranspose();
+        let t2d = self.t2d.untranspose();
+        array::from_fn(|i| GAffine {
+            x: x[i],
+            y: y[i],
+            t2d: t2d[i],
+        })
+    }
+}
+
+impl super::msm::Backend for Backend {
+    const STRIPES: usize = LANES;
+}

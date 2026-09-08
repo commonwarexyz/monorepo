@@ -64,12 +64,29 @@ fn store(regs: [__m512i; 5]) -> [[u64; LANES]; 5] {
 /// # Correctness
 ///
 /// `z` must be less than `2^59` per lane so `19*z` fits in `u64`.
+///
+/// The explicit instruction sequence prevents LLVM from recognizing a packed `u64` multiplication
+/// and expanding it into two packed 32-bit multiplications, two shifts, and an addition. These
+/// four AVX-512F instructions preserve the shift-and-add calculation directly.
 #[target_feature(enable = "avx512f")]
 fn mul19(z: __m512i) -> __m512i {
-    _mm512_add_epi64(
-        _mm512_add_epi64(_mm512_slli_epi64(z, 4), _mm512_slli_epi64(z, 1)),
-        z,
-    )
+    let result;
+    // SAFETY: AVX-512F is enabled. The instructions only read their register input, write
+    // their register outputs, preserve flags, and stay within the documented limb bound.
+    unsafe {
+        core::arch::asm!(
+            "vpsllq {times16}, {z}, 4",
+            "vpsllq {doubled}, {z}, 1",
+            "vpaddq {doubled}, {doubled}, {times16}",
+            "vpaddq {result}, {doubled}, {z}",
+            z = in(zmm_reg) z,
+            times16 = out(zmm_reg) _,
+            doubled = out(zmm_reg) _,
+            result = lateout(zmm_reg) result,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    result
 }
 
 /// Reduces each radix-`2^51` lane with one parallel carry pass.
@@ -80,12 +97,14 @@ fn mul19(z: __m512i) -> __m512i {
 /// # Correctness
 ///
 /// Inputs must have limbs below `2^63`. Outputs then have limbs below `2^52`.
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,avx512ifma")]
 fn reduce_regs(l: [__m512i; 5]) -> [__m512i; 5] {
     let mask = _mm512_set1_epi64(MASK_51 as i64);
     let c: [__m512i; 5] = core::array::from_fn(|i| _mm512_srli_epi64(l[i], 51));
+
+    // Each carry is below 2^12, so IFMA computes the folded carry exactly.
     [
-        _mm512_add_epi64(_mm512_and_si512(l[0], mask), mul19(c[4])),
+        _mm512_madd52lo_epu64(_mm512_and_si512(l[0], mask), c[4], _mm512_set1_epi64(19)),
         _mm512_add_epi64(_mm512_and_si512(l[1], mask), c[0]),
         _mm512_add_epi64(_mm512_and_si512(l[2], mask), c[1]),
         _mm512_add_epi64(_mm512_and_si512(l[3], mask), c[2]),
@@ -203,157 +222,211 @@ fn sub_raw(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
 ///
 /// Every input must satisfy [`FVec`]'s limb bound. That bound keeps raw field arithmetic within
 /// its documented ranges and keeps every IFMA operand below its `2^52` ceiling.
-impl FBackend for Backend {
-    fn add(self, a: FVec, b: FVec) -> FVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            FVec {
-                limbs: store(reduce_regs(add_raw(load(&a.limbs), load(&b.limbs)))),
-            }
+impl Backend {
+    /// Negates selected lanes with reduced output while preserving every unselected limb.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn conditional_neg_field(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        let mask = negative
+            .iter()
+            .enumerate()
+            .fold(0u8, |mask, (lane, &select)| mask | ((select as u8) << lane));
+        let value = load(&value.limbs);
+        let zero = [_mm512_setzero_si512(); 5];
+        let negated = reduce_regs(sub_raw(zero, value));
+        FVec {
+            limbs: store(core::array::from_fn(|limb| {
+                _mm512_mask_blend_epi64(mask, value[limb], negated[limb])
+            })),
         }
     }
 
-    fn neg(self, a: FVec) -> FVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            let zero = [_mm512_setzero_si512(); 5];
-            FVec {
-                limbs: store(reduce_regs(sub_raw(zero, load(&a.limbs)))),
-            }
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn add_field(self, a: FVec, b: FVec) -> FVec {
+        FVec {
+            limbs: store(reduce_regs(add_raw(load(&a.limbs), load(&b.limbs)))),
         }
     }
 
-    fn sub(self, a: FVec, b: FVec) -> FVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            FVec {
-                limbs: store(reduce_regs(sub_raw(load(&a.limbs), load(&b.limbs)))),
-            }
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn neg_field(self, a: FVec) -> FVec {
+        let zero = [_mm512_setzero_si512(); 5];
+        FVec {
+            limbs: store(reduce_regs(sub_raw(zero, load(&a.limbs)))),
         }
     }
 
-    fn mul(self, a: FVec, b: FVec) -> FVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            FVec {
-                limbs: store(mul_regs(load(&a.limbs), load(&b.limbs))),
-            }
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn sub_field(self, a: FVec, b: FVec) -> FVec {
+        FVec {
+            limbs: store(reduce_regs(sub_raw(load(&a.limbs), load(&b.limbs)))),
         }
     }
 
-    fn square(self, a: FVec) -> FVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            FVec {
-                limbs: store(square_regs(load(&a.limbs))),
-            }
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn mul_field(self, a: FVec, b: FVec) -> FVec {
+        FVec {
+            limbs: store(mul_regs(load(&a.limbs), load(&b.limbs))),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn pow2k_field(self, a: FVec, k: u32) -> FVec {
+        let mut value = load(&a.limbs);
+        for _ in 0..k {
+            value = square_regs(value);
+        }
+        FVec {
+            limbs: store(value),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn square_field(self, a: FVec) -> FVec {
+        FVec {
+            limbs: store(square_regs(load(&a.limbs))),
         }
     }
 }
 
-// These methods need forced inlining: without it, optimized `WithBackend` computations retain a
-// call to each group operation across the target-feature boundary.
-impl GBackend for Backend {
-    /// Fused point addition with every intermediate held in registers.
+impl FBackend for Backend {
+    #[inline(always)]
+    fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.conditional_neg_field(value, negative) }
+    }
+
+    #[inline(always)]
+    fn add(self, a: FVec, b: FVec) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.add_field(a, b) }
+    }
+
+    #[inline(always)]
+    fn neg(self, a: FVec) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.neg_field(a) }
+    }
+
+    #[inline(always)]
+    fn sub(self, a: FVec, b: FVec) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.sub_field(a, b) }
+    }
+
+    #[inline(always)]
+    fn mul(self, a: FVec, b: FVec) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.mul_field(a, b) }
+    }
+
+    #[inline(always)]
+    fn pow2k(self, a: FVec, k: u32) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.pow2k_field(a, k) }
+    }
+
+    #[inline(always)]
+    fn square(self, a: FVec) -> FVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.square_field(a) }
+    }
+}
+
+impl Backend {
+    /// Fused point addition.
     ///
     /// # Correctness
     ///
     /// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below
     /// `reduce_regs`'s `2^63` bound, and every right operand of `sub_raw` is reduced below
     /// `2^52`.
-    #[inline(always)]
-    fn g_add(self, p: GVec, q: GVec) -> GVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            let (x1, y1, z1, t1) = (
-                load(&p.x.limbs),
-                load(&p.y.limbs),
-                load(&p.z.limbs),
-                load(&p.t.limbs),
-            );
-            let (x2, y2, z2, t2) = (
-                load(&q.x.limbs),
-                load(&q.y.limbs),
-                load(&q.z.limbs),
-                load(&q.t.limbs),
-            );
-            let two_d = load(&EDWARDS_D2.limbs);
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn add_points(self, p: GVec, q: GVec) -> GVec {
+        let (x1, y1, z1, t1) = (
+            load(&p.x.limbs),
+            load(&p.y.limbs),
+            load(&p.z.limbs),
+            load(&p.t.limbs),
+        );
+        let (x2, y2, z2, t2) = (
+            load(&q.x.limbs),
+            load(&q.y.limbs),
+            load(&q.z.limbs),
+            load(&q.t.limbs),
+        );
+        let two_d = load(&EDWARDS_D2.limbs);
 
-            // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
-            //
-            //   A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
-            //   B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
-            //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
-            //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
-            let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
-            let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
-            let c = mul_regs(mul_regs(t1, t2), two_d);
-            let zz = mul_regs_loose(z1, z2);
-            let d = add_raw(zz, zz);
-            let e = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(d, c));
-            let g = reduce_regs(add_raw(d, c));
-            let h = reduce_regs(add_raw(b, a));
+        // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
+        //
+        //   A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
+        //   B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
+        //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
+        //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
+        let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+        let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+        let c = mul_regs(mul_regs(t1, t2), two_d);
+        let zz = mul_regs_loose(z1, z2);
+        let d = add_raw(zz, zz);
+        let e = reduce_regs(sub_raw(b, a));
+        let f = reduce_regs(sub_raw(d, c));
+        let g = reduce_regs(add_raw(d, c));
+        let h = reduce_regs(add_raw(b, a));
 
-            GVec {
-                x: FVec {
-                    limbs: store(mul_regs(e, f)),
-                },
-                y: FVec {
-                    limbs: store(mul_regs(g, h)),
-                },
-                t: FVec {
-                    limbs: store(mul_regs(e, h)),
-                },
-                z: FVec {
-                    limbs: store(mul_regs(f, g)),
-                },
-            }
+        GVec {
+            x: FVec {
+                limbs: store(mul_regs(e, f)),
+            },
+            y: FVec {
+                limbs: store(mul_regs(g, h)),
+            },
+            t: FVec {
+                limbs: store(mul_regs(e, h)),
+            },
+            z: FVec {
+                limbs: store(mul_regs(f, g)),
+            },
         }
     }
 
-    /// Fused mixed point addition with every intermediate held in registers.
+    /// Fused mixed point addition.
     ///
     /// # Correctness
     ///
     /// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below
     /// `reduce_regs`'s `2^63` bound, and every right operand of `sub_raw` is reduced below
     /// `2^52`.
-    #[inline(always)]
-    fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            let (x1, y1, z1, t1) = (
-                load(&p.x.limbs),
-                load(&p.y.limbs),
-                load(&p.z.limbs),
-                load(&p.t.limbs),
-            );
-            let (x2, y2, t2d) = (load(&q.x.limbs), load(&q.y.limbs), load(&q.t2d.limbs));
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn add_mixed_points(self, p: GVec, q: GAffineVec) -> GVec {
+        let (x1, y1, z1, t1) = (
+            load(&p.x.limbs),
+            load(&p.y.limbs),
+            load(&p.z.limbs),
+            load(&p.t.limbs),
+        );
+        let (x2, y2, t2d) = (load(&q.x.limbs), load(&q.y.limbs), load(&q.t2d.limbs));
 
-            let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
-            let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
-            let c = mul_regs(t1, t2d);
-            let d = add_raw(z1, z1);
-            let e = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(d, c));
-            let g = reduce_regs(add_raw(d, c));
-            let h = reduce_regs(add_raw(b, a));
+        let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+        let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+        let c = mul_regs(t1, t2d);
+        let d = add_raw(z1, z1);
+        let e = reduce_regs(sub_raw(b, a));
+        let f = reduce_regs(sub_raw(d, c));
+        let g = reduce_regs(add_raw(d, c));
+        let h = reduce_regs(add_raw(b, a));
 
-            GVec {
-                x: FVec {
-                    limbs: store(mul_regs(e, f)),
-                },
-                y: FVec {
-                    limbs: store(mul_regs(g, h)),
-                },
-                t: FVec {
-                    limbs: store(mul_regs(e, h)),
-                },
-                z: FVec {
-                    limbs: store(mul_regs(f, g)),
-                },
-            }
+        GVec {
+            x: FVec {
+                limbs: store(mul_regs(e, f)),
+            },
+            y: FVec {
+                limbs: store(mul_regs(g, h)),
+            },
+            t: FVec {
+                limbs: store(mul_regs(e, h)),
+            },
+            z: FVec {
+                limbs: store(mul_regs(f, g)),
+            },
         }
     }
 
@@ -364,39 +437,60 @@ impl GBackend for Backend {
     /// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below
     /// `reduce_regs`'s `2^63` bound, and every right operand of `sub_raw` is reduced below
     /// `2^52`.
-    #[inline(always)]
-    fn g_double(self, p: GVec) -> GVec {
-        // SAFETY: `Backend` can only be constructed when AVX-512F and AVX-512 IFMA are available.
-        unsafe {
-            let (x, y, z) = (load(&p.x.limbs), load(&p.y.limbs), load(&p.z.limbs));
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn double_points(self, p: GVec) -> GVec {
+        let (x, y, z) = (load(&p.x.limbs), load(&p.y.limbs), load(&p.z.limbs));
 
-            let a = square_regs(x);
-            let b = square_regs(y);
-            let c0 = square_regs_loose(z);
-            let c = reduce_regs(add_raw(c0, c0));
-            let xy2 = square_regs_loose(reduce_regs(add_raw(x, y)));
-            let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
-            let g = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(g, c));
-            let zero = [_mm512_setzero_si512(); 5];
-            let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
+        let a = square_regs(x);
+        let b = square_regs(y);
+        let c0 = square_regs_loose(z);
+        let c = reduce_regs(add_raw(c0, c0));
+        let xy2 = square_regs_loose(reduce_regs(add_raw(x, y)));
+        let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
+        let g = reduce_regs(sub_raw(b, a));
+        let f = reduce_regs(sub_raw(g, c));
+        let zero = [_mm512_setzero_si512(); 5];
+        let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
 
-            GVec {
-                x: FVec {
-                    limbs: store(mul_regs(e, f)),
-                },
-                y: FVec {
-                    limbs: store(mul_regs(g, h)),
-                },
-                t: FVec {
-                    limbs: store(mul_regs(e, h)),
-                },
-                z: FVec {
-                    limbs: store(mul_regs(f, g)),
-                },
-            }
+        GVec {
+            x: FVec {
+                limbs: store(mul_regs(e, f)),
+            },
+            y: FVec {
+                limbs: store(mul_regs(g, h)),
+            },
+            t: FVec {
+                limbs: store(mul_regs(e, h)),
+            },
+            z: FVec {
+                limbs: store(mul_regs(f, g)),
+            },
         }
     }
 }
 
 impl super::Backend for Backend {}
+
+impl super::msm::Backend for Backend {
+    const STRIPES: usize = LANES;
+}
+
+impl GBackend for Backend {
+    #[inline(always)]
+    fn g_add(self, p: GVec, q: GVec) -> GVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.add_points(p, q) }
+    }
+
+    #[inline(always)]
+    fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.add_mixed_points(p, q) }
+    }
+
+    #[inline(always)]
+    fn g_double(self, p: GVec) -> GVec {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.double_points(p) }
+    }
+}
