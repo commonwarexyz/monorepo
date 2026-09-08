@@ -283,11 +283,6 @@ pub enum CommitmentFallback {
     /// It is not part of response validity. A fetched block is delivered if its
     /// commitment matches. A matching block above this bound is delivered but
     /// not cached.
-    ///
-    /// Marshal issues a certified request when it holds certification evidence
-    /// for the commitment and an ancestry request otherwise. Only ancestry
-    /// deliveries recompute variant-specific commitment material from the block
-    /// bytes.
     FetchByCommitment { height: Height },
 }
 
