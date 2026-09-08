@@ -327,6 +327,22 @@ pub trait Decode: Read {
 // Automatically implement `Decode` for types that implement `Read`.
 impl<T: Read> Decode for T {}
 
+/// Decodes a value using reusable work owned by its implementation.
+///
+/// The context may avoid repeating expensive validation, for example when several values were
+/// validated together. It must not change the decoded value or which inputs are accepted.
+pub trait DecodeWith: Decode {
+    /// Reusable decoding work whose interpretation is defined by this implementation.
+    type Context;
+
+    /// Decodes `bytes` using `cfg` and reusable work from `context`.
+    ///
+    /// This must produce the same result as [`Decode::decode_cfg`] for every input and context,
+    /// including configuration checks and rejection of trailing bytes. An unrelated context must
+    /// not cause a valid input to fail or substitute a different value.
+    fn decode_with(bytes: &[u8], cfg: &Self::Cfg, context: &Self::Context) -> Result<Self, Error>;
+}
+
 /// Convenience trait combining [Encode] and [Decode].
 ///
 /// Represents types that can be both fully encoded and decoded.

@@ -14,8 +14,8 @@ use sha2::{Digest, Sha512};
 
 /// The exact byte encoding used to identify an Ed25519 verifying key.
 ///
-/// Batch verification hashes and groups keys by this encoding, then decompresses each distinct
-/// key in its point-processing phase.
+/// Batch verification hashes and groups keys by this encoding, then reuses a cached point or
+/// decompresses each distinct key in its point-processing phase.
 #[derive(Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct VerifyingKeyBytes([u8; 32]);
@@ -28,6 +28,29 @@ impl VerifyingKeyBytes {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+/// Access to decoding results held by the batch's original key objects.
+///
+/// Indices refer to original batch positions. Results must describe the exact key encoding at
+/// that position. A cached failure is distinct from an uninitialized entry, and storing a result
+/// must preserve the original bytes.
+pub(super) trait KeyCache: Sync {
+    /// Returns an initialized entry, including a cached decoding failure.
+    fn get(&self, index: usize) -> Option<Option<GAffine>>;
+
+    /// Records a point or decoding failure for the exact encoding at `index`.
+    fn store(&self, index: usize, bytes: &[u8; 32], point: Option<GAffine>);
+}
+
+impl KeyCache for () {
+    /// Leaves every key in the decompression worklist.
+    fn get(&self, _: usize) -> Option<Option<GAffine>> {
+        None
+    }
+
+    /// Discards decoded points when no cache was supplied.
+    fn store(&self, _: usize, _: &[u8; 32], _: Option<GAffine>) {}
 }
 
 /// Computes `SHA-512(parts[0] || parts[1] || ...)`, the Ed25519 challenge hash `H(R || A || M)`.
@@ -165,29 +188,35 @@ fn scalar_phase(
     Some((blocks, s_sum))
 }
 
-/// The decompression phase: turns a flat worklist of `count` point encodings (resolved by index
-/// via `resolve`, which returns an encoding and its already-final MSM scalar) into MSM terms, in
-/// one parallel pass over [`LANES`]-sized units -- the finest split that keeps the sqrt kernel
-/// running 8-wide (see [`GAffine::decompress_batch`]), so the pool's demand-driven
-/// splitting balances the pass at ~7us granularity and a late-waking worker simply takes fewer
-/// units. Each fixed partition builds one exactly sized term vector, then the parallel fold joins
-/// validity and vectors of those buffers without shared state or copying point data. The final
-/// unit is padded with identity/zero terms, keeping decompression SIMD-wide without changing the
-/// MSM.
+/// Turns `count` point encodings and `cached_count` decoded keys into MSM terms in one parallel
+/// pass over [`LANES`]-sized units. `resolve` supplies encodings and their final MSM scalars,
+/// while `resolve_cached` builds terms directly from cached points. Encoded units run the sqrt
+/// kernel 8-wide (see [`GAffine::decompress_batch`]), and cached units skip decompression.
 ///
-/// Returns `None` if any encoding fails to decompress.
-fn decompress_phase<B, F>(
+/// The pool's demand-driven splitting balances both kinds of work. Each fixed partition builds
+/// one exactly sized term vector, then the parallel fold joins validity and vectors of those
+/// buffers without copying point data. The final encoded and cached units are padded with
+/// identity/zero terms, keeping decompression SIMD-wide without changing the MSM.
+///
+/// Calls `record` with each encoding's decoding result, including failures. Returns `None` if
+/// any encoding fails to decompress.
+fn decompress_phase<B, F, R, C>(
     backend: B,
     count: usize,
     resolve: F,
+    record: R,
+    (cached_count, resolve_cached): (usize, C),
     width: u32,
     strategy: &impl Strategy,
 ) -> Option<Vec<Vec<[Term; LANES]>>>
 where
     B: Backend,
     F: Fn(usize) -> ([u8; 32], Scalar) + Send + Sync,
+    R: Fn(usize, Option<GAffine>) + Send + Sync,
+    C: Fn(usize) -> Term + Send + Sync,
 {
-    let units = count.div_ceil(LANES);
+    let encoded_units = count.div_ceil(LANES);
+    let units = encoded_units + cached_count.div_ceil(LANES);
     if units == 0 {
         return Some(Vec::new());
     }
@@ -221,6 +250,17 @@ where
             let mut chunk_valid = true;
             let mut terms = Vec::with_capacity(range.len());
             for unit in range {
+                if unit >= encoded_units {
+                    let base = (unit - encoded_units) * LANES;
+                    terms.push(core::array::from_fn(|lane| {
+                        if base + lane < cached_count {
+                            resolve_cached(base + lane)
+                        } else {
+                            placeholder
+                        }
+                    }));
+                    continue;
+                }
                 let base = unit * LANES;
                 let mut resolved = [(identity_encoding, Scalar::ZERO); LANES];
                 for (lane, item) in resolved.iter_mut().enumerate() {
@@ -234,6 +274,7 @@ where
                     if base + lane >= count {
                         return placeholder;
                     }
+                    record(base + lane, points[lane]);
                     points[lane].map_or_else(
                         || {
                             chunk_valid = false;
@@ -261,10 +302,11 @@ where
 ///    and grouping becomes local information ([`group_ranges`]).
 /// 2. [`scalar_phase`]: coefficient derivation, hashing, and scalar arithmetic -- uniform per
 ///    signature, no curve points.
-/// 3. [`decompress_phase`] over a flat worklist containing every `R` and every distinct `A`, into
-///    contiguous term chunks. A signer's coalesced scalar (the sum of its signatures' `z*h` over
-///    a contiguous [`ScalarBlock`] run) is computed lazily by whichever unit resolves its `A`
-///    entry, so there is no separate group-sum pass.
+/// 3. Reuse cached keys within each group, then run [`decompress_phase`] over every `R` and
+///    every distinct `A`, building cached `A` terms directly in the same parallel pass. A
+///    signer's coalesced scalar (the sum of its signatures' `z*h` over a contiguous
+///    [`ScalarBlock`] run) is computed when its `A` term is built, and decoded keys populate
+///    every cache in their group.
 /// 4. One tile-parallel MSM over the term slices (with the coalesced basepoint term
 ///    `sum(z*s)·(-B)` riding along as one final term), then the cofactored identity check.
 fn verify_batch_inner<B: Backend>(
@@ -272,6 +314,7 @@ fn verify_batch_inner<B: Backend>(
     rng: &mut impl CryptoRng,
     items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
     strategy: &impl Strategy,
+    cache: &impl KeyCache,
 ) -> bool {
     let n = items.len();
     if n == 0 {
@@ -303,23 +346,47 @@ fn verify_batch_inner<B: Backend>(
         return false;
     };
     let zr = |i: usize| blocks[i / 4].zr[i % 4];
-    // A signer's coalesced scalar: the sum of its contiguous sorted run's `z*h` scalars. Cheap
-    // mod-L additions, computed lazily (each group is resolved exactly once, by the worklist
-    // entry for its `A` term), so the summing itself rides inside a parallel phase. A batch
-    // dominated by one signer folds its whole run in that signer's single resolve call --
-    // acceptable, since even a 16k-signature run is far cheaper than one decompression unit's
-    // point arithmetic.
+    // A signer's coalesced scalar is the sum of its contiguous sorted run's `z*h` scalars.
+    // Compute it once when building the cached term or resolving the cold worklist entry.
     let group_scalar = |(start, end): (u32, u32)| {
         (start as usize..end as usize).fold(Scalar::ZERO, |acc, i| {
             acc.add_mod_l(&blocks[i / 4].zh[i % 4])
         })
     };
 
-    let groups = group_ranges(&order);
+    let mut groups = group_ranges(&order);
     // The MSM window width is a per-batch choice (see [`msm::width_for`]) and every term must
     // be recoded at the same width, so it is fixed here, before any term is built: the term
     // count is every `R`, every distinct `A`, and the basepoint.
     let width = msm::width_for(n + groups.len() + 1, strategy.parallelism());
+
+    let store_group = |(start, end): (u32, u32), point| {
+        for (bytes, index) in &order[start as usize..end as usize] {
+            cache.store(*index as usize, bytes.as_bytes(), point);
+        }
+    };
+    let mut cached_groups = Vec::new();
+    let mut valid = true;
+    groups.retain(|&group| {
+        let (start, end) = group;
+        let cached = order[start as usize..end as usize]
+            .iter()
+            .find_map(|(_, index)| cache.get(*index as usize));
+        let Some(point) = cached else {
+            return true;
+        };
+        match point {
+            Some(point) => cached_groups.push((group, point)),
+            None => {
+                store_group(group, None);
+                valid = false;
+            }
+        }
+        false
+    });
+    if !valid {
+        return false;
+    }
     let resolve_r = |i: usize| {
         let (_, sig, _) = items[order[i].1 as usize];
         (sig.r, zr(i))
@@ -337,7 +404,25 @@ fn verify_batch_inner<B: Backend>(
             (*order[group.0 as usize].0.as_bytes(), group_scalar(group))
         }
     };
-    let Some(terms) = decompress_phase(backend, n + groups.len(), resolve, width, strategy) else {
+    let record = |i: usize, point| {
+        if i >= n {
+            store_group(groups[i - n], point);
+        }
+    };
+    let resolve_cached = |i: usize| {
+        let (group, point) = cached_groups[i];
+        store_group(group, Some(point));
+        Term::new(point, &group_scalar(group), width)
+    };
+    let Some(terms) = decompress_phase(
+        backend,
+        n + groups.len(),
+        resolve,
+        record,
+        (cached_groups.len(), resolve_cached),
+        width,
+        strategy,
+    ) else {
         return false;
     };
     let mut chunks: Vec<&[Term]> = terms.iter().map(|chunk| chunk.as_flattened()).collect();
@@ -346,29 +431,32 @@ fn verify_batch_inner<B: Backend>(
     result.mul_by_cofactor().is_identity()
 }
 
-struct VerifyBatchCall<'a, 'b, R, S> {
+struct VerifyBatchCall<'a, 'b, R, S, C> {
     rng: &'a mut R,
     items: &'a [(&'b VerifyingKeyBytes, &'b Signature, &'b [u8])],
     strategy: &'a S,
+    cache: &'a C,
 }
 
-impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
+impl<R: CryptoRng, S: Strategy, C: KeyCache> WithBackend for VerifyBatchCall<'_, '_, R, S, C> {
     type Output = bool;
 
     fn call<B: Backend>(self, backend: B) -> Self::Output {
-        verify_batch_inner(backend, self.rng, self.items, self.strategy)
+        verify_batch_inner(backend, self.rng, self.items, self.strategy, self.cache)
     }
 }
 
-fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
+fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy, C: KeyCache>(
     rng: &mut R,
     items: &[(&'a VerifyingKeyBytes, &'a Signature, &'a [u8])],
     strategy: &S,
+    cache: &C,
 ) -> bool {
     with_backend(VerifyBatchCall {
         rng,
         items,
         strategy,
+        cache,
     })
 }
 
@@ -385,8 +473,21 @@ pub(super) fn verify_batch_bytes<'a>(
     items: impl IntoIterator<Item = (&'a VerifyingKeyBytes, &'a Signature, &'a [u8])>,
     strategy: &impl Strategy,
 ) -> bool {
+    verify_batch_bytes_cached(rng, items, strategy, &())
+}
+
+/// Verifies a batch while reusing and populating decoded keys by original item index.
+///
+/// Only byte-identical keys share cached results. Cold keys remain fused with signature points
+/// in the same SIMD decompression pass, and a decoded key is cached even if verification fails.
+pub(super) fn verify_batch_bytes_cached<'a>(
+    rng: &mut impl CryptoRng,
+    items: impl IntoIterator<Item = (&'a VerifyingKeyBytes, &'a Signature, &'a [u8])>,
+    strategy: &impl Strategy,
+    cache: &impl KeyCache,
+) -> bool {
     let items: Vec<_> = items.into_iter().collect();
-    verify_batch_dispatch(rng, &items, strategy)
+    verify_batch_dispatch(rng, &items, strategy, cache)
 }
 
 #[cfg(test)]
@@ -397,6 +498,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::FuzzRng;
     use ed25519_consensus::SigningKey as RefSigningKey;
+    use std::sync::OnceLock;
 
     #[test]
     fn group_ranges_groups_adjacent_equal_keys() {
@@ -441,6 +543,108 @@ mod tests {
     }
 
     type BatchItem = (VerifyingKeyBytes, Signature, Vec<u8>);
+
+    struct Cache {
+        keys: Vec<VerifyingKeyBytes>,
+        entries: Vec<OnceLock<Option<GAffine>>>,
+    }
+
+    impl Cache {
+        /// Creates an empty cache for each original batch position.
+        fn new(batch: &[BatchItem]) -> Self {
+            Self {
+                keys: batch.iter().map(|item| item.0).collect(),
+                entries: (0..batch.len()).map(|_| OnceLock::new()).collect(),
+            }
+        }
+    }
+
+    impl KeyCache for Cache {
+        /// Returns a previously recorded decoding result.
+        fn get(&self, index: usize) -> Option<Option<GAffine>> {
+            self.entries[index].get().copied()
+        }
+
+        /// Checks that sorting retained the association with the original key encoding.
+        fn store(&self, index: usize, bytes: &[u8; 32], point: Option<GAffine>) {
+            assert_eq!(bytes, self.keys[index].as_bytes());
+            let expected = GAffine::decompress(bytes).map(GAffine::to_bytes);
+            assert_eq!(point.map(GAffine::to_bytes), expected);
+            let _ = self.entries[index].set(point);
+        }
+    }
+
+    #[test]
+    fn cached_batch_reuses_keys_and_populates_every_original_position() {
+        let signers = [RefSigningKey::from([3; 32]), RefSigningKey::from([7; 32])];
+        let batch: Vec<BatchItem> = (0..2 * LANES + 3)
+            .map(|i| {
+                let signer = &signers[i % signers.len()];
+                let message = vec![i as u8];
+                (
+                    VerifyingKeyBytes::new(signer.verification_key().to_bytes()),
+                    Signature::from_bytes(signer.sign(&message).to_bytes()),
+                    message,
+                )
+            })
+            .collect();
+        let cache = Cache::new(&batch);
+        let warm_index = batch.len() - 1;
+        cache.entries[warm_index]
+            .set(GAffine::decompress(batch[warm_index].0.as_bytes()))
+            .unwrap();
+
+        for _ in 0..2 {
+            let items = batch
+                .iter()
+                .map(|(key, sig, msg)| (key, sig, msg.as_slice()));
+            assert!(verify_batch_bytes_cached(
+                &mut FuzzRng::new(vec![1; 32]),
+                items,
+                &Sequential,
+                &cache,
+            ));
+            for entry in &cache.entries {
+                assert!(entry.get().unwrap().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn cached_batch_propagates_cold_and_warm_key_failures() {
+        let mut invalid = [0; 32];
+        invalid[0] = 2;
+        assert!(GAffine::decompress(&invalid).is_none());
+        let mut signature = [0; 64];
+        signature[0] = 1;
+        let batch = vec![
+            (
+                VerifyingKeyBytes::new(invalid),
+                Signature::from_bytes(signature),
+                Vec::new(),
+            );
+            LANES + 3
+        ];
+
+        for warm in [false, true] {
+            let cache = Cache::new(&batch);
+            if warm {
+                cache.entries[batch.len() - 1].set(None).unwrap();
+            }
+            let items = batch
+                .iter()
+                .map(|(key, sig, msg)| (key, sig, msg.as_slice()));
+            assert!(!verify_batch_bytes_cached(
+                &mut FuzzRng::new(vec![1; 32]),
+                items,
+                &Sequential,
+                &cache,
+            ));
+            for entry in &cache.entries {
+                assert!(entry.get().unwrap().is_none());
+            }
+        }
+    }
 
     /// A batch of both independent signers and a repeated signer, spanning multiple scalar-phase
     /// chunks and decompression chunks, verified under `Manual` -- which disables the adaptive
@@ -502,6 +706,24 @@ mod tests {
                     items,
                     &strategy,
                 ));
+
+                let cache = Cache::new(&batch);
+                cache.entries[batch.len() - 1]
+                    .set(GAffine::decompress(batch.last().unwrap().0.as_bytes()))
+                    .unwrap();
+                // The first pass initializes every key. The second spans multiple cached tiles.
+                for _ in 0..2 {
+                    let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                    assert!(verify_batch_bytes_cached(
+                        &mut FuzzRng::new(rng_seed.to_vec()),
+                        items,
+                        &strategy,
+                        &cache,
+                    ));
+                    for entry in &cache.entries {
+                        assert!(entry.get().unwrap().is_some());
+                    }
+                }
                 Ok(())
             });
     }
