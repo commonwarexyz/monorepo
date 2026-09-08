@@ -35,10 +35,6 @@
 //! delta to disk (rather than rewriting the entire metadata). This makes [Metadata] a great choice
 //! for maintaining even large collections of data (with the majority rarely modified).
 //!
-//! Values that retain byte fields (such as [bytes::Bytes]) are decoded as views of the blob loaded
-//! on open, and a separate copy of the blob is kept for delta writes. Such stores hold roughly
-//! twice the blob size in memory until every loaded value has been overwritten.
-//!
 //! # Example
 //!
 //! ```rust

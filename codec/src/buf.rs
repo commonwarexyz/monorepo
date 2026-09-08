@@ -30,8 +30,7 @@ impl<A: Buf, B: Buf> Buf for Chain<A, B> {}
 /// An input that can be consumed by a decoder.
 ///
 /// [`Buf`] inputs pass through unchanged. A [`Vec<u8>`] transfers its allocation to
-/// [`Bytes`] without copying its payload. Custom inputs convert into their [`Buf`] through
-/// [`Into`].
+/// [`Bytes`] without copying its payload. Custom inputs can convert into a [`Buf`].
 ///
 /// Borrowing an owned buffer as a slice discards its ability to share decoded byte fields,
 /// so slices require an explicit [`Copying`] adapter:
