@@ -1121,6 +1121,22 @@ where
             }
         };
         if let Some(block) = block {
+            // Certification of the block's digest also binds its parent commitment
+            if let Some(parent) = block.height().previous()
+                && parent > self.tip
+                && match key {
+                    SubscriptionKey::Commitment(commitment) => {
+                        self.certified.contains(block.height(), &commitment)
+                    }
+                    SubscriptionKey::Digest(digest) => self
+                        .certified
+                        .contains_matching(block.height(), |commitment| {
+                            V::commitment_to_inner(*commitment) == digest
+                        }),
+                }
+            {
+                self.certified.insert(parent, V::parent_commitment(&block));
+            }
             response.send_lossy(block);
             return;
         }

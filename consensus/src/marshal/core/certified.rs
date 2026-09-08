@@ -36,6 +36,17 @@ impl<C: Digest> Certified<C> {
             .is_some_and(|commitments| commitments.contains(commitment))
     }
 
+    /// Returns true when a certified commitment at `height` matches `predicate`.
+    pub(super) fn contains_matching(
+        &self,
+        height: Height,
+        predicate: impl FnMut(&C) -> bool,
+    ) -> bool {
+        self.entries
+            .get(&height)
+            .is_some_and(|commitments| commitments.iter().any(predicate))
+    }
+
     /// Retains entries at or above `min`.
     pub(super) fn retain(&mut self, min: Height) {
         self.entries = self.entries.split_off(&min);
