@@ -55,6 +55,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
         &self.1
     }
 
+    fn into_value(self) -> V::Value {
+        self.1
+    }
+
     fn cached(&self) {}
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
