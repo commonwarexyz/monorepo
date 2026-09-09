@@ -129,14 +129,14 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve index
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]):
+    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]):
     /// `()` for index types that build serially, and the number of build tasks (including the
     /// init task itself, which replays and routes the log, so `1` builds entirely on the init
     /// task) for index types that build in parallel.
@@ -152,14 +152,14 @@ pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 /// Initialize an `Any` authenticated db from the given config.
 pub async fn init<F, E, U, H, I, J, S>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -172,7 +172,7 @@ where
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
@@ -180,7 +180,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -202,10 +202,10 @@ where
     }
 
     let index = I::new(context.child("index"), cfg.translator);
-    let snapshot_context = context.child("snapshot");
+    let index_context = context.child("index");
     let metrics = Metrics::new(context);
     db::Db::init_from_log(
-        snapshot_context,
+        index_context,
         index,
         log,
         bitmap,
@@ -268,7 +268,7 @@ pub(crate) mod test {
     }
 
     /// Shared config construction for every fixed-value flavor, generic over the strategy and
-    /// the index's snapshot-build concurrency.
+    /// the index-build concurrency.
     pub(crate) fn fixed_db_config_full<
         T: Translator + Default,
         S: commonware_parallel::Strategy,
@@ -328,7 +328,7 @@ pub(crate) mod test {
     }
 
     /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
+    /// index-build concurrency.
     pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
         suffix: &str,
         pooler: &impl BufferPooler,
@@ -727,7 +727,7 @@ pub(crate) mod test {
         let initial_size = db.size();
         let initial_floor = db.inactivity_floor_loc();
 
-        // Empty-batch rewind on an otherwise empty DB should apply no snapshot undos.
+        // Empty-batch rewind on an otherwise empty DB should apply no index undos.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let (db, empty_range) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
@@ -2607,7 +2607,7 @@ pub(crate) mod test {
             );
 
             // Rewind to the still-retained early commit must succeed and restore visible
-            // state (root match implies the snapshot was rebuilt correctly).
+            // state (root match implies the index was rebuilt correctly).
             let db = db.rewind(rewind_target).await.unwrap();
             assert_eq!(db.size(), rewind_target);
             assert_eq!(db.root(), root_at_target);
@@ -2811,7 +2811,7 @@ pub(crate) mod test {
 #[cfg(test)]
 mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
-    //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
+    //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the index variant,
     //! so one variant (`unordered::variable`) suffices as the test bed.
     use crate::qmdb::any::unordered::variable::test::{AnyTest, create_test_config};
     use commonware_cryptography::{Hasher as _, Sha256};
@@ -2907,7 +2907,7 @@ mod bitmap_tests {
     ///
     /// `any::rewind` is the sole writer of the bitmap during rewind; it must:
     ///   1. truncate the bitmap to the rewind size,
-    ///   2. flip restored locs (committed snapshot entries the rewound tail had superseded) back
+    ///   2. flip restored locs (committed index entries the rewound tail had superseded) back
     ///      to active,
     ///   3. set the rewound tail's CommitFloor bit to 1 (the new current commit).
     ///
@@ -2990,7 +2990,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b).await.unwrap();
 
-            // Setup sanity: anchor in committed snapshot.
+            // Setup sanity: anchor in committed index.
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![1]));
             let committed_bitmap_len = db.bitmap.len();
 

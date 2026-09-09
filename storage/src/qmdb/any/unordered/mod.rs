@@ -37,7 +37,7 @@ where
         key: &K,
     ) -> Result<Option<(V::Value, Location<F>)>, crate::qmdb::Error<F>> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.index.get(key).copied().collect();
 
         for loc in locs {
             let op = self.log.read(*loc).await?;

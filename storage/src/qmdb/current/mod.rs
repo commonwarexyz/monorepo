@@ -370,14 +370,14 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve index
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]):
+    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]):
     /// `()` for index types that build serially, and the number of build tasks (including the
     /// init task itself, which replays and routes the log, so `1` builds entirely on the init
     /// task) for index types that build in parallel.
@@ -407,14 +407,14 @@ pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 #[boxed]
 pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
     context: E,
-    config: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    config: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: merkle::Graftable,
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -446,7 +446,7 @@ where
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // Initialize the underlying `any` database. It takes sole ownership of the bitmap and
-    // populates it during snapshot rebuild.
+    // populates it during index rebuild.
     let any = any::init_with_bitmap(context.child("any"), config.into(), Some(bitmap)).await?;
 
     // Rebuild the grafted tree and canonical root from the initialized `any` state.
@@ -539,7 +539,7 @@ pub mod tests {
     /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an
     /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates,
     /// deletes (which fall back to normal mutations and, for the ordered kind, rewrite
-    /// predecessors via a snapshot-bucket scan), upserts, duplicate read slots, missing keys,
+    /// predecessors via an index-bucket scan), upserts, duplicate read slots, missing keys,
     /// and prefix-then-suffix expansion, rooted at the DB (D=0) and through one or two pending
     /// ancestors (D=1/D=2). This guards the current-layer threading of
     /// `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
@@ -742,7 +742,7 @@ pub mod tests {
     }
 
     /// Shared config construction for every fixed-value flavor, generic over the index's
-    /// snapshot-build concurrency.
+    /// index-build concurrency.
     pub(crate) fn fixed_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
         pooler: &impl BufferPooler,
@@ -783,7 +783,7 @@ pub mod tests {
     }
 
     /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
+    /// index-build concurrency.
     pub(crate) fn variable_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
         pooler: &impl BufferPooler,
@@ -3233,7 +3233,7 @@ pub mod tests {
             // Seed four colliding committed keys, then update only key_a.
             // The specific 4 / 1 / 0 shape is a concrete counterexample:
             // key_b remains outside the parent diff and is still resolved
-            // through the committed snapshot in the child.
+            // through the committed index in the child.
             let mut initial = db.new_batch();
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -3244,7 +3244,7 @@ pub mod tests {
 
             // Update only key_a so the colliding sibling key_b remains outside
             // the parent diff and must still be resolved through the committed
-            // snapshot in the child.
+            // index in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
@@ -3314,7 +3314,7 @@ pub mod tests {
 
             // Update only key_a so the colliding sibling key_b remains outside
             // the parent diff and must still be resolved through the committed
-            // snapshot in the child.
+            // index in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
@@ -3731,7 +3731,7 @@ pub mod tests {
 
     /// Regression: applying a batch after its ancestor Arc is dropped (without
     /// committing) must still apply the ancestor's bitmap pushes/clears and
-    /// snapshot diffs.
+    /// index diffs.
     #[test_traced("WARN")]
     fn test_current_apply_after_ancestor_dropped() {
         let executor = deterministic::Runner::default();
@@ -3981,7 +3981,7 @@ pub mod tests {
     }
 
     /// Apply C (grandchild of A) after only A is committed. B's data (any-layer
-    /// snapshot diff + current-layer bitmap) must still be applied.
+    /// index diff + current-layer bitmap) must still be applied.
     #[test_traced("INFO")]
     fn test_current_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();

@@ -33,7 +33,7 @@ type Db = AnyUFixDb<Mmb>;
 // Immutable "any" DB with a fixed-size value.
 type ImmDb = ImmFixDb<Mmb>;
 
-// Ordered "any" DB with a partitioned snapshot index.
+// Ordered "any" DB with a partitioned key index.
 type ODb = AnyOFixP256Db<Mmb>;
 
 fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(

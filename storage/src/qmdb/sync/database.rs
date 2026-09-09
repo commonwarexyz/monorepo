@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    merkle::{Family, Location, full},
+    merkle::{Family, Location, full, storage::Storage as _},
     qmdb::sync::{Journal, Target},
     translator::Translator,
 };

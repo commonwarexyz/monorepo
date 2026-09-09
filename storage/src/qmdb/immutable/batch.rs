@@ -79,7 +79,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     pub(super) parent: Option<Weak<Self>>,
 
     /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent
-    /// is alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
+    /// is alive. Used by `apply_batch` to apply uncommitted ancestor index diffs.
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 

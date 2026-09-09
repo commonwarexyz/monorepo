@@ -492,6 +492,7 @@ mod tests {
         test_keyless_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
         test_keyless_fixed_merkleize_across_prune => run_merkleize_across_prune, db;
         test_keyless_fixed_stale_fork_refuses => run_stale_fork_refuses, db;
+        test_keyless_fixed_snapshot => run_snapshot, db;
     }
 
     #[test_traced("INFO")]
