@@ -233,7 +233,7 @@ where
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -304,7 +304,7 @@ where
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -570,7 +570,9 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_fixed_immutable_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
             let key = Sha256::hash(&[&[1]]);
             let value = Sha256::hash(&[&[2]]);
@@ -611,7 +613,9 @@ mod tests {
     fn managed_db_apply_retains_each_immutable_rewind_target() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "apply-checkpoints");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let first = db
@@ -652,6 +656,7 @@ mod tests {
             let database = FixedDb::init(
                 context.child("reopen"),
                 fixed_config(&context, "apply-checkpoints"),
+                None,
             )
             .await
             .unwrap();
@@ -670,7 +675,9 @@ mod tests {
     fn database_set_rewind_persists_aligned_immutable_target() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "aligned-rewind");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -689,6 +696,7 @@ mod tests {
             let database = FixedDb::init(
                 context.child("reopen"),
                 fixed_config(&context, "aligned-rewind"),
+                None,
             )
             .await
             .unwrap();
@@ -699,9 +707,13 @@ mod tests {
     #[test]
     fn state_sync_fetches_fixed_immutable_compact_state() {
         deterministic::Runner::default().start(|context| async move {
-            let source = FixedDb::init(context.child("source"), fixed_config(&context, "source"))
-                .await
-                .unwrap();
+            let source = FixedDb::init(
+                context.child("source"),
+                fixed_config(&context, "source"),
+                None,
+            )
+            .await
+            .unwrap();
             let metadata = Sha256::hash(&[&[3]]);
             let floor = source.inactivity_floor_loc();
             let batch = source
@@ -904,7 +916,9 @@ mod tests {
     fn managed_db_rewinds_fixed_immutable_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "rewind");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
 
             let floor = db.inactivity_floor_loc();
             let batch = db
@@ -946,7 +960,9 @@ mod tests {
             // One witness entry per section so pruning takes effect at entry granularity.
             let mut config = fixed_config(&context, "prune");
             config.witness.items_per_section = NZU64!(1);
-            let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let mut db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
 
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();

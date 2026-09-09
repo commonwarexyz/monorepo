@@ -2607,6 +2607,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.0.blobs.sync_blob(blob).await
     }
 
+    /// Test helper: Reopen a shorter prefix through recovery, releasing the previous owner.
+    pub(crate) async fn test_truncate(mut self, cap: u64) -> Result<Self, Error> {
+        self.0 = self.0.test_truncate(cap).await?;
+        Ok(self)
+    }
+
     /// Test helper. Truncate the internal offsets journal directly (simulates crash scenario).
     pub(crate) async fn test_truncate_offsets(mut self, position: u64) -> Result<Self, Error> {
         self.0.offsets = self.0.offsets.test_truncate(position).await?;

@@ -3,18 +3,9 @@
 //! For fixed-size values, use [super::fixed].
 
 use crate::{
-    Context,
     journal::contiguous::variable::{self, Config as JournalConfig},
-    merkle::Family,
-    qmdb::{
-        Error,
-        any::value::{VariableEncoding, VariableValue},
-        keyless::operation::Operation as BaseOperation,
-    },
+    qmdb::{any::value::VariableEncoding, keyless::operation::Operation as BaseOperation},
 };
-use commonware_codec::Read;
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 
 /// Keyless operation for variable-length values.
 pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
@@ -31,30 +22,6 @@ pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
 
 /// Configuration for a variable-size [keyless](super) compact db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
-
-impl<
-    F: Family,
-    E: Context,
-    V: VariableValue,
-    H: Hasher,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-> CompactDb<F, E, V, H, C, S>
-where
-    Operation<F, V>: Read<Cfg = C>,
-{
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(
-            merkle,
-            context.child("witness"),
-            cfg.witness,
-            cfg.commit_codec_config,
-        )
-        .await
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -145,7 +112,7 @@ mod tests {
             },
             commit_codec_config: ((0..=10000usize).into(), ()),
         };
-        TestCompactDb::init(context, cfg).await.unwrap()
+        TestCompactDb::init(context, cfg, None).await.unwrap()
     }
 
     fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {

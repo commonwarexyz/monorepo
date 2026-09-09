@@ -16,7 +16,10 @@
 
 use crate::{
     Context, SyncCompletion,
-    journal::contiguous::{Contiguous, variable},
+    journal::{
+        authenticated::{Backing as _, BackingRecovery as _},
+        contiguous::{Contiguous, variable},
+    },
     merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{
         self, Error,
@@ -328,8 +331,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         .await
     }
 
-    /// Shared body of [`Self::commit`] and [`Self::sync`]: apply the current state, then make
-    /// every uncommitted witness durable according to `durability`.
+    /// Apply the current state and persist the journal according to `durability`.
     async fn persist<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
@@ -347,19 +349,19 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .apply::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
 
-        // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
+        // Full sync includes recovery metadata even when every witness is already committed.
         match durability {
             Durability::Commit if self.uncommitted => {
                 self.journal = self.journal.commit().await?;
                 self.uncommitted = false;
             }
-            Durability::Sync if self.uncommitted || self.pending_sync.is_some() => {
+            Durability::Sync => {
                 let journal = self.journal.sync().await?;
                 self.pending_sync = None;
                 self.uncommitted = false;
                 self.journal = journal;
             }
-            Durability::Commit | Durability::Sync => {}
+            Durability::Commit => {}
         }
         Ok(self)
     }
@@ -556,8 +558,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
     /// Clear the journal so the imported witness becomes its only entry.
     ///
-    /// Clears to a nonzero size: if a crash interrupts the import, reopen sees a non-empty
-    /// journal with an unreadable tip and fails, instead of mistaking it for a fresh db.
+    /// An interrupted import leaves an empty journal at a nonzero position. Reopening rejects
+    /// the missing tip instead of treating the journal as a fresh database.
     async fn clear_for_import(mut self) -> Result<Self, Error<F>> {
         let size = self.journal.size();
         self.journal = self.journal.clear_to_size(size.max(1)).await?;
@@ -692,10 +694,12 @@ where
 /// last-commit operation.
 ///
 /// A new db starts with one committed operation, the initial commit: it is inserted into the
-/// compact Merkle and persisted as the first witness entry, so reopen and rewind never see an
-/// empty journal. An existing db reloads and re-verifies its tip witness.
+/// compact Merkle and persisted as the first witness entry, so initialization never sees an empty
+/// journal. An existing db reloads and re-verifies its tip witness.
 pub(crate) async fn init<E, F, H, S, Op>(
-    mut journal: Journal<E, F, H::Digest>,
+    context: E,
+    config: variable::Config<()>,
+    max_size: Option<Location<F>>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
     initial_commit_op_bytes: Vec<u8>,
@@ -707,11 +711,42 @@ where
     S: Strategy,
     Op: Read + Floored<F>,
 {
-    if journal.size() == 0 {
-        journal = bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
-            .await?;
+    crate::qmdb::validate_initialization_bound(max_size)?;
+    let pending = Journal::<E, F, H::Digest>::recover(context, config, None).await?;
+    let bounds = pending.bounds();
+    if bounds.is_empty() {
+        if bounds.start != 0 {
+            return Err(Error::DataCorrupted("witness journal has no tip"));
+        }
+        let journal = pending.finish(0).await?;
+        let journal =
+            bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
+                .await?;
+        let (witness, op) =
+            load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
+        return Ok((Store::new(journal, witness), op));
     }
-    let (witness, op) = load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
+    let mut end = bounds.end;
+    if let Some(cap) = max_size {
+        // Witness positions count commits, while their sizes count database operations.
+        let mut start = bounds.start;
+        while start < end {
+            let mid = start + (end - start) / 2;
+            let entry = pending.read(mid).await?;
+            if entry.size <= cap {
+                start = mid + 1;
+            } else {
+                end = mid;
+            }
+        }
+        if end == bounds.start {
+            return Err(Error::HistoricalFloorPruned(cap));
+        }
+    }
+    let entry = pending.read(end - 1).await?;
+    // Verify the selected witness before discarding any newer entry.
+    let (witness, op) = rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config)?;
+    let journal = pending.finish(end).await?;
     Ok((Store::new(journal, witness), op))
 }
 
@@ -776,7 +811,7 @@ pub(crate) mod tests {
             }
         }
         f(&mut entries[0]);
-        let mut journal = journal.rewind(pos).await.unwrap();
+        let mut journal = journal.test_truncate(pos).await.unwrap();
         for entry in &entries {
             (journal, _) = journal.append(entry).await.unwrap();
         }
@@ -831,7 +866,7 @@ pub(crate) mod tests {
         D: Digest,
     {
         let entries = journal.size();
-        let journal = journal.rewind(entries - 1).await.unwrap();
+        let journal = journal.test_truncate(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
                 op_bytes: op_bytes.into(),
