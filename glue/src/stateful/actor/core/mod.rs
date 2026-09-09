@@ -250,7 +250,6 @@ where
             sync_metadata,
             syncer: syncer_mailbox,
             deferred_verifications: Vec::new(),
-            database_subscribers: Vec::new(),
             artifact: None,
             snapshot_publisher: self.snapshot_publisher,
             sync_completed,
@@ -282,18 +281,16 @@ where
         // The recovered state alone must publish before the loop starts, so
         // serving begins before the next finalization.
         let mut snapshot_publisher = self.snapshot_publisher;
-        processor.publish_snapshot(&mut snapshot_publisher).await;
+        let processor = processor.publish_snapshot(&mut snapshot_publisher).await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
-            processor,
             snapshot_publisher,
-            deferred_verifications: Vec::new(),
             skip_finalized_until,
         }
-        .start()
+        .start(processor, Vec::new())
         .await
     }
 }
