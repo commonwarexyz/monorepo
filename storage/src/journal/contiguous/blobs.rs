@@ -928,7 +928,16 @@ mod tests {
     use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
     use commonware_utils::{NZU16, NZUsize};
 
-    impl<E: crate::Context> Writable<E> {}
+    impl<E: crate::Context> Writable<E> {
+        pub(in super::super) fn test_configuration(&self) -> (E, String, CacheRef, NonZeroUsize) {
+            (
+                self.partition.context.child("recovery_fixture"),
+                self.partition.name.clone(),
+                self.partition.page_cache.clone(),
+                self.partition.write_buffer,
+            )
+        }
+    }
 
     fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
         assert!(matches!(
