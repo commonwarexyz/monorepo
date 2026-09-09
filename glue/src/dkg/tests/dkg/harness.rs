@@ -54,7 +54,7 @@ use std::{
 };
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_INITIAL_E2E";
-const EPOCH_LENGTH: NonZeroU64 = NZU64!(16);
+const EPOCH_LENGTH: NonZeroU64 = NZU64!(32);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
 const VOTES: u64 = 0;
@@ -295,7 +295,7 @@ pub(super) fn run_plan(
         .required_finalizations(0)
         .exit_condition(ProcessedHeightAtLeast::new(1))
         .property(property)
-        .timeout(Duration::from_secs(60));
+        .timeout(Duration::from_secs(300));
     for crash in crashes {
         builder = builder.crash(crash);
     }

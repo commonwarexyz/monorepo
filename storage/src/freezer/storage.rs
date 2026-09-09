@@ -671,17 +671,21 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             index_page_cache: config.key_page_cache.clone(),
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
+            replay_buffer: config.table_replay_buffer,
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        let oversized: Oversized<E, Record<K>, V> = Oversized::init(
-            context.child("oversized"),
-            oversized_cfg,
-            checkpoint
-                .filter(|checkpoint| !checkpoint.is_empty())
-                .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size)),
-        )
-        .await?;
+        let oversized_context = context.child("oversized");
+        let oversized: Oversized<E, Record<K>, V> = match checkpoint
+            .filter(|checkpoint| !checkpoint.is_empty())
+            .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size))
+        {
+            Some(checkpoint) => {
+                Oversized::init_with_checkpoint(oversized_context, oversized_cfg, checkpoint)
+                    .await?
+            }
+            None => Oversized::init(oversized_context, oversized_cfg).await?,
+        };
 
         // Open table blob
         let (table, table_len) = context
@@ -701,8 +705,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Resize table if needed
+                // Resize the table if needed. Growing is never valid: the checkpoint publishes
+                // only after the table sync completes, so a shorter table cannot back the
+                // checkpointed entries, and zero-extending would fabricate empty heads.
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
+                if table_len < expected_table_len {
+                    return Err(Error::CheckpointMismatch);
+                }
                 let mut modified = if table_len != expected_table_len {
                     table.resize(expected_table_len).await?;
                     true
@@ -1702,6 +1711,63 @@ mod tests {
             )
             .await;
             assert!(matches!(result, Err(Error::CheckpointMismatch)));
+        });
+    }
+
+    /// A durable checkpoint's table fsync completed at the checkpointed size, so a shorter
+    /// (but non-empty) table is corruption. Initialization must reject it rather than grow the
+    /// table with fabricated empty entries, and retries must fail identically.
+    #[test_traced]
+    fn non_empty_checkpoint_against_short_table_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            let short_len = Entry::FULL_SIZE as u64;
+            let (table, _) = context
+                .open(&cfg.table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+            table.resize(short_len).await.unwrap();
+            table.sync().await.unwrap();
+            drop(table);
+
+            let checkpoint = Checkpoint {
+                epoch: 1,
+                section: 0,
+                oversized_size: 0,
+                table_size: 2,
+            };
+            for child in ["first", "retry"] {
+                let result = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child(child),
+                    cfg.clone(),
+                    Some(checkpoint),
+                )
+                .await;
+                assert!(matches!(result, Err(Error::CheckpointMismatch)));
+            }
+
+            // The rejection must not resize the table.
+            let (_, size) = context
+                .open(&cfg.table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+            assert_eq!(size, short_len);
         });
     }
 

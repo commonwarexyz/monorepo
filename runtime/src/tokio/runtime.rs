@@ -7,8 +7,8 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 #[cfg(not(feature = "iouring-storage"))]
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    StreamOf, child_label,
+    BlobLayout, BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
+    METRICS_PREFIX, Name, SinkOf, StreamOf, child_label,
     network::metered::Network as MeteredNetwork,
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
@@ -39,6 +39,7 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
+    ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     sync::Arc,
@@ -165,13 +166,17 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
-    /// Base directory for all storage operations.
+    /// Base directory for all storage operations, created at start if missing
+    /// and held for the run.
     storage_directory: PathBuf,
 
-    /// Maximum buffer size for operations on blobs.
+    /// Blob layouts accepted by storage.
     ///
-    /// Tokio sets the default value to 2MB.
-    maximum_buffer_size: usize,
+    /// Defaults to [BlobLayout::ALL] and must be non-empty. New blobs use the latest layout in
+    /// the range. Existing blobs outside it fail to open with [Error::BlobLayoutMismatch], so
+    /// restrict the range to what a rollback target can read before the upgraded binary first
+    /// opens storage.
+    storage_blob_layouts: RangeInclusive<BlobLayout>,
 
     /// Network configuration.
     network_cfg: NetworkConfig,
@@ -195,7 +200,7 @@ impl Config {
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
-            maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
+            storage_blob_layouts: BlobLayout::ALL,
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
@@ -254,8 +259,16 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
-        self.maximum_buffer_size = n;
+    ///
+    /// # Panics
+    ///
+    /// Panics if `layouts` is empty.
+    pub fn with_storage_blob_layouts(mut self, layouts: RangeInclusive<BlobLayout>) -> Self {
+        assert!(
+            !layouts.is_empty(),
+            "storage blob layouts must be non-empty"
+        );
+        self.storage_blob_layouts = layouts;
         self
     }
     /// See [Config]
@@ -311,8 +324,8 @@ impl Config {
         &self.storage_directory
     }
     /// See [Config]
-    pub const fn maximum_buffer_size(&self) -> usize {
-        self.maximum_buffer_size
+    pub const fn storage_blob_layouts(&self) -> &RangeInclusive<BlobLayout> {
+        &self.storage_blob_layouts
     }
 
     /// Returns the network buffer pool config, deriving pool parallelism from
@@ -464,15 +477,6 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
-        // Make any storage a prior process left in the page cache crash-durable before we open it,
-        // so the data read during init is durable.
-        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
-            panic!(
-                "failed to sync storage filesystem at startup ({}): {e}",
-                self.cfg.storage_directory.display()
-            );
-        }
-
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -481,6 +485,7 @@ impl crate::Runner for Runner {
                     IoUringStorage::start(
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
+                            blob_layouts: self.cfg.storage_blob_layouts.clone(),
                             iouring_config: Default::default(),
                             thread_stack_size: self.cfg.thread_stack_size,
                         },
@@ -494,13 +499,23 @@ impl crate::Runner for Runner {
                     TokioStorage::new(
                         TokioStorageConfig::new(
                             self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
+                            self.cfg.storage_blob_layouts.clone(),
                         ),
                         storage_buffer_pool.clone(),
                     ),
                     &mut runtime_registry,
                 );
             }
+        }
+
+        // Make any storage a prior process left in the page cache crash-durable before we open it,
+        // so the data read during init is durable. This runs under the hold, after any straggling
+        // writes from a previous run have landed, so the flush covers them too.
+        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
+            panic!(
+                "failed to sync storage filesystem at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
         }
 
         // Initialize network
@@ -888,8 +903,8 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.storage.open_versioned(partition, name, versions).await
     }
 
@@ -913,11 +928,13 @@ impl crate::BufferPooler for Context {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::{
-        Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Strategizer as _, Stream,
-        Supervisor as _, telemetry::metrics::raw::Counter, tokio::telemetry,
+        Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Storage as _,
+        Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
+        tokio::telemetry,
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
@@ -1051,6 +1068,95 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_blob_layout_restriction() {
+        // The default policy accepts legacy V0 blobs while selecting V1 for new blobs.
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        assert_eq!(cfg.storage_blob_layouts(), &BlobLayout::ALL);
+
+        let partition = "layout_restriction";
+        let v0_name = b"v0";
+        let partition_directory = storage_directory.join(partition);
+        std::fs::create_dir_all(&partition_directory).unwrap();
+        let v0_path = partition_directory.join(commonware_formatting::hex(v0_name));
+        let v0_bytes = crate::storage::tests::v0_blob_bytes(0, b"payload");
+        std::fs::write(&v0_path, &v0_bytes).unwrap();
+
+        Runner::new(cfg).start(|context| async move {
+            let (blob, size) = context.open(partition, v0_name).await.unwrap();
+            assert_eq!(size, 7);
+            let payload = blob
+                .read_at(0, 7, crate::ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(payload.coalesce(), b"payload".as_slice());
+        });
+
+        // A V1-only policy rejects V0 without modifying it and creates new blobs as V1.
+        let cfg = Config::new()
+            .with_storage_directory(storage_directory.clone())
+            .with_storage_blob_layouts(BlobLayout::V1..=BlobLayout::V1);
+        Runner::new(cfg).start(|context| async move {
+            let result = context.open(partition, v0_name).await;
+            assert!(matches!(
+                result,
+                Err(Error::BlobLayoutMismatch { expected, found })
+                    if expected == (BlobLayout::V1..=BlobLayout::V1)
+                        && found == BlobLayout::V0
+            ));
+
+            context.open(partition, b"v1").await.unwrap();
+        });
+
+        assert_eq!(std::fs::read(&v0_path).unwrap(), v0_bytes);
+        let v1_path = partition_directory.join(commonware_formatting::hex(b"v1"));
+        let v1 = std::fs::read(&v1_path).unwrap();
+        assert_eq!(&v1[..4], &BlobLayout::V1.magic());
+
+        // A V0-only policy rejects the intact header-only V1 blob without healing it and
+        // creates new blobs the rollback target can read and write.
+        let cfg = Config::new()
+            .with_storage_directory(storage_directory.clone())
+            .with_storage_blob_layouts(BlobLayout::V0..=BlobLayout::V0);
+        Runner::new(cfg).start(|context| async move {
+            let result = context.open(partition, b"v1").await;
+            assert!(matches!(
+                result,
+                Err(Error::BlobLayoutMismatch { expected, found })
+                    if expected == (BlobLayout::V0..=BlobLayout::V0)
+                        && found == BlobLayout::V1
+            ));
+
+            let (blob, size) = context.open(partition, b"rollback").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, b"rollback!".as_slice(), crate::WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+            let (blob, size) = context.open(partition, b"rollback").await.unwrap();
+            assert_eq!(size, 9);
+            let payload = blob
+                .read_at(0, 9, crate::ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(payload.coalesce(), b"rollback!".as_slice());
+        });
+
+        assert_eq!(std::fs::read(&v1_path).unwrap(), v1);
+        let rollback_path = partition_directory.join(commonware_formatting::hex(b"rollback"));
+        let rollback = std::fs::read(rollback_path).unwrap();
+        assert_eq!(&rollback[..4], &BlobLayout::V0.magic());
+        assert_eq!(&rollback[8..], b"rollback!");
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty")]
+    fn test_storage_blob_layout_restriction_rejects_empty_range() {
+        let _ = Config::new().with_storage_blob_layouts(BlobLayout::V1..=BlobLayout::V0);
+    }
+
+    #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
         let cfg = Config::new().with_worker_threads(8);
 
@@ -1094,6 +1200,46 @@ mod tests {
                 assert_runner_drains_spawned_task(execution, root_exit);
             }
         }
+    }
+
+    #[test]
+    fn test_runner_start_waits_for_previous_run() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+
+        // The first run keeps its context, and with it the storage directory,
+        // until it is released.
+        let (started, first_started) = std::sync::mpsc::channel();
+        let (release, released) = futures::channel::oneshot::channel();
+        let first_cfg = cfg.clone();
+        let first = std::thread::spawn(move || {
+            Runner::new(first_cfg).start(|context| async move {
+                started.send(()).unwrap();
+                released.await.unwrap();
+                drop(context);
+            });
+        });
+        first_started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // A second run on the same directory cannot start until the first has
+        // returned.
+        let (started, second_started) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            Runner::new(cfg).start(|_| async move {
+                started.send(()).unwrap();
+            });
+        });
+        match second_started.recv_timeout(Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("second run started while the first held the directory: {other:?}"),
+        }
+        release.send(()).unwrap();
+        first.join().unwrap();
+        second_started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("second run did not start after the first returned");
+        second.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[test]

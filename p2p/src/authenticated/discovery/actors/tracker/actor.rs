@@ -18,7 +18,8 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     SystemTimeExt,
-    channel::{fallible::FallibleExt, mpsc},
+    channel::{fallible::FallibleExt, mpsc, ring},
+    ordered::Set,
     union,
 };
 use rand::{Rng, seq::SliceRandom};
@@ -55,6 +56,9 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
 
     /// Subscribers to peer set updates.
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
+
+    /// Subscribers to the set of blocked peers.
+    blocked_subscribers: Vec<ring::Sender<Set<C::PublicKey>>>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -119,6 +123,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             directory,
             mailboxes: HashMap::new(),
             subscribers: Vec::new(),
+            blocked_subscribers: Vec::new(),
         };
 
         (actor, Mailbox::new(sender), oracle, info_verifier)
@@ -136,7 +141,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 debug!("context shutdown, stopping tracker");
             },
             _ = self.directory.wait_for_unblock() => {
-                self.directory.unblock_expired();
+                if self.directory.unblock_expired() {
+                    self.notify_blocked();
+                }
             },
             Some(msg) = self.receiver.recv() else {
                 debug!("mailbox closed, stopping tracker");
@@ -145,6 +152,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 self.handle_msg(msg);
             },
         }
+    }
+
+    /// Send the current blocked set to every blocked-set subscriber, dropping
+    /// subscribers that have gone away.
+    fn notify_blocked(&mut self) {
+        let blocked = self.directory.blocked_peers();
+        self.blocked_subscribers
+            .retain(|subscriber| subscriber.send_lossy(blocked.clone()));
     }
 
     /// Handle a [`Message`].
@@ -273,10 +288,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Block { public_key } => {
                 // Block the peer
-                self.directory.block(&public_key);
+                if self.directory.block(&public_key) {
+                    self.notify_blocked();
+                }
 
                 // Kill the peer if we're connected to it
                 self.kill_peer(&public_key);
+            }
+            Message::SubscribeBlocked { sender } => {
+                // Start the subscriber from the current blocked set rather than
+                // the next change.
+                if sender.send_lossy(self.directory.blocked_peers()) {
+                    self.blocked_subscribers.push(sender);
+                }
             }
             Message::Release { metadata } => {
                 self.mailboxes.remove(metadata.public_key());
@@ -312,7 +336,7 @@ mod tests {
     };
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, bitmap::BitMap, ordered::Set};
-    use futures::{FutureExt, future::Either};
+    use futures::{FutureExt, StreamExt, future::Either};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -801,6 +825,63 @@ mod tests {
                 "no kill after handle has been cleared"
             );
             assert_eq!(reservation.metadata().public_key(), &peer_pk);
+        });
+    }
+
+    #[test]
+    fn test_blocked_subscription_tracks_block_and_expiry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let block_duration = cfg.block_duration;
+            let TestHarness {
+                mut oracle,
+                tracker_pk,
+                ..
+            } = setup_actor(context.child("actor"), cfg);
+
+            let (_, pk1) = new_signer_and_pk(1);
+            oracle.track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
+
+            // A new subscription starts with the current, empty set.
+            let mut blocked = crate::Blocker::blocked(&mut oracle);
+            assert!(blocked.next().await.unwrap().iter().next().is_none());
+
+            // Blocking publishes the peer.
+            crate::block_peer(&mut oracle, pk1.clone());
+            assert_eq!(
+                blocked
+                    .next()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![pk1.clone()]
+            );
+
+            // Blocking an already blocked peer changes nothing, so nothing is published,
+            // while a subscriber that joins now starts from the current set.
+            crate::block_peer(&mut oracle, pk1.clone());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(blocked.try_recv().is_err());
+            let mut late = crate::Blocker::blocked(&mut oracle);
+            assert_eq!(
+                late.next()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![pk1]
+            );
+
+            // Expiry removes the peer for every subscriber.
+            context
+                .sleep(block_duration + Duration::from_millis(10))
+                .await;
+            assert!(blocked.next().await.unwrap().iter().next().is_none());
+            assert!(late.next().await.unwrap().iter().next().is_none());
         });
     }
 

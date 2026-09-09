@@ -101,6 +101,7 @@ fn test_config(
         log: VConfig {
             partition: format!("{test_name}-log"),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             items_per_section: NZU64!(7),

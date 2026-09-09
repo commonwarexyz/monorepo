@@ -320,6 +320,7 @@ mod tests {
             codec_config: ((0..).into(), ()),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(4096),
+            replay_buffer: NZUsize!(4096),
         }
     }
 

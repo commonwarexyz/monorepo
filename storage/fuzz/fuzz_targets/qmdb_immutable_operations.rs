@@ -15,14 +15,11 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZU16, NZU64, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use rand::RngExt as _;
-use rand_core::CryptoRng;
 use std::num::{NonZeroU16, NonZeroU64};
 
 const MAX_OPERATIONS: usize = 50;
-const MAX_KEY_SIZE: usize = 32;
 const MAX_VALUE_SIZE: usize = 256;
 const MAX_PROOF_OPS: u64 = 100;
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
@@ -64,13 +61,11 @@ enum ImmutableOperation {
 
 #[derive(Debug)]
 struct FuzzInput {
-    seed: u64,
     operations: Vec<ImmutableOperation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let seed = u.arbitrary()?;
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let mut operations = Vec::with_capacity(num_ops);
 
@@ -78,21 +73,24 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(u.arbitrary()?);
         }
 
-        Ok(FuzzInput { seed, operations })
+        Ok(FuzzInput { operations })
     }
 }
 
-fn generate_key(rng: &mut impl CryptoRng, seed: u64) -> Digest {
-    let mut data = vec![0u8; rng.random_range(1..=MAX_KEY_SIZE)];
-    for (i, byte) in data.iter_mut().enumerate() {
-        *byte = ((seed >> (i % 8)) & 0xFF) as u8 ^ rng.random::<u8>();
-    }
-    Sha256::hash(&[&data])
+// Derives a key purely from its seed so a Get with the same seed addresses the key a
+// prior Set stored.
+fn generate_key(seed: u64) -> Digest {
+    Sha256::hash(&[&seed.to_be_bytes()])
 }
 
-fn generate_value(rng: &mut impl CryptoRng, size: usize) -> Vec<u8> {
+// Derives value bytes purely from a seed, cycled to the clamped size.
+fn generate_value(seed: u64, size: usize) -> Vec<u8> {
     let actual_size = size.clamp(1, MAX_VALUE_SIZE);
-    (0..actual_size).map(|_| rng.random()).collect()
+    seed.to_be_bytes()
+        .into_iter()
+        .cycle()
+        .take(actual_size)
+        .collect()
 }
 
 #[allow(clippy::type_complexity)]
@@ -107,6 +105,7 @@ fn db_config(
             metadata_partition: format!("metadata-{suffix}"),
             items_per_blob: NZU64!(ITEMS_PER_BLOB),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -116,10 +115,10 @@ fn db_config(
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             page_cache,
         },
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
     }
 }
@@ -142,13 +141,11 @@ fn assign_pending_locations<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
-    let runner = deterministic::Runner::seeded(input.seed);
+    let runner = deterministic::Runner::default();
 
     runner.start(|context| {
         let operations = input.operations.clone();
         async move {
-            let mut rng = TestRng::new(input.seed);
-
             let cfg = db_config(suffix, &context);
             let mut db =
                 Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap, Sequential>::init(context, cfg)
@@ -166,8 +163,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         key_seed,
                         value_size,
                     } => {
-                        let key = generate_key(&mut rng, key_seed);
-                        let value = generate_value(&mut rng, value_size);
+                        let key = generate_key(key_seed);
+                        let value = generate_value(key_seed, value_size);
 
                         if !keys_set.iter().any(|(k, _)| k == &key)
                             && !pending_sets.iter().any(|(k, _)| k == &key)
@@ -178,7 +175,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     }
 
                     ImmutableOperation::Get { key_seed } => {
-                        let key = generate_key(&mut rng, key_seed);
+                        let key = generate_key(key_seed);
                         let _ = db.get(&key).await;
                         db
                     }
@@ -189,7 +186,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         advance_floor,
                     } => {
                         let metadata = if has_metadata {
-                            Some(generate_value(&mut rng, metadata_size))
+                            Some(generate_value(metadata_size as u64, metadata_size))
                         } else {
                             None
                         };

@@ -20,7 +20,7 @@ use std::sync::Arc;
 pub(crate) async fn merkleize_ops<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     batch: compact::UnmerkleizedBatch<F, H::Digest, S>,
-    ops: Vec<Op>,
+    ops: impl Into<Arc<Vec<Op>>>,
     inactive_peaks: usize,
 ) -> Result<(Arc<batch::MerkleizedBatch<F, H::Digest, S>>, H::Digest), merkle::Error<F>>
 where
@@ -29,6 +29,7 @@ where
     S: Strategy,
     Op: EncodeShared + 'static,
 {
+    let ops = ops.into();
     let first_leaf = batch.leaves();
     let ancestors = batch.retain_ancestors();
     let mem = merkle.snapshot();
@@ -74,10 +75,14 @@ mod tests {
             compact::Merkle::<F, <Sha256 as Hasher>::Digest, Sequential>::new(Sequential);
 
         // Build a speculative suffix over a prefix that will be committed independently.
-        let (prefix, _) =
-            merkleize_ops::<F, Sha256, _, _>(&merkle, merkle.new_batch(), (0..8u64).collect(), 0)
-                .await
-                .unwrap();
+        let (prefix, _) = merkleize_ops::<F, Sha256, _, _>(
+            &merkle,
+            merkle.new_batch(),
+            (0..8u64).collect::<Vec<_>>(),
+            0,
+        )
+        .await
+        .unwrap();
         let (pending, _) = merkleize_ops::<F, Sha256, _, _>(
             &merkle,
             compact::UnmerkleizedBatch::wrap(prefix.new_batch()),

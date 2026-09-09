@@ -47,6 +47,7 @@ pub use actor::Actor;
 
 mod acks;
 pub(crate) mod cache;
+mod certified;
 mod delivery;
 pub(crate) mod durability;
 mod floor;
@@ -59,4 +60,4 @@ pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
 
 mod subscriptions;
 mod variant;
-pub use variant::{Buffer, Retirement, Variant};
+pub use variant::{Buffer, ExpectedCommitment, Retirement, Variant};

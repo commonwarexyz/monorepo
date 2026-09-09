@@ -1,5 +1,5 @@
 use crate::{
-    Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     telemetry::{
         metrics::{Counter, Gauge, Register, raw},
         traces::TracedExt as _,
@@ -92,8 +92,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
         Ok((
@@ -309,7 +309,11 @@ mod tests {
 
         // Reopen with a disjoint version range
         let result = storage
-            .open_versioned("partition", b"test_blob", 7..=7)
+            .open_versioned(
+                "partition",
+                b"test_blob",
+                BlobVersion::new(7)..=BlobVersion::new(7),
+            )
             .await;
         assert!(matches!(result, Err(Error::BlobVersionMismatch { .. })));
         assert_eq!(

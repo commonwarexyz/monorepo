@@ -715,8 +715,6 @@ mod open {
             },
         },
     };
-    use commonware_utils::Array;
-
     type VConfig<T, F, K, V, S> = VariableConfig<
         T,
         <Operation<F, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
@@ -732,7 +730,7 @@ mod open {
     where
         F: Graftable,
         E: Context + Spawner,
-        K: Array,
+        K: commonware_storage::qmdb::operation::Key,
         V: VariableValue + 'static,
         H: Hasher,
         T: commonware_storage::translator::Translator,
@@ -775,7 +773,7 @@ impl<F, E, K, V, H, T, const N: usize, S> ManagedDb<E>
 where
     F: Graftable,
     E: Context + Spawner,
-    K: Key + Array,
+    K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
     T: Translator,
@@ -1091,7 +1089,7 @@ impl<F, E, K, V, H, T, R, const N: usize, S> StateSyncDb<E, R>
 where
     F: Graftable,
     E: Context + Spawner,
-    K: Key + Array,
+    K: Key,
     V: value::VariableValue + 'static,
     H: Hasher,
     T: Translator,
@@ -1190,7 +1188,7 @@ mod tests {
         merkle::{full::Config as MerkleConfig, mmr},
         qmdb::current::{
             ordered::{fixed as ordered_fixed, variable as ordered_variable},
-            unordered::fixed,
+            unordered::{fixed, variable},
         },
         translator::TwoCap,
     };
@@ -1239,6 +1237,18 @@ mod tests {
         Sequential,
     >;
 
+    /// The unordered variable wrapper accepts variable-length keys.
+    type VariableDb = variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        Vec<u8>,
+        Digest,
+        Sha256,
+        TwoCap,
+        64,
+        Sequential,
+    >;
+
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
@@ -1250,6 +1260,7 @@ mod tests {
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1258,6 +1269,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
@@ -1278,6 +1290,7 @@ mod tests {
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1288,6 +1301,7 @@ mod tests {
                 codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
@@ -1315,6 +1329,13 @@ mod tests {
         assert_state_sync_db::<OrderedVariableDb, Arc<OrderedVariableDb>>();
         assert_database_set::<Shared<OrderedFixedDb>>();
         assert_database_set::<Shared<OrderedVariableDb>>();
+    }
+
+    #[test]
+    fn variable_current_db_trait_impls_compile() {
+        assert_managed_db::<VariableDb>();
+        assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
+        assert_database_set::<Shared<VariableDb>>();
     }
 
     #[test]

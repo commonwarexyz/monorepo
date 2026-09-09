@@ -219,8 +219,13 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 // to the records it marks
                 let mut set_indices = bits.as_ref().map(|bits| bits.ones_iter());
                 let mut all_indices = 0..items_per_blob;
-                let mut replay_blob =
-                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
+
+                // A committed bitmap already proves membership, so marked records are not
+                // re-read and damage surfaces at get. Membership of an unmarked section
+                // comes from record validity, so its records must be read.
+                let mut replay_blob = bits.is_none().then(|| {
+                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer)
+                });
                 while let Some(bit_index) = set_indices
                     .as_mut()
                     .map_or_else(|| all_indices.next(), |indices| indices.next())
@@ -235,10 +240,12 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                     }
 
                     // A committed record that is missing or invalid cannot be recovered
-                    replay_blob.seek_to(offset)?;
-                    let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
-                    if Record::<V>::decode_valid(record_buf.as_ref()).is_none() {
-                        return Err(Error::MissingRecord(index));
+                    if let Some(replay_blob) = replay_blob.as_mut() {
+                        replay_blob.seek_to(offset)?;
+                        let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
+                        if Record::<V>::decode_valid(record_buf.as_ref()).is_none() {
+                            return Err(Error::MissingRecord(index));
+                        }
                     }
                     items += 1;
                     intervals.insert(index);

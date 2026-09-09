@@ -1,7 +1,8 @@
 use super::{
-    Buffer, Retirement, Variant,
+    Buffer, ExpectedCommitment, Retirement, Variant,
     acks::{PendingAck, PendingAcks},
     cache,
+    certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
     finalized,
@@ -29,7 +30,7 @@ use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     Digestible,
-    certificate::{Provider, Verifier},
+    certificate::{Provider, Scoped, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
@@ -137,6 +138,8 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Commitments known certified above the finalized tip
+    certified: Certified<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
@@ -267,6 +270,7 @@ where
                 cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
                 cache,
                 storage,
@@ -400,6 +404,7 @@ where
             if let Some((height, digest, round)) = tip {
                 application.report(Update::Tip(round, height, digest));
                 self.tip = height;
+                self.certified.retain(height.next());
                 let _ = self.finalized_height.try_set(height.get());
             }
 
@@ -565,7 +570,9 @@ where
                     // Apply in-memory progress updates for this acknowledged
                     // block. The metadata sync below makes drained updates durable.
                     self.update_processed_height(height, resolver);
-                    self = self.update_processed_round(height, resolver).await;
+                    self = self
+                        .update_processed_round(height, buffer, application, resolver)
+                        .await;
                 }
                 Err(e) => return Err((height, e)),
             }
@@ -725,6 +732,19 @@ where
                 });
                 ack.send_lossy(handle);
             }
+            Message::Certification { notarization, .. } => {
+                // Certification also authenticates the parent commitment
+                let commitment = notarization.proposal.payload;
+                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                    debug!(?commitment, "certified block unavailable locally");
+                    return self;
+                };
+                let height = block.height();
+                self.certified.insert(height, commitment);
+                if let Some(parent) = height.previous() {
+                    self.certified.insert(parent, V::parent_commitment(&block));
+                }
+            }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
                 let commitment = notarization.proposal.payload;
@@ -796,7 +816,7 @@ where
                     let height = block.height();
                     let stored;
                     (self, stored) = self
-                        .update_processed_round_floor(height, round, resolver)
+                        .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
                         .store_finalization(
                             height,
@@ -820,7 +840,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_round(commitment, round),
+                            Request::finalized_by_round(commitment, round),
                         )
                         .ignore();
                 }
@@ -1092,6 +1112,22 @@ where
             }
         };
         if let Some(block) = block {
+            // An ancestor may be certified through a descendant without its own local notification.
+            // Its digest binds the parent commitment, so extend certification evidence here.
+            if let Some(parent) = block.height().previous()
+                && match key {
+                    SubscriptionKey::Commitment(commitment) => {
+                        self.certified.contains(block.height(), &commitment)
+                    }
+                    SubscriptionKey::Digest(digest) => self
+                        .certified
+                        .contains_matching(block.height(), |commitment| {
+                            V::commitment_to_inner(*commitment) == digest
+                        }),
+                }
+            {
+                self.certified.insert(parent, V::parent_commitment(&block));
+            }
             response.send_lossy(block);
             return;
         }
@@ -1122,11 +1158,14 @@ where
                     }
                 };
 
-                // This path is only for accepted ancestry or finalized repair,
-                // never for a candidate block's immediate parent.
-                self.floor
-                    .fetch_if_permitted(resolver, Request::certified_block(commitment, height))
-                    .ignore();
+                // Ancestry may be only notarized, so skipping commitment recomputation
+                // requires certification evidence
+                let request = if self.certified.contains(height, &commitment) {
+                    Request::certified(commitment, height)
+                } else {
+                    Request::untrusted(commitment, height)
+                };
+                self.floor.fetch_if_permitted(resolver, request).ignore();
                 debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
             }
             CommitmentFallback::Wait => {}
@@ -1206,10 +1245,7 @@ where
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
         self.floor
-            .fetch_if_permitted(
-                resolver,
-                Request::finalized_block_by_round(commitment, round),
-            )
+            .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round))
             .ignore();
         self
     }
@@ -1312,7 +1348,13 @@ where
                 .take_pending_anchor()
                 .expect("pending floor anchor missing");
             self = self
-                .update_processed_round_floor(height, finalization.round(), resolver)
+                .update_processed_round_floor(
+                    height,
+                    finalization.round(),
+                    buffer,
+                    application,
+                    resolver,
+                )
                 .await;
             let commitments = self.take_superseded_ack_commitments();
             buffer.retire(Retirement {
@@ -1346,6 +1388,7 @@ where
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
             self.tip = height;
+            self.certified.retain(height.next());
             let _ = self.finalized_height.try_set(height.get());
         }
 
@@ -1356,7 +1399,7 @@ where
             .expect("floor anchor above processed height must have predecessor");
         self.update_processed_height(dispatch_floor, resolver);
         self = self
-            .update_processed_round_floor(dispatch_floor, round, resolver)
+            .update_processed_round_floor(dispatch_floor, round, buffer, application, resolver)
             .await;
         self.stream = self
             .stream
@@ -1422,7 +1465,23 @@ where
         } = delivery;
         match key {
             Key::Block(commitment) => {
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                // Local annotations determine commitment checks and block storage
+                let annotations = subscribers
+                    .map_into(|(annotation, _)| annotation)
+                    .into_vec();
+
+                // Any `Certified` or `Finalized` subscriber authenticates the shared commitment
+                let expected = if annotations.iter().any(|annotation| {
+                    matches!(
+                        annotation,
+                        Annotation::Certified { .. } | Annotation::Finalized(_)
+                    )
+                }) {
+                    ExpectedCommitment::Trusted(commitment)
+                } else {
+                    ExpectedCommitment::Untrusted(commitment)
+                };
+                let block_cfg = V::block_cfg(&self.block_codec_config, expected);
                 let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
                     response.send_lossy(false);
                     return self;
@@ -1445,14 +1504,18 @@ where
                     return self;
                 }
 
-                // The peer-visible request only says "give me this block".
-                // Local annotations explain why the block was requested and
-                // therefore where, if anywhere, it should be stored.
                 let height = block.height();
                 let digest = block.digest();
-                let annotations = subscribers
-                    .map_into(|(annotation, _)| annotation)
-                    .into_vec();
+
+                // A certified block's parent link was checked by the validators
+                // that certified it, so the walk keeps trusting as it descends.
+                if annotations
+                    .iter()
+                    .any(|annotation| matches!(annotation, Annotation::Certified { .. }))
+                    && let Some(parent) = height.previous()
+                {
+                    self.certified.insert(parent, V::parent_commitment(&block));
+                }
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
@@ -1460,7 +1523,13 @@ where
                 let finalization = self.cache.get_finalization_for(digest).await;
                 if let Some(finalization) = &finalization {
                     self = self
-                        .update_processed_round_floor(height, finalization.round(), resolver)
+                        .update_processed_round_floor(
+                            height,
+                            finalization.round(),
+                            buffer,
+                            application,
+                            resolver,
+                        )
                         .await;
                 }
                 if finalization.is_some()
@@ -1480,7 +1549,8 @@ where
                 } else if annotations.iter().any(|annotation| {
                     matches!(
                         annotation,
-                        Annotation::Certified { height: bound } if height <= *bound
+                        Annotation::Certified { height: bound }
+                        | Annotation::Untrusted { height: bound } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
@@ -1499,9 +1569,7 @@ where
                 response.send_lossy(true);
             }
             Key::Finalized { height } => {
-                let Some((epoch, certificate_codec_config)) =
-                    self.certificate_codec_config_for_height(height)
-                else {
+                let Some((epoch, scoped)) = self.scoped_for_height(height) else {
                     debug!(
                         %height,
                         floor = %self.floor.processed_height(),
@@ -1510,6 +1578,7 @@ where
                     response.send_lossy(true);
                     return self;
                 };
+                let certificate_codec_config = scoped.certificate_codec_config();
 
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
@@ -1535,14 +1604,9 @@ where
                     return self;
                 };
 
-                // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
-                // is guaranteed to be certified (assuming the certificate verifies). Because of this,
-                // we can skip broader payload checks and just check that the application block matches
-                // the commitment in the finalization proposal.
-                //
-                // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
-                // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
-                // the requested block is certified.
+                // Once the certificate verifies, the finalization authenticates the application
+                // block, so only the height and digest are checked here. The working block is then
+                // rebuilt from the finalized commitment.
                 let commitment = finalization.proposal.payload;
                 if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
@@ -1550,12 +1614,16 @@ where
                     return self;
                 }
                 delivers.push(PendingVerification::Finalized {
+                    scoped,
                     finalization,
                     block,
                     response,
                 });
             }
             Key::Notarized { round } => {
+                // The payload check below needs the epoch's participant set, so a
+                // scope without the full scheme counts as unavailable and the
+                // delivery is acknowledged as stale.
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
@@ -1580,14 +1648,17 @@ where
                     return self;
                 }
 
-                // Use the notarization payload to derive the block decode config. Below, the
-                // decoded block is checked against the same payload.
+                // Notarization alone does not prove the commitment encodes the block,
+                // so decoding must recompute it
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
                     return self;
                 }
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
+                let block_cfg = V::block_cfg(
+                    &self.block_codec_config,
+                    ExpectedCommitment::Untrusted(commitment),
+                );
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return self;
@@ -1598,6 +1669,7 @@ where
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
+                    scoped: Scoped::scheme(scheme),
                     notarization,
                     block,
                     response,
@@ -1650,15 +1722,14 @@ where
             by_epoch.entry(epoch).or_default().push(i);
         }
 
-        // Batch verify each epoch group.
+        // Verify each epoch group under the scope captured at admission, so a
+        // provider that has since retired the epoch cannot fail the delivery.
         let mut verified = vec![false; delivers.len()];
-        for (epoch, indices) in &by_epoch {
-            let Some(scoped) = self.provider.scoped(*epoch) else {
-                continue;
-            };
+        for indices in by_epoch.values() {
+            let scoped = delivers[indices[0]].scoped();
             let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
             let results =
-                verify_certificates(self.context.as_mut(), &scoped, &group, &self.strategy);
+                verify_certificates(self.context.as_mut(), scoped, &group, &self.strategy);
             for (j, &idx) in indices.iter().enumerate() {
                 verified[idx] = results[j];
             }
@@ -1680,6 +1751,7 @@ where
                     finalization,
                     block,
                     response,
+                    ..
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
@@ -1703,7 +1775,7 @@ where
                     }
 
                     (self, _) = self
-                        .update_processed_round_floor(height, round, resolver)
+                        .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
                         .store_finalization(
                             height,
@@ -1718,6 +1790,7 @@ where
                     notarization,
                     block,
                     response,
+                    ..
                 } => {
                     // Valid notarization received.
                     response.send_lossy(true);
@@ -1763,7 +1836,13 @@ where
                     // and we resolve the notarization request before the block request.
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
                         self = self
-                            .update_processed_round_floor(height, finalization.round(), resolver)
+                            .update_processed_round_floor(
+                                height,
+                                finalization.round(),
+                                buffer,
+                                application,
+                                resolver,
+                            )
                             .await;
 
                         // SAFETY: `digest` identifies a unique `commitment`, so this
@@ -1784,24 +1863,11 @@ where
         self
     }
 
-    /// Returns the certificate codec config for `epoch`.
-    fn certificate_codec_config(
-        &self,
-        epoch: Epoch,
-    ) -> Option<<<P::Scheme as Verifier>::Certificate as Read>::Cfg> {
-        self.provider
-            .scoped(epoch)
-            .map(|scoped| scoped.certificate_codec_config())
-    }
-
-    /// Returns the epoch containing `height` and its certificate codec config.
-    fn certificate_codec_config_for_height(
-        &self,
-        height: Height,
-    ) -> Option<(Epoch, <<P::Scheme as Verifier>::Certificate as Read>::Cfg)> {
+    /// Returns the epoch containing `height` and the scope that verifies its certificates.
+    fn scoped_for_height(&self, height: Height) -> Option<(Epoch, Scoped<P::Scheme>)> {
         let epoch = self.epocher.containing(height)?.epoch();
-        self.certificate_codec_config(epoch)
-            .map(|config| (epoch, config))
+        let scoped = self.provider.scoped(epoch)?;
+        Some((epoch, scoped))
     }
 
     // -------------------- Application Dispatch --------------------
@@ -2042,6 +2108,7 @@ where
         if let Some(round) = round.filter(|_| height > self.tip) {
             application.report(Update::Tip(round, height, digest));
             self.tip = height;
+            self.certified.retain(height.next());
             let _ = self.finalized_height.try_set(height.get());
         }
 
@@ -2203,7 +2270,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_height(commitment, last_finalized),
+                            Request::finalized_by_height(commitment, last_finalized),
                         )
                         .ignore();
                 }
@@ -2267,7 +2334,7 @@ where
                     self.floor
                         .fetch_if_permitted(
                             resolver,
-                            Request::finalized_block_by_height(parent_commitment, parent_height),
+                            Request::finalized_by_height(parent_commitment, parent_height),
                         )
                         .ignore();
                     break 'cache_repair;
@@ -2361,23 +2428,37 @@ where
     }
 
     /// Buffers a processed round update in memory and prunes round-bound requests.
-    async fn update_processed_round(
+    async fn update_processed_round<Buf: Buffer<V>>(
         self: Box<Self>,
         height: Height,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         let Some(finalization) = self.get_finalization_by_height(height).await else {
             return self;
         };
-        self.update_processed_round_floor(height, finalization.round(), resolver)
-            .await
+        self.update_processed_round_floor(
+            height,
+            finalization.round(),
+            buffer,
+            application,
+            resolver,
+        )
+        .await
     }
 
     /// Buffers a processed round floor update in memory and prunes round-bound requests.
-    async fn update_processed_round_floor(
+    ///
+    /// A pending floor anchor whose round the new floor covers is released: the
+    /// same retention that prunes its fetch proves it sits at or below the
+    /// processed height, so repair and dispatch resume without it.
+    async fn update_processed_round_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,
         round: Round,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         let processed_round = self.floor.round();
@@ -2397,7 +2478,23 @@ where
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(round));
-        self
+
+        // A superseded anchor is an ancestor of a processed block, so the floor
+        // it announced is already active. Retire the acks it displaced and resume.
+        if self.floor.take_superseded_anchor(round).is_none() {
+            return self;
+        }
+        let commitments = self.take_superseded_ack_commitments();
+        buffer.retire(Retirement {
+            round_floor: round,
+            exact_retirements: commitments,
+        });
+        let repaired;
+        (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
+        if repaired {
+            self = self.sync_finalized().await;
+        }
+        self.try_dispatch_blocks(application).await
     }
 
     /// Prunes finalized storage and height-indexed certified cache data below `height`.

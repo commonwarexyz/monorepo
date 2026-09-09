@@ -14,10 +14,8 @@
 
 use super::{CHECKSUM_SIZE, CacheRef, Replay, read::PageReader, view::View};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
-use std::{
-    num::{NonZeroU16, NonZeroUsize},
-    sync::Arc,
-};
+use commonware_utils::Widen;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// An immutable, page-cache-backed read handle for a [Blob]. The read-only counterpart to
 /// [`super::Writer`].
@@ -179,8 +177,8 @@ impl<B: Blob> Sealed<B> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<B>, Error> {
-        let page_size = self.inner.cache_ref.page_size();
-        let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
+        let page_size_nz = self.inner.cache_ref.page_size();
+        let page_size: u64 = page_size_nz.widen();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
@@ -228,6 +226,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize};
+    use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky page size to test alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;

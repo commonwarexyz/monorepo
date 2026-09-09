@@ -1,6 +1,6 @@
 use super::Reservation;
 use crate::{
-    AddressableTrackedPeers, Ingress, PeerSetSubscription, TrackedPeers,
+    AddressableTrackedPeers, BlockedSubscription, Ingress, PeerSetSubscription, TrackedPeers,
     authenticated::{
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
@@ -14,8 +14,9 @@ use commonware_actor::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    channel::{mpsc, oneshot},
-    ordered::Map,
+    NZUsize,
+    channel::{mpsc, oneshot, ring},
+    ordered::{Map, Set},
 };
 use std::{collections::VecDeque, net::IpAddr};
 
@@ -50,6 +51,8 @@ pub enum Message<C: PublicKey> {
     /// Block a peer, disconnecting them if currently connected and preventing future connections
     /// for as long as the peer remains in at least one active peer set.
     Block { public_key: C },
+    /// Subscribe to the set of peers this node currently blocks.
+    SubscribeBlocked { sender: ring::Sender<Set<C>> },
 
     // ---------- Used by peer ----------
     /// Notify the tracker that a peer has been successfully connected.
@@ -288,6 +291,12 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
 
     fn block(&mut self, public_key: Self::PublicKey) -> Feedback {
         self.sender.enqueue(Message::Block { public_key })
+    }
+
+    fn blocked(&mut self) -> BlockedSubscription<Self::PublicKey> {
+        let (sender, receiver) = ring::channel(NZUsize!(1));
+        let _ = self.sender.enqueue(Message::SubscribeBlocked { sender });
+        receiver
     }
 }
 

@@ -97,6 +97,7 @@ mod tests {
             metadata_partition: format!("{prefix}-metadata"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, NZU16!(1024), NZUsize!(10)),
         }

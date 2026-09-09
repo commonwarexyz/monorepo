@@ -22,6 +22,26 @@ use std::{
 };
 use tracing::debug;
 
+/// List stored blob names, treating a missing partition as an empty journal.
+pub(super) async fn stored_names<E: Storage>(
+    context: &E,
+    partition: &str,
+) -> Result<Vec<Vec<u8>>, Error> {
+    match context.scan(partition).await {
+        Ok(names) => Ok(names),
+        Err(RError::PartitionMissing(_)) => Ok(Vec::new()),
+        Err(err) => Err(Error::Runtime(err)),
+    }
+}
+
+/// Decode the canonical big-endian section number stored in a blob name.
+pub(super) fn section_from_name(name: &[u8]) -> Result<u64, Error> {
+    let section = name
+        .try_into()
+        .map_err(|_| Error::InvalidBlobName(hex(name)))?;
+    Ok(u64::from_be_bytes(section))
+}
+
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
@@ -199,22 +219,14 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Scans the partition for existing blobs and opens them.
     pub async fn init(context: E, cfg: Config<F>) -> Result<Self, Error> {
-        // Iterate over blobs in partition
+        // Open each canonical section in storage order.
         let mut blobs = BTreeMap::new();
-        let stored_blobs = match context.scan(&cfg.partition).await {
-            Ok(blobs) => blobs,
-            Err(RError::PartitionMissing(_)) => Vec::new(),
-            Err(err) => return Err(Error::Runtime(err)),
-        };
+        let stored_blobs = stored_names(&context, &cfg.partition).await?;
 
         for name in stored_blobs {
             let (blob, size) = context.open(&cfg.partition, &name).await?;
-            let hex_name = hex(&name);
-            let section = match name.try_into() {
-                Ok(section) => u64::from_be_bytes(section),
-                Err(_) => return Err(Error::InvalidBlobName(hex_name)),
-            };
-            debug!(section, blob = hex_name, size, "loaded section");
+            let section = section_from_name(&name)?;
+            debug!(section, blob = hex(&name), size, "loaded section");
             let buffer = cfg.factory.create(blob, size).await?;
             blobs.insert(section, buffer);
         }

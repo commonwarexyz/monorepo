@@ -80,8 +80,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, batch_chain, build_snapshot_from_log, metrics::Metrics,
-        operation::Key, single_operation_root,
+        Error, any::ValueEncoding, batch_chain, metrics::Metrics, operation::Key,
+        single_operation_root,
     },
     translator::Translator,
 };
@@ -90,8 +90,9 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use core::num::{NonZeroU64, NonZeroUsize};
+use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -107,6 +108,40 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
+
+/// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
+/// every retained [Operation::Set] and keeping prior locations of the same key. Assumes the log
+/// is not pruned beyond the inactivity floor.
+///
+/// Repeats of a full key all land in the snapshot, matching a snapshot maintained live, so reads
+/// of a repeated key keep returning one of its written values however the snapshot was built.
+///
+/// `init_buffer` sizes the replay read buffer (in bytes).
+async fn build_snapshot<F, K, V, C, T>(
+    inactivity_floor_loc: Location<F>,
+    log: &C,
+    snapshot: &mut Index<T, Location<F>>,
+    init_buffer: NonZeroUsize,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    T: Translator,
+{
+    let stream = log
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .await?;
+    pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        let (loc, op) = result?;
+        if let Operation::Set(key, _) = op {
+            snapshot.insert(&key, Location::new(loc));
+        }
+    }
+    Ok(())
+}
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
 ///
@@ -133,10 +168,6 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
-
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -175,9 +206,6 @@ pub struct Immutable<
     ///
     /// Only references operations of type [Operation::Set].
     pub(crate) snapshot: Index<T, Location<F>>,
-
-    /// The location of the last commit operation.
-    pub(crate) last_commit_loc: Location<F>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
@@ -230,7 +258,6 @@ where
         context: E,
         translator: T,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
@@ -256,14 +283,14 @@ where
                 return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
             }
 
-            // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot_from_log::<F, _, _, _>(
+            // Replay the log from the inactivity floor to build the snapshot. Every retained
+            // location is inserted, mirroring the live apply path, so a repeated key keeps
+            // serving one of its written values across restarts and rewinds.
+            build_snapshot(
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
                 init_buffer,
-                cache_size,
-                |_, _| {},
             )
             .await?;
 
@@ -277,7 +304,6 @@ where
             journal,
             root,
             snapshot,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };
@@ -308,7 +334,7 @@ where
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
-            *self.last_commit_loc,
+            bounds.end - 1,
         );
     }
 
@@ -420,7 +446,8 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
-        let last_commit_loc = self.last_commit_loc;
+        // The journal always ends with a commit operation.
+        let last_commit_loc = self.size() - 1;
         let Operation::Commit(metadata, _floor) =
             self.journal.journal.read(*last_commit_loc).await?
         else {
@@ -544,7 +571,7 @@ where
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
+        let current_size = *self.size();
         if rewind_size == current_size {
             return Ok(self);
         }
@@ -554,7 +581,7 @@ where
             )));
         }
 
-        let (rewind_last_loc, rewind_floor, rewound_keys) = {
+        let (rewind_floor, rewound_keys) = {
             let bounds = self.journal.bounds();
             let rewind_last_loc = Location::new(rewind_size - 1);
             if rewind_size <= bounds.start {
@@ -580,7 +607,7 @@ where
                 }
             }
 
-            (rewind_last_loc, rewind_floor, rewound_keys)
+            (rewind_floor, rewound_keys)
         };
 
         let old_floor = self.inactivity_floor_loc;
@@ -610,7 +637,6 @@ where
             }
         }
 
-        self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
         let inactive_peaks = F::inactive_peaks(size, rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
@@ -684,7 +710,7 @@ where
 
     /// The [`Commitment`](batch_chain::Commitment) for the database's current state.
     pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root)
+        batch_chain::Commitment::new(self.size(), self.root)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -744,7 +770,7 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
-        let db_size = self.last_commit_loc + 1;
+        let db_size = self.size();
 
         // Apply journal.
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
@@ -794,7 +820,6 @@ where
         }
 
         // Update state.
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
         let range = db_size..batch.bounds.tip.size;
@@ -842,7 +867,7 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::verify_proof,
+        qmdb::{verify_proof, verify_proof_and_pinned_nodes},
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
@@ -1180,6 +1205,148 @@ pub(super) mod tests {
         assert!(
             recovered_state == durable_state || recovered_state == buffered_state,
             "recovered state is neither the durable baseline nor the buffered state"
+        );
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, for a db-based
+    /// batch and for a chained batch applied after its ancestor.
+    #[boxed]
+    pub(crate) async fn run_operations_match_applied_log<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared + PartialEq + core::fmt::Debug,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let seed = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(11u8))
+            .set(Sha256::fill(2u8), Sha256::fill(12u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (seed_start, seed_ops) = seed.operations();
+        let seed_root = seed.root();
+        let seed_proof = seed.proof(&db).unwrap();
+        let seed_pins = seed.pinned_nodes(&db).unwrap();
+        let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+        assert_eq!(seed_start, seed_range.start);
+        assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+        // A chained batch's operations are its own suffix only.
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3u8), Sha256::fill(13u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(4u8), Sha256::fill(14u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (parent_start, parent_ops) = parent.operations();
+        let (child_start, child_ops) = child.operations();
+        let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_pins, child_pins) = (
+            parent.pinned_nodes(&db).unwrap(),
+            child.pinned_nodes(&db).unwrap(),
+        );
+        let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+        let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(parent_start, parent_range.start);
+        assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+        assert_eq!(child_start, child_range.start);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+        // A write-free batch still captures its commit-only suffix.
+        let empty = db
+            .new_batch()
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (empty_start, empty_ops) = empty.operations();
+        let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let empty_pins = empty.pinned_nodes(&db).unwrap();
+        let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+        assert_eq!(empty_start, empty_range.start);
+        assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root with and without the pins.
+        for (start, ops, proof, pins, root) in [
+            (seed_start, seed_ops, seed_proof, seed_pins, seed_root),
+            (
+                parent_start,
+                parent_ops,
+                parent_proof,
+                parent_pins,
+                parent_root,
+            ),
+            (child_start, child_ops, child_proof, child_pins, child_root),
+            (empty_start, empty_ops, empty_proof, empty_pins, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof, start, &ops, &pins, &root
+            ));
+        }
+
+        // Flushing the applied batch prunes the store to its peaks. The late batch's base is
+        // mid-mountain, so its artifacts are refused rather than returned unverifiable.
+        let late = db
+            .new_batch()
+            .set(Sha256::fill(5u8), Sha256::fill(15u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        assert!(matches!(
+            late.proof(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+        assert!(matches!(
+            late.pinned_nodes(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+
+        // A batch built on the flushed store reads every node below it from the pinned peaks.
+        let flushed = db
+            .new_batch()
+            .set(Sha256::fill(6u8), Sha256::fill(16u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (flushed_start, flushed_ops) = flushed.operations();
+        let flushed_root = flushed.root();
+        let flushed_proof = flushed.proof(&db).unwrap();
+        let flushed_pins = flushed.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &flushed_proof,
+            flushed_start,
+            &flushed_ops,
+            &flushed_pins,
+            &flushed_root
+        ));
+        let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+        assert_eq!(flushed_start, flushed_range.start);
+        assert_eq!(
+            *flushed_start + flushed_ops.len() as u64,
+            *flushed_range.end
         );
 
         db.destroy().await.unwrap();
@@ -1532,7 +1699,7 @@ pub(super) mod tests {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
         // op_count is 4 (initial_commit, k1, k2, commit), last_commit is at location 3
-        assert_eq!(*db.last_commit_loc, 3);
+        assert_eq!(*db.size() - 1, 3);
 
         // Second batch with floor=5 (the new commit location).
         let merkleized = db
@@ -1617,7 +1784,7 @@ pub(super) mod tests {
             commit_sets(db, [(key1, value1), (key2, value2)], Some(metadata_a)).await;
         let size_before = db.bounds().end;
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.size() - 1;
         assert_eq!(size_before, first_range.end);
 
         let metadata_b = Sha256::fill(55u8);
@@ -1632,7 +1799,7 @@ pub(super) mod tests {
         let db = db.rewind(size_before).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
@@ -1643,7 +1810,7 @@ pub(super) mod tests {
         let db = open_db(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
@@ -1744,7 +1911,7 @@ pub(super) mod tests {
                 floor,
             )
             .await;
-            let last_commit = db.last_commit_loc;
+            let last_commit = db.size() - 1;
             db = db.prune(last_commit).await.unwrap();
 
             if db.bounds().start > first_range.start {
@@ -3105,7 +3272,7 @@ pub(super) mod tests {
             .await;
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.size() - 1;
         let floor_before = db.inactivity_floor_loc();
 
         let Err(err) = db.apply_batch(c).await else {
@@ -3120,7 +3287,7 @@ pub(super) mod tests {
         // Reopen the partition and verify the rejected chain persisted nothing.
         let db = open_db(context.child("test")).await;
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
@@ -3157,7 +3324,7 @@ pub(super) mod tests {
             .await;
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.size() - 1;
         let floor_before = db.inactivity_floor_loc();
 
         let Err(err) = db.apply_batch(b).await else {
@@ -3173,7 +3340,7 @@ pub(super) mod tests {
         // Reopen the partition and verify the rejected chain persisted nothing.
         let db = open_db(context.child("test")).await;
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
@@ -3413,6 +3580,83 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// A live db retains every location of a repeated key, so rewinding across the newer
+    /// write keeps serving the older retained one with no reopen involved.
+    #[boxed]
+    pub(crate) async fn run_rewind_repeated_key_live<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0. Either written value may be served.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        let live = db.get(&key).await.unwrap().unwrap();
+        assert!(live == v1 || live == v2);
+
+        // Rewind to commit A: the v2 location is dropped and the retained v1
+        // location keeps serving the key.
+        let db = db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Replay keeps only a repeated key's newest location, so a reopened db must still honor
+    /// the repeated-key read contract after a rewind that crosses the newer write: the older
+    /// write stays retained at an unchanged floor, and reads of the key may return any of its
+    /// written values, never `None`.
+    #[boxed]
+    pub(crate) async fn run_rewind_after_reopen_repeated_key_retained<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first")).await;
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0, then persist for the reopen.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        db.sync().await.unwrap();
+
+        // Reopen: replay visits both writes and keeps only the newer location.
+        let db = open_db(context.child("second")).await;
+        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
+
+        // Rewind to commit A with an unchanged floor: the newer location is dropped, and the
+        // older write, still retained in the restored journal, must keep the key readable.
+        let db = db.rewind(first_size).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
     /// After committing with `floor = commit_loc` and pruning down to it, the live set is
     /// exactly one operation — the commit itself. This is the minimum non-empty live set
     /// achievable under the per-commit bound. The DB must remain fully usable:
@@ -3454,7 +3698,7 @@ pub(super) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
@@ -3476,7 +3720,7 @@ pub(super) mod tests {
         assert_eq!(bounds.end, commit_loc + 1);
 
         // State preserved across the prune; root unchanged; commit metadata still readable.
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -3494,7 +3738,7 @@ pub(super) mod tests {
         // the floor (= commit_loc). The only op at/above the floor is the commit, which
         // contributes no keys — so the rebuilt snapshot is empty.
         let db = open_db(context.child("reopened")).await;
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         // The commit op at `commit_loc` is the anchor that survived pruning — its metadata
@@ -3519,7 +3763,7 @@ pub(super) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc, next_commit_loc);
+        assert_eq!(db.size() - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
         // New key readable; keys from the pre-prune batch remain excluded.
@@ -3622,7 +3866,7 @@ pub(super) mod tests {
         let mut db = db.commit().await.unwrap();
 
         let bad_key = Sha256::fill(99u8);
-        let bad_loc = db.last_commit_loc;
+        let bad_loc = db.size() - 1;
         db.snapshot.insert(&bad_key, bad_loc);
 
         let err = db.get(&bad_key).await.unwrap_err();
