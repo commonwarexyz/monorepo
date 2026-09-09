@@ -1972,7 +1972,41 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 }
 
 #[commonware_macros::stability(ALPHA)]
+impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recovery<E, A> {
+    type Journal = Journal<E, A>;
+
+    fn bounds(&self) -> Range<u64> {
+        self.bounds.clone()
+    }
+
+    async fn read(&self, pos: u64) -> Result<A, Error> {
+        Self::item(self, pos).await
+    }
+
+    async fn reset(self, size: u64) -> Result<Self, Error> {
+        Ok(*Box::new(self).clear_to_size(size).await?)
+    }
+
+    async fn finish(self, size: u64) -> Result<Self::Journal, Error> {
+        Journal(Box::new(Self::publish(self, size).await?))
+            .commit()
+            .await
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A> {
+    type Recovery = Recovery<E, A>;
+
+    async fn recover(
+        context: E,
+        cfg: Self::Config,
+        max_size: Option<u64>,
+    ) -> Result<Self::Recovery, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        Recovery::open(context, cfg, checkpoint, max_size).await
+    }
+
     type Config = Config;
 
     async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
@@ -2050,6 +2084,14 @@ impl<E: crate::Context, A: CodecFixedShared> Inner<E, A> {
 
 #[cfg(test)]
 impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
+    /// Read the recovery watermark persisted for `partition` without opening the journal.
+    pub(crate) async fn persisted_watermark(
+        context: E,
+        partition: &str,
+    ) -> Result<Option<u64>, Error> {
+        Ok(Checkpoint::open(context, partition).await?.watermark())
+    }
+
     /// Test helper: Get the oldest blob from the blob store.
     pub(crate) fn test_oldest_blob(&self) -> Option<u64> {
         self.0.test_oldest_blob()
