@@ -147,10 +147,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = input.operations.clone();
         async move {
             let cfg = db_config(suffix, &context);
-            let mut db =
-                Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap, Sequential>::init(context, cfg)
-                    .await
-                    .unwrap();
+            let mut db = Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap, Sequential>::init(
+                context, cfg, None,
+            )
+            .await
+            .unwrap();
 
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();
