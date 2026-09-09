@@ -270,7 +270,11 @@ mod tests {
         type Config = u64;
         type SyncTargets = u64;
 
-        async fn init(_context: deterministic::Context, config: Self::Config) -> Self {
+        async fn init(
+            _context: deterministic::Context,
+            config: Self::Config,
+            _expected: Option<Self::SyncTargets>,
+        ) -> Self {
             Self(config)
         }
 
@@ -306,10 +310,6 @@ mod tests {
 
         async fn committed_targets(&self) -> Self::SyncTargets {
             self.0
-        }
-
-        async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
-            assert_eq!(targets, self.0, "test database cannot rewind");
         }
     }
 

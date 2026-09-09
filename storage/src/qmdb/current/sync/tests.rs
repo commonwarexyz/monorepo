@@ -301,11 +301,11 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -348,11 +348,11 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -395,11 +395,11 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -442,11 +442,11 @@ mod harnesses {
 
         async fn init_db(ctx: Context) -> Self::Db {
             let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -490,6 +490,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let mut target_db: Db = Db::init(
             target_context.child("target"),
             variable_config::<crate::translator::TwoCap>(&target_suffix, &target_context),
+            None,
         )
         .await
         .unwrap();
@@ -554,7 +555,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 
         drop(synced_db);
 
-        let reopened: Db = Db::init(context.child("reopened"), client_config)
+        let reopened: Db = Db::init(context.child("reopened"), client_config, None)
             .await
             .unwrap();
         assert_eq!(SyncDatabase::root(&reopened), sync_root);
@@ -588,7 +589,9 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     executor.start(|mut context: Context| async move {
         let suffix = context.next_u64().to_string();
         let config = variable_config::<crate::translator::TwoCap>(&suffix, &context);
-        let mut db: Db = Db::init(context.child("db"), config.clone()).await.unwrap();
+        let mut db: Db = Db::init(context.child("db"), config.clone(), None)
+            .await
+            .unwrap();
 
         let key = Digest::from([9u8; 32]);
         for round in 0..300u64 {
