@@ -53,16 +53,16 @@ impl<A: Buf, B: Buf> Buf for Chain<A, B> {}
 /// let encoded = Bytes::from_static(b"hello").encode();
 /// let _ = Bytes::decode_cfg(Cursor::new(encoded), &(..).into());
 /// ```
-pub trait DecodeInput: Into<Self::Buf> {
+pub trait Input: Into<Self::Buf> {
     /// The buffer used by the decoder.
     type Buf: Buf;
 }
 
-impl<B: Buf> DecodeInput for B {
+impl<B: Buf> Input for B {
     type Buf = B;
 }
 
-impl DecodeInput for Vec<u8> {
+impl Input for Vec<u8> {
     type Buf = Bytes;
 }
 

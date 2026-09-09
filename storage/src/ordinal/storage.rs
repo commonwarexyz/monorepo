@@ -577,24 +577,24 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::FixedByteView;
+    use crate::utils::codec::View;
     use commonware_runtime::deterministic::Context;
 
     #[test]
     fn test_record_preserves_owned_byte_fields() {
-        let value = FixedByteView::new(7);
+        let value = View::new(7);
         let encoded = Record::encode(&value);
         let source = IoBuf::from(encoded.clone());
-        let decoded = Record::<FixedByteView>::decode_valid(source).unwrap();
+        let decoded = Record::<View>::decode_valid(source).unwrap();
         assert_eq!(decoded.bytes, value.bytes);
         decoded.assert_shared();
 
         let mut corrupt = encoded.clone();
         corrupt[0] ^= 1;
-        assert!(Record::<FixedByteView>::decode_valid(corrupt.into()).is_none());
+        assert!(Record::<View>::decode_valid(corrupt.into()).is_none());
         let mut truncated = encoded;
         truncated.pop();
-        assert!(Record::<FixedByteView>::decode_valid(truncated.into()).is_none());
+        assert!(Record::<View>::decode_valid(truncated.into()).is_none());
     }
 
     type TestOrdinal = Ordinal<Context, u64>;

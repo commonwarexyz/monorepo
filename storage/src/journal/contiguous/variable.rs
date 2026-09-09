@@ -2580,7 +2580,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{journal::contiguous::tests::run_contiguous_tests, utils::codec::FixedByteView};
+    use crate::{journal::contiguous::tests::run_contiguous_tests, utils::codec::View};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
@@ -3194,10 +3194,8 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
-            let value = vec![FixedByteView::new(1), FixedByteView::new(2)];
-            let mut journal = Journal::<_, Vec<FixedByteView>>::init(context, cfg)
-                .await
-                .unwrap();
+            let value = vec![View::new(1), View::new(2)];
+            let mut journal = Journal::<_, Vec<View>>::init(context, cfg).await.unwrap();
             (journal, _) = journal.append(&value).await.unwrap();
             journal = journal.sync().await.unwrap();
             let (journal, reader) = journal.snapshot().await.unwrap();
@@ -3229,19 +3227,17 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
-            let values: Vec<Vec<FixedByteView>> = (0..6)
+            let values: Vec<Vec<View>> = (0..6)
                 .map(|position| {
                     (0..40)
-                        .map(|field| FixedByteView::new(position * 40 + field))
+                        .map(|field| View::new(position * 40 + field))
                         .collect()
                 })
                 .collect();
             let mut frame = Vec::new();
             encode_frame_into(None, &values[0], &mut frame).unwrap();
             let frame_len = frame.len();
-            let mut journal = Journal::<_, Vec<FixedByteView>>::init(context, cfg)
-                .await
-                .unwrap();
+            let mut journal = Journal::<_, Vec<View>>::init(context, cfg).await.unwrap();
             for value in &values {
                 (journal, _) = journal.append(value).await.unwrap();
             }

@@ -226,7 +226,7 @@ pub(super) fn encode_frame_into<V: Codec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::FixedByteView;
+    use crate::utils::codec::View;
     use bytes::{BufMut, Bytes};
     use commonware_codec::{Copying, Encode, Read, Write};
 
@@ -413,9 +413,9 @@ mod tests {
         assert!(copied.iter().all(|b| !range.contains(&b.as_ptr())));
 
         // Decompressed fields share the decoder's input allocation
-        let value = vec![FixedByteView::new(1), FixedByteView::new(2)];
+        let value = vec![View::new(1), View::new(2)];
         let buf = Bytes::from(compress(&value.encode(), 3).unwrap());
-        let decoded = decode_item::<Vec<FixedByteView>>(buf, &((..).into(), ()), true).unwrap();
+        let decoded = decode_item::<Vec<View>>(buf, &((..).into(), ()), true).unwrap();
         assert_eq!(decoded.len(), value.len());
         for (decoded, expected) in decoded.iter().zip(&value) {
             assert_eq!(decoded.bytes, expected.bytes);

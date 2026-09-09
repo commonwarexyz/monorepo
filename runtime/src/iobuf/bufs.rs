@@ -10,7 +10,7 @@ use super::{
     pool::BufferPool,
 };
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
-use commonware_codec::{Buf, BufsMut, DecodeInput, EncodeSize, Write};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Input, Write};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize};
 
 /// Container for one or more immutable buffers.
@@ -1008,7 +1008,7 @@ impl IoBufsMut {
     }
 }
 
-impl DecodeInput for IoBufsMut {
+impl Input for IoBufsMut {
     type Buf = IoBufs;
 }
 

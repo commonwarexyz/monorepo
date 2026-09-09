@@ -1056,7 +1056,7 @@ async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::FixedByteView;
+    use crate::utils::codec::View;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1107,7 +1107,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context);
             let mut journal = Journal::init(context, cfg).await.unwrap();
-            (journal, _) = journal.append(1, &FixedByteView::new(7)).await.unwrap();
+            (journal, _) = journal.append(1, &View::new(7)).await.unwrap();
             let decoded = journal.try_get_sync(1, 0).unwrap();
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());

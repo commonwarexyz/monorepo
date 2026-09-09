@@ -13,7 +13,7 @@ use super::{
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{
-    Buf, BufsMut, DecodeInput, EncodeSize, Error, RangeCfg, Read, Write, util::at_least,
+    Buf, BufsMut, EncodeSize, Error, Input, RangeCfg, Read, Write, util::at_least,
 };
 use std::{
     mem::ManuallyDrop,
@@ -865,7 +865,7 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBufMut {
     }
 }
 
-impl DecodeInput for IoBufMut {
+impl Input for IoBufMut {
     type Buf = IoBuf;
 }
 

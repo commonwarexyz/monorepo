@@ -1752,7 +1752,7 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{journal::contiguous::Contiguous as _, utils::codec::FixedByteView};
+    use crate::{journal::contiguous::Contiguous as _, utils::codec::View};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1797,9 +1797,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
             let mut journal = Journal::init(context, cfg).await.unwrap();
-            (journal, _) = journal.append(&FixedByteView::new(7)).await.unwrap();
+            (journal, _) = journal.append(&View::new(7)).await.unwrap();
             let decoded = journal.try_read_sync(0).unwrap();
-            (journal, _) = journal.append(&FixedByteView::new(8)).await.unwrap();
+            (journal, _) = journal.append(&View::new(8)).await.unwrap();
             let next = journal.try_read_sync(1).unwrap();
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
@@ -1813,7 +1813,7 @@ mod tests {
             let cfg = test_cfg(&context, NZU64!(3));
             let mut journal = Journal::init(context, cfg).await.unwrap();
             for i in 0..5 {
-                (journal, _) = journal.append(&FixedByteView::new(i)).await.unwrap();
+                (journal, _) = journal.append(&View::new(i)).await.unwrap();
             }
             let decoded = journal.read_many(&[0, 2, 3, 4]).await.unwrap();
             let probed = journal.try_read_many_sync(&[0, 2, 3, 4]);

@@ -3,13 +3,14 @@
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Error, FixedSize, Read, Write, util::at_least};
 
+/// A fixed-size byte view for checking shared decoding.
 #[derive(Clone, Debug)]
-pub(crate) struct FixedByteView {
+pub(crate) struct View {
     pub(crate) bytes: Bytes,
     source: usize,
 }
 
-impl FixedByteView {
+impl View {
     pub(crate) fn new(value: u64) -> Self {
         Self {
             bytes: Bytes::copy_from_slice(&value.to_be_bytes()),
@@ -22,17 +23,17 @@ impl FixedByteView {
     }
 }
 
-impl FixedSize for FixedByteView {
+impl FixedSize for View {
     const SIZE: usize = u64::SIZE;
 }
 
-impl Write for FixedByteView {
+impl Write for View {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_slice(&self.bytes);
     }
 }
 
-impl Read for FixedByteView {
+impl Read for View {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {

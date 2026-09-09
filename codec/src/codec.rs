@@ -1,6 +1,6 @@
 //! Core traits for encoding and decoding.
 
-use crate::{Buf, Copying, DecodeInput, error::Error};
+use crate::{Buf, Copying, Input, error::Error};
 #[cfg(not(feature = "std"))]
 use alloc::{sync::Arc, vec::Vec};
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
@@ -309,12 +309,12 @@ impl<T: Encode + Send + Sync> EncodeShared for T {}
 pub trait Decode: Read {
     /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is consumed.
     ///
-    /// Accepts [Buf] inputs and owned [`Vec<u8>`] values through [DecodeInput]. Borrowed
+    /// Accepts [Buf] inputs and owned [`Vec<u8>`] values through [Input]. Borrowed
     /// slices require an explicit [Copying] adapter.
     ///
     /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes in
     /// `buf` after reading.
-    fn decode_cfg(buf: impl DecodeInput, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn decode_cfg(buf: impl Input, cfg: &Self::Cfg) -> Result<Self, Error> {
         let mut buf = buf.into();
         let result = Self::read_cfg(&mut buf, cfg)?;
 
