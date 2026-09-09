@@ -11,7 +11,7 @@ use crate::{
 use commonware_cryptography::{Digest, certificate::Verification};
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{non_empty, ordered::Set};
+use commonware_utils::{non_empty, ordered::Committee};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{future::Future, mem, sync::Arc};
@@ -288,7 +288,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Returns the ordered participant set.
-    pub(super) fn participants(&self) -> &Set<S::PublicKey> {
+    pub(super) fn participants(&self) -> &Committee<S::PublicKey> {
         self.scheme.participants()
     }
 

@@ -105,7 +105,7 @@ mod tests {
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         non_empty,
-        ordered::{Quorum as _, Set},
+        ordered::Set,
         probability,
         sequence::U64,
         sync::Mutex,

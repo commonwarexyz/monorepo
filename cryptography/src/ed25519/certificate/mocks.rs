@@ -8,7 +8,7 @@ use crate::{
 use commonware_math::algebra::Random;
 use commonware_utils::{
     TryCollect as _,
-    ordered::{Map, Set},
+    ordered::{Committee, Map},
 };
 use rand_core::CryptoRng;
 
@@ -32,8 +32,8 @@ pub fn fixture<S, R>(
     rng: &mut R,
     namespace: &[u8],
     n: u32,
-    signer: impl Fn(&[u8], Set<PublicKey>, PrivateKey) -> Option<S>,
-    verifier: impl Fn(&[u8], Set<PublicKey>) -> S,
+    signer: impl Fn(&[u8], Committee<PublicKey>, PrivateKey) -> Option<S>,
+    verifier: impl Fn(&[u8], Committee<PublicKey>) -> S,
 ) -> Fixture<S>
 where
     R: CryptoRng,
@@ -42,8 +42,14 @@ where
     assert!(n > 0);
 
     let associated = participants(rng, n);
-    let participants = associated.keys().clone();
-    let participants_vec: Vec<_> = participants.clone().into();
+    let participants: Committee<_> = associated
+        .keys()
+        .iter()
+        .cloned()
+        .map(|public_key| (public_key, 1))
+        .try_collect()
+        .expect("ed25519 participant committee is valid");
+    let participants_vec: Vec<_> = participants.iter().cloned().collect();
 
     let private_keys: Vec<_> = participants_vec
         .iter()

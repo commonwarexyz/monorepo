@@ -54,9 +54,9 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZU16, NZU32, NZU64, NZUsize,
+    NZU16, NZU32, NZU64, NZUsize, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
-    ordered::Set,
+    ordered::{Committee, Set},
     sequence::Unit,
 };
 use rand_core::{CryptoRng, Rng};
@@ -369,9 +369,17 @@ where
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_PAGES);
         let public_key = self.config.signer.public_key();
         let consensus_namespace = [self.config.namespace, b"_INITIAL_CONSENSUS"].concat();
+        let consensus_committee: Committee<_> = self
+            .config
+            .participants
+            .iter()
+            .cloned()
+            .map(|participant| (participant, 1))
+            .try_collect()
+            .expect("DKG participants form a consensus committee");
         let scheme = ConsensusScheme::signer(
             &consensus_namespace,
-            self.config.participants.clone(),
+            consensus_committee,
             self.config.signer.clone(),
         )
         .expect("DKG signer must be a participant");

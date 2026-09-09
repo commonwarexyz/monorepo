@@ -7,11 +7,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_utils::{
-    Participant,
-    iter::NonEmpty,
-    ordered::{Quorum, Set},
-    sequence::U64,
-    sync::Mutex,
+    Participant, iter::NonEmpty, ordered::Committee, sequence::U64, sync::Mutex,
 };
 use core::fmt;
 use rand_core::CryptoRng;
@@ -113,7 +109,7 @@ pub struct Generic<
     N: super::Namespace,
 {
     me: Option<Participant>,
-    participants: Set<P>,
+    participants: Committee<P>,
     namespace: N,
     shared: Shared,
 }
@@ -173,7 +169,7 @@ where
     /// Creates a signer bound to the provided participant index.
     pub fn signer(
         namespace: &[u8],
-        participants: Set<P>,
+        participants: Committee<P>,
         me: Participant,
         shared: Shared,
     ) -> Option<Self> {
@@ -187,7 +183,7 @@ where
     }
 
     /// Creates a verifier sharing the provided state.
-    pub fn verifier(namespace: &[u8], participants: Set<P>, shared: Shared) -> Self {
+    pub fn verifier(namespace: &[u8], participants: Committee<P>, shared: Shared) -> Self {
         Self {
             me: None,
             participants,
@@ -201,8 +197,8 @@ where
         self.me
     }
 
-    /// Returns the ordered participant set.
-    pub const fn participants(&self) -> &Set<P> {
+    /// Returns the ordered committee.
+    pub const fn participants(&self) -> &Committee<P> {
         &self.participants
     }
 
@@ -345,8 +341,8 @@ where
 
         let signers =
             Signers::try_from((&self.participants, signers)).map_err(Self::assembly_error)?;
-        let quorum = self.participants.quorum_count::<S::Faults>();
-        let signers = signers.require(quorum)?;
+        let quorum = self.participants.quorum_weight::<S::Faults>();
+        let signers = signers.require_weight(&self.participants, quorum)?;
 
         let subject = signed_subject.expect("non-empty attestations establish a signed subject");
         let stored_subject = subject.clone();
@@ -479,8 +475,7 @@ macro_rules! impl_certificate_mock {
             assert!(n > 0);
 
             let associated = $crate::ed25519::certificate::mocks::participants(rng, n);
-            let participants = associated.keys().clone();
-            let participants_vec: ::std::vec::Vec<_> = participants.clone().into();
+            let participants_vec: ::std::vec::Vec<_> = associated.keys().clone().into();
             let private_keys: ::std::vec::Vec<_> = participants_vec
                 .iter()
                 .map(|public_key| {
@@ -491,6 +486,14 @@ macro_rules! impl_certificate_mock {
                 })
                 .collect();
 
+            let participants = commonware_utils::ordered::Committee::try_from(
+                participants_vec
+                    .iter()
+                    .cloned()
+                    .map(|participant| (participant, 1))
+                    .collect::<::std::vec::Vec<_>>(),
+            )
+            .expect("mock fixture must contain participants");
             let shared = $crate::certificate::mocks::Shared::default();
             let schemes = participants_vec
                 .iter()
@@ -541,7 +544,7 @@ macro_rules! impl_certificate_mock {
         {
             pub fn signer(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<P>,
+                participants: commonware_utils::ordered::Committee<P>,
                 me: commonware_utils::Participant,
                 shared: $crate::certificate::mocks::Shared,
             ) -> Option<Self> {
@@ -557,7 +560,7 @@ macro_rules! impl_certificate_mock {
 
             pub fn verifier(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::Set<P>,
+                participants: commonware_utils::ordered::Committee<P>,
                 shared: $crate::certificate::mocks::Shared,
             ) -> Self {
                 Self {
@@ -653,7 +656,7 @@ macro_rules! impl_certificate_mock {
                 self.generic.me()
             }
 
-            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+            fn participants(&self) -> &commonware_utils::ordered::Committee<Self::PublicKey> {
                 self.generic.participants()
             }
 

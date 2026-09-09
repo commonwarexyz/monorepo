@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{futures::Aborter, ordered::Quorum};
+use commonware_utils::futures::Aborter;
 use std::{
     mem::replace,
     time::{Duration, SystemTime},

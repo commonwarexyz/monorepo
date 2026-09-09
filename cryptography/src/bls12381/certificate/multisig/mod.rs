@@ -32,7 +32,7 @@ use commonware_utils::{
     Participant,
     iter::NonEmpty,
     non_empty,
-    ordered::{BiMap, Quorum, Set},
+    ordered::{BiMap, Committee},
 };
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -45,72 +45,81 @@ use std::collections::BTreeSet;
 /// by wrapping it with protocol-specific trait implementations via the macro.
 #[derive(Clone, Debug)]
 pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
+    /// Participants and their weights, ordered by identity key.
+    committee: Committee<P>,
     /// Participants' identity keys and BLS signing keys.
     ///
     /// Every signing key must have a verified proof of possession.
-    pub participants: BiMap<P, V::Public>,
+    signing_keys: BiMap<P, V::Public>,
     /// Key used for generating signatures.
-    pub signer: Option<(Participant, Private)>,
+    signer: Option<(Participant, Private)>,
     /// Pre-computed namespace(s) for this subject type.
-    pub namespace: N,
+    namespace: N,
 }
 
 impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Creates a new scheme instance with the provided key material.
     ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// signing and verification.
+    /// The identity key determines committee order and participant indices. `private_key` signs
+    /// messages. The public keys in `signing_keys` verify signatures.
     ///
-    /// Returns `None` if the provided private key does not match any signing key
-    /// in the participant set.
+    /// Returns `None` if the committee identity keys do not exactly match the signing-key map or
+    /// if the provided private key does not match any signing key.
     ///
     /// # Security
     ///
     /// This function does not verify proofs of possession. The caller must verify a PoP for every
-    /// BLS public key in `participants` before constructing the scheme. See the [module-level
+    /// BLS public key in `signing_keys` before constructing the scheme. See the [module-level
     /// documentation](crate::bls12381::certificate::multisig) for details.
     pub fn signer(
         namespace: &[u8],
-        participants: BiMap<P, V::Public>,
+        committee: Committee<P>,
+        signing_keys: BiMap<P, V::Public>,
         private_key: Private,
     ) -> Option<Self> {
         let public_key = ops::compute_public::<V>(&private_key);
-        let signer = participants
+        let mut scheme = Self::verifier(namespace, committee, signing_keys)?;
+        let signer = scheme
+            .signing_keys
             .values()
             .iter()
             .position(|p| p == &public_key)
             .map(|index| (Participant::from_usize(index), private_key))?;
-
-        Some(Self {
-            participants,
-            signer: Some(signer),
-            namespace: N::derive(namespace),
-        })
+        scheme.signer = Some(signer);
+        Some(scheme)
     }
 
     /// Builds a verifier that can authenticate signatures and certificates.
     ///
-    /// Participants have both an identity key and a signing key. The identity key
-    /// is used for participant set ordering and indexing, while the signing key is used for
-    /// verification.
+    /// The identity key determines committee order and participant indices. The signing key
+    /// verifies messages.
+    ///
+    /// Returns `None` if the committee identity keys do not exactly match the signing-key map.
     ///
     /// # Security
     ///
     /// This function does not verify proofs of possession. The caller must verify a PoP for every
-    /// BLS public key in `participants` before constructing the scheme. See the [module-level
+    /// BLS public key in `signing_keys` before constructing the scheme. See the [module-level
     /// documentation](crate::bls12381::certificate::multisig) for details.
-    pub fn verifier(namespace: &[u8], participants: BiMap<P, V::Public>) -> Self {
-        Self {
-            participants,
+    pub fn verifier(
+        namespace: &[u8],
+        committee: Committee<P>,
+        signing_keys: BiMap<P, V::Public>,
+    ) -> Option<Self> {
+        if !committee.iter().eq(signing_keys.keys().iter()) {
+            return None;
+        }
+        Some(Self {
+            committee,
+            signing_keys,
             signer: None,
             namespace: N::derive(namespace),
-        }
+        })
     }
 
-    /// Returns the ordered set of identity keys.
-    pub const fn participants(&self) -> &Set<P> {
-        self.participants.keys()
+    /// Returns the ordered committee.
+    pub const fn participants(&self) -> &Committee<P> {
+        &self.committee
     }
 
     /// Returns the index of "self" in the participant set, if available.
@@ -150,7 +159,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S::Subject<'a, D>: Subject<Namespace = N>,
         D: Digest,
     {
-        let Some(public_key) = self.participants.value(attestation.signer.into()) else {
+        let Some(public_key) = self.signing_keys.value(attestation.signer.into()) else {
             return false;
         };
         let Some(sig) = attestation.signature.get() else {
@@ -187,7 +196,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let signer = attestation.signer;
                 let value = self
-                    .participants
+                    .signing_keys
                     .value(signer.into())
                     .and_then(|public_key| {
                         attestation
@@ -241,7 +250,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Collect the signers and signatures.
         let mut entries = Vec::new();
         for Attestation { signer, signature } in attestations {
-            self.participants
+            self.signing_keys
                 .value(signer.into())
                 .ok_or(AssemblyError::UnknownSigner(signer))?;
             let signature = signature
@@ -253,8 +262,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         // Produce signers and aggregate signature.
         let (signers, signatures): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let quorum = self.participants.quorum_count::<S::Faults>();
-        let signers = Signers::try_from((self.participants.keys(), signers))?.require(quorum)?;
+        let quorum = self.committee.quorum_weight::<S::Faults>();
+        let signers = Signers::try_from((&self.committee, signers))?
+            .require_weight(&self.committee, quorum)?;
         let signatures = non_empty![@signatures.iter()];
         let signature = aggregate::combine_signatures::<V, _>(signatures);
 
@@ -278,20 +288,24 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         D: Digest,
     {
         // If the certificate signers length does not match the participant set, return false.
-        if certificate.signers.len() != self.participants.len() {
+        if certificate.signers.len() != self.committee.len() {
             return false;
         }
 
         // If the certificate does not meet the quorum, return false.
-        let quorum = self.participants.quorum_count::<S::Faults>() as usize;
-        if certificate.signers.count() < quorum {
+        let quorum = self.committee.quorum_weight::<S::Faults>();
+        if !self
+            .committee
+            .sum_ordered_weights(certificate.signers.iter())
+            .is_ok_and(|weight| weight >= quorum)
+        {
             return false;
         }
 
         // Collect the public keys.
         let mut publics = Vec::with_capacity(certificate.signers.count());
         for signer in certificate.signers.iter() {
-            let Some(public_key) = self.participants.value(signer.into()) else {
+            let Some(public_key) = self.signing_keys.value(signer.into()) else {
                 return false;
             };
 
@@ -342,8 +356,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         true
     }
 
-    pub const fn certificate_codec_config(&self) -> <Certificate<V> as Read>::Cfg {
-        self.participants.len()
+    pub fn certificate_codec_config(&self) -> <Certificate<V> as Read>::Cfg {
+        self.committee.len()
     }
 
     pub const fn certificate_codec_config_unbounded() -> <Certificate<V> as Read>::Cfg {
@@ -493,16 +507,20 @@ macro_rules! impl_certificate_bls12381_multisig {
             /// # Security
             ///
             /// This function does not verify proofs of possession. The caller must verify a PoP
-            /// for every BLS public key in `participants` before constructing the scheme.
+            /// for every BLS public key in `signing_keys` before constructing the scheme.
+            /// Returns `None` if the committee identity keys and signing-key map differ or the
+            /// private key does not belong to the map.
             pub fn signer(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::BiMap<P, V::Public>,
+                committee: commonware_utils::ordered::Committee<P>,
+                signing_keys: commonware_utils::ordered::BiMap<P, V::Public>,
                 private_key: $crate::bls12381::primitives::group::Private,
             ) -> Option<Self> {
                 Some(Self {
                     generic: $crate::bls12381::certificate::multisig::Generic::signer(
                         namespace,
-                        participants,
+                        committee,
+                        signing_keys,
                         private_key,
                     )?,
                 })
@@ -513,17 +531,20 @@ macro_rules! impl_certificate_bls12381_multisig {
             /// # Security
             ///
             /// This function does not verify proofs of possession. The caller must verify a PoP
-            /// for every BLS public key in `participants` before constructing the scheme.
+            /// for every BLS public key in `signing_keys` before constructing the scheme.
+            /// Returns `None` if the committee identity keys and signing-key map differ.
             pub fn verifier(
                 namespace: &[u8],
-                participants: commonware_utils::ordered::BiMap<P, V::Public>,
-            ) -> Self {
-                Self {
+                committee: commonware_utils::ordered::Committee<P>,
+                signing_keys: commonware_utils::ordered::BiMap<P, V::Public>,
+            ) -> Option<Self> {
+                Some(Self {
                     generic: $crate::bls12381::certificate::multisig::Generic::verifier(
                         namespace,
-                        participants,
-                    ),
-                }
+                        committee,
+                        signing_keys,
+                    )?,
+                })
             }
         }
 
@@ -591,7 +612,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 self.generic.me()
             }
 
-            fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+            fn participants(&self) -> &commonware_utils::ordered::Committee<Self::PublicKey> {
                 self.generic.participants()
             }
 
@@ -670,7 +691,11 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, Participant, TryCollect, ordered::BiMap, test_rng};
+    use commonware_utils::{
+        N3f1, Participant, TryCollect,
+        ordered::{BiMap, Committee},
+        test_rng,
+    };
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";
@@ -703,26 +728,47 @@ mod tests {
         Vec<Scheme<ed25519::PublicKey, V>>,
         Scheme<ed25519::PublicKey, V>,
     ) {
-        // Generate identity keys (ed25519) and consensus keys (BLS)
+        setup_weighted_signers(rng, vec![1; n as usize])
+    }
+
+    fn setup_weighted_signers<V: Variant>(
+        rng: &mut impl CryptoRng,
+        weights: Vec<u64>,
+    ) -> (
+        Vec<Scheme<ed25519::PublicKey, V>>,
+        Scheme<ed25519::PublicKey, V>,
+    ) {
+        let n = u32::try_from(weights.len()).expect("participant count exceeds u32::MAX");
+        assert!(n > 0);
+
         let identity_keys: Vec<_> = (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng))
             .collect();
         let consensus_keys: Vec<Private> = (0..n).map(|_| Private::random(&mut *rng)).collect();
 
-        // Build BiMap of identity public keys -> consensus public keys
         let participants: BiMap<ed25519::PublicKey, V::Public> = identity_keys
             .iter()
             .zip(consensus_keys.iter())
             .map(|(id_sk, cons_sk)| (id_sk.public_key(), compute_public::<V>(cons_sk)))
             .try_collect()
             .unwrap();
+        let committee: Committee<_> = participants
+            .keys()
+            .iter()
+            .cloned()
+            .zip(weights)
+            .try_collect()
+            .unwrap();
 
-        let signers = consensus_keys
+        let mut signers: Vec<_> = consensus_keys
             .into_iter()
-            .map(|sk| Scheme::signer(NAMESPACE, participants.clone(), sk).unwrap())
+            .map(|sk| {
+                Scheme::signer(NAMESPACE, committee.clone(), participants.clone(), sk).unwrap()
+            })
             .collect();
+        signers.sort_by_key(|scheme| scheme.me().unwrap());
 
-        let verifier = Scheme::verifier(NAMESPACE, participants);
+        let verifier = Scheme::verifier(NAMESPACE, committee, participants).unwrap();
 
         (signers, verifier)
     }
@@ -741,6 +787,134 @@ mod tests {
         assert!(Scheme::<ed25519::PublicKey, MinPk>::is_batchable());
         assert!(Generic::<ed25519::PublicKey, MinSig, Vec<u8>>::is_batchable());
         assert!(Scheme::<ed25519::PublicKey, MinSig>::is_batchable());
+    }
+
+    fn test_constructors_reject_identity_mismatch<V: Variant>() {
+        let mut rng = test_rng();
+        let identities: Vec<_> = (0..4)
+            .map(|_| Ed25519PrivateKey::random(&mut rng).public_key())
+            .collect();
+        let private_keys: Vec<_> = (0..3).map(|_| Private::random(&mut rng)).collect();
+        let participants: BiMap<_, _> = identities[..3]
+            .iter()
+            .cloned()
+            .zip(private_keys.iter().map(compute_public::<V>))
+            .try_collect()
+            .unwrap();
+
+        let missing: Committee<_> = identities[..2]
+            .iter()
+            .cloned()
+            .map(|identity| (identity, 1))
+            .try_collect()
+            .unwrap();
+        assert!(Scheme::<_, V>::verifier(NAMESPACE, missing, participants.clone()).is_none());
+
+        let extra: Committee<_> = identities
+            .iter()
+            .cloned()
+            .map(|identity| (identity, 1))
+            .try_collect()
+            .unwrap();
+        assert!(Scheme::<_, V>::verifier(NAMESPACE, extra, participants.clone()).is_none());
+
+        let different: Committee<_> = identities[1..]
+            .iter()
+            .cloned()
+            .map(|identity| (identity, 1))
+            .try_collect()
+            .unwrap();
+        assert!(
+            Scheme::<_, V>::verifier(NAMESPACE, different.clone(), participants.clone()).is_none()
+        );
+        assert!(
+            Scheme::<_, V>::signer(
+                NAMESPACE,
+                different,
+                participants,
+                private_keys.into_iter().next().unwrap(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_constructors_reject_identity_mismatch_variants() {
+        test_constructors_reject_identity_mismatch::<MinPk>();
+        test_constructors_reject_identity_mismatch::<MinSig>();
+    }
+
+    fn test_weighted_quorum_security_boundary<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_weighted_signers::<V>(&mut rng, vec![4, 1, 1, 1]);
+        let subject = || TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+
+        let light_attestations: Vec<_> = schemes[1..]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject()).unwrap())
+            .collect();
+        assert_eq!(
+            schemes[0].assemble(non_empty![@light_attestations.clone()], &Sequential),
+            Err(AssemblyError::InsufficientAttestations(5, 3))
+        );
+
+        let light_signatures: Vec<_> = light_attestations
+            .iter()
+            .map(|attestation| *attestation.signature.get().unwrap())
+            .collect();
+        let light_certificate = Certificate {
+            signers: Signers::new(4, light_attestations.iter().map(|a| a.signer)).unwrap(),
+            signature: aggregate::combine_signatures::<V, _>(non_empty![@light_signatures.iter()])
+                .into(),
+        };
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject(),
+            &light_certificate,
+            &Sequential,
+        ));
+
+        let heavy_attestations = vec![
+            schemes[0].sign::<Sha256Digest>(subject()).unwrap(),
+            schemes[1].sign::<Sha256Digest>(subject()).unwrap(),
+        ];
+        let certificate = schemes[0]
+            .assemble(non_empty![@heavy_attestations], &Sequential)
+            .unwrap();
+        assert_eq!(certificate.signers.count(), 2);
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject(),
+            &certificate,
+            &Sequential,
+        ));
+
+        let (schemes, verifier) = setup_weighted_signers::<V>(&mut rng, vec![7, 1, 1, 1]);
+        let heavy = schemes[0].sign::<Sha256Digest>(subject()).unwrap();
+        let certificate = schemes[0].assemble(non_empty![heavy], &Sequential).unwrap();
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject(),
+            &certificate,
+            &Sequential,
+        ));
+
+        let remaining: Vec<_> = schemes[1..]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject()).unwrap())
+            .collect();
+        assert_eq!(
+            schemes[1].assemble(non_empty![@remaining], &Sequential),
+            Err(AssemblyError::InsufficientAttestations(7, 3))
+        );
+    }
+
+    #[test]
+    fn test_weighted_quorum_security_boundary_variants() {
+        test_weighted_quorum_security_boundary::<MinPk>();
+        test_weighted_quorum_security_boundary::<MinSig>();
     }
 
     fn test_sign_vote_roundtrip<V: Variant>() {
@@ -790,7 +964,7 @@ mod tests {
     fn test_verify_attestations_filters_invalid<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(&mut rng, 5);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -853,7 +1027,7 @@ mod tests {
     fn test_assemble_certificate<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -924,7 +1098,7 @@ mod tests {
     fn test_verify_certificate<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -961,7 +1135,7 @@ mod tests {
     fn test_verify_certificate_detects_corruption<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -1011,7 +1185,7 @@ mod tests {
     fn test_certificate_codec_roundtrip<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
@@ -1043,7 +1217,7 @@ mod tests {
     fn test_certificate_rejects_sub_quorum<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(&mut rng, 4);
-        let expected = u64::from(schemes[0].participants().quorum_count::<N3f1>());
+        let expected = schemes[0].participants().quorum_weight::<N3f1>();
         let found = expected - 1;
         let found_count = usize::try_from(found).expect("quorum exceeds usize::MAX");
 
@@ -1073,7 +1247,7 @@ mod tests {
     fn test_certificate_rejects_invalid_signer<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let mut attestations: Vec<_> = schemes
@@ -1105,7 +1279,7 @@ mod tests {
     fn test_certificate_rejects_malformed_signature<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let mut attestations: Vec<_> = schemes
@@ -1220,7 +1394,7 @@ mod tests {
     fn test_verify_certificates_batch<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()]
@@ -1272,7 +1446,7 @@ mod tests {
     fn test_verify_certificates_batch_detects_failure<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
-        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+        let quorum = usize::try_from(schemes[0].participants().quorum_weight::<N3f1>())
             .expect("quorum exceeds usize::MAX");
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice()]
