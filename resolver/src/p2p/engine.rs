@@ -12,14 +12,14 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    Blocker, Provider, Receiver, Recipients, Sender,
+    Blocker, PeerSetUpdate, Provider, Receiver, Recipients, Sender,
     utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
+use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool, ordered::Set};
 use futures::{
     StreamExt,
     future::{self, Either},
@@ -27,6 +27,21 @@ use futures::{
 use rand_core::Rng;
 use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
+
+#[derive(Clone, Copy)]
+enum PeerSelection {
+    LatestPrimary,
+    AllTracked,
+}
+
+impl PeerSelection {
+    fn select<P: PublicKey>(self, update: PeerSetUpdate<P>) -> Set<P> {
+        match self {
+            Self::LatestPrimary => update.latest.primary,
+            Self::AllTracked => update.all.union(),
+        }
+    }
+}
 
 /// Represents a pending serve operation.
 struct Serve<P: PublicKey> {
@@ -86,6 +101,9 @@ where
     /// Whether responses are sent with priority over other network messages
     priority_responses: bool,
 
+    /// Peer-set view used for outgoing requests.
+    peer_selection: PeerSelection,
+
     /// Metrics for the peer actor
     metrics: metrics::Metrics,
 
@@ -113,6 +131,25 @@ where
         context: E,
         cfg: Config<P, D, B, Key, Con, Pro>,
     ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
+        Self::init(context, cfg, PeerSelection::LatestPrimary)
+    }
+
+    /// Creates an actor that may request from every peer in the retained peer-set history.
+    ///
+    /// This mode is intended for resolving historical data whose authoritative source may no
+    /// longer belong to the latest primary peer set.
+    pub fn new_with_all_peers(
+        context: E,
+        cfg: Config<P, D, B, Key, Con, Pro>,
+    ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
+        Self::init(context, cfg, PeerSelection::AllTracked)
+    }
+
+    fn init(
+        context: E,
+        cfg: Config<P, D, B, Key, Con, Pro>,
+        peer_selection: PeerSelection,
+    ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
@@ -138,6 +175,7 @@ where
                 subscribers: subscribers::Tracker::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
+                peer_selection,
                 metrics,
                 _r: PhantomData,
             },
@@ -209,7 +247,8 @@ where
             } => {
                 if self.last_peer_set_id < Some(update.index) {
                     self.last_peer_set_id = Some(update.index);
-                    self.fetcher.reconcile(update.latest.primary.as_ref());
+                    let peers = self.peer_selection.select(update);
+                    self.fetcher.reconcile(peers.as_ref());
                 }
             },
             // Handle blocked-set updates
@@ -560,5 +599,36 @@ where
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
         self.fetcher.add_retry(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use commonware_p2p::TrackedPeers;
+
+    #[test]
+    fn peer_selection_can_include_retained_sets() {
+        let current = PrivateKey::from_seed(0).public_key();
+        let retained_primary = PrivateKey::from_seed(1).public_key();
+        let retained_secondary = PrivateKey::from_seed(2).public_key();
+        let update = PeerSetUpdate {
+            index: 2,
+            latest: TrackedPeers::primary(Set::from_iter_dedup([current.clone()])),
+            all: TrackedPeers::new(
+                Set::from_iter_dedup([current.clone(), retained_primary.clone()]),
+                Set::from_iter_dedup([retained_secondary.clone()]),
+            ),
+        };
+
+        assert_eq!(
+            PeerSelection::LatestPrimary.select(update.clone()),
+            Set::from_iter_dedup([current.clone()])
+        );
+        assert_eq!(
+            PeerSelection::AllTracked.select(update),
+            Set::from_iter_dedup([current, retained_primary, retained_secondary])
+        );
     }
 }
