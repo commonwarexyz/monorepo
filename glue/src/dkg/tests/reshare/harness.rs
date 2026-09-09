@@ -1201,6 +1201,8 @@ impl EngineDefinition for ReshareEngine {
                 gate,
                 state_sync,
                 blocks_per_epoch: EPOCH_LENGTH,
+                peer_set_retention: 0,
+                peer_set_capacity: NZUsize!(1),
                 muxer_size: 128,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-orchestrator"),

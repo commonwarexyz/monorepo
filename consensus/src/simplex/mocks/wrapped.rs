@@ -111,6 +111,16 @@ impl<S> Scheme<S> {
     }
 }
 
+impl<D, S> crate::aggregation::scheme::Scheme<D> for Scheme<S>
+where
+    D: Digest,
+    S: crate::aggregation::scheme::Scheme<D>,
+{
+    fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+        self.inner.recovery_namespace()
+    }
+}
+
 impl<S, L> elector::Config<Scheme<S>> for Config<L>
 where
     S: CertificateScheme,

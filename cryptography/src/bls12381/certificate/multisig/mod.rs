@@ -122,6 +122,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         &self.committee
     }
 
+    /// Returns the pre-computed namespace.
+    pub const fn namespace(&self) -> &N {
+        &self.namespace
+    }
+
     /// Returns the index of "self" in the participant set, if available.
     pub fn me(&self) -> Option<Participant> {
         self.signer.as_ref().map(|(index, _)| *index)
