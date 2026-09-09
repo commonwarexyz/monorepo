@@ -222,14 +222,14 @@ mod tests {
                 write_buffer: config.write_buffer,
                 replay_buffer: config.replay_buffer,
             };
-            let journal = fixed::Journal::<_, Digest>::init(
+            let reset_pos = Position::<MmrFamily>::try_from(restart).unwrap();
+            let journal = fixed::Journal::<_, Digest>::init_at_size(
                 context.child("interrupted_reset"),
                 journal_config,
+                *reset_pos,
             )
             .await
             .unwrap();
-            let reset_pos = Position::<MmrFamily>::try_from(restart).unwrap();
-            let journal = journal.clear_to_size(*reset_pos).await.unwrap();
             drop(journal);
 
             let target = Target {

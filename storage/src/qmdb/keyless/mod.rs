@@ -148,11 +148,26 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
+    /// Initialize from the latest retained commit, discarding uncommitted operations.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
     #[boxed]
-    pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H, S>,
+    pub async fn init(
         context: E,
-    ) -> Result<Self, Error<F>> {
+        cfg: Config<C::Config, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
+        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+            context.child("journal"),
+            cfg.merkle,
+            cfg.log,
+            max_size,
+            false,
+        )
+        .await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
@@ -620,6 +635,13 @@ pub(crate) mod tests {
     pub(crate) type Reopen<D> =
         Box<dyn Fn(deterministic::Context) -> Pin<Box<dyn Future<Output = D> + Send>>>;
 
+    pub(crate) type BoundedOpen<D, F> = Box<
+        dyn Fn(
+            deterministic::Context,
+            Location<F>,
+        ) -> Pin<Box<dyn Future<Output = Result<D, Error<F>>> + Send>>,
+    >;
+
     type TestKeyless<F, V, C, H, S> = Keyless<F, deterministic::Context, V, C, H, S>;
 
     /// Test value factory: creates distinct values from an index.
@@ -660,6 +682,18 @@ pub(crate) mod tests {
                     }
                 )*
             }
+        };
+        (@fixture bounded, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            tests::$scenario($ctx, db, reopen::<$family::Family>(), bounded_open::<$family::Family>()).await;
+        };
+        (@fixture bounded_floor, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            tests::$scenario($ctx, db, bounded_open::<$family::Family>()).await;
+        };
+        (@fixture bounded_indexed, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db").with_attribute("index", 1)).await;
+            tests::$scenario($ctx, db, reopen::<$family::Family>(), bounded_open::<$family::Family>()).await;
         };
         (@fixture db, $scenario:ident, $family:ident, $ctx:ident) => {
             let db = open_db::<$family::Family>($ctx.child("db")).await;
@@ -725,6 +759,7 @@ pub(crate) mod tests {
         let root = db.root();
 
         // Commit op should remain after reopen even without clean shutdown.
+        drop(db);
         let db = reopen(context.child("db").with_attribute("index", 3)).await;
         assert_eq!(db.bounds().end, 2); // commit op should remain after re-open.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -1182,6 +1217,7 @@ pub(crate) mod tests {
         const ELEMENTS: u64 = 200;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
+        drop(db);
         let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
@@ -1279,7 +1315,7 @@ pub(crate) mod tests {
         assert_eq!(
             db.bounds().end,
             committed_size,
-            "Should rewind to last commit"
+            "Should recover to last commit"
         );
         assert_eq!(db.root(), committed_root, "Root should match last commit");
         assert_eq!(
@@ -1323,7 +1359,7 @@ pub(crate) mod tests {
         assert_eq!(
             db.bounds().end,
             new_committed_size,
-            "Should rewind to last commit with multiple trailing appends"
+            "Should recover to last commit with multiple trailing appends"
         );
         assert_eq!(
             db.root(),
@@ -1598,6 +1634,7 @@ pub(crate) mod tests {
         let op_count = db.bounds().end;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
+        drop(db);
         let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
@@ -2332,10 +2369,11 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_rewind_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_bounded_initialization_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
+        bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
@@ -2368,7 +2406,8 @@ pub(crate) mod tests {
         assert_ne!(db.root(), root_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_b));
 
-        let db = db.rewind(size_before).await.unwrap();
+        drop(db);
+        let db = bounded(context.child("cap"), size_before).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
         assert_eq!(db.bounds().end - 1, commit_before);
@@ -2386,10 +2425,10 @@ pub(crate) mod tests {
                 db.get(Location::new(4)).await,
                 Err(Error::LocationOutOfBounds(_, size)) if size == size_before
             ),
-            "rewound append should be out of bounds",
+            "discarded append should be out of bounds",
         );
 
-        db.commit().await.unwrap();
+        drop(db);
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
@@ -2408,7 +2447,8 @@ pub(crate) mod tests {
             Err(Error::LocationOutOfBounds(_, size)) if size == size_before
         ));
 
-        let db = db.rewind(initial_size).await.unwrap();
+        drop(db);
+        let db = bounded(context.child("cap"), initial_size).await.unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.bounds().end, initial_size);
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -2417,7 +2457,7 @@ pub(crate) mod tests {
             Err(Error::LocationOutOfBounds(_, size)) if size == initial_size
         ));
 
-        db.commit().await.unwrap();
+        drop(db);
         let db = reopen(context.child("reopen_initial_boundary")).await;
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.bounds().end, initial_size);
@@ -2431,10 +2471,17 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_rewind_pruned_target_errors<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_bounded_initialization_pruned_target_errors<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
+        bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
@@ -2448,7 +2495,7 @@ pub(crate) mod tests {
             round += 1;
             assert!(
                 round <= 64,
-                "failed to prune enough history for rewind test"
+                "failed to prune enough history for the initialization test"
             );
 
             (db, _) =
@@ -2462,24 +2509,26 @@ pub(crate) mod tests {
         }
 
         let oldest_retained = db.bounds().start;
-        let Err(boundary_err) = db.rewind(oldest_retained).await else {
-            panic!("expected rewind to fail");
+        drop(db);
+        let Err(boundary_err) = bounded(context.child("cap_error"), oldest_retained).await else {
+            panic!("expected bounded initialization to fail");
         };
         assert!(
             matches!(
                 boundary_err,
                 Error::Journal(crate::journal::Error::ItemPruned(_))
             ),
-            "unexpected rewind error at retained boundary: {boundary_err:?}"
+            "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
         );
 
         let db = reopen(context.child("reopen_boundary")).await;
-        let Err(err) = db.rewind(first_range.start).await else {
-            panic!("expected rewind to fail");
+        drop(db);
+        let Err(err) = bounded(context.child("cap_error"), first_range.start).await else {
+            panic!("expected bounded initialization to fail");
         };
         assert!(
             matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
-            "unexpected rewind error: {err:?}"
+            "unexpected bounded initialization error: {err:?}"
         );
     }
 
@@ -2637,8 +2686,10 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_rewind_restores_floor<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_bounded_initialization_restores_floor<F: Family, V, C, H, S: Strategy>(
+        context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
+        bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
@@ -2655,7 +2706,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = db.bounds().end;
+        let initialization_bound = db.bounds().end;
 
         // Second commit: floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -2669,8 +2720,11 @@ pub(crate) mod tests {
         let db = db.commit().await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), floor_b);
 
-        // Rewind to the first commit; floor should restore to floor_a.
-        let db = db.rewind(rewind_target).await.unwrap();
+        // Reopen at the first commit. The floor should restore to floor_a.
+        drop(db);
+        let db = bounded(context.child("cap"), initialization_bound)
+            .await
+            .unwrap();
         assert_eq!(db.inactivity_floor_loc(), floor_a);
 
         // Prune is now gated at floor_a: pruning up to the floor works.
@@ -2745,12 +2799,19 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
+    /// Commit, reopen at an earlier bound, then verify the restored floor survives another reopen.
     #[boxed]
-    pub(crate) async fn run_rewind_after_reopen_with_floor<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_bounded_initialization_after_reopen_with_floor<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
+        bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
         C: Mutable<Item = Operation<F, V>>,
@@ -2767,7 +2828,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = db.bounds().end;
+        let initialization_bound = db.bounds().end;
 
         // Second commit: 2 appends + commit, floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -2784,13 +2845,16 @@ pub(crate) mod tests {
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), floor_b);
 
-        // Rewind to the first commit; floor should restore to floor_a.
-        let db = db.rewind(rewind_target).await.unwrap();
+        // Reopen at the first commit. The floor should restore to floor_a.
+        drop(db);
+        let db = bounded(context.child("cap"), initialization_bound)
+            .await
+            .unwrap();
         assert_eq!(db.inactivity_floor_loc(), floor_a);
         assert_eq!(db.bounds().end - 1, Location::new(3));
 
-        // Commit the rewind so it's durable, then reopen and confirm the floor again.
-        db.commit().await.unwrap();
+        // Bounded initialization is durable. Reopen and confirm the floor again.
+        drop(db);
         let db = reopen(context.child("reopen").with_attribute("index", 2)).await;
         assert_eq!(db.inactivity_floor_loc(), floor_a);
 
@@ -2945,7 +3009,7 @@ pub(crate) mod tests {
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
                 if *p == *commit_loc + 1 && *f == *commit_loc));
 
-        // Reopen: `init_from_journal` must recover the floor from the last commit op.
+        // Reopening restores the inactivity floor from the last commit.
         let db = reopen(context.child("reopened")).await;
         let reopened_bounds = db.bounds();
         assert_eq!(reopened_bounds.end, commit_loc + 1);

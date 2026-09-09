@@ -873,6 +873,21 @@ where
     H: Hasher,
     S: Strategy,
 {
+    /// Range selected for publication.
+    pub(crate) fn bounds(&self) -> Range<u64> {
+        self.journal.bounds().start..self.selected_end
+    }
+
+    /// Whether storage was empty before commit selection.
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.journal.bounds() == (0..0)
+    }
+
+    /// Read an operation to validate its recovery requirements.
+    pub(crate) async fn read(&self, pos: u64) -> Result<C::Item, JournalError> {
+        self.journal.read(pos).await
+    }
+
     /// Persist the selected operations before the Merkle state acknowledging them.
     pub(crate) async fn finish(self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
         let journal = self.journal.finish(self.selected_end).await?;
