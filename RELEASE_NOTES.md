@@ -5,6 +5,8 @@
 <details>
 <summary>Rollback Support</summary>
 
+_These instructions do not apply to changes to ALPHA primitives._
+
 To retain a path back to v2026.7.1:
 
 **Defer incompatible changes:**
