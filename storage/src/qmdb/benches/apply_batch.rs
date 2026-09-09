@@ -212,9 +212,13 @@ async fn seed_imm_db(db: ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng)
 }
 
 async fn open_imm_db(ctx: &Context) -> ImmDb {
-    ImmDb::init(ctx.child("storage"), imm_fix_cfg_with(ctx, ITEMS_PER_BLOB))
-        .await
-        .unwrap()
+    ImmDb::init(
+        ctx.child("storage"),
+        imm_fix_cfg_with(ctx, ITEMS_PER_BLOB),
+        None,
+    )
+    .await
+    .unwrap()
 }
 
 #[boxed]

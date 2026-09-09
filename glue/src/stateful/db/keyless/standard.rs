@@ -273,7 +273,7 @@ where
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -362,7 +362,7 @@ where
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -556,7 +556,9 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -597,7 +599,9 @@ mod tests {
     fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db

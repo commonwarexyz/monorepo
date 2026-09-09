@@ -737,7 +737,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let source_context = context.child("source");
             let source_config = full_fixed_config(&source_context, "source");
-            let source = FullFixedDb::init(source_context, source_config)
+            let source = FullFixedDb::init(source_context, source_config, None)
                 .await
                 .unwrap();
             let floor = source.inactivity_floor_loc();
@@ -827,6 +827,7 @@ mod tests {
             let source = FullFixedDb::init(
                 context.child("source"),
                 full_fixed_config(&context, "source"),
+                None,
             )
             .await
             .unwrap();
