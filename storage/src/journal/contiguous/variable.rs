@@ -3810,6 +3810,7 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
 
