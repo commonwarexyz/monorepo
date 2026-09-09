@@ -16,6 +16,7 @@ use core::{
     array,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A scalar exponent for the Banderwagon group [`G`]: an element of the scalar
 /// field `Z/r`, where `r` is the prime group order.
@@ -32,6 +33,20 @@ use core::{
 pub struct F {
     limbs: [u64; 4],
 }
+
+impl Zeroize for F {
+    fn zeroize(&mut self) {
+        self.limbs.zeroize();
+    }
+}
+
+impl Drop for F {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for F {}
 
 impl F {
     /// The bit-width of the modulus `r`; enough bits to represent any element of

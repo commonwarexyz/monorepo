@@ -1,4 +1,4 @@
-use crate::Secret;
+use crate::{HardenError, Secret};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -11,7 +11,7 @@ use core::{
 };
 use p256::{
     ecdsa::{SigningKey, VerifyingKey},
-    elliptic_curve::Generate,
+    elliptic_curve::{Generate, subtle::ConstantTimeEq},
 };
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
@@ -20,16 +20,25 @@ pub const CURVE_NAME: &str = "secp256r1";
 pub const PRIVATE_KEY_LENGTH: usize = 32;
 pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 
+/// A signing key and its canonical private encoding.
+///
+/// Both fields remain immutable and occupy the same protected value after hardening.
+#[derive(Clone)]
+struct SigningValue {
+    raw: [u8; PRIVATE_KEY_LENGTH],
+    key: SigningKey,
+}
+
 /// Internal Secp256r1 Private Key storage.
 #[derive(Clone, Debug)]
 pub struct PrivateKeyInner {
-    raw: Secret<[u8; PRIVATE_KEY_LENGTH]>,
-    pub(crate) key: Secret<SigningKey>,
+    inner: Secret<SigningValue>,
+    public: VerifyingKey,
 }
 
 impl PartialEq for PrivateKeyInner {
     fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
+        self.access(|key| other.access(|other| key.ct_eq(other).into()))
     }
 }
 
@@ -37,16 +46,40 @@ impl Eq for PrivateKeyInner {}
 
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
-        let raw = Zeroizing::new(key.to_bytes().into());
+        let bytes = Zeroizing::new(key.to_bytes());
+        let mut raw = [0u8; PRIVATE_KEY_LENGTH];
+        raw.copy_from_slice(bytes.as_slice());
+        Self::from_parts(raw, key)
+    }
+
+    /// Wraps a key together with its canonical encoding.
+    fn from_parts(raw: [u8; PRIVATE_KEY_LENGTH], key: SigningKey) -> Self {
+        let public = *key.verifying_key();
         Self {
-            raw: Secret::new(*raw),
-            key: Secret::new(key),
+            inner: Secret::new(SigningValue { raw, key }),
+            public,
         }
     }
 
+    /// Lends the signing key for the duration of `f`.
+    pub(super) fn access<R>(&self, f: impl for<'a> FnOnce(&'a SigningKey) -> R) -> R {
+        self.inner.access(|value| f(&value.key))
+    }
+
+    /// Moves the secret material into hardened storage.
+    ///
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.inner.try_harden()
+    }
+
     /// Returns the `VerifyingKey` corresponding to this private key.
-    pub fn verifying_key(&self) -> VerifyingKey {
-        self.key.expose(|key| *key.verifying_key())
+    pub const fn verifying_key(&self) -> VerifyingKey {
+        self.public
     }
 }
 
@@ -58,7 +91,7 @@ impl Random for PrivateKeyInner {
 
 impl Write for PrivateKeyInner {
     fn write(&self, buf: &mut impl BufMut) {
-        self.raw.expose(|raw| raw.write(buf));
+        self.inner.access(|value| value.raw.write(buf));
     }
 }
 
@@ -73,7 +106,7 @@ impl Read for PrivateKeyInner {
         #[cfg(not(feature = "std"))]
         let key =
             key.map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        Ok(Self::new(key))
+        Ok(Self::from_parts(*raw, key))
     }
 }
 
@@ -208,6 +241,19 @@ impl arbitrary::Arbitrary<'_> for PublicKeyInner {
 /// Macro to implement newtype wrapper traits for PrivateKey.
 macro_rules! impl_private_key_wrapper {
     ($name:ident) => {
+        impl $name {
+            /// Moves the secret material into hardened storage.
+            ///
+            /// See [crate::Secret::try_harden] for requirements and guarantees.
+            ///
+            /// # Errors
+            ///
+            /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+            pub fn try_harden(&mut self) -> Result<(), crate::secret::HardenError> {
+                self.0.try_harden()
+            }
+        }
+
         impl crate::PrivateKey for $name {}
 
         impl commonware_math::algebra::Random for $name {

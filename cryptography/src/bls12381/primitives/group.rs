@@ -14,7 +14,7 @@
 //! at its own boundary.
 
 use super::variant::Variant;
-use crate::Secret;
+use crate::{HardenError, Secret};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
@@ -515,24 +515,41 @@ impl Private {
         }
     }
 
-    /// Temporarily exposes the inner scalar to a closure.
-    ///
-    /// See [`Secret::expose`](crate::Secret::expose) for more details.
-    pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
-        self.scalar.expose(f)
+    /// Returns whether the private scalar is stored in hardened memory.
+    pub(crate) const fn is_hardened(&self) -> bool {
+        self.scalar.is_hardened()
     }
 
-    /// Consumes the private key and returns the inner scalar.
+    /// Moves the secret material into hardened storage.
     ///
-    /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
-    pub fn expose_unwrap(self) -> Scalar {
-        self.scalar.expose_unwrap()
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.scalar.try_harden()
+    }
+
+    /// Grants temporary access to the inner scalar through a closure.
+    ///
+    /// See [`Secret::access`](crate::Secret::access) for more details.
+    pub fn access<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
+        self.scalar.access(f)
+    }
+
+    /// Consumes the private key, moving out its scalar or cloning it if shared.
+    ///
+    /// The returned scalar is unprotected and zeroized on drop. Other handles to
+    /// shared hardened storage retain their protection. See [Secret::extract_or_clone].
+    pub fn extract_or_clone(self) -> Scalar {
+        self.scalar.extract_or_clone()
     }
 }
 
 impl Write for Private {
     fn write(&self, buf: &mut impl BufMut) {
-        self.expose(|scalar| scalar.write(buf));
+        self.access(|scalar| scalar.write(buf));
     }
 }
 
@@ -577,6 +594,7 @@ impl Scalar {
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
+        sc.b.zeroize();
         Self(ret)
     }
 
@@ -611,12 +629,13 @@ impl Scalar {
 
         // Transform expanded bytes with modular reduction
         let mut fr = blst_fr::default();
+        let mut scalar = blst_scalar::default();
         // SAFETY: uniform_bytes is a valid 48-byte buffer.
         unsafe {
-            let mut scalar = blst_scalar::default();
             blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
             blst_fr_from_scalar(&mut fr, &scalar);
         }
+        scalar.b.zeroize();
 
         Self(fr)
     }
@@ -641,14 +660,15 @@ impl Scalar {
     }
 
     /// Encodes the scalar into a byte array.
-    fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
+    pub(crate) fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
         let mut slice = Zeroizing::new([0u8; Self::SIZE]);
+        let mut scalar = blst_scalar::default();
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
-            let mut scalar = blst_scalar::default();
             blst_scalar_from_fr(&mut scalar, &self.0);
             blst_bendian_from_scalar(slice.as_mut_ptr(), &scalar);
         }
+        scalar.b.zeroize();
         slice
     }
 
@@ -758,19 +778,24 @@ impl Read for Scalar {
     fn read_cfg(buf: &mut impl Buf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
+        let mut scalar = blst_scalar::default();
         // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates in-range.
         //
         // For private key material, callers pass `RejectZero` to preserve the
         // IETF BLS non-zero secret-key requirement:
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
-        unsafe {
-            let mut scalar = blst_scalar::default();
+        let valid = unsafe {
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_scalar_fr_check(&scalar) {
-                return Err(Invalid("Scalar", "Invalid"));
+            let valid = blst_scalar_fr_check(&scalar);
+            if valid {
+                blst_fr_from_scalar(&mut ret, &scalar);
             }
-            blst_fr_from_scalar(&mut ret, &scalar);
+            valid
+        };
+        scalar.b.zeroize();
+        if !valid {
+            return Err(Invalid("Scalar", "Invalid"));
         }
         let out = Self(ret);
         if *cfg == ScalarReadCfg::RejectZero && out == Self::zero() {
@@ -992,19 +1017,30 @@ impl Share {
         Self { index, private }
     }
 
+    /// Moves the secret material into hardened storage.
+    ///
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.private.try_harden()
+    }
+
     /// Returns the public key corresponding to the share.
     ///
     /// This can be verified against the public polynomial.
     pub fn public<V: Variant>(&self) -> V::Public {
         self.private
-            .expose(|private| V::Public::generator() * private)
+            .access(|private| V::Public::generator() * private)
     }
 }
 
 impl Write for Share {
     fn write(&self, buf: &mut impl BufMut) {
         self.index.write(buf);
-        self.private.expose(|private| private.write(buf));
+        self.private.write(buf);
     }
 }
 
@@ -1020,7 +1056,7 @@ impl Read for Share {
 
 impl EncodeSize for Share {
     fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.expose(|private| private.encode_size())
+        self.index.encode_size() + Scalar::SIZE
     }
 }
 
@@ -1394,6 +1430,7 @@ impl<'a> MulAssign<&'a Scalar> for G1 {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
             blst_p1_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
+        scalar.b.zeroize();
     }
 }
 
@@ -1429,14 +1466,16 @@ impl<'a> Mul<&'a SmallScalar> for G1 {
 impl Space<Scalar> for G1 {
     fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
-        Self::msm_inner(
+        let mut scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let result = Self::msm_inner(
             points
                 .iter()
                 .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
             SCALAR_BITS,
             strategy,
-        )
+        );
+        scalar_bytes.iter_mut().for_each(|s| s.b.zeroize());
+        result
     }
 }
 
@@ -1817,6 +1856,7 @@ impl<'a> MulAssign<&'a Scalar> for G2 {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
             blst_p2_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
+        scalar.b.zeroize();
     }
 }
 
@@ -1852,14 +1892,16 @@ impl<'a> Mul<&'a SmallScalar> for G2 {
 impl Space<Scalar> for G2 {
     fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
-        Self::msm_inner(
+        let mut scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let result = Self::msm_inner(
             points
                 .iter()
                 .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
             SCALAR_BITS,
             strategy,
-        )
+        );
+        scalar_bytes.iter_mut().for_each(|s| s.b.zeroize());
+        result
     }
 }
 
@@ -1910,6 +1952,8 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
+    #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
+    use crate::bls12381::primitives::variant::MinPk;
     use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
@@ -2401,6 +2445,85 @@ mod tests {
         assert_eq!(s1, s2);
         // Different scalars should (very likely) be different
         assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_private_encoding() {
+        // Keep construction usable in const contexts without an encoding cache.
+        const fn private_from_scalar(scalar: Scalar) -> Private {
+            Private::new(scalar)
+        }
+
+        let original = Private::random(test_rng());
+        let encoded = original.access(|scalar| scalar.encode());
+        let index = Participant::new(1);
+        let mut share_bytes = Vec::new();
+        index.write(&mut share_bytes);
+        share_bytes.extend_from_slice(&encoded);
+
+        for private in [
+            original.clone(),
+            private_from_scalar(original.access(Clone::clone)),
+            Private::decode(encoded.as_ref()).unwrap(),
+        ] {
+            assert!(!private.is_hardened());
+            assert_eq!(private, original);
+            assert_eq!(private.encode(), encoded);
+            let share = Share::new(index, private.clone());
+            assert_eq!(share.encode().as_ref(), share_bytes);
+            assert_eq!(Share::decode(share_bytes.as_slice()).unwrap(), share);
+            assert_eq!(private.extract_or_clone(), original.access(Clone::clone));
+        }
+
+        // Construction still accepts zero even though private-key decoding rejects it.
+        let zero = Private::new(Scalar::zero());
+        assert_eq!(zero.encode().as_ref(), &[0; PRIVATE_KEY_LENGTH]);
+        assert_eq!(zero.extract_or_clone(), Scalar::zero());
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
+    #[test]
+    fn test_hardened_private_extraction() {
+        let mut hardened = Private::random(test_rng());
+        let encoded = hardened.encode();
+        hardened.try_harden().unwrap();
+        let cloned = hardened.clone();
+        assert!(hardened.is_hardened());
+        hardened.access(|value| cloned.access(|other| assert!(core::ptr::eq(value, other))));
+
+        let shared_scalar = hardened.extract_or_clone();
+        cloned.access(|scalar| assert_eq!(scalar, &shared_scalar));
+        assert_eq!(cloned.encode(), encoded);
+
+        // The remaining owner can move out its scalar.
+        let unique_scalar = cloned.extract_or_clone();
+        assert_eq!(unique_scalar, shared_scalar);
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux", not(miri)))]
+    #[test]
+    fn test_hardened_share() {
+        let mut hardened = Share::new(Participant::new(1), Private::random(test_rng()));
+        let encoded = hardened.encode();
+        let public = hardened.public::<MinPk>();
+        hardened.try_harden().unwrap();
+        assert_eq!(hardened.encode(), encoded);
+        assert_eq!(hardened.public::<MinPk>(), public);
+
+        let cloned = hardened.clone();
+        hardened
+            .private
+            .access(|a| cloned.private.access(|b| assert!(core::ptr::eq(a, b))));
+        hardened.try_harden().unwrap();
+        hardened
+            .private
+            .access(|a| cloned.private.access(|b| assert!(core::ptr::eq(a, b))));
+        let exported = hardened.private.extract_or_clone();
+        cloned
+            .private
+            .access(|scalar| assert_eq!(scalar, &exported));
+        assert_eq!(cloned.public::<MinPk>(), public);
+        assert_eq!(Share::decode(encoded).unwrap(), cloned);
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use crate::{
-    BatchVerifier, Secret,
+    BatchVerifier, HardenError, Secret,
     ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
-use alloc::borrow::{Cow, ToOwned};
+use alloc::borrow::Cow;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -17,7 +17,7 @@ use core::{
 };
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
-use std::borrow::{Cow, ToOwned};
+use std::borrow::Cow;
 use zeroize::Zeroizing;
 
 const CURVE_NAME: &str = "ed25519";
@@ -28,7 +28,8 @@ const SIGNATURE_LENGTH: usize = 64;
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
-    key: Secret<ed_core::SigningKey>,
+    key: Secret<ed_core::SigningSecret>,
+    public: VerificationKey,
 }
 
 impl crate::PrivateKey for PrivateKey {}
@@ -42,34 +43,42 @@ impl crate::Signer for PrivateKey {
     }
 
     fn public_key(&self) -> Self::PublicKey {
-        self.key.expose(|key| Self::PublicKey {
-            key: key.verification_key().to_owned(),
-        })
+        Self::PublicKey { key: self.public }
     }
 }
 
 impl PrivateKey {
+    /// Moves the secret material into hardened storage.
+    ///
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.key.try_harden()
+    }
+
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
         let payload = namespace
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
-        self.key.expose(|key| Signature::from(key.sign(&payload)))
+        self.key
+            .access(|key| Signature::from(key.sign(&self.public, &payload)))
     }
 }
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRng) -> Self {
         let key = ed_core::SigningKey::new(rng);
-        Self {
-            key: Secret::new(key),
-        }
+        key.into()
     }
 }
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.expose(|key| key.as_bytes().write(buf));
+        self.key.access(|key| key.as_bytes().write(buf));
     }
 }
 
@@ -79,9 +88,7 @@ impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let key = ed_core::SigningKey::from(*raw);
-        Ok(Self {
-            key: Secret::new(key),
-        })
+        Ok(key.into())
     }
 }
 
@@ -91,8 +98,10 @@ impl FixedSize for PrivateKey {
 
 impl From<ed_core::SigningKey> for PrivateKey {
     fn from(key: ed_core::SigningKey) -> Self {
+        let (key, public) = key.into_parts();
         Self {
             key: Secret::new(key),
+            public,
         }
     }
 }
@@ -117,7 +126,7 @@ impl arbitrary::Arbitrary<'_> for PrivateKey {
 impl PartialEq for PrivateKey {
     fn eq(&self, other: &Self) -> bool {
         self.key
-            .expose(|key1| other.key.expose(|key2| key1.as_bytes() == key2.as_bytes()))
+            .access(|key1| other.key.access(|key2| key1.as_bytes() == key2.as_bytes()))
     }
 }
 
@@ -129,9 +138,7 @@ pub struct PublicKey {
 
 impl From<PrivateKey> for PublicKey {
     fn from(value: PrivateKey) -> Self {
-        value.key.expose(|key| Self {
-            key: key.verification_key(),
-        })
+        Self { key: value.public }
     }
 }
 

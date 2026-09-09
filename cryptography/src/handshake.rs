@@ -309,7 +309,7 @@ pub fn dial_end<P: PublicKey>(
     };
     shared
         .secret
-        .expose(|secret| transcript.commit(secret.as_ref()));
+        .access(|secret| transcript.commit(secret.as_ref()));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
@@ -364,7 +364,7 @@ pub fn listen_start<S: Signer, P: PublicKey>(
     };
     shared
         .secret
-        .expose(|secret| transcript.commit(secret.as_ref()));
+        .access(|secret| transcript.commit(secret.as_ref()));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();

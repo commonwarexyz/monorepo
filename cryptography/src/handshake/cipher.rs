@@ -151,7 +151,7 @@ impl SendCipher {
     pub fn send_in_place(&mut self, data: &mut [u8]) -> Result<[u8; TAG_SIZE], Error> {
         let nonce = self.nonce.inc()?;
         self.inner
-            .expose(|cipher| cipher.encrypt_in_place(&nonce, data))
+            .access(|cipher| cipher.encrypt_in_place(&nonce, data))
     }
 
     /// Encrypts data and returns the ciphertext.
@@ -205,7 +205,7 @@ impl RecvCipher {
             return Err(Error::DecryptionFailed);
         }
         self.inner
-            .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
+            .access(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
     }
 
     /// Decrypts ciphertext and returns the original data.

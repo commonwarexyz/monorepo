@@ -45,6 +45,9 @@ thiserror.workspace = true
 x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 # aws-lc-rs provides optimized P-256 verification and handshake cipher on x86_64 and aarch64.
 aws-lc-rs.workspace = true

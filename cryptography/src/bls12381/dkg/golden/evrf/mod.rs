@@ -1,7 +1,7 @@
 mod banderwagon;
 
 use crate::{
-    Secret,
+    HardenError, Secret,
     bls12381::primitives::group::{G1, Scalar, ScalarReadCfg},
     transcript::{Summary, Transcript, Version},
     zk::{
@@ -153,16 +153,19 @@ impl Read for Setup {
     }
 }
 
+/// A private exponent for Golden DKG VRF evaluation and Schnorr signing.
+///
+/// The public key is cached separately, so retrieving it does not access the
+/// private scalar.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     inner: Secret<F>,
+    public: PublicKey,
 }
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRng) -> Self {
-        Self {
-            inner: Secret::new(F::random(rng)),
-        }
+        Self::from_scalar(F::random(rng))
     }
 }
 
@@ -171,17 +174,17 @@ impl crate::Signer for PrivateKey {
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.inner
-            .expose(|x| PublicKey::from_point(G::generator() * x))
+        self.public.clone()
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
-        let pk = self.public();
         let mut t = Transcript::new(SCHNORR_NS, Version::V1);
-        t.commit(namespace).commit(msg).commit(pk.raw.as_slice());
+        t.commit(namespace)
+            .commit(msg)
+            .commit(self.public.raw.as_slice());
 
         // Derive deterministic nonce from secret key + public transcript state
-        let k = self.inner.expose(|x| {
+        let k = self.inner.access(|x| {
             let mut nonce_t = t.fork(b"nonce");
             let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
             nonce_t.commit(x_bytes.as_slice());
@@ -194,7 +197,7 @@ impl crate::Signer for PrivateKey {
         let e = F::random(t.noise(b"challenge"));
 
         // s = k + e * x
-        let s = self.inner.expose(|x| e * x + &k);
+        let s = self.inner.access(|x| e * x + &k);
 
         let mut raw = [0u8; Signature::SIZE];
         raw[..G::SIZE].copy_from_slice(&k_big_bytes);
@@ -204,6 +207,26 @@ impl crate::Signer for PrivateKey {
 }
 
 impl PrivateKey {
+    /// Creates a private key from a scalar.
+    fn from_scalar(scalar: F) -> Self {
+        let public = PublicKey::from_point(G::generator() * &scalar);
+        Self {
+            inner: Secret::new(scalar),
+            public,
+        }
+    }
+
+    /// Moves the secret material into hardened storage.
+    ///
+    /// See [crate::Secret::try_harden] for requirements and guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Leaves `self` unchanged on failure, including when hardening is unsupported.
+    pub fn try_harden(&mut self) -> Result<(), HardenError> {
+        self.inner.try_harden()
+    }
+
     /// Get the [`PublicKey`] associated with this private key.
     pub fn public(&self) -> PublicKey {
         crate::Signer::public_key(self)
@@ -219,11 +242,16 @@ impl PrivateKey {
     /// a random value.
     pub(super) fn vrf_recv(&self, msg: &Summary, sender: &PublicKey) -> Scalar {
         self.inner
-            .expose(|inner| vrf_recv(msg, &sender.point, inner))
+            .access(|inner| vrf_recv(msg, &sender.point, inner))
     }
 
     /// Compute the VRF output for each receiver, along with [`VrfCommitments`]
     /// that bind those outputs and prove they were evaluated correctly.
+    ///
+    /// The witness contains the private exponent's bits in ordinary allocations.
+    /// Hardening the retained scalar does not protect that witness or the proof's
+    /// scratch storage. Temporary exponent copies and bit buffers need a separate
+    /// scratch-erasure review, even though witness scalars erase on drop.
     ///
     /// # Panics
     ///
@@ -241,9 +269,11 @@ impl PrivateKey {
             let point = x.point.clone();
             (x, point)
         }));
+        // The witness outlives this access and includes the secret exponent's bits.
+        // Keeping the scalar readable during proving would not protect those copies.
         let (circuit, witness) = self
             .inner
-            .expose(|x| vrf_batch_checked(msg, x, receivers.values()));
+            .access(|x| vrf_batch_checked(msg, x, receivers.values()));
         let claim = witness.claim(setup.inner());
         let circuit_proof = prove(
             &mut *rng,
@@ -301,8 +331,10 @@ impl PrivateKey {
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.inner
-            .expose(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
+        self.inner.access(|x| {
+            let raw = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
+            buf.put_slice(raw.as_slice());
+        });
     }
 }
 
@@ -312,9 +344,7 @@ impl Read for PrivateKey {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let x: F = ReadExt::read(&mut raw.as_slice())?;
-        Ok(Self {
-            inner: Secret::new(x),
-        })
+        Ok(Self::from_scalar(x))
     }
 }
 

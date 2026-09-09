@@ -6,6 +6,8 @@
 //! - Reduces the clamped Ed25519 scalar with [`Scalar::from_bytes_mod_order`] before public-key
 //!   derivation and scalar-scalar arithmetic (equivalent to [`ed25519_zebra`]).
 //! - Zeroizes the signing key's prefix, along with the seed and scalar.
+//! - Separates private signing material from its cached verification key so the
+//!   outer signer can protect private storage without opening it for public data.
 //! - Removed `serde` dependency.
 //! - Swapped `hex` dependency to [`commonware_formatting::Hex`].
 //! - Adapted code to `commonware`'s clippy rules.
@@ -25,5 +27,5 @@ mod verification_key;
 
 pub use error::Error;
 pub use signature::Signature;
-pub use signing_key::SigningKey;
+pub use signing_key::{SigningKey, SigningSecret};
 pub use verification_key::{VerificationKey, VerificationKeyBytes};

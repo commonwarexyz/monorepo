@@ -33,7 +33,7 @@ use commonware_utils::union_unique;
 
 /// Computes the public key from the private key.
 pub fn compute_public<V: Variant>(private: &Private) -> V::Public {
-    private.expose(|scalar| V::Public::generator() * scalar)
+    private.access(|scalar| V::Public::generator() * scalar)
 }
 
 /// Returns a new keypair derived from the provided randomness.
@@ -57,7 +57,8 @@ pub fn hash_with_namespace<V: Variant>(dst: DST, namespace: &[u8], message: &[u8
 
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Private, dst: DST, message: &[u8]) -> V::Signature {
-    private.expose(|scalar| hash::<V>(dst, message) * scalar)
+    let hashed = hash::<V>(dst, message);
+    private.access(|scalar| hashed * scalar)
 }
 
 /// Verifies the signature with the provided public key.
@@ -111,7 +112,7 @@ pub fn sign_proof_of_possession<V: Variant>(private: &Private, namespace: &[u8])
     let public = compute_public::<V>(private);
     let hm = hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
 
-    private.expose(|scalar| hm * scalar)
+    private.access(|scalar| hm * scalar)
 }
 
 /// Verifies a proof of possession for the provided public key.

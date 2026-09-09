@@ -355,7 +355,7 @@ use crate::{
     transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{
-    Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
+    Encode, EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
@@ -841,7 +841,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         let expected = pub_msg.commitment.eval_msm(&scalar, &Sequential);
         priv_msg
             .share
-            .expose(|share| expected == V::Public::generator() * share)
+            .access(|share| expected == V::Public::generator() * share)
     }
 
     fn check_dealer_log<M: Faults, B: BatchVerifier<PublicKey = P>>(
@@ -892,7 +892,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                     reveal_eval_points.push((coeff.clone(), player_scalar));
                     priv_msg
                         .share
-                        .expose(|share| reveal_sum += &(coeff * share));
+                        .access(|share| reveal_sum += &(coeff * share));
                 }
             }
         }
@@ -1057,13 +1057,13 @@ impl DealerPrivMsg {
 
 impl EncodeSize for DealerPrivMsg {
     fn encode_size(&self) -> usize {
-        self.share.expose(|share| share.encode_size())
+        Scalar::SIZE
     }
 }
 
 impl Write for DealerPrivMsg {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        self.share.expose(|share| share.write(buf));
+        self.share.access(|share| share.write(buf));
     }
 }
 
@@ -1783,7 +1783,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
             // `Poly::new_with_constant` requires an owned value. The extracted scalar is
             // scoped to this function and will be zeroized on drop (i.e. the secret is
             // only exposed for the duration of this function).
-            share.map(|x| x.private.expose_unwrap()),
+            share.map(|x| x.private.extract_or_clone()),
         )?;
         let my_poly = Poly::new_with_constant(&mut rng, info.degree::<M>(), share);
         let priv_msgs = info
@@ -2154,10 +2154,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
                 let persisted = self.view.get(dealer);
                 let share = match persisted {
                     Some((pub_msg, priv_msg)) if pub_msg == &log.pub_msg => {
-                        priv_msg.share.clone().expose_unwrap()
+                        priv_msg.share.clone().extract_or_clone()
                     }
                     _ => match log.get_reveal(&self.me_pub) {
-                        Some(priv_msg) => priv_msg.share.clone().expose_unwrap(),
+                        Some(priv_msg) => priv_msg.share.clone().extract_or_clone(),
                         None if persisted.is_some() => {
                             return Err(Error::InvalidPersistedDealing {
                                 dealer: format!("{dealer:?}"),
@@ -2728,7 +2728,7 @@ mod test_plan {
                             let share = info
                                 .unwrap_or_random_share(
                                     &mut rng,
-                                    share.map(|s| s.private.expose_unwrap()),
+                                    share.map(|s| s.private.extract_or_clone()),
                                 )
                                 .expect("Failed to generate dealer share");
 
