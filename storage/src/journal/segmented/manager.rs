@@ -597,9 +597,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        BufferPooler, ReadOptions, Runner as _, Spawner as _, Supervisor as _, WriteOptions,
+        buffer::paged::Writer, deterministic,
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
@@ -609,6 +612,64 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    /// Materialize a crash that retains new page bytes but loses their checksum lengths.
+    pub(in super::super) async fn seed_torn_suffix<E: Storage + BufferPooler>(
+        context: &E,
+        partition: &str,
+        section: u64,
+        page: &[u8],
+        suffix_pages: usize,
+    ) {
+        let physical = page.len() + CHECKSUM_SIZE as usize;
+        let source = format!("{partition}-source");
+        let (raw, size) = context.open(&source, b"source").await.unwrap();
+        let cache = CacheRef::from_pooler(
+            context,
+            (page.len() as u16).try_into().unwrap(),
+            commonware_utils::NZUsize!(4),
+        );
+        let mut writer = Writer::new(raw.clone(), size, 2 * page.len(), cache)
+            .await
+            .unwrap();
+        writer.append(page).await.unwrap();
+        writer.sync().await.unwrap();
+        let acknowledged = raw
+            .read_at(0, physical, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+
+        // The empty tip and page-aligned direct append issue one unsynced write wholly beyond
+        // the acknowledged page. The same-open raw clone observes exactly those submitted bytes.
+        writer
+            .append_owned(page.repeat(suffix_pages).into())
+            .await
+            .unwrap();
+        let mut image = raw
+            .read_at(0, physical * (suffix_pages + 1), ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce()
+            .as_ref()
+            .to_vec();
+        assert_eq!(&image[..physical], acknowledged.as_ref());
+        drop(writer);
+        drop(raw);
+        for page_index in 1..=suffix_pages {
+            let footer = page_index * physical + page.len();
+            image[footer..footer + 2].fill(0);
+            image[footer + 6..footer + 8].fill(0);
+        }
+        let (blob, _) = context
+            .open(partition, &section.to_be_bytes())
+            .await
+            .unwrap();
+        blob.write_at(0, image, WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
 
     impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         pub fn test_configuration(&self) -> (E, String, F) {
@@ -630,6 +691,7 @@ mod tests {
     struct TestFactory {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
+        on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
     struct TestBuffer<B: Blob> {
@@ -637,6 +699,15 @@ mod tests {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
         syncing: Option<SharedSync>,
+        on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+
+    impl<B: Blob> Drop for TestBuffer<B> {
+        fn drop(&mut self) {
+            if let Some(on_drop) = &self.on_drop {
+                on_drop();
+            }
+        }
     }
 
     impl<B: Blob> SectionBuffer for TestBuffer<B> {
@@ -686,6 +757,7 @@ mod tests {
                 pending: self.pending.clone(),
                 wait_for_syncs: self.wait_for_syncs.clone(),
                 syncing: None,
+                on_drop: self.on_drop.clone(),
             })
         }
     }
@@ -696,7 +768,60 @@ mod tests {
             factory: TestFactory {
                 pending,
                 wait_for_syncs,
+                on_drop: None,
             },
+        }
+    }
+
+    #[test]
+    fn test_cleanup_drops_each_owner_after_removal() {
+        for operation in [
+            "prune",
+            "remove_section",
+            "destroy",
+            "clear",
+            "truncate_pending",
+        ] {
+            deterministic::Runner::default().start(|context| async move {
+                let drops = Arc::new(Mutex::new(Vec::new()));
+                let observed = drops.clone();
+                let observer = context.child("drop_observer");
+                let mut cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+                cfg.factory.on_drop = Some(Arc::new(move || {
+                    // Deterministic namespace reads complete on their first poll.
+                    let names = observer.scan("test").now_or_never().and_then(Result::ok);
+                    observed.lock().push(names);
+                }));
+                let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+                manager.get_or_create(1).await.unwrap();
+                manager.get_or_create(2).await.unwrap();
+
+                match operation {
+                    "prune" => assert!(manager.prune(3).await.unwrap()),
+                    "remove_section" => {
+                        assert!(manager.remove_section(1).await.unwrap());
+                        assert!(manager.remove_section(2).await.unwrap());
+                    }
+                    "destroy" => manager.destroy().await.unwrap(),
+                    "clear" => manager.clear().await.unwrap(),
+                    "truncate_pending" => manager.truncate_pending(0, 0).await.unwrap(),
+                    _ => unreachable!(),
+                }
+
+                let remaining = if operation == "truncate_pending" {
+                    1u64
+                } else {
+                    2u64
+                };
+                assert_eq!(
+                    *drops.lock(),
+                    vec![
+                        Some(vec![remaining.to_be_bytes().to_vec()]),
+                        Some(Vec::new())
+                    ],
+                    "{operation}",
+                );
+            });
         }
     }
 
