@@ -46,8 +46,8 @@ pub enum ExpectedCommitment<C> {
 pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
     ///
-    /// Clones must share the block payload. Must be convertible to `StoredBlock`
-    /// via `Into` for archival without copying the payload.
+    /// Cloning must share the block payload, and conversion to [`Self::StoredBlock`]
+    /// must not copy it.
     type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
         + Into<Self::StoredBlock>;
 
