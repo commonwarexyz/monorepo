@@ -66,11 +66,14 @@ impl Input for Vec<u8> {
     type Buf = Bytes;
 }
 
-/// Explicitly decodes from a borrowed slice, copying any retained byte fields.
+/// An adapter for decoding from a borrowed byte slice.
 ///
-/// Construction does not allocate or copy. Reads of scalar values or byte arrays consume
-/// the slice directly, so scratch buffers can be reused without allocating. Decoded [`Bytes`]
-/// fields allocate and copy their contents.
+/// Construction does not copy or allocate. Scalar and byte-array reads consume the slice
+/// directly without allocating, so scratch buffers can be reused.
+///
+/// The copying applies to fields that retain input bytes, such as [`Bytes`]. These fields
+/// copy their contents into owned storage so they can outlive the borrow. To share an existing
+/// allocation, pass an owned [`Bytes`] or [`BytesMut`] directly to the decoder.
 ///
 /// # Examples
 ///
@@ -83,6 +86,19 @@ impl Input for Vec<u8> {
 /// let mut input = Copying(&scratch);
 /// assert_eq!(u32::read(&mut input).unwrap(), 7);
 /// assert!(input.0.is_empty());
+/// ```
+///
+/// A retained [`Bytes`] value owns its contents after the scratch buffer is dropped:
+///
+/// ```
+/// use bytes::Bytes;
+/// use commonware_codec::{Copying, Decode};
+///
+/// let value = {
+///     let scratch = *b"\x05hello";
+///     Bytes::decode_cfg(Copying(&scratch), &(..).into()).unwrap()
+/// };
+/// assert_eq!(value, b"hello"[..]);
 /// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Copying<'a>(
