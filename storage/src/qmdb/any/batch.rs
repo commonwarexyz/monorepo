@@ -17,6 +17,7 @@ use crate::{
         },
         batch_chain::{self, Bounds, Commitment},
         bitmap::Shared,
+        compaction::{CompactionBudget, CompactionResult},
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -44,7 +45,7 @@ type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
 /// Floor-raise candidates prefetched from the committed prefix of the raise's candidate
 /// source, with their resolved operations. The candidate sequence depends only on the base
 /// floor and that source, so a staged merkleize reads it before its serial bookkeeping
-/// runs. `finish` drains this buffer, then resumes the live scan at `next_scan`, producing
+/// runs. Compaction drains this buffer, then resumes the live scan at `next_scan`, producing
 /// exactly the sequence the live scan alone would have.
 pub(crate) struct PrefetchedCandidates<F: Family, U: update::Update>
 where
@@ -346,7 +347,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     /// Total active keys after this batch.
     pub(crate) total_active_keys: usize,
 
-    /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
+    /// Arc refs to each ancestor's diff, collected during finalization while ancestors are
     /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
     /// 1:1 with `bounds.ancestors` (same length, same ordering).
     pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
@@ -381,6 +382,31 @@ where
     db_state: Commitment<F, H::Digest>,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
+}
+
+/// Resolved user operations awaiting optional compaction and finalization.
+///
+/// Created by `UnmerkleizedBatch::prepare`. Call [`Self::compact`] zero
+/// or more times, then [`Self::merkleize`] to append one CommitFloor and compute the root.
+/// No automatic compaction occurs on this path. All rounds share the original scan tip.
+/// The database must retain the same root between preparation and finalization; a change
+/// is rejected with [`crate::qmdb::Error::StaleBatch`]. An error consumes the prepared batch.
+pub struct PreparedBatch<F: Family, H, U, S: Strategy>
+where
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    merkleizer: Merkleizer<F, H, U, S>,
+    ops: Vec<Operation<F, U>>,
+    diff: DiffVec<U::Key, F, U::Value>,
+    superseded_locs: Vec<Location<F>>,
+    floor_diff: DiffVec<U::Key, F, U::Value>,
+    total_active_keys: usize,
+    user_steps: u64,
+    floor: Location<F>,
+    fixed_tip: u64,
+    db_root: H::Digest,
 }
 
 /// Look up a key in the ancestor chain (immediate parent first).
@@ -930,46 +956,137 @@ where
         });
         creates
     }
+}
 
-    /// Shared final phases of merkleization: floor raise, CommitFloor, journal
-    /// merkleize, diff merge, and `MerkleizedBatch` construction.
-    ///
-    /// `diff` may arrive in any order: it is key-sorted on the strategy pool, overlapping the
-    /// first floor-raise candidate read. `superseded_locs` holds the committed locations
-    /// superseded by `diff` (every `Some` `base_old_loc`), in any order. The floor raise
-    /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
-    /// caller gathered and read ahead of time, consumed by the raise before scanning live.
-    #[allow(clippy::too_many_arguments)]
-    async fn finish<E, C, I, const N: usize>(
-        self,
-        mut ops: Vec<Operation<F, U>>,
-        mut diff: DiffVec<U::Key, F, U::Value>,
-        mut superseded_locs: Vec<Location<F>>,
+impl<F: Family, H, U, S: Strategy> PreparedBatch<F, H, U, S>
+where
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    fn new(
+        merkleizer: Merkleizer<F, H, U, S>,
+        ops: Vec<Operation<F, U>>,
+        diff: DiffVec<U::Key, F, U::Value>,
+        superseded_locs: Vec<Location<F>>,
         active_keys_delta: isize,
         user_steps: u64,
-        metadata: Option<U::Value>,
-        mut prefetched: Option<PrefetchedCandidates<F, U>>,
-        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+        db_root: H::Digest,
+    ) -> Self {
+        let total_active_keys = merkleizer
+            .base_active_keys
+            .checked_add_signed(active_keys_delta)
+            .expect("active_keys overflow");
+        let fixed_tip = *merkleizer.base_state.size + ops.len() as u64;
+        let floor = if total_active_keys == 0 {
+            let floor = Location::new(fixed_tip);
+            debug!(tip = ?floor, "db is empty, raising floor to tip");
+            floor
+        } else {
+            merkleizer.base_inactivity_floor_loc
+        };
+        Self {
+            merkleizer,
+            ops,
+            diff,
+            superseded_locs,
+            floor_diff: Vec::new(),
+            total_active_keys,
+            user_steps,
+            floor,
+            fixed_tip,
+            db_root,
+        }
+    }
+
+    /// Default per-commit move allowance (`user_steps + 1`), with no scan limit.
+    ///
+    /// The extra move accounts for the previous CommitFloor becoming inactive. Calling
+    /// `compact` multiple times does not add further implicit allowances.
+    pub const fn default_compaction_budget(&self) -> CompactionBudget {
+        CompactionBudget {
+            max_moves: self.user_steps + 1,
+            max_scan: u64::MAX,
+        }
+    }
+
+    /// Return the current inactivity floor.
+    pub const fn inactivity_floor(&self) -> Location<F> {
+        self.floor
+    }
+
+    /// Compact at most the supplied move and scan allowances, returning the batch and progress.
+    ///
+    /// The scan resumes across calls. Entries moved in earlier rounds are outside the fixed
+    /// scan interval. Scanned inactive gaps advance the floor even if no entries were moved,
+    /// preserving progress across commits. Zero in either budget field makes this a no-op.
+    pub async fn compact<E, C, I, const N: usize>(
+        self,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
+        budget: CompactionBudget,
+    ) -> Result<(Self, CompactionResult<F>), crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        // Floor raise.
-        // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
-        let total_steps = user_steps + 1;
-        let total_active_keys = self.base_active_keys as isize + active_keys_delta;
-        let mut floor = self.base_inactivity_floor_loc;
+        self.compact_with_floor_scan(db, budget, None, |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
+        })
+        .await
+    }
 
+    pub(crate) async fn compact_with_floor_scan<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+        budget: CompactionBudget,
+        mut prefetched: Option<PrefetchedCandidates<F, U>>,
+        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+    ) -> Result<(Self, CompactionResult<F>), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        if db.root() != self.db_root {
+            return Err(crate::qmdb::Error::StaleBatch);
+        }
+        if budget.max_moves == 0 || budget.max_scan == 0 || *self.floor >= self.fixed_tip {
+            let result = CompactionResult {
+                moved: 0,
+                scanned: 0,
+                floor: self.floor,
+                exhausted: *self.floor >= self.fixed_tip,
+            };
+            return Ok((self, result));
+        }
+        let Self {
+            merkleizer: m,
+            mut ops,
+            mut diff,
+            mut superseded_locs,
+            mut floor_diff,
+            total_active_keys,
+            user_steps,
+            mut floor,
+            fixed_tip,
+            db_root,
+        } = self;
+        let total_steps = budget.max_moves;
+        let mut scan_from = floor;
+        let scan_start = *scan_from;
+        let round_tip = fixed_tip.min(scan_start.saturating_add(budget.max_scan));
+        let reserve = total_steps
+            .min(total_active_keys as u64)
+            .min(round_tip - scan_start) as usize;
+        let mut moved = 0u64;
         // Key-sort the diff as one job on the strategy: candidate classification (after the
         // first floor-raise read below) is the earliest consumer that needs it sorted, so the
         // sort overlaps the candidate gathering and read instead of the calling task. An
         // empty diff is already sorted and skips the job. While the job runs, `diff` is
         // empty. It is replaced by the sorted diff at the first `diff_sort` await.
         let mut diff_sort = None;
-        if !diff.is_empty() {
+        if !diff.is_sorted_by(|a, b| a.0 < b.0) {
             let unsorted = mem::take(&mut diff);
             diff_sort = Some(db.strategy().spawn(unsorted.len(), move |strategy| {
                 let mut diff = unsorted;
@@ -978,16 +1095,12 @@ where
             }));
         }
 
-        // New diff entries for keys moved by the floor raise, merged into `diff` below.
-        let mut floor_diff = Vec::new();
+        // New diff entries for keys moved by the floor raise, merged during finalization.
         if total_active_keys > 0 {
             // Floor raise: advance the inactivity floor by `total_steps` active operations.
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let strategy = db.strategy();
-            let fixed_tip = *self.base_state.size + ops.len() as u64;
-            let mut moved = 0u64;
-            let mut scan_from = floor;
-            floor_diff.reserve(total_steps as usize);
+            floor_diff.reserve(reserve);
 
             // Locations are unique (each committed location belongs to exactly one key), so a
             // presorted collection needs neither the sort nor the dedup.
@@ -998,18 +1111,20 @@ where
 
             // The raise appends at most `total_steps` moved ops plus the CommitFloor. Reserve
             // once instead of growing mid-loop.
-            ops.reserve(total_steps as usize + 1);
+            ops.reserve(reserve.saturating_add(1));
 
             // `fill_candidates` yields ascending locations, so superseded checks advance a
             // monotonic cursor.
             let mut superseded_cursor = 0;
 
             // Scan active operations in `[floor, fixed_tip)` and move them to the tip.
-            while moved < total_steps {
+            while moved < total_steps && *scan_from < round_tip {
                 // Collect candidates, capped by the number of active ops still needed.
                 // `scan_from` tracks prefetch progress separately from `floor`, so
                 // early exit cannot leave `floor` past unprocessed candidates.
-                let limit = (total_steps - moved) as usize;
+                let limit = (total_steps - moved)
+                    .min(total_active_keys as u64)
+                    .min(round_tip - *scan_from) as usize;
 
                 // Consume the prefetched committed prefix whole: it was gathered from the
                 // same floor with the same bitmap, so it is a prefix of the sequence the
@@ -1027,7 +1142,7 @@ where
                 if candidates.len() < limit {
                     scan_from = fill_candidates(
                         scan_from,
-                        fixed_tip,
+                        round_tip,
                         limit - candidates.len(),
                         &mut candidates,
                     );
@@ -1066,7 +1181,7 @@ where
                     let live = &read_candidates[pf_count..];
                     let mut resolved = pf_shards;
                     if !live.is_empty() {
-                        resolved.extend(self.read_ops_sharded(live, &ops, &db.log).await?);
+                        resolved.extend(m.read_ops_sharded(live, &ops, &db.log).await?);
                     }
 
                     // Classification is the first consumer of the sorted diff. By now the
@@ -1095,7 +1210,7 @@ where
                                     FloorOutcome::Inactive
                                 }
                             }
-                            Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
+                            Err(_) => resolve_in_ancestors(&m.ancestors, key).map_or_else(
                                 || {
                                     if db.snapshot.get(key).any(|&l| l == candidate) {
                                         FloorOutcome::MoveNew {
@@ -1142,7 +1257,7 @@ where
                     match outcome {
                         FloorOutcome::Inactive => continue,
                         FloorOutcome::MoveExisting { idx, base_old_loc } => {
-                            let new_loc = self.base_state.size + ops.len() as u64;
+                            let new_loc = m.base_state.size + ops.len() as u64;
                             let value = extract_update_value(&op);
                             ops.push(op);
                             diff[idx].1 = DiffEntry::Active {
@@ -1153,7 +1268,7 @@ where
                         }
                         FloorOutcome::MoveNew { base_old_loc } => {
                             let key = op.key().cloned().expect("moved op has a key");
-                            let new_loc = self.base_state.size + ops.len() as u64;
+                            let new_loc = m.base_state.size + ops.len() as u64;
                             let value = extract_update_value(&op);
                             ops.push(op);
                             floor_diff.push((
@@ -1172,10 +1287,6 @@ where
                     }
                 }
             }
-        } else {
-            // DB is empty after this batch; raise floor to tip.
-            floor = self.base_state.size + ops.len() as u64;
-            debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
 
         // The floor raise may have exited without classifying any candidate (or been skipped
@@ -1184,6 +1295,69 @@ where
             diff = job.await;
         }
 
+        if moved < total_steps {
+            // All fetched candidates were processed; retain progress through trailing inactive
+            // gaps so a scan-limited commit does not restart from the same gap next time.
+            floor = scan_from;
+        }
+        let result = CompactionResult {
+            moved,
+            scanned: *floor - scan_start,
+            floor,
+            exhausted: *floor >= fixed_tip,
+        };
+        Ok((
+            Self {
+                merkleizer: m,
+                ops,
+                diff,
+                superseded_locs,
+                floor_diff,
+                total_active_keys,
+                user_steps,
+                floor,
+                fixed_tip,
+                db_root,
+            },
+            result,
+        ))
+    }
+
+    /// Append one CommitFloor and compute the root, without performing further compaction.
+    ///
+    /// An empty post-state always has its floor at the commit location, even when no
+    /// compaction was requested. This requires no bitmap scan or entry moves.
+    pub async fn merkleize<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+        metadata: Option<U::Value>,
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        if db.root() != self.db_root {
+            return Err(crate::qmdb::Error::StaleBatch);
+        }
+        let Self {
+            merkleizer: m,
+            mut ops,
+            mut diff,
+            floor_diff,
+            total_active_keys,
+            floor,
+            ..
+        } = self;
+        if !diff.is_sorted_by(|a, b| a.0 < b.0) {
+            diff = db
+                .strategy()
+                .spawn(diff.len(), move |strategy| {
+                    strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+                    diff
+                })
+                .await;
+        }
         // Merge the floor raise's new diff entries as one job on the strategy: nothing below
         // reads `diff` until after the journal merkleization, so the merge overlaps the
         // hashing instead of the calling task. `floor_diff` only accumulates keys that were
@@ -1204,7 +1378,7 @@ where
         }
 
         // CommitFloor operation.
-        let commit_loc = self.base_state.size + ops.len() as u64;
+        let commit_loc = m.base_state.size + ops.len() as u64;
         ops.push(Operation::CommitFloor(metadata, floor));
 
         // Merkleize the journal batch.
@@ -1212,14 +1386,14 @@ where
         // parent already contains all prior batches' Merkle state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
-        let leaves = self.base_state.size + ops.len() as u64;
+        let leaves = m.base_state.size + ops.len() as u64;
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
         // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .log
-            .merkleize(self.journal_batch, ops, inactive_peaks)
+            .merkleize(m.journal_batch, ops, inactive_peaks)
             .await?;
         if let Some(job) = diff_merge.take() {
             diff = job.await;
@@ -1229,22 +1403,18 @@ where
         // was originally created. If an older committed prefix has since dropped out of the Weak
         // chain, resolve keys touched on both sides of that boundary to their location after the
         // dropped prefix. Keeping only the intersection avoids retaining the prefix's value diffs.
-        let ancestor_base_locs = self.ancestors.last().map_or_else(Vec::new, |oldest| {
+        let ancestor_base_locs = m.ancestors.last().map_or_else(Vec::new, |oldest| {
             if oldest.ancestor_diffs.iter().all(|diff| diff.is_empty()) {
                 return Vec::new();
             }
             let mut dropped =
                 DiffCursors::new(oldest.ancestor_diffs.iter().map(|diff| diff.as_slice()));
-            DiffMerge::new(
-                self.ancestors
-                    .iter()
-                    .map(|ancestor| ancestor.diff.as_slice()),
-            )
-            .filter_map(|(key, _)| dropped.resolve(key).map(|entry| (key.clone(), entry.loc())))
-            .collect()
+            DiffMerge::new(m.ancestors.iter().map(|ancestor| ancestor.diff.as_slice()))
+                .filter_map(|(key, _)| dropped.resolve(key).map(|entry| (key.clone(), entry.loc())))
+                .collect()
         });
-        let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
-        let ancestors: Vec<_> = self
+        let ancestor_diffs: Vec<_> = m.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
+        let ancestors: Vec<_> = m
             .ancestors
             .iter()
             .map(|a| batch_chain::AncestorBounds {
@@ -1253,17 +1423,16 @@ where
             })
             .collect();
 
-        assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
-            parent: self.ancestors.first().map(Arc::downgrade),
-            total_active_keys: total_active_keys as usize,
+            parent: m.ancestors.first().map(Arc::downgrade),
+            total_active_keys,
             ancestor_diffs,
             ancestor_base_locs,
             bounds: batch_chain::Bounds {
-                base: self.base_state,
-                db: self.db_state,
+                base: m.base_state,
+                db: m.db_state,
                 tip: Commitment::new(commit_loc + 1, root),
                 ancestors,
                 inactivity_floor: floor,
@@ -1959,6 +2128,39 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let prepared = self.prepare_with_updates(db, staged_updates).await?;
+        let budget = prepared.default_compaction_budget();
+        let (prepared, _) = prepared
+            .compact_with_floor_scan(db, budget, prefetched, fill_candidates)
+            .await?;
+        prepared.merkleize(db, metadata).await
+    }
+
+    /// Resolve user mutations without automatically compacting or appending CommitFloor.
+    ///
+    /// Use the returned batch to choose compaction budgets and the number of rounds.
+    pub async fn prepare<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> Result<PreparedBatch<F, H, update::Unordered<K, V>, S>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        self.prepare_with_updates(db, Vec::new()).await
+    }
+
+    async fn prepare_with_updates<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
+    ) -> Result<PreparedBatch<F, H, update::Unordered<K, V>, S>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys.
@@ -1973,7 +2175,7 @@ where
 
         // Committed locations superseded by this batch, collected for the floor raise (which
         // skips re-reading them). Emission order is ascending in `base_old_loc` except for
-        // entries resolved through ancestor diffs, so `finish` usually skips its sort.
+        // entries resolved through ancestor diffs, so compaction usually skips its sort.
         let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(diff.capacity());
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
@@ -2100,19 +2302,15 @@ where
             active_keys_delta += 1;
         }
 
-        // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(
+        Ok(PreparedBatch::new(
+            m,
             ops,
             diff,
             superseded_locs,
             active_keys_delta,
             user_steps,
-            metadata,
-            prefetched,
-            fill_candidates,
-            db,
-        )
-        .await
+            db.root(),
+        ))
     }
 }
 
@@ -2169,6 +2367,39 @@ where
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        let prepared = self.prepare_with_updates(db, staged_updates).await?;
+        let budget = prepared.default_compaction_budget();
+        let (prepared, _) = prepared
+            .compact_with_floor_scan(db, budget, None, fill_candidates)
+            .await?;
+        prepared.merkleize(db, metadata).await
+    }
+
+    /// Resolve user mutations without automatically compacting or appending CommitFloor.
+    ///
+    /// Use the returned batch to choose compaction budgets and the number of rounds.
+    pub async fn prepare<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<PreparedBatch<F, H, update::Ordered<K, V>, S>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        self.prepare_with_updates(db, Vec::new()).await
+    }
+
+    async fn prepare_with_updates<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
+    ) -> Result<PreparedBatch<F, H, update::Ordered<K, V>, S>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -2540,26 +2771,22 @@ where
             }
         }
 
-        // Committed locations superseded by this batch, for the floor raise (`finish` sorts
+        // Committed locations superseded by this batch, for the floor raise (compaction sorts
         // the diff itself).
         let superseded_locs: Vec<_> = diff
             .iter()
             .filter_map(|(_, entry)| entry.base_old_loc())
             .collect();
 
-        // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(
+        Ok(PreparedBatch::new(
+            m,
             ops,
             diff,
             superseded_locs,
             active_keys_delta,
             user_steps,
-            metadata,
-            None,
-            fill_candidates,
-            db,
-        )
-        .await
+            db.root(),
+        ))
     }
 }
 

@@ -20,6 +20,7 @@ use crate::{
         },
         batch_chain::Bounds,
         bitmap::{Shared, fill_from},
+        compaction::{CompactionBudget, CompactionResult},
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -272,6 +273,98 @@ where
 
     /// Parent's bitmap state (COW, Arc-based).
     bitmap_parent: BitmapBatch<N>,
+}
+
+/// Resolved operations with explicit control over compaction before finalization.
+///
+/// Call `UnmerkleizedBatch::prepare`, then [`Self::compact`] zero or more
+/// times before [`Self::merkleize`]. All rounds share one scan tip and emit one final CommitFloor.
+/// The database must retain the same root throughout; a change returns [`Error::StaleBatch`].
+pub struct PreparedBatch<F, H, U, const N: usize, S: Strategy>
+where
+    F: Graftable,
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    inner: any::batch::PreparedBatch<F, H, U, S>,
+    grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
+    bitmap_parent: BitmapBatch<N>,
+}
+
+impl<F, H, U, const N: usize, S: Strategy> PreparedBatch<F, H, U, N, S>
+where
+    F: Graftable,
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Default per-commit move allowance, with no scan limit.
+    pub const fn default_compaction_budget(&self) -> CompactionBudget {
+        self.inner.default_compaction_budget()
+    }
+
+    /// Return the current inactivity floor.
+    pub const fn inactivity_floor(&self) -> Location<F> {
+        self.inner.inactivity_floor()
+    }
+
+    /// Run one bounded compaction round and return the batch and progress.
+    ///
+    /// Zero in either budget field disables the round. Later calls resume the scan without
+    /// revisiting moved entries. Errors consume the prepared batch.
+    pub async fn compact<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+        budget: CompactionBudget,
+    ) -> Result<(Self, CompactionResult<F>), Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let (inner, result) = inner
+            .compact_with_floor_scan(&db.any, budget, None, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
+        Ok((
+            Self {
+                inner,
+                grafted_parent,
+                bitmap_parent,
+            },
+            result,
+        ))
+    }
+
+    /// Append one CommitFloor and compute the root, without additional compaction.
+    ///
+    /// Empty post-states place the floor at the commit location without scanning or moving.
+    #[allow(clippy::type_complexity)]
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+        metadata: Option<U::Value>,
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let inner = inner.merkleize(&db.any, metadata).await?;
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+    }
 }
 
 /// Staged batch returned by [`UnmerkleizedBatch::stage`].
@@ -639,6 +732,31 @@ where
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
+
+    /// Resolve user operations without automatic compaction or finalization.
+    ///
+    /// Compact the returned batch zero or more times, then call its `merkleize` method.
+    pub async fn prepare<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> Result<PreparedBatch<F, H, update::Unordered<K, V>, N, S>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let inner = inner.prepare(&db.any).await?;
+        Ok(PreparedBatch {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        })
+    }
 }
 
 // Ordered merkleize.
@@ -682,6 +800,31 @@ where
             )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+    }
+
+    /// Resolve user operations without automatic compaction or finalization.
+    ///
+    /// Compact the returned batch zero or more times, then call its `merkleize` method.
+    pub async fn prepare<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<PreparedBatch<F, H, update::Ordered<K, V>, N, S>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        let inner = inner.prepare(&db.any).await?;
+        Ok(PreparedBatch {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        })
     }
 }
 
