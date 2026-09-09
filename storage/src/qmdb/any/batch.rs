@@ -13,7 +13,7 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key},
+            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
         },
         batch_chain::{self, Bounds, Commitment},
         bitmap::Shared,
@@ -59,10 +59,9 @@ where
     next_scan: Location<F>,
 }
 
-/// Sorted `(key, (value, loc))` vec consulted by `find_prev_key` to find the predecessor
-/// of a given key during ordered merkleization. The value is `None` for staged-resolved
-/// keys: the predecessor-rewrite loop only reads a value for keys outside this batch's
-/// mutations, and staged-resolved keys are always in `updated`.
+/// Sorted `(key, (value, loc))` vec consulted by `find_prev_key_mut` during ordered merkleization.
+/// Values are `None` for staged-resolved keys (skipped as updates) and for predecessors whose
+/// values have already been consumed by a rewrite. Candidate keys remain unchanged.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
 /// Where a staged read resolved: in the committed snapshot, or in an uncommitted
@@ -2181,7 +2180,7 @@ where
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
         // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
-        // before `find_next_key` / `find_prev_key` binary-search them.
+        // before `find_next_key` / `find_prev_key_mut` binary-search them.
         let mut next_candidates: Vec<K> = Vec::new();
         let mut prev_candidates: PrevCandidates<K, F, V::Value> = Vec::new();
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
@@ -2334,8 +2333,8 @@ where
             0
         };
         let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
-        let mut ancestor_deleted: Vec<K> = Vec::new();
-        let mut ancestor_active: Vec<(&K, &V::Value, Location<F>)> = Vec::new();
+        let mut ancestor_deleted: Vec<&K> = Vec::new();
+        let mut ancestor_locs: Vec<Location<F>> = Vec::new();
         for batch in m.ancestors.iter() {
             let (mut ui, mut ci, mut di) = (0, 0, 0);
             for (key, entry) in batch.diff.iter() {
@@ -2359,11 +2358,11 @@ where
                     continue;
                 }
                 match entry {
-                    DiffEntry::Active { value, loc, .. } => {
-                        ancestor_active.push((key, value, *loc));
+                    DiffEntry::Active { loc, .. } => {
+                        ancestor_locs.push(*loc);
                     }
                     DiffEntry::Deleted { .. } => {
-                        ancestor_deleted.push(key.clone());
+                        ancestor_deleted.push(key);
                     }
                 }
             }
@@ -2372,24 +2371,22 @@ where
         ancestor_deleted.dedup();
 
         // Batch-read the collected active entries' ops and emit their candidates.
-        let ancestor_locs: Vec<Location<F>> =
-            ancestor_active.iter().map(|&(_, _, loc)| loc).collect();
-        for (op, (key, value, loc)) in m
+        for (op, loc) in m
             .read_ops(&ancestor_locs, &[], &db.log)
             .await?
             .into_iter()
-            .zip(ancestor_active)
+            .zip(ancestor_locs)
         {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("ancestor diff Active should reference Update op"),
             };
-            next_candidates.push(key.clone());
+            next_candidates.push(data.key.clone());
             next_candidates.push(data.next_key);
-            prev_candidates.push((key.clone(), (Some(value.clone()), loc)));
+            prev_candidates.push((data.key, (Some(data.value), loc)));
         }
 
-        // Sort + dedup candidate sets now so find_next_key/find_prev_key can binary-search.
+        // Sort + dedup candidate sets now so find_next_key/find_prev_key_mut can binary-search.
         db.strategy().sort_by(&mut next_candidates, |a, b| a.cmp(b));
         next_candidates.dedup();
         // For `prev_candidates`, duplicates can occur when the same key is pushed from multiple
@@ -2412,7 +2409,7 @@ where
         // base DB lookup may have added.
         let is_deleted = |k: &K| -> bool {
             deleted.binary_search_by(|(dk, _)| dk.cmp(k)).is_ok()
-                || (ancestor_deleted.binary_search(k).is_ok()
+                || (ancestor_deleted.binary_search(&k).is_ok()
                     && created.binary_search_by(|(ck, _, _)| ck.cmp(k)).is_err())
         };
         next_candidates.retain(|k| !is_deleted(k));
@@ -2428,24 +2425,26 @@ where
 
         // Process deletes.
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
-        for (key, old_loc) in &deleted {
+        for (key, old_loc) in deleted {
             ops.push(Operation::Delete(key.clone()));
 
             let base_old_loc = ancestors
-                .resolve(key)
-                .map_or(Some(*old_loc), DiffEntry::base_old_loc);
+                .resolve(&key)
+                .map_or(Some(old_loc), DiffEntry::base_old_loc);
 
-            diff.push((key.clone(), DiffEntry::Deleted { base_old_loc }));
+            diff.push((key, DiffEntry::Deleted { base_old_loc }));
             active_keys_delta -= 1;
             user_steps += 1;
         }
+        let deleted_range = 0..diff.len();
 
         // Process updates of existing keys.
+        let updated_range = diff.len()..diff.len() + updated.len();
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut next_idx = 0;
-        for (key, value, old_loc) in &updated {
+        for (key, value, old_loc) in updated {
             let new_loc = m.base_state.size + ops.len() as u64;
-            let next_key = find_next_key_ascending(key, &next_candidates, &mut next_idx);
+            let next_key = find_next_key_ascending(&key, &next_candidates, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
                 value: value.clone(),
@@ -2453,13 +2452,13 @@ where
             }));
 
             let base_old_loc = ancestors
-                .resolve(key)
-                .map_or(Some(*old_loc), DiffEntry::base_old_loc);
+                .resolve(&key)
+                .map_or(Some(old_loc), DiffEntry::base_old_loc);
 
             diff.push((
-                key.clone(),
+                key,
                 DiffEntry::Active {
-                    value: value.clone(),
+                    value,
                     loc: new_loc,
                     base_old_loc,
                 },
@@ -2468,21 +2467,22 @@ where
         }
 
         // Process creates.
+        let created_range = diff.len()..diff.len() + created.len();
         let mut next_idx = 0;
-        for (key, value, base_old_loc) in &created {
+        for (key, value, base_old_loc) in created {
             let new_loc = m.base_state.size + ops.len() as u64;
-            let next_key = find_next_key_ascending(key, &next_candidates, &mut next_idx);
+            let next_key = find_next_key_ascending(&key, &next_candidates, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
                 value: value.clone(),
                 next_key,
             }));
             diff.push((
-                key.clone(),
+                key,
                 DiffEntry::Active {
-                    value: value.clone(),
+                    value,
                     loc: new_loc,
-                    base_old_loc: *base_old_loc,
+                    base_old_loc,
                 },
             ));
             active_keys_delta += 1;
@@ -2490,33 +2490,27 @@ where
 
         // Update predecessors of created and deleted keys.
         if !prev_candidates.is_empty() {
-            // Safe to use a HashSet here since we don't rely on iteration order.
-            let mut rewritten_predecessors = AHashSet::with_capacity(created.len() + deleted.len());
-            for key in created
-                .iter()
-                .map(|(k, _, _)| k)
-                .chain(deleted.iter().map(|(k, _)| k))
-            {
-                let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &prev_candidates);
+            // The emitted mutation groups are individually key-sorted. Their ranges stay
+            // fixed as predecessor rewrites are appended to the diff.
+            let mutation_ranges = [deleted_range.clone(), updated_range, created_range.clone()];
+            for idx in created_range.chain(deleted_range) {
+                let key = &diff[idx].0;
+                let (prev_key, (prev_value, prev_loc)) =
+                    find_prev_key_mut(key, &mut prev_candidates);
 
-                if deleted.binary_search_by(|(k, _)| k.cmp(prev_key)).is_ok()
-                    || updated
-                        .binary_search_by(|(k, _, _)| k.cmp(prev_key))
-                        .is_ok()
-                    || created
-                        .binary_search_by(|(k, _, _)| k.cmp(prev_key))
-                        .is_ok()
+                if mutation_ranges
+                    .iter()
+                    .any(|range| lookup_sorted(&diff[range.clone()], prev_key).is_some())
                 {
                     continue;
                 }
 
-                if !rewritten_predecessors.insert(prev_key.clone()) {
+                // Mutation keys, including staged keys without values, were skipped above.
+                // Taking the value ensures a shared predecessor is rewritten only once.
+                let Some(prev_value) = prev_value.take() else {
                     continue;
-                }
+                };
 
-                let prev_value = prev_value
-                    .as_ref()
-                    .expect("staged-resolved keys are skipped as updated");
                 let prev_new_loc = m.base_state.size + ops.len() as u64;
                 let prev_next_key = find_next_key(prev_key, &next_candidates);
                 ops.push(Operation::Update(update::Ordered {
@@ -2531,7 +2525,7 @@ where
                 diff.push((
                     prev_key.clone(),
                     DiffEntry::Active {
-                        value: prev_value.clone(),
+                        value: prev_value,
                         loc: prev_new_loc,
                         base_old_loc: prev_base_old_loc,
                     },
@@ -5428,7 +5422,7 @@ mod tests {
     /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
     /// the deleted key's stale committed location into the loop. The guard skips the stale
     /// entry, and it must do so before the candidate pushes: a stale prev-candidate makes
-    /// `find_prev_key`'s wrap-around land on the deleted key, whose rewrite is then skipped
+    /// `find_prev_key_mut`'s wrap-around land on the deleted key, whose rewrite is then skipped
     /// as batch-created, and the true predecessor's rewrite is emitted at a different stream
     /// position than on the committed path, so the roots diverge with identical key-value
     /// data.
