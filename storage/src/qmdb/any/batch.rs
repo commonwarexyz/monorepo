@@ -2511,6 +2511,8 @@ where
                     continue;
                 };
 
+                // Preserve the ordered links across creates and deletes by rewriting the
+                // predecessor with its existing value and its successor in the final key set.
                 let prev_new_loc = m.base_state.size + ops.len() as u64;
                 let prev_next_key = find_next_key(prev_key, &next_candidates);
                 ops.push(Operation::Update(update::Ordered {
