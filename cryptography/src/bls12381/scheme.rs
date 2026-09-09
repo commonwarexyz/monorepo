@@ -60,7 +60,7 @@ const CURVE_NAME: &str = "bls12381";
 /// Both fields remain immutable and occupy the same protected value after hardening.
 #[derive(Clone)]
 struct PrivateValue {
-    raw: Zeroizing<[u8; group::PRIVATE_KEY_LENGTH]>,
+    raw: [u8; group::PRIVATE_KEY_LENGTH],
     scalar: Scalar,
 }
 
@@ -82,7 +82,7 @@ impl PrivateKey {
     fn new(scalar: Scalar) -> Self {
         Self {
             key: Secret::new(PrivateValue {
-                raw: scalar.as_slice(),
+                raw: *scalar.as_slice(),
                 scalar,
             }),
         }
@@ -123,7 +123,7 @@ impl Read for PrivateKey {
         let scalar = Scalar::decode_cfg(raw.as_ref(), &ScalarReadCfg::RejectZero)
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self {
-            key: Secret::new(PrivateValue { raw, scalar }),
+            key: Secret::new(PrivateValue { raw: *raw, scalar }),
         })
     }
 }

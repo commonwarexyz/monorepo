@@ -25,7 +25,7 @@ pub const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
 /// Both fields remain immutable and occupy the same protected value after hardening.
 #[derive(Clone)]
 struct SigningValue {
-    raw: Zeroizing<[u8; PRIVATE_KEY_LENGTH]>,
+    raw: [u8; PRIVATE_KEY_LENGTH],
     key: SigningKey,
 }
 
@@ -47,13 +47,13 @@ impl Eq for PrivateKeyInner {}
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
         let bytes = Zeroizing::new(key.to_bytes());
-        let mut raw = Zeroizing::new([0u8; PRIVATE_KEY_LENGTH]);
+        let mut raw = [0u8; PRIVATE_KEY_LENGTH];
         raw.copy_from_slice(bytes.as_slice());
         Self::from_parts(raw, key)
     }
 
     /// Wraps a key together with its canonical encoding.
-    fn from_parts(raw: Zeroizing<[u8; PRIVATE_KEY_LENGTH]>, key: SigningKey) -> Self {
+    fn from_parts(raw: [u8; PRIVATE_KEY_LENGTH], key: SigningKey) -> Self {
         let public = *key.verifying_key();
         Self {
             inner: Secret::new(SigningValue { raw, key }),
@@ -106,7 +106,7 @@ impl Read for PrivateKeyInner {
         #[cfg(not(feature = "std"))]
         let key =
             key.map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        Ok(Self::from_parts(raw, key))
+        Ok(Self::from_parts(*raw, key))
     }
 }
 
