@@ -241,7 +241,7 @@ impl<T> Secret<T> {
     /// The location `value` is moved in from is not erased. An optimizing build
     /// usually inlines this and constructs `value` in place, but that is best
     /// effort.
-    #[inline]
+    #[inline(always)]
     pub const fn new(value: T) -> Self {
         Self {
             storage: Storage::Inline(InlineSecret::new(value)),
@@ -472,7 +472,7 @@ pub(crate) struct InlineSecret<T>(ManuallyDrop<T>);
 
 impl<T> InlineSecret<T> {
     /// Stores `value` inline.
-    #[inline]
+    #[inline(always)]
     pub const fn new(value: T) -> Self {
         Self(ManuallyDrop::new(value))
     }

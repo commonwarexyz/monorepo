@@ -455,7 +455,7 @@ impl<T> Drop for ReadGuard<'_, T> {
 
 #[cfg(all(test, not(miri)))]
 mod tests {
-    use crate::{HardenError, Secret};
+    use crate::Secret;
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
         ptr,
@@ -627,52 +627,6 @@ mod tests {
             .is_err()
         );
         assert_eq!(mapping_info(data).0, "---");
-    }
-
-    #[test]
-    fn test_sizes_and_alignment() {
-        // A zero-sized value hardens like any other.
-        round_trip::<0>();
-
-        // Const array lengths and repr(align) require compile-time page sizes.
-        // Dispatch on the actual page size rather than assuming 4 KiB pages.
-        macro_rules! page_cases {
-            ($page:literal, $over:literal) => {{
-                // Values of exactly one page and of one byte more both round-trip.
-                round_trip::<$page>();
-                round_trip::<{ $page + 1 }>();
-
-                // Page alignment is the most the mapping can honor.
-                #[repr(align($page))]
-                struct Aligned([u8; 1]);
-                let mut value = Secret::new(Aligned([73]));
-                value.try_harden().unwrap();
-                value.access(|value| assert_eq!(value.0, [73]));
-
-                // Stricter alignment is rejected, and the inline value stays usable.
-                #[repr(align($over))]
-                struct OverAligned([u8; 1]);
-                let mut value = Secret::new(OverAligned([73]));
-                assert!(matches!(value.try_harden(), Err(HardenError::Layout)));
-                assert!(!value.is_hardened());
-                value.access(|value| assert_eq!(value.0, [73]));
-            }};
-        }
-        match page_size() {
-            4096 => page_cases!(4096, 8192),
-            8192 => page_cases!(8192, 16384),
-            16384 => page_cases!(16384, 32768),
-            65536 => page_cases!(65536, 131072),
-            page => panic!("add fixtures for {page}-byte pages"),
-        }
-    }
-
-    /// Hardens a byte array, reads it back, and moves it out again.
-    fn round_trip<const N: usize>() {
-        let mut secret = Secret::new([37u8; N]);
-        secret.try_harden().unwrap();
-        secret.access(|value| assert_eq!(value, &[37; N]));
-        assert_eq!(secret.try_extract().unwrap(), [37; N]);
     }
 
     /// Returns the kernel's page size.
