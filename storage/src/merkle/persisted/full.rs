@@ -40,7 +40,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
-use tracing::{debug, error};
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 ///
@@ -246,65 +245,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.leaves()
     }
 
-    /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
-    /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
-    /// error otherwise.
-    async fn get_from_metadata_or_journal(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        pos: Position<F>,
-    ) -> Result<D, Error<F>> {
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
-            debug!(?pos, "read node from metadata");
-            let digest = D::decode(Copying(bytes));
-            let Ok(digest) = digest else {
-                error!(
-                    ?pos,
-                    err = %digest.expect_err("digest is Err in else branch"),
-                    "could not convert node from metadata bytes to digest"
-                );
-                return Err(Error::DataCorrupted(
-                    "could not read digest at requested pos",
-                ));
-            };
-            return Ok(digest);
-        }
-
-        // If a node isn't found in the metadata, it might still be in the journal.
-        debug!(?pos, "reading node from journal");
-        let node = journal.read(*pos).await;
-        match node {
-            Ok(node) => Ok(node),
-            Err(JError::ItemPruned(_)) => {
-                error!(?pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(pos))
-            }
-            Err(e) => Err(Error::Journal(e)),
-        }
-    }
-
     /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
     /// count.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.mem.leaves()
-    }
-
-    /// Adds the pinned nodes based on `prune_pos` to `mem`.
-    async fn add_extra_pinned_nodes(
-        mem: &mut Mem<F, D>,
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        prune_pos: Position<F>,
-    ) -> Result<(), Error<F>> {
-        let prune_loc = Location::try_from(prune_pos).expect("valid prune_pos");
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in F::nodes_to_pin(prune_loc) {
-            let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
-            pinned_nodes.insert(pos, digest);
-        }
-        mem.add_pinned_nodes(pinned_nodes);
-
-        Ok(())
     }
 
     /// Initialize a new `Merkle` instance.
@@ -940,75 +884,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return a reference to the merkleization strategy.
     pub const fn strategy(&self) -> &S {
         &self.strategy
-    }
-
-    /// Rewind the structure by the given number of leaves.
-    ///
-    /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply_batch`]), but removing
-    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to O(log
-    /// n) pinned nodes. A batch pop would expose new peaks that are not in memory, and `merkleize`
-    /// cannot load them because [`Readable::get_node`] is synchronous. `rewind` performs async
-    /// journal I/O to rebuild state at the target position.
-    pub(crate) async fn rewind(mut self, leaves_to_remove: usize) -> Result<Self, Error<F>> {
-        if leaves_to_remove == 0 {
-            return Ok(self);
-        }
-
-        let current_leaves = *self.leaves();
-        let destination_leaf = match current_leaves.checked_sub(leaves_to_remove as u64) {
-            Some(dest) => dest,
-            None => {
-                let pruned_to_pos = self.pruned_to_pos;
-                return Err(if pruned_to_pos == 0 {
-                    Error::Empty
-                } else {
-                    Error::ElementPruned(pruned_to_pos - 1)
-                });
-            }
-        };
-
-        let destination_loc = Location::new(destination_leaf);
-        let new_size = Position::try_from(destination_loc).expect("valid leaf");
-
-        if new_size < self.pruned_to_pos {
-            return Err(Error::ElementPruned(new_size));
-        }
-
-        // Rewind the journal if needed.
-        let journal_size = Position::<F>::new(self.journal.size());
-        if new_size < journal_size {
-            self.journal = self.journal.rewind(*new_size).await?.sync().await?;
-        }
-
-        // Truncate the in-memory structure to the target size.
-        // If the in-memory structure has been pruned past the target (e.g. after sync),
-        // rebuild from the journal/metadata instead.
-        if new_size >= Position::try_from(self.mem.bounds().start).expect("valid mem bounds start")
-        {
-            Arc::make_mut(&mut self.mem).truncate(new_size);
-        } else {
-            let mut pinned_nodes = Vec::new();
-            for pos in F::nodes_to_pin(destination_loc) {
-                pinned_nodes.push(
-                    Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
-                );
-            }
-            let mut mem = Mem::init(MemConfig {
-                nodes: vec![],
-                pruning_boundary: destination_loc,
-                pinned_nodes,
-            })?;
-            Self::add_extra_pinned_nodes(
-                &mut mem,
-                &self.metadata,
-                &self.journal,
-                self.pruned_to_pos,
-            )
-            .await?;
-            self.mem = Arc::new(mem);
-        }
-
-        Ok(self)
     }
 
     /// Return an inclusion proof for the element at the location `loc` against a historical

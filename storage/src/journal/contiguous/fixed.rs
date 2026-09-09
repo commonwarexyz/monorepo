@@ -104,8 +104,8 @@
 //!
 //! - The watermark only takes values the barrier has held (never an in-flight size).
 //! - The barrier advances only on an observed sync success.
-//! - Live rewind and recovery truncation durably lower the watermark before shortening retained
-//!   state. Clear stages its reset target before deleting blobs.
+//! - Initialization recovery persists a lower watermark before discarding a suffix. Live
+//!   handles never move their retained end backward.
 //!
 //! # Consistency
 //!
@@ -1291,44 +1291,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.end - 1
     }
 
-    /// See [Journal::rewind].
-    pub(crate) async fn rewind(mut self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
-        match size.cmp(&self.bounds.end) {
-            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
-            std::cmp::Ordering::Equal => return Ok(self),
-            std::cmp::Ordering::Less => {}
-        }
-
-        if size < self.bounds.start {
-            return Err(Error::ItemPruned(size));
-        }
-
-        let blob = super::position_to_blob(size, self.items_per_blob.get());
-        let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
-        let byte_offset = Self::items_to_bytes(pos_in_blob)?;
-
-        // Persist a lowered recovery watermark before blob state moves backward.
-        if self.checkpoint.lower_watermark(size) {
-            self.checkpoint = self.checkpoint.sync().await?;
-        }
-
-        if blob == self.blobs.tail_blob_index() {
-            self.blobs.rewind_tail(byte_offset).await?;
-        } else {
-            self.blobs.rewind_into_sealed(blob, byte_offset).await?;
-        }
-
-        self.bounds.end = size;
-        self.barrier.truncate(size);
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
-
-        Ok(self)
-    }
-
     /// Return the location before which all items have been pruned.
     pub const fn pruning_boundary(&self) -> u64 {
         self.bounds.start
@@ -1380,10 +1342,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok(())
     }
 
-    /// Clear all data and reset the journal to a new starting position.
+    /// Clear all data and advance the journal to a new starting position.
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused. After clearing, the
     /// journal will behave as if initialized with `init_at_size(new_size)`.
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end.
     ///
     /// # Crash Safety
     ///
@@ -1394,6 +1357,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         new_size: u64,
     ) -> Result<Box<Self>, Error> {
+        if new_size < self.bounds.end {
+            return Err(Error::ItemOutOfRange(new_size));
+        }
+
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
@@ -1429,7 +1396,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
-    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
@@ -1438,6 +1405,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
+        }
+        if new_size < self.bounds.end {
+            return Err(Error::ItemOutOfRange(new_size));
         }
         self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
         Ok(self)
@@ -1563,8 +1533,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// If the journal later rewinds or truncates into the returned reader's range, subsequent reads
-    /// from that range may observe unspecified contents.
+    /// Close storage-backed snapshots before reopening these partitions for bounded initialization.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
@@ -1612,25 +1581,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ) -> Result<(Self, u64), Error> {
         let position = self.0.append_prepared(prepared).await?;
         Ok((self, position))
-    }
-
-    /// Rewind the journal to `size` items, discarding items from the end.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidRewind] if `size` is larger than current size.
-    /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
-    ///
-    /// # Warnings
-    ///
-    /// * This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
-    /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
-    ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
-    /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
-    ///   rewind truncates into their range.
-    pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
-        self.0 = self.0.rewind(size).await?;
-        Ok(self)
     }
 
     /// Return the location before which all items have been pruned.
@@ -1970,10 +1920,6 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
-    }
-
-    async fn rewind(self, size: u64) -> Result<Self, Error> {
-        Self::rewind(self, size).await
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
@@ -4466,97 +4412,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewinding() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
-            let journal: Journal<_, Digest> = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-            let journal = journal.rewind(0).await.unwrap();
-            assert!(matches!(
-                journal.rewind(1).await,
-                Err(Error::InvalidRewind(1))
-            ));
-            let mut journal: Journal<_, Digest> =
-                Journal::init(context.child("reopen"), cfg.clone())
-                    .await
-                    .expect("failed to re-initialize journal");
-
-            (journal, _) = journal
-                .append(&test_digest(0))
-                .await
-                .expect("failed to append data 0");
-            assert_eq!(journal.size(), 1);
-            journal = journal.rewind(1).await.unwrap();
-            journal = journal.rewind(0).await.unwrap();
-            assert_eq!(journal.size(), 0);
-
-            for i in 0..7 {
-                let pos;
-                (journal, pos) = journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-                assert_eq!(pos, i);
-            }
-            assert_eq!(journal.size(), 7);
-            journal = journal.rewind(4).await.unwrap();
-            assert_eq!(journal.size(), 4);
-            journal = journal.rewind(0).await.unwrap();
-            assert_eq!(journal.size(), 0);
-
-            for _ in 0..10 {
-                for i in 0..100 {
-                    (journal, _) = journal
-                        .append(&test_digest(i))
-                        .await
-                        .expect("failed to append data");
-                }
-                let size = journal.size();
-                journal = journal.rewind(size - 49).await.unwrap();
-            }
-            const ITEMS_REMAINING: u64 = 10 * (100 - 49);
-            assert_eq!(journal.size(), ITEMS_REMAINING);
-
-            let journal = journal.sync().await.expect("failed to sync journal");
-            drop(journal);
-
-            let mut cfg = test_cfg(&context, NZU64!(3));
-            cfg.partition = "test-partition-2".into();
-            let mut journal = Journal::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-            for _ in 0..10 {
-                for i in 0..100 {
-                    (journal, _) = journal
-                        .append(&test_digest(i))
-                        .await
-                        .expect("failed to append data");
-                }
-                let size = journal.size();
-                journal = journal.rewind(size - 49).await.unwrap();
-            }
-            assert_eq!(journal.size(), ITEMS_REMAINING);
-            journal.sync().await.expect("failed to sync journal");
-
-            let mut journal: Journal<_, Digest> =
-                Journal::init(context.child("third"), cfg.clone())
-                    .await
-                    .expect("failed to re-initialize journal");
-            assert_eq!(journal.size(), ITEMS_REMAINING);
-            (journal, _) = journal.prune(300).await.expect("pruning failed");
-            assert_eq!(journal.size(), ITEMS_REMAINING);
-            journal = journal.rewind(300).await.unwrap();
-            assert_eq!(journal.bounds(), 300..300);
-            assert!(matches!(
-                journal.rewind(299).await,
-                Err(Error::ItemPruned(299))
-            ));
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_journal_init_at_most() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -6558,6 +6413,45 @@ mod tests {
                 journal.0.stage_clear_intent(u64::MAX).await,
                 Err(Error::SizeOverflow)
             ));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_clear_to_size_rejects_backward_without_mutation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..2 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            assert!(matches!(
+                journal.0.clear_to_size(1).await,
+                Err(Error::ItemOutOfRange(1))
+            ));
+
+            let journal = Journal::<_, Digest>::init(context.child("after_clear"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            assert_eq!(journal.read(1).await.unwrap(), test_digest(1));
+            assert!(matches!(
+                journal.0.stage_clear_intent(1).await,
+                Err(Error::ItemOutOfRange(1))
+            ));
+
+            let journal = Journal::<_, Digest>::init(context.child("after_intent"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            assert_eq!(journal.read(1).await.unwrap(), test_digest(1));
+            journal.destroy().await.unwrap();
         });
     }
 

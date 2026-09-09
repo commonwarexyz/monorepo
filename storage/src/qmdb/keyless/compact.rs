@@ -605,48 +605,10 @@ where
         Ok(self)
     }
 
-    /// Rewind the db to the applied state with exactly `target` operations, discarding any
-    /// uncommitted batches and any later states. The rewind is made durable before this
-    /// method returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained applied state has exactly `target` operations (never applied, or pruned).
-    #[tracing::instrument(name = "qmdb.keyless.compact.db.rewind", level = "info", skip_all)]
-    pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>>
-    where
-        F: Family,
-    {
-        // A clean current target only needs to settle its pipelined sync. An uncommitted target
-        // takes the regular rewind path so the witness journal becomes durable before return.
-        if self.size() == target
-            && self.witness.with(|w| w.size()) == target
-            && !self.witness.has_uncommitted_state()
-        {
-            self.witness.wait_for_sync().await?;
-            return Ok(self);
-        }
-
-        let last_commit_op;
-        (self.witness, last_commit_op) = self
-            .witness
-            .rewind::<H, S, Operation<F, V>>(&self.merkle, target, &self.commit_codec_config)
-            .await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
-        self.last_commit_metadata = last_commit_metadata;
-        self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = target - 1;
-        self.root = self.witness.with(|w| w.root);
-        Ok(self)
-    }
-
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
     /// below the boundary may survive.
     ///
-    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness
+    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
     /// always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
@@ -1344,75 +1306,6 @@ mod tests {
                 .unwrap();
             assert_eq!(db.root(), root);
             db.destroy().await.unwrap();
-        });
-    }
-
-    /// A rewind to the current size waits for the in-flight sync and adopts its proof of
-    /// durability instead of starting new journal work.
-    #[test_traced]
-    fn test_compact_start_sync_rewind_fast_path_drains() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let partition = "keyless-start-sync-rewind-drain";
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            db = apply_append(db, 1).await;
-
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-            let root = db.root();
-            let size = db.size();
-
-            let starts_before = pending.starts();
-            let db = {
-                let mut rewind = std::pin::pin!(db.rewind(size));
-                assert!(
-                    rewind.as_mut().now_or_never().is_none(),
-                    "rewind proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                rewind.await.unwrap()
-            };
-            handle.await.unwrap();
-            assert_eq!(
-                pending.starts(),
-                starts_before,
-                "the fast path started journal work instead of adopting the proven sync"
-            );
-            assert_eq!(db.root(), root);
-            drop(db);
-
-            // The awaited pipelined sync made the witness entry durable.
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
-                .await
-                .unwrap();
-            assert_eq!(db.root(), root);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// A rewind to the current size fails when the sync started for the tip witness has
-    /// already failed, rather than reporting the unproven tip as durable.
-    #[test_traced]
-    fn test_compact_start_sync_rewind_fast_path_fails() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            pending.unblock();
-            let mut db =
-                open_delayed_db(&ctx, "delayed", "keyless-start-sync-rewind-fail", &pending)
-                    .await
-                    .unwrap();
-            db = apply_append(db, 1).await;
-
-            pending.arm_fail();
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-            assert!(handle.await.is_err());
-            let size = db.size();
-            assert!(
-                db.rewind(size).await.is_err(),
-                "rewind reported an unproven tip as durable"
-            );
         });
     }
 
