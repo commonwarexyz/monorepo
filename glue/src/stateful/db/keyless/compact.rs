@@ -222,7 +222,7 @@ where
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -292,7 +292,7 @@ where
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -534,7 +534,9 @@ mod tests {
 
     async fn populated_fixed_db(context: deterministic::Context, suffix: &str) -> FixedDb {
         let config = fixed_config(&context, suffix);
-        let source = FixedDb::init(context.child("db"), config).await.unwrap();
+        let source = FixedDb::init(context.child("db"), config, None)
+            .await
+            .unwrap();
         let floor = source.inactivity_floor_loc();
         let batch = source
             .new_batch()
@@ -565,7 +567,9 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_fixed_keyless_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -603,7 +607,9 @@ mod tests {
     fn managed_db_apply_retains_each_keyless_rewind_target() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "apply-checkpoints");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let first = db
@@ -644,6 +650,7 @@ mod tests {
             let database = FixedDb::init(
                 context.child("reopen"),
                 fixed_config(&context, "apply-checkpoints"),
+                None,
             )
             .await
             .unwrap();
@@ -662,7 +669,9 @@ mod tests {
     fn managed_db_matches_sync_target_rejects_wrong_size() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "matches-sync-target");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -813,7 +822,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let source_context = context.child("source");
             let source_config = fixed_config(&source_context, "source");
-            let source = FixedDb::init(source_context, source_config).await.unwrap();
+            let source = FixedDb::init(source_context, source_config, None)
+                .await
+                .unwrap();
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
@@ -898,6 +909,7 @@ mod tests {
             let source = FixedDb::init(
                 context.child("source"),
                 fixed_config(&context, "supersede-source"),
+                None,
             )
             .await
             .unwrap();
@@ -968,7 +980,9 @@ mod tests {
     fn managed_db_rewinds_fixed_keyless_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "rewind");
-            let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let mut db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
 
             let floor = db.inactivity_floor_loc();
             let batch = db
@@ -1010,7 +1024,9 @@ mod tests {
             // One witness entry per section so pruning takes effect at entry granularity.
             let mut config = fixed_config(&context, "prune");
             config.witness.items_per_section = NZU64!(1);
-            let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let mut db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
 
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();
