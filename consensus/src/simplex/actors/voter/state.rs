@@ -89,7 +89,7 @@ pub enum Verify<S: Scheme<D>, D: Digest> {
         proposal: View,
         view: View,
         kind: Kind,
-        target: S::PublicKey,
+        target: Option<S::PublicKey>,
     },
     Wait,
 }
@@ -1019,10 +1019,14 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// so there is nothing to fetch yet. If we fall behind, our issuance
     /// anchor freezes and newer proposals leave the window (see
     /// [`Self::in_issuance_window`]), so the fetch resumes.
-    fn resolve_ancestry(&self, err: &ParentPayloadError) -> Option<(View, Kind)> {
+    fn resolve_ancestry(
+        &self,
+        err: &ParentPayloadError,
+        leader: &S::PublicKey,
+    ) -> Option<(View, Kind, Option<S::PublicKey>)> {
         match err {
             ParentPayloadError::MissingNullification { missing_view, .. } => {
-                Some((*missing_view, Kind::Nullification))
+                Some((*missing_view, Kind::Nullification, Some(leader.clone())))
             }
             ParentPayloadError::ParentNotCertified {
                 proposal_view,
@@ -1031,7 +1035,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 if self.in_issuance_window(*proposal_view) {
                     return None;
                 }
-                Some((*parent_view, Kind::Notarization))
+                // A pipelined term-start leader can propose before it holds the
+                // outgoing certificate. Ask any peer for that parent; retain
+                // leader affinity for ordinary same-term repair.
+                let target = (!proposal_view.is_term_start(self.term_length()))
+                    .then(|| leader.clone());
+                Some((*parent_view, Kind::Notarization, target))
             }
             _ => None,
         }
@@ -1040,8 +1049,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns work for the lowest locally admissible tracked proposal awaiting
     /// verification.
     ///
-    /// Missing ancestry is requested from the proposal's elected leader
-    /// (see [`Self::resolve_ancestry`] for when an error justifies a fetch).
+    /// Missing ancestry is requested from the proposal's elected leader, except
+    /// for a term-start parent notarization that any validator may hold (see
+    /// [`Self::resolve_ancestry`] for when an error justifies a fetch).
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
         // Ascending order gives the current view precedence over optimistic work.
@@ -1080,7 +1090,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         ?err,
                         "proposal exists but ancestry is not yet certified"
                     );
-                    let Some((missing, kind)) = self.resolve_ancestry(&err) else {
+                    let Some((missing, kind, target)) =
+                        self.resolve_ancestry(&err, &leader.key)
+                    else {
                         continue;
                     };
                     if !self
@@ -1095,7 +1107,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         proposal: proposal.view(),
                         view: missing,
                         kind,
-                        target: leader.key,
+                        target,
                     };
                 }
             };
@@ -3695,15 +3707,13 @@ mod tests {
             assert_eq!(state.current_view(), View::new(6));
 
             // A term-start proposal is never inside the issuance window, so
-            // its uncertified parent is missing locally: the proposer must
-            // have held the parent's certificate. Verification requests the
-            // notarization from the leader.
+            // its uncertified parent is missing locally. The pipelined proposer
+            // may not hold the certificate yet, so verification asks any peer.
             let child = Proposal::new(
                 Rnd::new(Epoch::new(9), View::new(6)),
                 View::new(2),
                 Sha256Digest::from([44u8; 32]),
             );
-            let expected_leader = state.term_leader(View::new(6)).expect("term leader").key;
             assert!(state.set_proposal(View::new(6), child.clone()));
             assert!(matches!(
                 state.try_verify(),
@@ -3715,7 +3725,7 @@ mod tests {
                 }
                     if proposal == View::new(6)
                         && view == View::new(2)
-                        && target == expected_leader
+                        && target.is_none()
             ));
 
             // The round deduplicates the request while it is outstanding.
@@ -3850,7 +3860,7 @@ mod tests {
                     target,
                 } if proposal == View::new(3)
                     && view == View::new(2)
-                    && target == participants[2]
+                    && target == Some(participants[2].clone())
             ));
 
             // Notarization(3) triggers an untargeted request for the same
@@ -7490,7 +7500,6 @@ mod tests {
             // A validator that receives the pipelined proposal early still
             // waits for the tip's certification before verifying it.
             let child = fetch_proposal(6, 5, 66);
-            let expected_leader = state.term_leader(View::new(6)).expect("term leader").key;
             assert!(state.set_proposal(View::new(6), child.clone()));
             assert!(matches!(
                 state.try_verify(),
@@ -7502,7 +7511,7 @@ mod tests {
                 }
                     if proposal == View::new(6)
                         && view == View::new(5)
-                        && target == expected_leader
+                        && target.is_none()
             ));
 
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
@@ -7771,7 +7780,7 @@ mod tests {
                 }
                     if proposal == child_view
                         && view == skipped_view
-                        && target == expected_leader
+                        && target == Some(expected_leader)
             ));
 
             // The leader's preferred notarization is already known and does
