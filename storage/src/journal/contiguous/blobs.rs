@@ -9,7 +9,7 @@ use commonware_codec::Buf;
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
-    buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
+    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
 use futures::{
@@ -66,6 +66,15 @@ impl<E: Context> Partition<E> {
         Ok(Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone()).await?)
     }
 
+    /// Open a blob under exclusive initialization ownership.
+    pub(super) async fn open_recovery(&self, index: u64) -> Result<PagedRecovery<E::Blob>, Error> {
+        let (blob, size) = self.context.open(&self.name, &index.to_be_bytes()).await?;
+        Ok(
+            PagedRecovery::open(blob, size, self.write_buffer.get(), self.page_cache.clone())
+                .await?,
+        )
+    }
+
     /// Scan a partition's blob names, treating a missing partition as empty.
     async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(name).await {
@@ -79,7 +88,7 @@ impl<E: Context> Partition<E> {
     pub(super) async fn open_many(
         &self,
         names: Vec<Vec<u8>>,
-    ) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    ) -> Result<BTreeMap<u64, PagedRecovery<E::Blob>>, Error> {
         let mut blobs = BTreeMap::new();
         for name in names {
             let hex_name = hex(&name);
@@ -87,7 +96,7 @@ impl<E: Context> Partition<E> {
                 .try_into()
                 .map_err(|_| Error::InvalidBlobName(hex_name.clone()))?;
             let index = u64::from_be_bytes(bytes);
-            let writer = self.open(index).await?;
+            let writer = self.open_recovery(index).await?;
             debug!(index, blob = hex_name, "loaded blob");
             blobs.insert(index, writer);
         }
@@ -95,9 +104,35 @@ impl<E: Context> Partition<E> {
     }
 
     /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
-    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, PagedRecovery<E::Blob>>, Error> {
         let names = Self::scan_names(&self.context, &self.name).await?;
         self.open_many(names).await
+    }
+
+    /// Open only blobs that may contain items below a cap, retaining discarded names.
+    pub(super) async fn open_bounded(
+        &self,
+        max_size: u64,
+        items_per_blob: u64,
+    ) -> Result<(BTreeMap<u64, PagedRecovery<E::Blob>>, Vec<u64>), Error> {
+        let names = Self::scan_names(&self.context, &self.name).await?;
+        let mut pending = BTreeMap::new();
+        let mut discarded = Vec::new();
+        for name in names {
+            let bytes: [u8; 8] = name
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidBlobName(hex(&name)))?;
+            let index = u64::from_be_bytes(bytes);
+            let first = super::blob_first_position(index, items_per_blob)?;
+            if first >= max_size {
+                discarded.push(index);
+            } else {
+                pending.insert(index, self.open_recovery(index).await?);
+            }
+        }
+        discarded.sort_unstable();
+        Ok((pending, discarded))
     }
 
     /// Remove the given blob.
@@ -177,7 +212,7 @@ impl<E: Context> Writable<E> {
     /// - Any blobs present must end at `tail_blob`.
     pub(super) async fn recover(
         partition: Partition<E>,
-        pending: BTreeMap<u64, Writer<E::Blob>>,
+        pending: BTreeMap<u64, PagedRecovery<E::Blob>>,
         tail_blob: u64,
     ) -> Result<Self, Error> {
         if let Some(&newest) = pending.keys().next_back()
@@ -193,6 +228,7 @@ impl<E: Context> Writable<E> {
         let mut tail: Option<Writer<E::Blob>> = None;
         let mut expected = oldest;
         for (blob, writer) in pending {
+            let writer: Writer<_> = writer.into();
             if expected != Some(blob) {
                 return Err(Error::Corruption(format!(
                     "retained blobs must be contiguous (expected {expected:?}, got {blob})"
@@ -396,6 +432,7 @@ impl<E: Context> Writable<E> {
     ///
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
@@ -828,6 +865,17 @@ mod tests {
     use super::*;
     use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
     use commonware_utils::{NZU16, NZUsize};
+
+    impl<E: crate::Context> Writable<E> {
+        pub(in super::super) fn test_configuration(&self) -> (E, String, CacheRef, NonZeroUsize) {
+            (
+                self.partition.context.child("recovery_fixture"),
+                self.partition.name.clone(),
+                self.partition.page_cache.clone(),
+                self.partition.write_buffer,
+            )
+        }
+    }
 
     fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
         assert!(matches!(
