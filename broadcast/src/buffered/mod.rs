@@ -7,6 +7,18 @@
 //! - Broadcasting messages to all peers
 //! - Serving cached messages on-demand
 //!
+//! # Message Sizes
+//!
+//! Each broadcast sends the complete encoded message as one P2P message. Applications must
+//! bound this encoding, including length prefixes and application wrappers, by the P2P message
+//! size limit. [`Config::codec_config`] controls decoding; it does not limit locally submitted
+//! messages. The engine does not fragment messages, and authenticated P2P panics on oversized
+//! sends.
+//!
+//! Align message production, decoding, and validation limits across peers. If another protocol
+//! recovers broadcast data, budget for its complete recovery messages too, including any
+//! certificates and response framing.
+//!
 //! # Message Caching
 //!
 //! The engine receives messages from other peers and caches them. The cache is a bounded queue of

@@ -47,6 +47,9 @@ where
 pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
 
 /// Initialize a P2P resolver.
+///
+/// The `backfill` channel must accommodate marshal's
+/// [complete recovery responses](crate::marshal#message-sizes).
 pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,

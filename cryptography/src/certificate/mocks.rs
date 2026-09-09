@@ -621,6 +621,10 @@ macro_rules! impl_certificate_mock {
                 >::is_batchable()
             }
 
+            fn certificate_max_size(&self) -> Option<usize> {
+                Some(<Self::Certificate as commonware_codec::FixedSize>::SIZE)
+            }
+
             fn certificate_codec_config(
                 &self,
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {

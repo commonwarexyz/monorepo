@@ -695,6 +695,10 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         true
     }
 
+    fn certificate_max_size(&self) -> Option<usize> {
+        Some(Certificate::<V>::SIZE)
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
 
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}

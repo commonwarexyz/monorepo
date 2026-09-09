@@ -44,6 +44,11 @@
 //! caches; once a block is finalized it is evicted from the reconstruction map, reducing memory
 //! pressure.
 //!
+//! Recovery sends the complete application block in one resolver message, with coding configuration
+//! and a certificate as required by the request. Follow marshal's
+//! [message size requirements](crate::marshal#message-sizes) when setting block and P2P bounds;
+//! fitting each dissemination shard is insufficient.
+//!
 //! # When to Use
 //!
 //! Choose this module when the consensus deployment wants erasure-coded dissemination with the
