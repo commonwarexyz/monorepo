@@ -402,13 +402,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
-        let offsets: Vec<u64> = positions
-            .iter()
-            .map(|&p| {
-                p.checked_mul(Self::CHUNK_SIZE_U64)
-                    .ok_or(Error::ItemOutOfRange(p))
-            })
-            .collect::<Result<_, _>>()?;
+        let mut offsets = positions.to_vec();
+        for offset in &mut offsets {
+            *offset = offset
+                .checked_mul(Self::CHUNK_SIZE_U64)
+                .ok_or(Error::ItemOutOfRange(*offset))?;
+        }
 
         let hits = blob
             .read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))

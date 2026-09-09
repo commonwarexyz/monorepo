@@ -3650,12 +3650,12 @@ mod tests {
                 assert_eq!(journal.try_get_sync(1, short_offset), Some(short.clone()));
                 assert_eq!(journal.try_get_sync(1, long_offset), Some(long.clone()));
 
-                // Once synced and read back, the item is served from the page cache
+                // Once synced and read back, the item is served from the page cache.
                 let journal = journal.sync(1).await.expect("Failed to sync");
                 journal.get(1, long_offset).await.expect("Failed to get");
                 assert_eq!(journal.try_get_sync(1, long_offset), Some(long.clone()));
 
-                // An offset at the end of the section is a miss
+                // An offset at the end of the section is a miss.
                 let size = journal.size(1).expect("Failed to size");
                 assert!(journal.try_get_sync(1, size).is_none());
 

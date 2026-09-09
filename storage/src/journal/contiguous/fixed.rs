@@ -1406,10 +1406,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(group[0], items_per_blob);
         let first_position = first_in_blob(self.bounds.start, blob, items_per_blob)?;
-        let offsets = group
-            .iter()
-            .map(|&pos| Inner::<E, A>::items_to_bytes(pos - first_position))
-            .collect::<Result<Vec<u64>, _>>()?;
+        let mut offsets = Vec::with_capacity(group.len());
+        for &pos in group {
+            offsets.push(Inner::<E, A>::items_to_bytes(pos - first_position)?);
+        }
         Ok((blob, offsets))
     }
 

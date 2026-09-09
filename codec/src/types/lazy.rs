@@ -102,8 +102,8 @@ impl<T: Read> Lazy<T> {
 
     /// Create a [`Lazy`] by deferring decoding of an underlying value.
     ///
-    /// The only cost incurred when this function is called is that of copying
-    /// some bytes.
+    /// Retains the remaining encoded bytes, sharing the input allocation when possible
+    /// and copying otherwise.
     ///
     /// Use [`Self::get`] to access the actual value, by decoding these bytes.
     pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {

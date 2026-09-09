@@ -315,6 +315,10 @@ impl bytes::Buf for ReplayBuf {
 ///
 /// This combines async I/O (`PageReader`) with sync buffering (`ReplayBuf`)
 /// to provide an `ensure(n)` + `Buf` interface for codec decoding.
+///
+/// Nonempty byte fields within one page share the allocation backing the entire prefetched batch.
+/// Retaining such a field keeps that allocation alive after the replay advances or is dropped,
+/// delaying reuse of pooled buffers. Fields spanning pages are copied into separate allocations.
 pub struct Replay<B: Blob> {
     /// Async I/O component.
     reader: PageReader<B>,

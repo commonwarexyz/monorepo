@@ -784,4 +784,45 @@ mod tests {
             assert!(copied.iter().all(|b| !range.contains(&b.as_ref().as_ptr())));
         });
     }
+
+    #[test_traced]
+    fn test_background_recv_view() {
+        deterministic::Runner::default().start(|context| async move {
+            let sender = pk(0);
+            let value: Vec<IoBuf> = (0..8).map(|_| IoBuf::from(vec![1u8; 17])).collect();
+            let encoded = value.encode();
+            let frames = [
+                ("external", IoBuf::from(encoded.clone())),
+                ("native", IoBuf::copy_from_slice(&encoded)),
+            ];
+            drop(encoded);
+
+            for (label, frame) in frames {
+                let range = frame.as_ref().as_ptr_range();
+                let (tx, receiver) = mpsc::unbounded_channel();
+                tx.send((sender.clone(), frame.clone())).unwrap();
+                drop(tx);
+                let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, Vec<IoBuf>, _>::new(
+                    context.child(label),
+                    MockReceiver { receiver },
+                    ((..).into(), (..).into()),
+                    NoopBlocker,
+                    NZUsize!(1),
+                    mocks::inline(NZUsize!(2)),
+                );
+                bg.start().await.unwrap();
+
+                let (from, decoded) = rx.recv().await.unwrap();
+                assert_eq!(from, sender);
+                assert!(
+                    decoded
+                        .iter()
+                        .all(|field| range.contains(&field.as_ref().as_ptr()))
+                );
+                drop(frame);
+                assert_eq!(decoded, value);
+                assert!(rx.recv().await.is_none());
+            }
+        });
+    }
 }
