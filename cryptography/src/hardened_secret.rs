@@ -1,4 +1,4 @@
-//! Linux backend for [crate::secret]: guarded mappings and permission transitions.
+//! Hardened storage for [crate::Secret] on Linux.
 //!
 //! Three owners split the work:
 //!
@@ -24,7 +24,7 @@
 //! +----------------+-----------------------+-------------+----------------+
 //! | leading guard  | unused data bytes     | T           | trailing guard |
 //! +----------------+-----------------------+-------------+----------------+
-//! |<-- one page -->|<---------- whole data pages -------->|<-- one page -->|
+//! |<-- one page -->|<---------- whole data pages ------->|<-- one page -->|
 //!
 //! Guards: NONE for the mapping's lifetime, never locked
 //! Data:   locked, excluded from kernel cores, wiped in fork children
@@ -40,45 +40,32 @@
 //! - Unused data bytes before `T` share the data permissions, so an underrun
 //!   need not reach the leading guard.
 //!
-//! # Permissions
+//! # Lifecycle
 //!
 //! ```text
-//! SETUP     RW     allocate, then copy T
-//!   |
-//!   | protect(NONE), publish
-//!   v
-//! IDLE      NONE   readers = 0
-//!   |    ^
-//!   |    | first reader: protect(READ), readers = 1
-//!   |    | last reader:  readers = 0, protect(NONE)
-//!   v    |
-//! READABLE  READ   readers > 0, further readers only change the count
+//!      allocate: mmap, protect(RW), madvise, mlock
+//!               |
+//!               v
+//!      +-----------------+  copy T into the data region
+//!      | SETUP       RW  |  any failure: erase, unmap, return the error
+//!      +-----------------+
+//!               | protect(NONE), publish
+//!               v
+//!      +-----------------+  lock, protect(READ) if readers == 0,   +-----------------+
+//!      | IDLE      NONE  |  readers += 1, unlock                   | READABLE  READ  |
+//!      | readers = 0     | --------------------------------------> | readers > 0     |
+//!      |                 | <-------------------------------------- | f(&T), unlocked |
+//!      +-----------------+  lock, readers -= 1,                    +-----------------+
+//!               |            protect(NONE) if readers == 0, unlock
+//!               |
+//!               | unique extraction or final release: exclusive, so readers = 0
+//!               v
+//!      +-----------------+
+//!      | RELEASE     RW  |  move out or drop T, erase the data region, unmap
+//!      +-----------------+
 //!
-//! IDLE -> RELEASE  RW   unique extraction or final release: move out or drop T,
-//!                       erase the data region, unmap
+//!      After publication, a failed protect or a reader count overflow aborts.
 //! ```
-//!
-//! - Hold the reader mutex across a permission change and its count update.
-//!   Release it before user code so nested and overlapping access cannot
-//!   deadlock. [ReadGuard] closes the interval on return or unwind. A plain
-//!   atomic counter would not serialize revocation against the next grant.
-//! - A `&T` exists only inside a [ReadGuard]'s lifetime or during the exclusive
-//!   RW phases of construction, extraction, and destruction. Otherwise `value`
-//!   is a raw pointer into inaccessible memory and must not be dereferenced.
-//! - Cleanup restores write access, erases every data byte including unused
-//!   bytes and padding, then unmaps while still locked. The data region is
-//!   already writable when [Mapping] takes over cleanup during construction.
-//! - Non-final handle drops may happen while another handle is reading. Final
-//!   release and unique extraction require exclusive ownership, so no reader
-//!   remains. A failed shared extraction returns the handle without entering
-//!   this state machine.
-//! - Before publication, any failure including final sealing returns an error
-//!   if cleanup succeeds. Hardening stages a raw copy while the inline source
-//!   still owns `T`, so an error leaves the source intact and success hands
-//!   ownership to the sealed allocation. After publication, permission
-//!   failures, count overflow, and cleanup failures abort rather than panic:
-//!   a failed mprotect leaves the region's permissions unknown, and continuing
-//!   could expose or corrupt the secret.
 //!
 //! # Fork
 //!
@@ -102,9 +89,6 @@ use std::{io, process, sync::Arc};
 use zeroize::Zeroize;
 
 /// Handle to one shared protected allocation.
-///
-/// [crate::secret] states the public contract. The module documentation covers
-/// the invariants behind it.
 pub(crate) struct HardenedSecret<T> {
     inner: Arc<ProtectedAllocation<T>>,
 }
@@ -196,7 +180,7 @@ fn abort_on_error(result: libc::c_int) {
 ///
 /// Only the data region is locked or changes permissions. The bytes are never
 /// interpreted as `T`. See the module documentation for the layout and the
-/// permission states.
+/// lifecycle.
 struct Mapping {
     /// Start of the entire mapping, including the leading guard.
     base: NonNull<u8>,
@@ -305,7 +289,9 @@ impl Mapping {
     /// Changes the data region's permissions.
     ///
     /// Callers serialize transitions with exclusive ownership or the reader mutex.
-    /// They must not revoke permissions required by an outstanding reference.
+    /// They must not revoke permissions required by an outstanding reference. A
+    /// failed call may have changed part of the region, so callers after
+    /// publication abort rather than continue with unknown permissions.
     fn protect(&self, protection: libc::c_int) -> Result<(), HardenError> {
         // SAFETY: The data pointer and length describe our page-aligned mapping.
         if unsafe { libc::mprotect(self.data.as_ptr().cast(), self.data_len, protection) } != 0 {
@@ -352,8 +338,15 @@ impl Drop for Mapping {
 struct ProtectedAllocation<T> {
     mapping: Mapping,
     /// Aligned location of the initialized value within mapping's data region.
+    ///
+    /// Dereferenced only while a [ReadGuard] is alive or during the exclusive
+    /// RW phases of construction, extraction, and destruction.
     value: NonNull<T>,
     /// Active readers across all handles to this allocation.
+    ///
+    /// The mutex is held across each count update and the permission change it
+    /// triggers, and released before user code runs. A plain atomic would let a
+    /// revoke land after the next reader's grant.
     readers: Mutex<usize>,
 }
 

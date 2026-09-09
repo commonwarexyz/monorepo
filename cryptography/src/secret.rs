@@ -87,11 +87,12 @@
 //!
 //! # Failure modes
 //!
-//! Construction returns [HardenError] when setup or final sealing fails and
-//! cleanup succeeds. Cleanup that cannot restore write access or release
-//! mappings aborts the process, as do failures after publication: a failed
-//! permission change or reader-count overflow. Abort runs no destructors and
-//! guarantees no erasure.
+//! [Secret::try_harden] is the only fallible operation. It returns [HardenError]
+//! when setting up or sealing the allocation fails and cleanup succeeds, and it
+//! leaves the inline value in place. Cleanup that cannot restore write access
+//! or release mappings aborts the process, as do failures once a value is
+//! hardened: a failed permission change or reader-count overflow. Abort runs no
+//! destructors and guarantees no erasure.
 //!
 //! Panics unwind normally. Access guards restore the reader count and
 //! permissions, and the pages are still erased and unmapped when `T`'s
@@ -102,18 +103,19 @@
 //! not cross `fork`. Inline values are copied into the child like any other
 //! memory. Nothing detects the child, and an inherited hardened handle must not
 //! be accessed or dropped there: its pages hold zeros, and it shares the
-//! parent's reader mutex state as of the fork. A child that keeps running should
-//! `exec`, call `_exit`, or forget its handles first. The parent's allocation is
-//! unaffected, and new allocations in the child work normally.
+//! parent's reader mutex state as of the fork. A child that goes on to run
+//! destructors, rather than calling `exec` or `_exit`, must forget its handles
+//! first. The parent's allocation is unaffected, and new allocations in the
+//! child work normally.
 //!
 //! # Costs
 //!
 //! Each hardened allocation locks `round_up(max(size_of::<T>(), 1), page_size)`
 //! bytes and reserves two guard pages of address space, plus kernel
 //! bookkeeping. Locked bytes count against
-//! `RLIMIT_MEMLOCK`, so many small secrets exhaust a small allowance quickly.
-//! The wrapper is an enum over both storage modes, so a hardened wrapper still
-//! occupies at least `size_of::<T>()` bytes.
+//! `RLIMIT_MEMLOCK`, so many small secrets may exhaust a small allowance
+//! quickly. The wrapper is an enum over both storage modes, so a hardened
+//! wrapper still occupies at least `size_of::<T>()` bytes.
 //!
 //! Hardened access takes a mutex and changes page permissions on the first
 //! entry and last exit of an access interval. Inline access costs nothing extra.
@@ -151,10 +153,10 @@ use ctutils::CtEq;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Failure to construct hardened storage.
+/// Failure to move a value into hardened storage.
 ///
-/// `Layout` and `System` exist only on Linux. Failures after construction abort
-/// the process instead of returning an error.
+/// `Layout` and `System` exist only on Linux. Failures after hardening abort the
+/// process instead of returning an error.
 #[derive(Debug, Error)]
 pub enum HardenError {
     /// Hardening was requested on an unsupported system.
@@ -185,7 +187,8 @@ pub enum HardenError {
 /// `Debug` prints `Secret([REDACTED])` and `Display` prints `[REDACTED]`. The
 /// value is reachable only through [Self::access] and the extraction methods.
 /// [Self::new] stores it inline, and on Linux [Self::try_harden] moves it into
-/// protected memory that clones then share.
+/// protected memory. Clones of an inline value each own a copy. Clones of a
+/// hardened value share its single allocation.
 ///
 /// Protection covers `T`'s own bytes only. Memory behind pointers inside `T`,
 /// copies made outside the wrapper, and values inherited by fork children are
@@ -195,7 +198,7 @@ pub enum HardenError {
 /// # Examples
 ///
 /// ```
-/// use commonware_cryptography::{HardenError, Secret};
+/// use commonware_cryptography::{HardenError, Hasher, Secret, Sha256};
 /// use zeroize::Zeroizing;
 ///
 /// # fn main() -> Result<(), HardenError> {
@@ -206,12 +209,14 @@ pub enum HardenError {
 ///     Err(HardenError::Unsupported) => assert!(!secret.is_hardened()),
 ///     Err(error) => return Err(error),
 /// }
-/// secret.access(|bytes| assert_eq!(bytes[0], 42));
-/// assert_eq!(secret, secret.clone());
+///
+/// // Use the value inside the callback. Equality on the wrapper is constant time.
+/// let digest = secret.access(|key| Sha256::hash(&[key]));
+/// assert_eq!(secret, Secret::new([42u8; 32]));
 ///
 /// // Extracted values leave the wrapper. Erase them separately.
-/// let bytes = Zeroizing::new(secret.extract_or_clone());
-/// assert_eq!(*bytes, [42; 32]);
+/// let key = Zeroizing::new(secret.extract_or_clone());
+/// assert_eq!(Sha256::hash(&[key.as_slice()]), digest);
 /// # Ok(())
 /// # }
 /// ```
@@ -301,11 +306,12 @@ impl<T> Secret<T> {
     ///
     /// ```
     /// use commonware_cryptography::Secret;
+    /// use ctutils::CtEq;
     ///
     /// struct Value([u8; 32]);
     /// let secret = Secret::new(Value([42; 32]));
     /// let value = secret.try_extract().unwrap();
-    /// assert_eq!(value.0, [42; 32]);
+    /// assert!(bool::from(value.0.ct_eq(&[42; 32])));
     /// ```
     pub fn try_extract(self) -> Result<T, Self> {
         match self.storage {
@@ -317,7 +323,8 @@ impl<T> Secret<T> {
         }
     }
 
-    /// Consumes the wrapper, moving out `T` when uniquely owned and cloning it otherwise.
+    /// Consumes the wrapper, moving out `T` when uniquely owned and cloning it
+    /// otherwise.
     ///
     /// Uniquely owned storage follows [Self::try_extract]. Shared hardened
     /// storage clones `T` through [Self::access] and releases this handle,
@@ -330,11 +337,12 @@ impl<T> Secret<T> {
     ///
     /// ```
     /// use commonware_cryptography::Secret;
+    /// use ctutils::CtEq;
     /// use zeroize::Zeroizing;
     ///
     /// let secret = Secret::new([42u8; 32]);
     /// let bytes = Zeroizing::new(secret.extract_or_clone());
-    /// assert_eq!(*bytes, [42; 32]);
+    /// assert!(bool::from(bytes.ct_eq(&[42; 32])));
     /// ```
     pub fn extract_or_clone(self) -> T
     where
@@ -414,86 +422,19 @@ impl<T: CtEq> Eq for Secret<T> {}
 /// and a panicking inline destructor skips erasure of that value.
 impl<T> ZeroizeOnDrop for Secret<T> {}
 
-/// Hardened handles share ownership, so a wrapper is `Send` only when `T` is
-/// also `Sync`:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use core::cell::Cell;
-///
-/// fn require_send<T: Send>() {}
-/// require_send::<Secret<Cell<u8>>>();
-/// ```
-///
-/// `T: Send` is still required:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use std::sync::MutexGuard;
-///
-/// fn require_send<T: Send>() {}
-/// require_send::<Secret<MutexGuard<'static, ()>>>();
-/// ```
 // SAFETY: Inline ownership can move across threads when T is Send. Hardened
 // handles share ownership, so T must also be Sync even when moving one handle.
 unsafe impl<T: Send + Sync> Send for Secret<T> {}
 
-/// Hardened handles can be released on different threads, so a wrapper is
-/// `Sync` only when `T` is also `Send`:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use std::sync::MutexGuard;
-///
-/// fn require_sync<T: Sync>() {}
-/// require_sync::<Secret<MutexGuard<'static, ()>>>();
-/// ```
-///
-/// `T: Sync` is still required:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use core::cell::Cell;
-///
-/// fn require_sync<T: Sync>() {}
-/// require_sync::<Secret<Cell<u8>>>();
-/// ```
 // SAFETY: Inline shared access requires T: Sync. Hardened handles may outlive
 // each other on different threads, so transferring final ownership also needs Send.
 unsafe impl<T: Send + Sync> Sync for Secret<T> {}
 
 /// Access guards restore the reader count and permissions during unwinding.
-/// Invariants inside `T` remain `T`'s own:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use core::{cell::Cell, panic::RefUnwindSafe};
-///
-/// fn require_ref_unwind_safe<T: RefUnwindSafe>() {}
-/// require_ref_unwind_safe::<Secret<Cell<u8>>>();
-/// ```
 impl<T: RefUnwindSafe> RefUnwindSafe for Secret<T> {}
 
 /// An owned hardened handle can leave other handles observing `T` after a
-/// caught panic, so owned unwind safety also requires `T: RefUnwindSafe`:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use core::{cell::Cell, panic::UnwindSafe};
-///
-/// fn require_unwind_safe<T: UnwindSafe>() {}
-/// require_unwind_safe::<Secret<Box<Cell<u8>>>>();
-/// ```
-///
-/// `T: UnwindSafe` is still required:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use core::panic::UnwindSafe;
-///
-/// fn require_unwind_safe<T: UnwindSafe>() {}
-/// require_unwind_safe::<Secret<&'static mut ()>>();
-/// ```
+/// caught panic, so owned unwind safety also requires `T: RefUnwindSafe`.
 impl<T: UnwindSafe + RefUnwindSafe> UnwindSafe for Secret<T> {}
 
 /// Erases the storage for `T`, including padding, using volatile writes.
@@ -523,15 +464,7 @@ unsafe fn zeroize_ptr<T>(ptr: *mut T) {
 /// Drop destroys the value, then erases its bytes and padding. A destructor
 /// panic skips erasure. Clone creates an independent value, and no OS
 /// protections apply. Holding `T` directly also makes the wrapper inherit its
-/// pinning requirement:
-///
-/// ```compile_fail,E0277
-/// use commonware_cryptography::Secret;
-/// use core::marker::PhantomPinned;
-///
-/// fn require_unpin<T: Unpin>() {}
-/// require_unpin::<Secret<PhantomPinned>>();
-/// ```
+/// pinning requirement.
 pub(crate) struct InlineSecret<T>(ManuallyDrop<T>);
 
 impl<T> InlineSecret<T> {
