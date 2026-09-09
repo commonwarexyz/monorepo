@@ -1264,10 +1264,9 @@ mod tests {
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryResponse(
                     terminal_finalization,
                 )
-                .encode()
-                .to_vec();
+                .encode();
             let decoded = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
-                message.as_slice(),
+                message.clone(),
                 &harness.schemes[2].certificate_codec_config(),
             )
             .expect("terminal response decoded")

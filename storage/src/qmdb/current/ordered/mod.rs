@@ -778,7 +778,7 @@ pub mod tests {
     fn test_exclusion_proof_rejects_unknown_tag() {
         let mut bytes = vec![42u8]; // unknown tag
         bytes.extend_from_slice(&[0u8; 32]); // garbage
-        let result = CodecExclusionProof::decode_cfg(bytes.as_slice(), &(MAX_DIGESTS, (), ()));
+        let result = CodecExclusionProof::decode_cfg(bytes, &(MAX_DIGESTS, (), ()));
         assert!(result.is_err());
     }
 
@@ -788,11 +788,11 @@ pub mod tests {
         assert_eq!(dynamic.encode_size(), encoded.len());
         assert!(P::decode_cfg(encoded.clone(), limited).is_err());
         for end in 0..encoded.len() {
-            assert!(P::decode_cfg(&encoded[..end], cfg).is_err());
+            assert!(P::decode_cfg(encoded.slice(..end), cfg).is_err());
         }
         let mut trailing = encoded.to_vec();
         trailing.push(0);
-        assert!(P::decode_cfg(trailing.as_slice(), cfg).is_err());
+        assert!(P::decode_cfg(trailing, cfg).is_err());
     }
 
     fn check_dynamic_ordered_codecs<F: Graftable>() {
@@ -839,7 +839,7 @@ pub mod tests {
             unknown_tag[0] = 2;
             assert!(matches!(
                 dynamic::ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest>::decode_cfg(
-                    unknown_tag.as_slice(),
+                    unknown_tag,
                     &((32, 1), (), ()),
                 ),
                 Err(commonware_codec::Error::InvalidEnum(2)),

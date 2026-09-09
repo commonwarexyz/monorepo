@@ -6,13 +6,13 @@
 extern crate alloc;
 
 use crate::{
-    RangeCfg,
+    Buf, RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_set,
 };
 use alloc::collections::BTreeSet;
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 
 const BTREESET_TYPE: &str = "BTreeSet";
 

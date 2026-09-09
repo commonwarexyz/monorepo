@@ -8,8 +8,8 @@ use crate::{
         },
     },
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
-use commonware_runtime::{Buf, BufMut};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_runtime::BufMut;
 
 impl<F: Family, K: Key, V: VariableValue> EncodeSize for Operation<F, K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn test_operation_invalid_context() {
         let invalid = vec![0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let decoded = VarOp::decode(invalid.as_ref());
+        let decoded = VarOp::decode(invalid);
         assert!(matches!(
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
@@ -126,11 +126,11 @@ mod tests {
     #[test]
     fn test_operation_insufficient_buffer() {
         let invalid = vec![SET_CONTEXT];
-        let decoded = VarOp::decode(invalid.as_ref());
+        let decoded = VarOp::decode(invalid);
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
 
         let invalid = vec![COMMIT_CONTEXT];
-        let decoded = VarOp::decode(invalid.as_ref());
+        let decoded = VarOp::decode(invalid);
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }
 

@@ -28,7 +28,7 @@ use crate::{
         operation::Floored as _,
     },
 };
-use commonware_codec::{Codec, CodecShared, DecodeExt};
+use commonware_codec::{Codec, CodecShared, Copying, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
@@ -1278,7 +1278,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
                     "missing pinned node in grafted tree metadata",
                 ));
             };
-            let digest = D::decode(bytes.as_ref())
+            let digest = D::decode(Copying(bytes))
                 .map_err(|_| Error::<F>::DataCorrupted("invalid pinned node digest"))?;
             pinned.push(digest);
         }

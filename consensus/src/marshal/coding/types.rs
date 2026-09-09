@@ -97,7 +97,7 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
     type Cfg = commonware_coding::CodecConfig;
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl commonware_codec::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let commitment = Commitment::<B, C, H>::read(buf)?;
@@ -337,7 +337,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
     type Cfg = CodedBlockCfg<B, C, H>;
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl commonware_codec::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, &cfg.inner)?;
@@ -532,7 +532,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
     type Cfg = B::Cfg;
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl commonware_codec::Buf,
         block_cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, block_cfg)?;
@@ -602,7 +602,7 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 mod test {
     use super::*;
     use crate::marshal::mocks::block::EmptyBlock;
-    use bytes::Buf;
+    use bytes::Buf as _;
     use commonware_codec::{Decode, Encode, Error};
     use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
@@ -632,15 +632,15 @@ mod test {
             Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
         let shard = RShard::new(commitment, 0, raw_shard);
         let encoded = shard.encode();
-        let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
+        let decoded = RShard::decode_cfg(encoded, &MAX_SHARD_SIZE).unwrap();
         assert!(shard == decoded);
     }
 
     #[test]
     fn test_shard_decode_truncated_returns_error() {
         let decode = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut buf = &[][..];
-            RShard::decode_cfg(&mut buf, &MAX_SHARD_SIZE)
+            let buf = commonware_codec::Copying(&[]);
+            RShard::decode_cfg(buf, &MAX_SHARD_SIZE)
         }));
         assert!(decode.is_ok(), "decode must not panic on truncated input");
         assert!(decode.unwrap().is_err());
@@ -674,7 +674,7 @@ mod test {
             Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
         let shard = RShard::new(commitment, 0, raw_shard);
         let encoded = shard.encode();
-        let decoded = RShard::decode_cfg(&mut encoded.as_ref(), &MAX_SHARD_SIZE).unwrap();
+        let decoded = RShard::decode_cfg(encoded, &MAX_SHARD_SIZE).unwrap();
         assert!(shard == decoded);
     }
 
@@ -719,7 +719,7 @@ mod test {
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
-            encoded.as_ref(),
+            encoded,
             &CodedBlockCfg {
                 inner: (),
                 expected: ExpectedCommitment::Untrusted(expected),
@@ -814,7 +814,7 @@ mod test {
         let encoded = (block, EMBEDDED_CONFIG).encode();
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
-            encoded.as_ref(),
+            encoded,
             &CodedBlockCfg {
                 inner: (),
                 expected: ExpectedCommitment::Trusted(expected),
@@ -843,7 +843,7 @@ mod test {
         let encoded = (other, CONFIG).encode();
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
-            encoded.as_ref(),
+            encoded,
             &CodedBlockCfg {
                 inner: (),
                 expected: ExpectedCommitment::Trusted(expected),
@@ -970,7 +970,7 @@ mod test {
         encoded[block_size] ^= 0xFF;
 
         // Decoding should fail due to digest mismatch
-        let result = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(&mut encoded.as_slice(), &());
+        let result = StoredCodedBlock::<TestBlock, RS, H>::decode_cfg(encoded, &());
         assert!(result.is_err());
     }
 

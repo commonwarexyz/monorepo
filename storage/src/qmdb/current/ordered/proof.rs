@@ -12,8 +12,8 @@ use crate::{
         operation::Key,
     },
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 
 /// Proofs with fixed-size bitmap chunks.

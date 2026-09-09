@@ -2,7 +2,7 @@ use crate::stateful::{
     Application,
     db::{Anchor, DatabaseSet},
 };
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
@@ -13,7 +13,7 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
-use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner};
+use commonware_runtime::{BufMut, Clock, Metrics, Spawner};
 use commonware_storage::{
     Context,
     metadata::{self, Metadata},
