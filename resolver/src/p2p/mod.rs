@@ -80,6 +80,12 @@
 //! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
 //! in the latest primary set are ignored until they become primary again.
 //!
+//! # Message Sizes
+//!
+//! A produced value is sent in one response message, with up to [`MAX_RESPONSE_OVERHEAD`] bytes
+//! of resolver framing. Configure value bounds so the complete response fits the underlying P2P
+//! application message limit. The resolver does not fragment oversized values.
+//!
 //! # Performance Considerations
 //!
 //! The peer supports arbitrarily many concurrent fetches, but resource usage generally
@@ -98,6 +104,7 @@ mod ingress;
 pub use ingress::Mailbox;
 mod metrics;
 mod wire;
+pub use wire::MAX_RESPONSE_OVERHEAD;
 
 #[cfg(feature = "mocks")]
 pub mod mocks;

@@ -669,6 +669,10 @@ macro_rules! impl_certificate_bls12381_threshold {
                 $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
             }
 
+            fn certificate_max_size(&self) -> Option<usize> {
+                Some(<Self::Certificate as commonware_codec::FixedSize>::SIZE)
+            }
+
             fn certificate_codec_config(
                 &self,
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {

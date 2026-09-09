@@ -40,6 +40,43 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! ## Message Sizes
+//!
+//! Applications must align block production, block decoding, application validation, and P2P
+//! message limits so every permitted block can be both disseminated and recovered. Enforce the
+//! block bound for remote proposals as well as locally produced blocks, consistently across
+//! validators.
+//!
+//! Recovery responses contain one of the following values, encoded as a single resolver message:
+//!
+//! - A block, for a request by commitment.
+//! - A [`Notarization`](crate::simplex::types::Notarization) and a block, for a request by round.
+//! - A [`Finalization`](crate::simplex::types::Finalization) and a block, for a request by height.
+//!
+//! In [`standard`], the recovered block is the complete application block. In [`coding`],
+//! commitment and round requests recover the complete [`CodedBlock`](coding::types::CodedBlock),
+//! including the application block and coding configuration; height requests recover the
+//! application block with its finalization. Budgeting for the complete coded block covers both.
+//! Individually sendable shards do not establish that recovery fits. Recovery does not fragment
+//! blocks or fetch individual shards.
+//!
+//! [`max_recovery_overhead`] derives the certificate and resolver allowance from a configured
+//! scheme and consensus payload type: a block digest in Standard or a coding commitment in Coding.
+//! It includes the proposal's epoch, view, parent view, and payload, and the scheme's maximum
+//! certificate encoding, plus [`MAX_RESPONSE_OVERHEAD`](commonware_resolver::p2p::MAX_RESPONSE_OVERHEAD)
+//! bytes for resolver framing. After obtaining this bound, a sufficient configuration is
+//! `max_encoded_block_size + recovery_overhead <= max_message_size`.
+//! Include any additional application wrappers in this budget. Authenticated P2P's own framing
+//! and encryption overhead are outside its `max_message_size` limit.
+//!
+//! Take the largest allowance across all committees and epochs that can be served or synchronized.
+//! Certificate bounds must cover all accepted signer counts, which may exceed a quorum; measuring
+//! one certificate with [`commonware_codec::EncodeSize`] does not establish a maximum.
+//!
+//! Violating this requirement can prevent certification and halt consensus when a peer needs
+//! recovery, even if initial block or shard dissemination succeeds. Authenticated P2P panics
+//! on oversized sends; retries cannot make an oversized recovery response fit.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
@@ -76,6 +113,8 @@ use std::sync::Arc;
 
 mod config;
 pub use config::{Config, Start};
+mod sizing;
+pub use sizing::max_recovery_overhead;
 
 pub mod ancestry;
 pub mod core;
