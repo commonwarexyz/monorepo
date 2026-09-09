@@ -6,7 +6,7 @@ use commonware_utils::sync::Mutex;
 use std::sync::Arc;
 
 /// A finalized-block store operation observed by [`Recording`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Op {
     /// A `put` of the block at this height and the payload address passed to storage.
     Put(Height, usize),

@@ -1234,7 +1234,7 @@ mod tests {
                 .cloned()
                 .expect("finalized block dispatched");
             assert_eq!(delivered.digest(), block.digest());
-            let ops = ops.lock().clone();
+            let ops = ops.lock();
             let written = ops
                 .iter()
                 .position(|op| matches!(op, Op::Put(height, _) if *height == Height::new(1)))

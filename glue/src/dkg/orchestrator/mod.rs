@@ -496,10 +496,10 @@ mod tests {
         context: &deterministic::Context,
         marshal: &mocks::TestMarshalMailbox,
         height: Height,
-    ) -> mocks::TestBlock {
+    ) -> Arc<mocks::TestBlock> {
         for _ in 0..50 {
             if let Some(block) = marshal.get_block(height).await {
-                return Arc::unwrap_or_clone(block);
+                return block;
             }
             context.sleep(Duration::from_millis(10)).await;
         }

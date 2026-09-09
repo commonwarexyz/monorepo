@@ -8527,7 +8527,7 @@ mod tests {
                     .is_some_and(|handed| Arc::ptr_eq(&handed, &delivered)),
                 "dispatch must deliver the block object the buffer handed to marshal"
             );
-            let ops = ops.lock().clone();
+            let ops = ops.lock();
             let written = ops
                 .iter()
                 .position(|op| matches!(op, Op::Put(height, _) if *height == Height::new(1)))
