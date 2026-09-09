@@ -5,6 +5,21 @@
 //! The existing `UnmerkleizedBatch::merkleize` path retains its default automatic compaction.
 //! All participants reproducing a root must use the same deterministic policy. Disabling
 //! compaction or providing insufficient sustained work can leave retained history unbounded.
+//!
+//! # Example
+//!
+//! An application can split compaction into bounded rounds and finalize the batch separately:
+//!
+//! ```ignore
+//! let prepared = batch.prepare(&db).await?;
+//! let budget = CompactionBudget { max_moves: 32, max_scan: 4096 };
+//! let (prepared, progress) = prepared.compact(&db, budget).await?;
+//! println!("moved {} entries across {} locations", progress.moved, progress.scanned);
+//! let batch = prepared.merkleize(&db, metadata).await?;
+//! ```
+//!
+//! `CompactionBudget` has no `Default` implementation: callers must choose the move and scan
+//! limits explicitly. The existing automatic path continues to use its established policy.
 
 use crate::merkle::{Family, Location};
 
