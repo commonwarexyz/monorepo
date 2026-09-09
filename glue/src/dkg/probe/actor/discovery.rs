@@ -559,7 +559,7 @@ where
             return None;
         }
 
-        let block = V::into_inner(block);
+        let block = V::into_shared(block);
         let Some(Payload::EpochInfo(info)) = block.payload() else {
             return None;
         };
@@ -625,7 +625,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::non_empty;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     const THRESHOLD_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_PROBE_DISCOVERY_TEST";
 
@@ -761,7 +761,7 @@ mod tests {
     fn coding_block(
         leader: mocks::TestPublicKey,
         participants: u16,
-    ) -> CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256> {
+    ) -> Arc<CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256>> {
         let parent = Sha256::hash(&[b"parent"]);
         let context = CodingContext {
             round: Round::new(Epoch::zero(), View::new(1)),
@@ -777,11 +777,11 @@ mod tests {
             ),
         };
         let block = CodingBlock::new::<Sha256>(context, parent, Height::new(1), 0);
-        CodedBlock::new(
+        Arc::new(CodedBlock::new(
             block,
             coding_config_for_participants(participants),
             &Sequential,
-        )
+        ))
     }
 
     #[test]
@@ -867,7 +867,7 @@ mod tests {
             let block_message =
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::zero(),
-                    block: block.clone(),
+                    block: block.clone().into(),
                 }
                 .encode()
                 .to_vec();
@@ -880,7 +880,7 @@ mod tests {
                 authenticate_boundary_block::<mocks::TestMarshalVariant>(&(), commitment, body)
                     .expect("standard block authenticated");
 
-            assert_eq!(decoded, block);
+            assert_eq!(decoded.as_ref(), &block);
         });
     }
 

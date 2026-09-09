@@ -59,7 +59,7 @@ where
     P: PublicKey,
 {
     type ApplicationBlock = B;
-    type Block = CodedBlock<B, C, H>;
+    type Block = Arc<CodedBlock<B, C, H>>;
     type StoredBlock = StoredCodedBlock<B, C, H>;
     type Commitment = Commitment<B, C, H>;
 
@@ -101,23 +101,15 @@ where
         }
     }
 
-    fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
-        block.into_inner()
-    }
-
-    fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock> {
+    fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block.inner_shared()
-    }
-
-    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
-        block.into_inner_shared()
     }
 
     fn from_application_block(
         block: Self::ApplicationBlock,
         payload: Self::Commitment,
     ) -> Self::Block {
-        CodedBlock::new_trusted(block, payload)
+        Arc::new(CodedBlock::new_trusted(block, payload))
     }
 }
 
@@ -223,7 +215,7 @@ mod tests {
 
     impl Clone for NoCloneBlock {
         fn clone(&self) -> Self {
-            panic!("stored commitment lookup must not clone the inner block");
+            panic!("shared block operations must not clone the inner block");
         }
     }
 
@@ -301,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_commitment_does_not_clone_coding_block() {
+    fn storage_conversion_shares_coding_block() {
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(1),
             extra_shards: NZU16!(2),
@@ -311,10 +303,22 @@ mod tests {
         type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
 
         let block = no_clone_block(CONFIG);
-        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(block, CONFIG, &Sequential);
+        let coded = Arc::new(CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(
+            block,
+            CONFIG,
+            &Sequential,
+        ));
         let expected = coded.commitment();
-        let stored = StoredCodedBlock::new(coded);
+        let stored: StoredCodedBlock<_, _, _> = coded.clone().into();
 
         assert_eq!(TestVariant::stored_commitment(&stored), expected);
+        assert!(std::ptr::eq(stored.inner(), coded.inner()));
+
+        let recovered = stored.into();
+        assert_eq!(TestVariant::commitment(&recovered), expected);
+        assert!(Arc::ptr_eq(
+            &TestVariant::into_shared(recovered),
+            &coded.inner_shared()
+        ));
     }
 }

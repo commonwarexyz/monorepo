@@ -826,7 +826,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     }
 
     /// See [Freezer::put].
-    async fn put(mut self: Box<Self>, key: K, value: V) -> Result<(Box<Self>, Cursor), Error> {
+    async fn put(mut self: Box<Self>, key: K, value: &V) -> Result<(Box<Self>, Cursor), Error> {
         self.puts.inc();
 
         // Update the section if needed
@@ -849,7 +849,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let (position, value_offset, value_size);
         (self.oversized, position, value_offset, value_size) = self
             .oversized
-            .append(self.current_section, key_entry, &value)
+            .append(self.current_section, key_entry, value)
             .await?;
 
         // Update the number of items added to the entry.
@@ -1178,7 +1178,7 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Put a key-value pair into the [Freezer].
     /// If the key already exists, the value is updated.
-    pub async fn put(mut self, key: K, value: V) -> Result<(Self, Cursor), Error> {
+    pub async fn put(mut self, key: K, value: &V) -> Result<(Self, Cursor), Error> {
         let cursor;
         (self.0, cursor) = self.0.put(key, value).await?;
         Ok((self, cursor))
@@ -1304,7 +1304,7 @@ mod tests {
     #[allow(dead_code)]
     fn assert_freezer_futures_are_send(freezer: TestFreezer, key: U64) {
         is_send(freezer.get(Identifier::Key(&key)));
-        is_send(freezer.put(key, 0u64));
+        is_send(freezer.put(key, &0u64));
     }
 
     #[allow(dead_code)]
@@ -1339,8 +1339,8 @@ mod tests {
 
             // Insert only 2 keys to different entries. With table_size=4, entries 2 and 3
             // should remain empty.
-            let (freezer, _) = freezer.put(test_key("key0"), 0).await.unwrap();
-            let (freezer, _) = freezer.put(test_key("key2"), 1).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key0"), &0).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key2"), &1).await.unwrap();
             freezer.close().await.unwrap();
 
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
@@ -1400,7 +1400,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), &42).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
@@ -1466,7 +1466,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
 
                 assert_eq!(freezer.resizing(), Some(1));
@@ -1512,7 +1512,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
@@ -1564,7 +1564,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let checkpoint = freezer.close().await.unwrap();
                 assert_eq!(checkpoint.table_size, 2);
             }
@@ -1608,7 +1608,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, checkpoint) = freezer.sync().await.unwrap();
 
                 assert_eq!(checkpoint.table_size, 4);
@@ -1657,7 +1657,7 @@ mod tests {
                 let (freezer, stale_checkpoint) = freezer.sync().await.unwrap();
                 assert_eq!(stale_checkpoint.table_size, 2);
 
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, checkpoint) = freezer.sync().await.unwrap();
                 assert_eq!(checkpoint.table_size, 4);
                 assert_eq!(freezer.resizing(), None);
@@ -1800,8 +1800,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
-                let (freezer, _) = freezer.put(test_key("key1"), 43).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), &42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), &43).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
@@ -1850,7 +1850,7 @@ mod tests {
             );
 
             // The freezer remains usable
-            let (freezer, _) = freezer.put(test_key("key2"), 44).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key2"), &44).await.unwrap();
             let (freezer, _) = freezer.sync().await.unwrap();
             assert_eq!(
                 freezer
@@ -1892,8 +1892,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
-                let (freezer, _) = freezer.put(test_key("key1"), 43).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), &42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), &43).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };

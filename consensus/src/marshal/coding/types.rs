@@ -243,16 +243,6 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     pub fn inner_shared(&self) -> Arc<B> {
         Arc::clone(&self.inner)
     }
-
-    /// Takes the shared inner [`Block`].
-    pub fn into_inner_shared(self) -> Arc<B> {
-        self.inner
-    }
-
-    /// Takes the inner [`Block`].
-    pub fn into_inner(self) -> B {
-        Arc::unwrap_or_clone(self.inner)
-    }
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
@@ -260,6 +250,18 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<CodedBlock<B, C, H>>
 {
     fn from(block: CodedBlock<B, C, H>) -> Self {
         Self::new(block)
+    }
+}
+
+/// Shares the inner block of a [`CodedBlock`] for archival.
+impl<B: CertifiableBlock, C: Scheme, H: Hasher> From<Arc<CodedBlock<B, C, H>>>
+    for StoredCodedBlock<B, C, H>
+{
+    fn from(block: Arc<CodedBlock<B, C, H>>) -> Self {
+        Self {
+            commitment: block.commitment(),
+            inner: block.inner_shared(),
+        }
     }
 }
 
@@ -477,6 +479,13 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
 impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for CodedBlock<B, C, H> {
     fn from(stored: StoredCodedBlock<B, C, H>) -> Self {
         Self::new_trusted_shared(stored.inner, stored.commitment)
+    }
+}
+
+/// Restores a shared [`CodedBlock`] from its stored form.
+impl<B: Block, C: Scheme, H: Hasher> From<StoredCodedBlock<B, C, H>> for Arc<CodedBlock<B, C, H>> {
+    fn from(stored: StoredCodedBlock<B, C, H>) -> Self {
+        Self::new(stored.into())
     }
 }
 

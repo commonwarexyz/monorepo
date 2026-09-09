@@ -987,7 +987,7 @@ impl EngineDefinition for ReshareEngine {
                     *self.initial.info.output.public().public(),
                 )),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone()),
+                start: plan.marshal_start(genesis.clone().into()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
