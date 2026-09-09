@@ -189,3 +189,35 @@ impl<const N: usize> bitmap::Readable<N> for Shared<N> {
         bitmap::Readable::<N>::len(&*self.read())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::bitmap::Readable;
+
+    #[test]
+    fn compaction_scan_does_not_read_past_budget() {
+        struct Guarded;
+        impl Readable<32> for Guarded {
+            fn complete_chunks(&self) -> usize {
+                4
+            }
+            fn get_chunk(&self, chunk: usize) -> [u8; 32] {
+                assert_eq!(chunk, 0, "scan read a chunk outside its budget");
+                [0; 32]
+            }
+            fn last_chunk(&self) -> ([u8; 32], u64) {
+                ([0; 32], 256)
+            }
+            fn pruned_chunks(&self) -> usize {
+                0
+            }
+            fn len(&self) -> u64 {
+                1024
+            }
+        }
+        let mut candidates = Vec::<u64>::new();
+        assert_eq!(fill_from(&Guarded, 0, 256, 1, &mut candidates), 256);
+        assert!(candidates.is_empty());
+    }
+}
