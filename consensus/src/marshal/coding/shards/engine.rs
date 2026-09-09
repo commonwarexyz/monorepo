@@ -1890,7 +1890,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{coding::types::coding_config_for_participants, mocks::block::EmptyBlock},
+        marshal::{
+            coding::types::{coding_config_for_committee, coding_config_for_participants},
+            mocks::block::EmptyBlock,
+        },
         types::{Epoch, Height, View},
     };
     use bytes::Bytes;
@@ -2089,6 +2092,8 @@ mod tests {
         link: Link,
         /// Per-peer capacity for shards received before leader discovery.
         peer_buffer_size: NonZeroUsize,
+        /// Participant weights in participant-key order.
+        weights: Option<Vec<u64>>,
         /// Marker for the coding scheme type parameter.
         _marker: PhantomData<S>,
     }
@@ -2102,6 +2107,7 @@ mod tests {
                 additional_scheme_epochs: Vec::new(),
                 link: DEFAULT_LINK,
                 peer_buffer_size: NZUsize!(64),
+                weights: None,
                 _marker: PhantomData,
             }
         }
@@ -2127,14 +2133,14 @@ mod tests {
                 private_keys.sort_by_key(|s| s.public_key());
                 let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
 
-                let participants = Committee::try_from(
-                    peer_keys
-                        .iter()
-                        .cloned()
-                        .map(|participant| (participant, 1))
-                        .collect::<Vec<_>>(),
-                )
-                .expect("test participants form a committee");
+                let weights = self
+                    .weights
+                    .clone()
+                    .unwrap_or_else(|| vec![1; peer_keys.len()]);
+                assert_eq!(weights.len(), peer_keys.len());
+                let participants =
+                    Committee::try_from(peer_keys.iter().cloned().zip(weights).collect::<Vec<_>>())
+                        .expect("test participants form a committee");
 
                 let mut np_private_keys = (0..self.num_secondary_peers)
                     .map(|i| PrivateKey::from_seed((self.num_primary_peers + i) as u64))
@@ -2183,8 +2189,8 @@ mod tests {
                     }
                 }
 
-                let coding_config =
-                    coding_config_for_participants(u16::try_from(self.num_primary_peers).unwrap());
+                let coding_config = coding_config_for_committee::<S, _>(&participants)
+                    .expect("test committee must support coding");
 
                 let mut peers = Vec::with_capacity(self.num_primary_peers);
                 for (idx, peer_key) in peer_keys.iter().enumerate() {
@@ -3840,7 +3846,7 @@ mod tests {
         // Test that shards buffered in pending_shards are batch-validated once
         // the minimum shard threshold is met, enabling reconstruction.
         //
-        // With 10 peers: minimum_shards = (10-1)/3 + 1 = 4
+        // With 10 unit-weight peers: minimum_shards = 10 - 2 * 3 = 4
         // The leader (peer 0) sends peer 3 their own-index shard (verified
         // immediately). Peers 1, 2, 4 send their own shards (buffered in
         // pending_shards). Once the leader's shard + 3 pending shards >= 4,
@@ -4096,6 +4102,55 @@ mod tests {
                     oracle.blocked().await.unwrap().is_empty(),
                     "valid sender-indexed shards should not block peers"
                 );
+            },
+        );
+    }
+
+    #[test_traced]
+    fn test_weighted_committee_reconstructs_from_derived_minimum_shards() {
+        let fixture: Fixture<C> = Fixture {
+            weights: Some(vec![1, 7, 1, 1]),
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, _, mut peers, _, coding_config| async move {
+                assert_eq!(coding_config.minimum_shards.get(), 1);
+                assert_eq!(coding_config.extra_shards.get(), 3);
+
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let dominant_idx = 1usize;
+                let receiver_idx = 3usize;
+                let receiver = peers[receiver_idx].public_key.clone();
+                let block_sub = peers[receiver_idx].mailbox.subscribe(commitment);
+
+                let shard = coded_block
+                    .shard(peers[dominant_idx].index.get() as u16)
+                    .expect("missing dominant participant shard")
+                    .encode();
+                peers[dominant_idx]
+                    .sender
+                    .send(Recipients::One(receiver), shard, true);
+                context.sleep(config.link.latency * 2).await;
+
+                assert!(peers[receiver_idx].mailbox.get(commitment).await.is_none());
+                peers[receiver_idx].mailbox.notarized(commitment, round);
+
+                select! {
+                    _ = block_sub => {},
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("dominant participant shard did not reconstruct notarized block");
+                    },
+                }
+
+                let reconstructed =
+                    peers[receiver_idx].mailbox.get(commitment).await.expect(
+                        "notarized block should reconstruct from dominant participant shard",
+                    );
+                assert_eq!(reconstructed.commitment(), commitment);
             },
         );
     }
