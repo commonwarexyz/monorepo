@@ -317,7 +317,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
     let bytes: [u8; 48] = u.arbitrary()?;
 
-    match G1::read(&mut Copying(bytes.as_slice())) {
+    match G1::read(&mut Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => {
             if u.arbitrary()? {
@@ -332,7 +332,7 @@ fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
 fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     let bytes: [u8; 96] = u.arbitrary()?;
 
-    match G2::read(&mut Copying(bytes.as_slice())) {
+    match G2::read(&mut Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => {
             if u.arbitrary()? {

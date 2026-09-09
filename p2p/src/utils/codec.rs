@@ -778,8 +778,7 @@ mod tests {
             assert!(decoded.iter().all(|b| range.contains(&b.as_ref().as_ptr())));
 
             // Decoding a slice of the frame copies every field
-            let copied =
-                Vec::<IoBuf>::decode_cfg(commonware_codec::Copying(frame.as_ref()), &cfg).unwrap();
+            let copied = Vec::<IoBuf>::decode_cfg(commonware_codec::Copying(&frame), &cfg).unwrap();
             assert_eq!(copied, value);
             assert!(copied.iter().all(|b| !range.contains(&b.as_ref().as_ptr())));
         });

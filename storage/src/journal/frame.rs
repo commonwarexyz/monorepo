@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn test_roundtrip_uncompressed() {
         let buf = frame(None, &42u64);
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         let (next_offset, info) = find_frame(&mut cursor, 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn test_roundtrip_compressed() {
         let buf = frame(Some(3), &42u64);
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         let (_, info) = find_frame(&mut cursor, 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
@@ -282,7 +282,7 @@ mod tests {
         encode_frame_into(None, &2u64, &mut buf).unwrap();
 
         // Walk both frames out of the accumulated buffer.
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         let (first_end, _) = find_frame(&mut cursor, 0).unwrap();
         assert_eq!(first_end as usize, first_frame_len);
         let first: u64 = decode_item(Copying(&buf[1..9]), &(), false).unwrap();
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn test_find_frame_zero_length_payload() {
         let buf = [0x00u8];
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         let (next_offset, info) = find_frame(&mut cursor, 7).unwrap();
         let FrameInfo::Complete {
             varint_len,
@@ -315,7 +315,7 @@ mod tests {
     fn test_find_frame_incomplete_payload() {
         // Prefix declares 5 payload bytes; only 3 are buffered.
         let buf = [0x05u8, 1, 2, 3];
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         let (next_offset, info) = find_frame(&mut cursor, 100).unwrap();
         let FrameInfo::Incomplete {
             varint_len,
@@ -335,14 +335,14 @@ mod tests {
     fn test_find_frame_payload_boundary() {
         // Exactly filling the buffer is complete; one byte short is incomplete.
         let buf = [0x03u8, 1, 2, 3];
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         assert!(matches!(
             find_frame(&mut cursor, 0).unwrap().1,
             FrameInfo::Complete { data_len: 3, .. }
         ));
 
         let buf = [0x03u8, 1, 2];
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         assert!(matches!(
             find_frame(&mut cursor, 0).unwrap().1,
             FrameInfo::Incomplete {
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_find_frame_empty_buffer() {
-        let mut cursor = Copying(&[][..]);
+        let mut cursor = Copying(&[]);
         assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
     }
 
@@ -363,7 +363,7 @@ mod tests {
     fn test_find_frame_truncated_varint() {
         // A lone continuation byte is an incomplete varint, not a frame.
         let buf = [0x80u8];
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
     }
 
@@ -371,14 +371,14 @@ mod tests {
     fn test_find_frame_varint_exceeds_u32() {
         // 5-byte varint encoding a value larger than u32::MAX.
         let buf = [0xFFu8, 0xFF, 0xFF, 0xFF, 0x7F];
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
     }
 
     #[test]
     fn test_find_frame_offset_overflow() {
         let buf = frame(None, &42u64);
-        let mut cursor = Copying(&buf[..]);
+        let mut cursor = Copying(&buf);
         assert!(matches!(
             find_frame(&mut cursor, u64::MAX),
             Err(Error::OffsetOverflow)
@@ -390,7 +390,7 @@ mod tests {
         // 9 bytes for a u64: decode must consume exactly the payload.
         let buf = [0u8; 9];
         assert!(matches!(
-            decode_item::<u64>(Copying(&buf[..]), &(), false),
+            decode_item::<u64>(Copying(&buf), &(), false),
             Err(Error::Codec(commonware_codec::Error::ExtraData(_)))
         ));
     }

@@ -508,7 +508,7 @@ mod tests {
             assert_eq!(buf.len(), size(value));
 
             // decode matches original value
-            let mut slice = Copying(&buf[..]);
+            let mut slice = Copying(&buf);
             let decoded: T = read(&mut slice).unwrap();
             assert_eq!(decoded, value);
             assert!(slice.0.is_empty());
@@ -563,7 +563,7 @@ mod tests {
             assert_eq!(buf.len(), size_signed(value));
 
             // decode matches original value
-            let mut slice = Copying(&buf[..]);
+            let mut slice = Copying(&buf);
             let decoded: T = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value);
             assert!(slice.0.is_empty());
@@ -671,7 +671,7 @@ mod tests {
             );
 
             // Verify we can decode it back correctly
-            let mut slice = Copying(&buf[..]);
+            let mut slice = Copying(&buf);
             let decoded: i16 = read_signed(&mut slice).unwrap();
             assert_eq!(decoded, value, "Decode mismatch for value {value}");
             assert!(

@@ -357,7 +357,7 @@ mod test {
         assert!(buf.pushed.iter().all(|b| range.contains(&b.as_ptr())));
 
         // Decoding from a slice of it copies every element
-        let copied = Vec::<Lazy<Small>>::decode_cfg(Copying(source.as_ref()), &cfg).unwrap();
+        let copied = Vec::<Lazy<Small>>::decode_cfg(Copying(&source), &cfg).unwrap();
         assert_eq!(copied, value);
         let mut buf = TrackingWriteBuf::new();
         copied.write_bufs(&mut buf);

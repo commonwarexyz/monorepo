@@ -438,7 +438,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if !blob.try_read_sync_into(buf, offset) {
             return None;
         }
-        A::decode(Copying(&buf[..])).ok()
+        A::decode(Copying(buf)).ok()
     }
 
     /// See [Journal::last].

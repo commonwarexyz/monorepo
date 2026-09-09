@@ -320,23 +320,23 @@ mod tests {
     #[test]
     fn rejects_truncated_and_oversized_packets() {
         assert!(matches!(
-            Modes::<2>::decode(Copying(&[][..])),
+            Modes::<2>::decode(Copying(&[])),
             Err(Error::EndOfBuffer)
         ));
         assert!(matches!(
-            Modes::<2>::decode(Copying(&[0x80][..])),
+            Modes::<2>::decode(Copying(&[0x80])),
             Err(Error::EndOfBuffer)
         ));
         assert!(matches!(
-            Modes::<1>::decode(Copying(&[0x80][..])),
+            Modes::<1>::decode(Copying(&[0x80])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(Copying(&[0x80, 0x80][..])),
+            Modes::<2>::decode(Copying(&[0x80, 0x80])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(Copying(&[0x80, 0x80, 0x01][..])),
+            Modes::<2>::decode(Copying(&[0x80, 0x80, 0x01])),
             Err(Error::Invalid("Modes", _))
         ));
     }
@@ -344,27 +344,27 @@ mod tests {
     #[test]
     fn rejects_non_canonical_packets() {
         assert!(matches!(
-            Modes::<1>::decode(Copying(&[0x00][..])),
+            Modes::<1>::decode(Copying(&[0x00])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(Copying(&[0x80, 0x00][..])),
+            Modes::<2>::decode(Copying(&[0x80, 0x00])),
             Err(Error::Invalid("Modes", _))
         ));
         assert!(matches!(
-            Modes::<2>::decode(Copying(&[0x81, 0x00][..])),
+            Modes::<2>::decode(Copying(&[0x81, 0x00])),
             Err(Error::Invalid("Modes", _))
         ));
     }
 
     #[test]
     fn read_stops_at_packet_boundary() {
-        let mut encoded = Copying(&[0x01, 0x02][..]);
+        let mut encoded = Copying(&[0x01, 0x02]);
         let modes = Modes::<2>::read(&mut encoded).unwrap();
         assert_eq!(modes.encode().as_ref(), &[0x01]);
         assert_eq!(encoded.0, &[0x02]);
         assert!(matches!(
-            Modes::<2>::decode(Copying(&[0x01, 0x02][..])),
+            Modes::<2>::decode(Copying(&[0x01, 0x02])),
             Err(Error::ExtraData(1))
         ));
     }

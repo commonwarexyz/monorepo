@@ -1269,7 +1269,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
                     "missing pinned node in grafted tree metadata",
                 ));
             };
-            let digest = D::decode(Copying(bytes.as_slice()))
+            let digest = D::decode(Copying(bytes))
                 .map_err(|_| Error::<F>::DataCorrupted("invalid pinned node digest"))?;
             pinned.push(digest);
         }

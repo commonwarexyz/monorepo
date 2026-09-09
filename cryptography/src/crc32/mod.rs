@@ -382,7 +382,7 @@ mod tests {
         let mut hasher = Crc32::default();
         hasher.update(msg);
         let (hasher, digest) = hasher.finalize();
-        assert!(Digest::decode(Copying(digest.as_ref())).is_ok());
+        assert!(Digest::decode(Copying(&digest)).is_ok());
 
         // Verify against reference
         let expected = CRC32C_REF.checksum(msg);

@@ -337,7 +337,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
                 error!(?pruned_loc, ?pos, "missing pinned node");
                 return Err(Error::MissingNode(pos));
             };
-            let digest = D::decode(Copying(bytes.as_slice()));
+            let digest = D::decode(Copying(bytes));
             let Ok(digest) = digest else {
                 error!(?pruned_loc, ?pos, "could not convert node bytes to digest");
                 return Err(Error::MissingNode(pos));

@@ -658,7 +658,7 @@ mod tests {
         let expected = if expected {
             let mut ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig[1..]).unwrap();
             if ecdsa_signature.s().is_high().into() {
-                assert!(Signature::decode(Copying(sig.as_ref())).is_err());
+                assert!(Signature::decode(Copying(&sig)).is_err());
                 assert!(Signature::decode(sig).is_err());
 
                 ecdsa_signature = ecdsa_signature.normalize_s();
@@ -669,7 +669,7 @@ mod tests {
             let signature = Signature::new(ecdsa_signature, recovery_id);
             public_key.verify_inner(None, &message, &signature)
         } else {
-            let tf_res = Signature::decode(Copying(sig.as_ref()));
+            let tf_res = Signature::decode(Copying(&sig));
             let dc_res = Signature::decode(sig);
             if tf_res.is_err() && dc_res.is_err() {
                 true

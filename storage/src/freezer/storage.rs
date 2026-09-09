@@ -1264,7 +1264,7 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Copying, DecodeExt};
+    use commonware_codec::Copying;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Runner, Storage, Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
@@ -1280,7 +1280,7 @@ mod tests {
         let key = key.as_bytes();
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(Copying(buf.as_ref())).unwrap()
+        FixedBytes::new(buf)
     }
 
     fn test_key_at_index(table_size: u32, table_index: u32) -> FixedBytes<64> {

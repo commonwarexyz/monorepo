@@ -869,7 +869,7 @@ pub(crate) mod tests {
         assert!(Request::<mmr::Family>::decode(malformed).is_err());
 
         let bad_tag = [7u8];
-        assert!(Request::<mmr::Family>::decode(Copying(&bad_tag[..])).is_err());
+        assert!(Request::<mmr::Family>::decode(Copying(&bad_tag)).is_err());
     }
 
     /// Requests are map keys, so equality and ordering must separate every distinct request.
@@ -966,7 +966,7 @@ pub(crate) mod tests {
         assert!(R::decode_cfg(response.encode(), &(1, ())).is_ok());
 
         // Unknown tag.
-        assert!(R::decode_cfg(Copying(&[9u8][..]), &(1, ())).is_err());
+        assert!(R::decode_cfg(Copying(&[9u8]), &(1, ())).is_err());
     }
 
     /// A source behind a lock reaches the source and reports its error.

@@ -185,10 +185,10 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         }
 
         // Extract checksum
+        let bytes = buf.as_ref();
         let checksum_index = buf.len() - crc32::Digest::SIZE;
-        let stored_checksum =
-            u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
-        let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
+        let stored_checksum = u32::from_be_bytes(bytes[checksum_index..].try_into().unwrap());
+        let computed_checksum = Crc32::checksum(&bytes[..checksum_index]);
         if stored_checksum != computed_checksum {
             warn!(
                 blob = index,
@@ -200,7 +200,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         }
 
         // Get parent
-        let version = u64::from_be_bytes(buf.as_ref()[..8].try_into().unwrap());
+        let version = u64::from_be_bytes(bytes[..8].try_into().unwrap());
 
         // Extract data
         //
@@ -211,12 +211,12 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let mut cursor = u64::SIZE;
         while cursor < checksum_index {
             // Read key
-            let key = K::read(&mut Copying(&buf.as_ref()[cursor..]))
-                .expect("unable to read key from blob");
+            let key =
+                K::read(&mut Copying(&bytes[cursor..])).expect("unable to read key from blob");
             cursor += key.encode_size();
 
             // Read value
-            let value = V::read_cfg(&mut Copying(&buf.as_ref()[cursor..]), codec_config)
+            let value = V::read_cfg(&mut Copying(&bytes[cursor..]), codec_config)
                 .expect("unable to read value from blob");
             lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
             cursor += value.encode_size();

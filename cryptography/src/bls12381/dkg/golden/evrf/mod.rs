@@ -437,7 +437,7 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let point: G = ReadExt::read(&mut Copying(raw.as_slice()))?;
+        let point: G = ReadExt::read(&mut Copying(&raw))?;
         Ok(Self { raw, point })
     }
 }

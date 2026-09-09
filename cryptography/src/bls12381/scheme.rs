@@ -181,7 +181,7 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let key = <MinPk as Variant>::Public::decode(Copying(raw.as_ref()))
+        let key = <MinPk as Variant>::Public::decode(Copying(&raw))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, key })
     }
@@ -283,7 +283,7 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let signature = <MinPk as Variant>::Signature::decode(Copying(raw.as_ref()))
+        let signature = <MinPk as Variant>::Signature::decode(Copying(&raw))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self { raw, signature })
     }

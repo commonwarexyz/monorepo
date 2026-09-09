@@ -1600,7 +1600,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         }
         let buf = &mut scratch[..A::SIZE];
         let item = if blob.try_read_sync_into(buf, offset) {
-            A::decode(Copying(&buf[..])).ok()
+            A::decode(Copying(buf)).ok()
         } else {
             None
         };

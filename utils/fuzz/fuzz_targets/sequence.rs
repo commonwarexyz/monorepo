@@ -75,7 +75,7 @@ fn fuzz(input: FuzzInput) {
 
         FuzzInput::TestU32 { value } => {
             let array = U32::new(value);
-            assert_eq!(value, U32::decode(Copying(array.as_ref())).unwrap().into());
+            assert_eq!(value, U32::decode(Copying(&array)).unwrap().into());
 
             let vec = array.to_vec();
             assert_eq!(value, U32::decode(vec).unwrap().into());

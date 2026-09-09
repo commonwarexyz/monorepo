@@ -2055,24 +2055,17 @@ mod tests {
         let s = Scalar::random(test_rng());
         let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
         assert_eq!(
-            Scalar::decode_cfg(Copying(bytes.as_ref()), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::decode_cfg(Copying(&bytes), &ScalarReadCfg::AllowZero).unwrap(),
             s
         );
         assert_eq!(
-            Scalar::decode_cfg(
-                Copying([0u8; Scalar::SIZE].as_ref()),
-                &ScalarReadCfg::AllowZero
-            )
-            .unwrap(),
+            Scalar::decode_cfg(Copying(&[0u8; Scalar::SIZE]), &ScalarReadCfg::AllowZero).unwrap(),
             Scalar::zero()
         );
         // Non-canonical encodings (>= r) are rejected.
         assert!(
-            Scalar::decode_cfg(
-                Copying([0xffu8; Scalar::SIZE].as_ref()),
-                &ScalarReadCfg::AllowZero
-            )
-            .is_err()
+            Scalar::decode_cfg(Copying(&[0xffu8; Scalar::SIZE]), &ScalarReadCfg::AllowZero)
+                .is_err()
         );
     }
 

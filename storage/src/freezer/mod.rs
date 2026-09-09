@@ -287,7 +287,6 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Copying, DecodeExt};
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
@@ -303,7 +302,7 @@ mod tests {
         let key = key.as_bytes();
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(Copying(buf.as_ref())).unwrap()
+        FixedBytes::new(buf)
     }
 
     const DEFAULT_WRITE_BUFFER: usize = 1024;

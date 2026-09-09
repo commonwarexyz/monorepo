@@ -612,7 +612,7 @@ mod tests {
         };
 
         let bytes = record.to_bytes();
-        let restored = Checksum::read(&mut Copying(&bytes[..])).unwrap();
+        let restored = Checksum::read(&mut Copying(&bytes)).unwrap();
 
         assert_eq!(restored.len1, 0x1234);
         assert_eq!(restored.crc1, 0xAABBCCDD);

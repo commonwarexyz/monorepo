@@ -185,7 +185,7 @@ impl Arbitrary<'_> for EncodedPoint {
             6 => [0xff; 32],
             7 => {
                 let SecretBytes(seed) = u.arbitrary()?;
-                SigningKey::decode(Copying(seed.as_slice()))
+                SigningKey::decode(Copying(&seed))
                     .unwrap()
                     .verifying_key()
                     .as_ref()
@@ -252,7 +252,7 @@ struct Signing {
 impl Signing {
     fn run(self) {
         let SecretBytes(seed) = self.seed;
-        let signing_key = SigningKey::decode(Copying(seed.as_slice())).unwrap();
+        let signing_key = SigningKey::decode(Copying(&seed)).unwrap();
         let consensus_key = ConsensusSigningKey::from(seed);
         assert_eq!(
             signing_key.verifying_key().as_ref(),
@@ -294,7 +294,7 @@ impl KeyExchange {
             "key exchange: {self:#?}",
         );
 
-        let public_key = ExchangePublicKey::decode(Copying(public_key_bytes.as_slice())).unwrap();
+        let public_key = ExchangePublicKey::decode(Copying(&public_key_bytes)).unwrap();
         let shared = secret_key.exchange(&public_key);
         let dalek_shared = dalek_secret
             .diffie_hellman(&x25519_dalek::PublicKey::from(public_key_bytes))
@@ -320,7 +320,7 @@ impl Item {
             Some(seed) => seed,
             None => u.arbitrary()?,
         };
-        let signing_key = SigningKey::decode(Copying(seed.as_slice())).unwrap();
+        let signing_key = SigningKey::decode(Copying(&seed)).unwrap();
         let verifying_key = signing_key.verifying_key();
         let signature = signing_key.sign(&namespace, &message);
         Ok(Self {
@@ -334,14 +334,14 @@ impl Item {
     fn low_order(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let Payload { namespace, message } = u.arbitrary()?;
         let bytes = u.choose(&LOW_ORDER_ENCODINGS)?;
-        let verifying_key = VerifyingKey::decode(Copying(bytes.as_slice())).unwrap();
+        let verifying_key = VerifyingKey::decode(Copying(bytes)).unwrap();
         let mut signature = [0; 64];
         signature[..32].copy_from_slice(u.choose(&LOW_ORDER_ENCODINGS)?);
         Ok(Self {
             namespace,
             message,
             verifying_key,
-            signature: Signature::decode(Copying(signature.as_slice())).unwrap(),
+            signature: Signature::decode(Copying(&signature)).unwrap(),
         })
     }
 
@@ -364,8 +364,8 @@ impl Item {
         Ok(Self {
             namespace,
             message,
-            verifying_key: VerifyingKey::decode(Copying(verifying_key.as_slice())).unwrap(),
-            signature: Signature::decode(Copying(signature.as_slice())).unwrap(),
+            verifying_key: VerifyingKey::decode(Copying(&verifying_key)).unwrap(),
+            signature: Signature::decode(Copying(&signature)).unwrap(),
         })
     }
 
@@ -375,19 +375,19 @@ impl Item {
             1 => mutate_bytes(&mut self.message, u)?,
             2 => {
                 let EncodedPoint(bytes) = u.arbitrary()?;
-                self.verifying_key = VerifyingKey::decode(Copying(bytes.as_slice())).unwrap();
+                self.verifying_key = VerifyingKey::decode(Copying(&bytes)).unwrap();
             }
             3 => {
                 let EncodedPoint(r) = u.arbitrary()?;
                 let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
                 signature[..32].copy_from_slice(&r);
-                self.signature = Signature::decode(Copying(signature.as_slice())).unwrap();
+                self.signature = Signature::decode(Copying(&signature)).unwrap();
             }
             4 => {
                 let EncodedScalar(s) = u.arbitrary()?;
                 let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
                 signature[32..].copy_from_slice(&s);
-                self.signature = Signature::decode(Copying(signature.as_slice())).unwrap();
+                self.signature = Signature::decode(Copying(&signature)).unwrap();
             }
             _ => self.make_scalar_noncanonical(),
         }
@@ -404,7 +404,7 @@ impl Item {
     fn make_scalar_noncanonical(&mut self) {
         let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
         signature[32..].copy_from_slice(&SCALAR_ORDER);
-        self.signature = Signature::decode(Copying(signature.as_slice())).unwrap();
+        self.signature = Signature::decode(Copying(&signature)).unwrap();
     }
 
     fn verify(&self) -> bool {
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn rfc8032_ed25519_vectors() {
         for vector in RFC8032_ED25519 {
-            let signing_key = SigningKey::decode(Copying(vector.secret_key.as_slice())).unwrap();
+            let signing_key = SigningKey::decode(Copying(&vector.secret_key)).unwrap();
             assert_eq!(
                 signing_key.verifying_key().as_ref(),
                 vector.public_key,
@@ -628,9 +628,9 @@ mod tests {
                 "RFC 8032 test {} signature",
                 vector.name,
             );
-            let signature = Signature::decode(Copying(vector.signature.as_slice())).unwrap();
+            let signature = Signature::decode(Copying(&vector.signature)).unwrap();
             let cached = signing_key.verifying_key();
-            let decoded = VerifyingKey::decode(Copying(vector.public_key.as_slice())).unwrap();
+            let decoded = VerifyingKey::decode(Copying(&vector.public_key)).unwrap();
             assert!(cached.verify_raw(vector.message, &signature));
             assert!(decoded.verify_raw(vector.message, &signature));
         }
@@ -639,8 +639,7 @@ mod tests {
     #[test]
     fn wycheproof_ed25519_vectors() {
         for vector in WYCHEPROOF_ED25519 {
-            let verifying_key =
-                VerifyingKey::decode(Copying(vector.public_key.as_slice())).unwrap();
+            let verifying_key = VerifyingKey::decode(Copying(&vector.public_key)).unwrap();
             let valid = Signature::decode(Copying(vector.signature)).is_ok_and(|signature| {
                 let valid = verifying_key.verify_raw(vector.message, &signature);
                 let batch = || {
@@ -667,8 +666,7 @@ mod tests {
     #[test]
     fn rfc7748_x25519_vectors() {
         for vector in RFC7748_X25519 {
-            let public_key =
-                ExchangePublicKey::decode(Copying(vector.u_coordinate.as_slice())).unwrap();
+            let public_key = ExchangePublicKey::decode(Copying(&vector.u_coordinate)).unwrap();
             let shared_secret = SecretKey::from_raw(vector.scalar)
                 .exchange(&public_key)
                 .expect("RFC 7748 output is contributory");
@@ -684,9 +682,8 @@ mod tests {
         assert_eq!(alice.public_key().as_ref(), vector.alice_public);
         assert_eq!(bob.public_key().as_ref(), vector.bob_public);
 
-        let bob_public = ExchangePublicKey::decode(Copying(vector.bob_public.as_slice())).unwrap();
-        let alice_public =
-            ExchangePublicKey::decode(Copying(vector.alice_public.as_slice())).unwrap();
+        let bob_public = ExchangePublicKey::decode(Copying(&vector.bob_public)).unwrap();
+        let alice_public = ExchangePublicKey::decode(Copying(&vector.alice_public)).unwrap();
         let alice_shared = alice
             .exchange(&bob_public)
             .expect("RFC 7748 Bob public key is contributory");
@@ -700,8 +697,7 @@ mod tests {
     #[test]
     fn wycheproof_x25519_vectors() {
         for vector in WYCHEPROOF_X25519 {
-            let public_key =
-                ExchangePublicKey::decode(Copying(vector.public_key.as_slice())).unwrap();
+            let public_key = ExchangePublicKey::decode(Copying(&vector.public_key)).unwrap();
             let shared_secret = SecretKey::from_raw(vector.private_key)
                 .exchange(&public_key)
                 .map(|shared_secret| *shared_secret.as_bytes());
@@ -727,11 +723,10 @@ mod tests {
         // satisfies the cofactored verification equation for every message.
         for public_key_bytes in ZIP215_POINTS {
             for r_bytes in ZIP215_POINTS {
-                let verifying_key =
-                    VerifyingKey::decode(Copying(public_key_bytes.as_slice())).unwrap();
+                let verifying_key = VerifyingKey::decode(Copying(&public_key_bytes)).unwrap();
                 let mut signature_bytes = [0u8; 64];
                 signature_bytes[..32].copy_from_slice(&r_bytes);
-                let signature = Signature::decode(Copying(signature_bytes.as_slice())).unwrap();
+                let signature = Signature::decode(Copying(&signature_bytes)).unwrap();
 
                 assert!(
                     verifying_key.verify(NAMESPACE, message, &signature),

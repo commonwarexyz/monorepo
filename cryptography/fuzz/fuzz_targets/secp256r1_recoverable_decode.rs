@@ -131,7 +131,7 @@ fn test_signature(data: &[u8]) {
 // Test sign and verify operations
 fn test_sign_verify(private_key_data: &[u8; 32], message: &[u8]) {
     // Create private key
-    if let Ok(private_key) = PrivateKey::decode(Copying(private_key_data.as_ref())) {
+    if let Ok(private_key) = PrivateKey::decode(Copying(private_key_data)) {
         let signature = private_key.sign(b"", message);
         let public_key = private_key.public_key();
         assert!(public_key.verify(b"", message, &signature));

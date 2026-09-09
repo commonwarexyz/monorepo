@@ -232,9 +232,7 @@ async fn read_index_sections(
             .as_chunks::<{ IndexRecord::SIZE }>()
             .0
             .iter()
-            .map(|record| {
-                IndexRecord::decode(Copying(&record[..])).expect("oracle index record failed")
-            })
+            .map(|record| IndexRecord::decode(Copying(record)).expect("oracle index record failed"))
             .collect();
         sections.insert(section, records);
     }

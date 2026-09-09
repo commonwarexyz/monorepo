@@ -4,7 +4,6 @@ use crate::{
     archive::{Archive as _, Error, immutable, prunable},
     translator::TwoCap,
 };
-use commonware_codec::{Copying, DecodeExt};
 use commonware_conformance::conformance_tests;
 use commonware_runtime::{
     Supervisor as _,
@@ -51,8 +50,7 @@ impl StorageWorkload for ArchivePrunableWorkload {
         for i in 0..items_count {
             let mut key_bytes = [0u8; 64];
             context.fill(&mut key_bytes);
-            let key =
-                FixedBytes::<64>::decode(Copying(key_bytes.as_ref())).expect("key should decode");
+            let key = FixedBytes::new(key_bytes);
             let value: i32 = context.random();
             archive = archive.put(i as u64, key, value).await?;
         }
@@ -97,8 +95,7 @@ impl StorageWorkload for ArchiveImmutableWorkload {
         for i in 0..items_count {
             let mut key_bytes = [0u8; 64];
             context.fill(&mut key_bytes);
-            let key =
-                FixedBytes::<64>::decode(Copying(key_bytes.as_ref())).expect("key should decode");
+            let key = FixedBytes::new(key_bytes);
             let value: i32 = context.random();
             archive = archive.put(i as u64, key, value).await?;
         }

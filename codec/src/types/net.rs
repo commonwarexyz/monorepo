@@ -273,18 +273,18 @@ mod test {
         // Test invalid version
         let invalid_version = [5];
         assert!(matches!(
-            IpAddr::decode(Copying(&invalid_version[..])),
+            IpAddr::decode(Copying(&invalid_version)),
             Err(Error::Invalid(_, _))
         ));
 
         // Test insufficient data for V4
         let insufficient_v4 = [4, 127, 0, 0]; // Version + 3 bytes instead of 4
-        assert!(IpAddr::decode(Copying(&insufficient_v4[..])).is_err());
+        assert!(IpAddr::decode(Copying(&insufficient_v4)).is_err());
 
         // Test insufficient data for V6
         let mut insufficient_v6 = vec![6];
         insufficient_v6.extend_from_slice(&[0; 15]); // 15 bytes instead of 16
-        assert!(IpAddr::decode(Copying(&insufficient_v6[..])).is_err());
+        assert!(IpAddr::decode(Copying(&insufficient_v6)).is_err());
     }
 
     #[test]
@@ -313,19 +313,19 @@ mod test {
         // Test invalid version
         let invalid_version = [5]; // Neither 4 nor 6
         assert!(matches!(
-            SocketAddr::decode(Copying(&invalid_version[..])),
+            SocketAddr::decode(Copying(&invalid_version)),
             Err(Error::Invalid(_, _))
         ));
 
         // Test insufficient data for V4
         let mut insufficient_v4 = vec![4]; // Version byte
         insufficient_v4.extend_from_slice(&[127, 0, 0, 1, 0x1f]); // IP + 1 byte of port (5 bytes total)
-        assert!(SocketAddr::decode(Copying(&insufficient_v4[..])).is_err());
+        assert!(SocketAddr::decode(Copying(&insufficient_v4)).is_err());
 
         // Test insufficient data for V6
         let mut insufficient_v6 = vec![6]; // Version byte
         insufficient_v6.extend_from_slice(&[0; 17]); // 17 bytes instead of 18
-        assert!(SocketAddr::decode(Copying(&insufficient_v6[..])).is_err());
+        assert!(SocketAddr::decode(Copying(&insufficient_v6)).is_err());
     }
 
     #[test]

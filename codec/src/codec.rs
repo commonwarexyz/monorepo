@@ -385,7 +385,7 @@ pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
             Self::SIZE
         );
 
-        Self::decode_cfg(Copying(bytes.as_ref()), &())
+        Self::decode_cfg(Copying(&bytes), &())
     }
 }
 
@@ -450,7 +450,7 @@ mod tests {
     fn test_encode_fixed() {
         let value = 42u32;
         let encoded: [u8; 4] = value.encode_fixed();
-        let decoded = <u32>::decode(Copying(&encoded[..])).unwrap();
+        let decoded = <u32>::decode(Copying(&encoded)).unwrap();
         assert_eq!(value, decoded);
     }
 

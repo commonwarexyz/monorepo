@@ -177,7 +177,7 @@ fn test_signing(seed: [u8; 32], namespace: &[u8], message: &[u8]) {
 
     // Construct equivalent signing keys from the same raw seed
     let consensus_private_key = ConsensusPrivateKey::from(seed);
-    let our_private_key = PrivateKey::decode(Copying(seed.as_ref())).unwrap();
+    let our_private_key = PrivateKey::decode(Copying(&seed)).unwrap();
 
     // The derived public keys should have identical encodings
     let consensus_public_key = ConsensusPublicKey::from(&consensus_private_key);

@@ -286,9 +286,7 @@ async fn recover_expected(
             .as_chunks::<{ TestEntry::SIZE }>()
             .0
             .iter()
-            .map(|record| {
-                TestEntry::decode(Copying(&record[..])).expect("oracle index record failed")
-            })
+            .map(|record| TestEntry::decode(Copying(record)).expect("oracle index record failed"))
             .collect();
 
         let mut validity = Vec::with_capacity(records.len());

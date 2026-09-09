@@ -195,14 +195,14 @@ mod tests {
         let mut hasher = Blake3::default();
         hasher.update(msg);
         let (hasher, digest) = hasher.finalize();
-        assert!(Digest::decode(Copying(digest.as_ref())).is_ok());
+        assert!(Digest::decode(Copying(&digest)).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Reuse the reset hasher
         let mut hasher = hasher;
         hasher.update(msg);
         let (_, digest) = hasher.finalize();
-        assert!(Digest::decode(Copying(digest.as_ref())).is_ok());
+        assert!(Digest::decode(Copying(&digest)).is_ok());
         assert_eq!(digest.as_ref(), HELLO_DIGEST);
 
         // Test one-shot hasher

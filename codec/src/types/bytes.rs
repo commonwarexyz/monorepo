@@ -104,7 +104,7 @@ mod tests {
         assert!(decoded.iter().all(|b| range.contains(&b.as_ptr())));
 
         // Decoding from a slice of it copies every field
-        let copied = Vec::<Bytes>::decode_cfg(Copying(source.as_ref()), &cfg).unwrap();
+        let copied = Vec::<Bytes>::decode_cfg(Copying(&source), &cfg).unwrap();
         assert_eq!(copied, value);
         assert!(copied.iter().all(|b| !range.contains(&b.as_ptr())));
     }

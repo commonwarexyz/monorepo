@@ -104,7 +104,7 @@ mod tests {
         let prefix = 69u8;
         let value = 42u64;
         let array = U64::new(prefix, value);
-        let decoded = U64::decode(Copying(array.as_ref())).unwrap();
+        let decoded = U64::decode(Copying(&array)).unwrap();
         assert_eq!(value, decoded.value());
         assert_eq!(prefix, decoded.prefix());
         let from = U64::from(array.0);

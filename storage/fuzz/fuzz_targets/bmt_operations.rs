@@ -169,7 +169,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::DeserializeProof { data } => {
                 // Use max_items=1 since we're fuzzing single-element proofs
-                let _ = Proof::<Sha256Digest>::decode_cfg(Copying(data.as_slice()), &1);
+                let _ = Proof::<Sha256Digest>::decode_cfg(Copying(data), &1);
             }
 
             BmtOperation::BuildEmptyTree => {
@@ -226,7 +226,7 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::DeserializeRangeProof { data } => {
                 // Use a reasonable max_items for range proof deserialization
-                let _ = Proof::<Sha256Digest>::decode_cfg(Copying(data.as_slice()), &32);
+                let _ = Proof::<Sha256Digest>::decode_cfg(Copying(data), &32);
             }
 
             // Range proof edge cases
@@ -327,7 +327,7 @@ fn fuzz(input: FuzzInput) {
             BmtOperation::DeserializeMultiProof { data, max_items } => {
                 // Use max_items from fuzz input, clamped to reasonable range
                 let max = (*max_items as usize).clamp(1, 100);
-                let _ = Proof::<Sha256Digest>::decode_cfg(Copying(data.as_slice()), &max);
+                let _ = Proof::<Sha256Digest>::decode_cfg(Copying(data), &max);
             }
 
             BmtOperation::MultiProofDuplicatePositions { position, count } => {

@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(bytes, bytes_into);
 
         let slice = [1, 2, 3, 4];
-        let bytes_from_slice = FixedBytes::decode(Copying(slice.as_ref())).unwrap();
+        let bytes_from_slice = FixedBytes::decode(Copying(&slice)).unwrap();
         assert_eq!(bytes_from_slice, bytes);
 
         let vec = vec![1, 2, 3, 4];
@@ -115,7 +115,7 @@ mod tests {
         // Test with incorrect length
         let slice_too_short = [1, 2, 3];
         assert!(matches!(
-            FixedBytes::<4>::decode(Copying(slice_too_short.as_ref())),
+            FixedBytes::<4>::decode(Copying(&slice_too_short)),
             Err(CodecError::EndOfBuffer)
         ));
 

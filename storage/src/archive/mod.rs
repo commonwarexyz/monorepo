@@ -226,7 +226,6 @@ pub trait MultiArchive: Archive {
 mod tests {
     use super::*;
     use crate::translator::TwoCap;
-    use commonware_codec::{Copying, DecodeExt};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         Metrics as _, Runner, Supervisor as _,
@@ -246,7 +245,7 @@ mod tests {
         let key = key.as_bytes();
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(Copying(buf.as_ref())).unwrap()
+        FixedBytes::new(buf)
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -687,7 +686,7 @@ mod tests {
 
                 let mut key_bytes = [0u8; 64];
                 context.fill(&mut key_bytes);
-                let key = FixedBytes::<64>::decode(Copying(key_bytes.as_ref())).unwrap();
+                let key = FixedBytes::new(key_bytes);
                 let data: i32 = context.random();
 
                 if keys.contains_key(&index) {
@@ -805,7 +804,7 @@ mod tests {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
-                let key = FixedBytes::<64>::decode(Copying(key.as_ref())).unwrap();
+                let key = FixedBytes::new(key);
                 let data: i32 = context.random();
 
                 archive = archive

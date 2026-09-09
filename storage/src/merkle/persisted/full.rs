@@ -215,7 +215,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ) -> Result<D, Error<F>> {
         if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
             debug!(?pos, "read node from metadata");
-            let digest = D::decode(Copying(bytes.as_slice()));
+            let digest = D::decode(Copying(bytes));
             let Ok(digest) = digest else {
                 error!(
                     ?pos,
