@@ -351,7 +351,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         mut self: Box<Self>,
         index: u64,
         key: K,
-        data: V,
+        data: &V,
         skip_if_index_exists: bool,
     ) -> Result<Box<Self>, Error> {
         // A put below the prune floor is satisfied without storing
@@ -370,7 +370,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let section = self.section(index);
         let entry = Record::new(index, key.clone(), 0, 0);
         let position;
-        (self.oversized, position, _, _) = self.oversized.append(section, entry, &data).await?;
+        (self.oversized, position, _, _) = self.oversized.append(section, entry, data).await?;
 
         // Store index location
         match self.indices.entry(index) {
@@ -625,7 +625,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archiv
     type Key = K;
     type Value = V;
 
-    async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+    async fn put(mut self, index: u64, key: K, data: &V) -> Result<Self, Error> {
         self.0 = self.0.put_internal(index, key, data, true).await?;
         Ok(self)
     }
@@ -685,7 +685,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::MultiA
         self.0.get_all(index).await
     }
 
-    async fn put_multi(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+    async fn put_multi(mut self, index: u64, key: K, data: &V) -> Result<Self, Error> {
         self.0 = self.0.put_internal(index, key, data, false).await?;
         Ok(self)
     }

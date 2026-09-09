@@ -270,7 +270,7 @@ where
             .marshal
             .get_block(Identifier::Height(height))
             .await
-            .map(MV::into_inner)?;
+            .map(MV::into_shared)?;
         let Some(Payload::EpochInfo(info)) = block.payload() else {
             panic!("boundary block {height} missing epoch info");
         };

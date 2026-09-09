@@ -30,8 +30,8 @@ where
     B: Block,
 {
     type ApplicationBlock = B;
-    type Block = B;
-    type StoredBlock = B;
+    type Block = Arc<B>;
+    type StoredBlock = Arc<B>;
     type Commitment = <B as Digestible>::Digest;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
@@ -67,23 +67,15 @@ where
         block_cfg.clone()
     }
 
-    fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
+    fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block
-    }
-
-    fn into_inner_shared(block: Arc<Self::Block>) -> Arc<Self::ApplicationBlock> {
-        block
-    }
-
-    fn owned_into_inner_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
-        Arc::new(block)
     }
 
     fn from_application_block(
         block: Self::ApplicationBlock,
         _payload: Self::Commitment,
     ) -> Self::Block {
-        block
+        Arc::new(block)
     }
 }
 

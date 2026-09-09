@@ -582,7 +582,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone()),
+            start: plan.marshal_start(genesis_block.clone().into()),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),

@@ -443,7 +443,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
-                start: Start::Genesis(genesis.clone()),
+                start: Start::Genesis(genesis.clone().into()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention: ViewDelta::new(10),

@@ -632,7 +632,7 @@ mod test {
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: Start::Genesis(genesis.clone()),
+                    start: Start::Genesis(genesis.clone().into()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),

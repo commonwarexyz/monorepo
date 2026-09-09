@@ -52,6 +52,7 @@ mod delivery;
 pub(crate) mod durability;
 mod floor;
 pub use floor::Floor;
+mod staged;
 mod stream;
 
 mod mailbox;

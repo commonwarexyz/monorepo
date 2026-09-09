@@ -46,7 +46,7 @@ pub trait Certificates: Send + Sync + Sized + 'static {
         self,
         height: Height,
         digest: Self::BlockDigest,
-        finalization: Finalization<Self::Scheme, Self::Commitment>,
+        finalization: &Finalization<Self::Scheme, Self::Commitment>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Flush all buffered writes to durable storage.
@@ -132,7 +132,7 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     /// # Arguments
     ///
     /// * `block`: The finalized block, which provides its `height()` and `digest()`.
-    fn put(self, block: Self::Block) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+    fn put(self, block: &Self::Block) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Flush all buffered writes to durable storage.
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
@@ -243,7 +243,7 @@ where
         self,
         height: Height,
         digest: Self::BlockDigest,
-        finalization: Finalization<S, Self::Commitment>,
+        finalization: &Finalization<S, Self::Commitment>,
     ) -> Result<Self, Self::Error> {
         Archive::put(self, height.get(), digest, finalization).await
     }
@@ -290,7 +290,7 @@ where
     type Block = B;
     type Error = archive::Error;
 
-    async fn put(self, block: Self::Block) -> Result<Self, Self::Error> {
+    async fn put(self, block: &Self::Block) -> Result<Self, Self::Error> {
         Archive::put(self, block.height().get(), block.digest(), block).await
     }
 
@@ -348,7 +348,7 @@ where
         self,
         height: Height,
         digest: Self::BlockDigest,
-        finalization: Finalization<S, Self::Commitment>,
+        finalization: &Finalization<S, Self::Commitment>,
     ) -> Result<Self, Self::Error> {
         Archive::put(self, height.get(), digest, finalization).await
     }
@@ -395,7 +395,7 @@ where
     type Block = B;
     type Error = archive::Error;
 
-    async fn put(self, block: Self::Block) -> Result<Self, Self::Error> {
+    async fn put(self, block: &Self::Block) -> Result<Self, Self::Error> {
         Archive::put(self, block.height().get(), block.digest(), block).await
     }
 
