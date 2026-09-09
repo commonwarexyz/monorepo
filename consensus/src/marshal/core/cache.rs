@@ -51,6 +51,8 @@ where
     notarized_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Certified blocks indexed by height and keyed by digest.
+    ///
+    /// Also includes uncertified ancestors fetched during optimistic verification.
     certified_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view
@@ -365,7 +367,7 @@ where
         (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
-    /// Add a certified block to the height-indexed archive.
+    /// Add a block to the height-indexed certified archive.
     pub(crate) async fn put_certified(
         mut self,
         epoch: Epoch,
@@ -588,7 +590,7 @@ where
         None
     }
 
-    /// Looks for a block (certified by height, verified, or notarized) that matches `predicate`.
+    /// Looks for a block in the verified, notarized, or certified archives that matches `predicate`.
     pub(crate) async fn find_block_matching(
         &self,
         digest: <V::Block as Digestible>::Digest,

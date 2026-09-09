@@ -1,9 +1,14 @@
 //! Property suites shared by field and group backends.
 
-use super::{Backend, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51, WithBackend};
+use super::{
+    Backend, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES, MASK_51, WithBackend,
+};
+#[cfg(test)]
+use crate::test::ZIP215_POINTS;
 use arbitrary::{Arbitrary, Unstructured};
+use core::array;
 
-const MASK_52: u64 = (1 << 52) - 1;
+pub(super) const MASK_52: u64 = (1 << 52) - 1;
 
 /// A field or group arithmetic fuzzing operation.
 #[derive(Debug, Arbitrary)]
@@ -91,7 +96,7 @@ fn assert_bounded(value: FVec) {
     );
 }
 
-fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
+pub(super) fn assert_f_eq(actual: FVec, expected: FVec, property: &str) {
     assert_bounded(actual);
     assert_bounded(expected);
     for lane in 0..LANES {
@@ -313,6 +318,46 @@ fn fuzz_group<B: Backend>(u: &mut Unstructured<'_>, backend: B) -> arbitrary::Re
 
 #[cfg(test)]
 #[test]
+fn repeated_squaring_matches_scalar() {
+    #[derive(Clone, Copy)]
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) -> Self::Output {
+            let max = FVec {
+                limbs: [[MASK_52; LANES]; 5],
+            };
+            let mixed = FVec::transpose([
+                F::ZERO,
+                F::ONE,
+                F([MASK_52; 5]),
+                F([MASK_51; 5]),
+                F([19, 0, 0, 0, 0]),
+                F([0, MASK_52, 0, MASK_52, 0]),
+                F([1 << 51; 5]),
+                F([0x123456789abcd, 7, MASK_52 - 1, 42, 1]),
+            ]);
+            for input in [max, mixed] {
+                for k in [0, 1, 2, 5, 10, 20, 50, 100] {
+                    let actual = backend.pow2k(input, k);
+                    if k == 0 {
+                        assert_eq!(actual.limbs, input.limbs);
+                    }
+                    let expected = FVec::transpose(input.untranspose().map(|v| v.pow2k(k)));
+                    assert_f_eq(actual, expected, "repeated squaring");
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
+
+#[cfg(test)]
+#[test]
 fn backend_at_bounds() {
     struct CheckBackendAtBounds;
 
@@ -350,6 +395,37 @@ fn backend_at_bounds() {
                 backend.square(max),
                 "backend square at bound",
             );
+
+            // These coordinates need not form a curve point: compare the complete formulas
+            // coordinate-wise to exercise their loose-intermediate bounds.
+            let point = GVec {
+                x: max,
+                y: max,
+                t: max,
+                z: max,
+            };
+            let affine = GAffineVec {
+                x: max,
+                y: max,
+                t2d: max,
+            };
+            for (actual, expected) in [
+                (backend.g_add(point, point), reference.g_add(point, point)),
+                (
+                    backend.g_add_mixed(point, affine),
+                    reference.g_add_mixed(point, affine),
+                ),
+                (backend.g_double(point), reference.g_double(point)),
+            ] {
+                for (actual, expected) in [
+                    (actual.x, expected.x),
+                    (actual.y, expected.y),
+                    (actual.t, expected.t),
+                    (actual.z, expected.z),
+                ] {
+                    assert_f_eq(actual, expected, "group formula at bound");
+                }
+            }
         }
     }
 
@@ -368,24 +444,18 @@ fn minifuzz_field() {
 #[cfg(test)]
 #[test]
 fn minifuzz_group() {
-    // The fully inlined NEON group formulas need more than the test harness's default stack in
-    // unoptimized builds.
-    let run = || {
-        commonware_invariants::minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(100)
-            .test(|u| Plan::Group.run(u));
-    };
-    if cfg!(target_arch = "aarch64") {
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(run)
-            .unwrap()
-            .join()
-            .unwrap();
-    } else {
-        run();
-    }
+    // Fully inlined group formulas can exceed the test harness's default stack in debug builds.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(100)
+                .test(|u| Plan::Group.run(u));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 /// Checks that a backend's field operations match the portable backend.
@@ -419,14 +489,31 @@ fn fuzz_group_matches_portable<B: Backend>(
     backend: B,
 ) -> arbitrary::Result<()> {
     let reference = super::portable::Backend::new();
-    let scalar = u.arbitrary::<u16>()?;
-    let basepoint = basepoint(reference);
-    let point = scale(reference, basepoint, u32::from(scalar));
-    let affine_basepoint = GAffineVec {
-        x: basepoint.x,
-        y: basepoint.y,
-        t2d: reference.mul(basepoint.t, FVec::splat(F::EDWARDS_D2)),
-    };
+    let encodings: [[u8; 32]; LANES] = u.arbitrary()?;
+    let decoded = GAffine::decompress_batch(backend, &encodings);
+    let lanes = array::from_fn(|i| {
+        let scalar = GAffine::decompress(&encodings[i]);
+        assert_eq!(
+            decoded[i].map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+            scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+            "decompression lane {i}",
+        );
+        scalar.unwrap_or(GAffine::IDENTITY)
+    });
+    let affine = GAffineVec::transpose(lanes);
+    let rhs = GVec::transpose(lanes.map(GAffine::to_extended));
+    let scales = arbitrary_fvec(u)?
+        .untranspose()
+        .map(|scale| if scale.is_zero() { F::ONE } else { scale });
+    let point = GVec::transpose(array::from_fn(|i| {
+        let point = lanes[(i + 1) % LANES].to_extended();
+        G {
+            x: point.x.mul(scales[i]),
+            y: point.y.mul(scales[i]),
+            t: point.t.mul(scales[i]),
+            z: point.z.mul(scales[i]),
+        }
+    }));
     assert_g_eq(
         reference,
         reference.g_double(point),
@@ -435,17 +522,118 @@ fn fuzz_group_matches_portable<B: Backend>(
     );
     assert_g_eq(
         reference,
-        reference.g_add(point, basepoint),
-        backend.g_add(point, basepoint),
+        reference.g_add(point, rhs),
+        backend.g_add(point, rhs),
         "backend addition",
     );
     assert_g_eq(
         reference,
-        reference.g_add_mixed(point, affine_basepoint),
-        backend.g_add_mixed(point, affine_basepoint),
+        reference.g_add_mixed(point, affine),
+        backend.g_add_mixed(point, affine),
         "backend mixed addition",
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn noncanonical_field_encodings() {
+    let mut p = [0xff; 32];
+    p[0] = 0xed;
+    p[31] = 0x7f;
+    for offset in 0..19 {
+        let mut canonical = [0; 32];
+        canonical[0] = offset;
+        for sign in [0, 0x80] {
+            let mut encoded = p;
+            encoded[0] += offset;
+            encoded[31] |= sign;
+            assert_eq!(F::from_bytes(&encoded).to_bytes(), canonical);
+        }
+    }
+    let mut p_minus_one = p;
+    p_minus_one[0] -= 1;
+    assert_eq!(F::from_bytes(&p_minus_one).to_bytes(), p_minus_one);
+    assert_eq!(F::ZERO.sub(F::ONE).to_bytes(), p_minus_one);
+}
+
+#[cfg(test)]
+#[test]
+fn zip215_decompression_and_group_laws() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let reference = super::portable::Backend::new();
+            let mut encodings = ZIP215_POINTS.to_vec();
+            for offset in 0..19 {
+                for sign in [0, 0x80] {
+                    let mut encoding = [0xff; 32];
+                    encoding[0] = 0xed + offset;
+                    encoding[31] = 0x7f | sign;
+                    encodings.push(encoding);
+                }
+            }
+            for chunk in encodings.chunks(LANES) {
+                let bytes = array::from_fn(|i| chunk[i % chunk.len()]);
+                let decoded = GAffine::decompress_batch(backend, &bytes);
+                let lanes = array::from_fn(|i| {
+                    let scalar = GAffine::decompress(&bytes[i]);
+                    assert_eq!(
+                        decoded[i].map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
+                        scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
+                    );
+                    scalar.unwrap_or(GAffine::IDENTITY)
+                });
+                let p = GVec::transpose(lanes.map(GAffine::to_extended));
+                let q = GVec::transpose(array::from_fn(|i| lanes[(i + 1) % LANES].to_extended()));
+                assert_g_eq(
+                    reference,
+                    backend.g_add(p, q),
+                    reference.g_add(p, q),
+                    "ZIP215 addition",
+                );
+                assert_g_eq(
+                    reference,
+                    backend.g_double(p),
+                    reference.g_double(p),
+                    "ZIP215 doubling",
+                );
+                assert_g_eq(
+                    reference,
+                    backend.g_add_mixed(q, GAffineVec::transpose(lanes)),
+                    reference.g_add(q, p),
+                    "ZIP215 mixed addition",
+                );
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
+
+#[cfg(test)]
+#[test]
+fn secret_scalar_multiplication_matches_public() {
+    commonware_invariants::minifuzz::Builder::default()
+        .with_seed(0)
+        .with_search_limit(32)
+        .test(|u| {
+            let scalar: [u8; 32] = u.arbitrary()?;
+            let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?)
+                .unwrap()
+                .to_extended();
+            let point = GAffine::BASEPOINT.to_extended().add(torsion);
+            let bits = (0..256).rev().map(|i| scalar[i / 8] >> (i % 8) & 1 == 1);
+            assert_eq!(
+                point.scalar_mul_secret(&scalar).to_bytes(),
+                point.scalar_mul(bits).to_bytes()
+            );
+            Ok(())
+        });
 }
 
 /// Checks the runtime dispatch path as one multi-operation computation.
@@ -498,4 +686,160 @@ fn with_backend_matches_portable() {
         expected.1,
         "runtime-dispatched group computation",
     );
+}
+
+#[test]
+fn backend_conditional_neg_matches_every_mask() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let mixed = FVec {
+                limbs: array::from_fn(|limb| {
+                    array::from_fn(|lane| {
+                        let offset = (limb * LANES + lane) as u64;
+                        if (limb + lane) & 1 == 0 {
+                            offset
+                        } else {
+                            MASK_52 - offset
+                        }
+                    })
+                }),
+            };
+            for value in [FVec::splat(F::ZERO), FVec::splat(F([MASK_52; 5])), mixed] {
+                let lanes = value.untranspose();
+                for mask in 0..1u16 << LANES {
+                    let negative = array::from_fn(|lane| mask & (1 << lane) != 0);
+                    let actual = backend.conditional_neg(value, &negative);
+                    let expected = FVec::transpose(array::from_fn(|lane| {
+                        if negative[lane] {
+                            lanes[lane].neg()
+                        } else {
+                            lanes[lane]
+                        }
+                    }));
+                    assert_f_eq(actual, expected, "conditional negation");
+                    for (lane, negative) in negative.into_iter().enumerate() {
+                        if !negative {
+                            for limb in 0..5 {
+                                assert_eq!(
+                                    actual.limbs[limb][lane], value.limbs[limb][lane],
+                                    "unselected limb {limb}, lane {lane}, mask {mask:#04x}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
+}
+
+#[test]
+fn bucket_fill_matches_scalar_sum_for_every_geometry() {
+    fn check<const STRIPES: usize>() {
+        const NB: usize = 7;
+        let torsion = GAffine::decompress(&[0; 32]).unwrap();
+        let mixed = GAffine::decompress(
+            &GAffine::BASEPOINT
+                .to_extended()
+                .add(torsion.to_extended())
+                .to_bytes(),
+        )
+        .unwrap();
+        let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
+        let digits = [0, 1, -1, 7, -7, 3, 3, -3, 7];
+        let terms: [(GAffine, i16); 53] = array::from_fn(|i| {
+            let digit = if i < 16 {
+                0
+            } else {
+                digits[(i - 16) % digits.len()]
+            };
+            (points[i % points.len()], digit)
+        });
+        let expected = terms.iter().fold(G::IDENTITY, |sum, &(point, digit)| {
+            let point = point.to_extended();
+            let point = if digit < 0 { point.negate() } else { point };
+            (0..digit.unsigned_abs()).fold(sum, |sum, _| sum.add(point))
+        });
+
+        for split in [0, 1, 3, 17, 31, terms.len()] {
+            let mut buckets = [[G::IDENTITY; NB]; STRIPES];
+            for piece in [&terms[..split], &terms[split..]] {
+                super::msm::fill_buckets(
+                    |current: [G; STRIPES], incoming, negative| {
+                        array::from_fn(|lane| {
+                            let mut point = incoming[lane];
+                            if negative[lane] {
+                                point.x = point.x.neg();
+                                point.t2d = point.t2d.neg();
+                            }
+                            current[lane].add_mixed(point)
+                        })
+                    },
+                    buckets.as_flattened_mut(),
+                    NB,
+                    piece,
+                    |term| *term,
+                );
+            }
+            let actual = buckets
+                .iter()
+                .flatten()
+                .enumerate()
+                .fold(G::IDENTITY, |sum, (i, &point)| {
+                    (0..=i % NB).fold(sum, |sum, _| sum.add(point))
+                });
+            assert!(
+                actual.add(expected.negate()).is_identity(),
+                "stripes={STRIPES} split={split}"
+            );
+        }
+    }
+
+    check::<1>();
+    check::<2>();
+    check::<3>();
+    check::<8>();
+    check::<16>();
+}
+
+#[test]
+fn sum_lanes_matches_scalar_sum() {
+    struct Check;
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            let base = GAffine::BASEPOINT.to_extended();
+            let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
+            let points = [G::IDENTITY, base, torsion, base.add(torsion), base.negate()];
+            for offset in 0..points.len() {
+                for mask in 0..1usize << LANES {
+                    let lanes = array::from_fn(|lane| {
+                        if mask & (1 << lane) != 0 {
+                            points[(lane + offset) % points.len()]
+                        } else {
+                            G::IDENTITY
+                        }
+                    });
+                    let expected = lanes.into_iter().fold(G::IDENTITY, G::add);
+                    let actual = GVec::transpose(lanes).sum_lanes(backend);
+                    assert!(
+                        actual.add(expected.negate()).is_identity(),
+                        "offset={offset} mask={mask:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    Check.call(super::portable::Backend::new());
+    super::with_backend(Check);
 }

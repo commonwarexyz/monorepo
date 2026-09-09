@@ -940,6 +940,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
     type Context = <MultiApp as Application<deterministic::Context>>::Context;
     type Block = MultiBlock;
     type Databases = MultiDatabaseSet<deterministic::Context>;
+    type Captured = <MultiApp as Application<deterministic::Context>>::Captured;
     type Provider = ();
     type Input = ();
 
@@ -993,7 +994,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         <MultiApp as Application<deterministic::Context>>::apply(
             &mut self.inner,
             context,
@@ -1003,16 +1004,35 @@ impl Application<deterministic::Context> for GatedMultiApp {
         .await
     }
 
+    async fn capture(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        block: &Self::Block,
+        batches: &<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized,
+        readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) -> Self::Captured {
+        <MultiApp as Application<deterministic::Context>>::capture(
+            &mut self.inner,
+            context,
+            block,
+            batches,
+            readers,
+        )
+        .await
+    }
+
     async fn finalized(
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
+        captured: Self::Captured,
         readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
     ) {
         <MultiApp as Application<deterministic::Context>>::finalized(
             &mut self.inner,
             context,
             block,
+            captured,
             readers,
         )
         .await;
