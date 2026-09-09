@@ -94,12 +94,9 @@ pub fn required_chunks<F: Graftable, const N: usize>(
 ) -> Result<impl Iterator<Item = u64>, Error<F>> {
     const { assert!(N.is_power_of_two() && N <= usize::MAX / 8) };
     let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-    let (complete, graftable) = graftable_chunk_window(
-        ops_leaves,
-        bitmap_len / chunk_bits,
-        pruned_chunks,
-        grafting::height::<N>(),
-    )?;
+    let complete = bitmap_len / chunk_bits;
+    let graftable =
+        graftable_chunk_window(ops_leaves, complete, pruned_chunks, grafting::height::<N>())?;
     let queried = if let Some(loc) = location {
         if loc >= ops_leaves || *loc >= bitmap_len {
             return Err(merkle::Error::RangeOutOfBounds(loc).into());

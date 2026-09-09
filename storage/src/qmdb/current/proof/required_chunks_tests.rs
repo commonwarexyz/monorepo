@@ -12,7 +12,7 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_async;
 use commonware_parallel::Sequential;
 use commonware_utils::{
-    Widen as _,
+    Widen,
     bitmap::{Prunable as BitMap, Readable},
     sync::Mutex,
 };
@@ -156,12 +156,11 @@ async fn check_constructor_reads<F: Graftable>() {
                         )
                     );
                 }
-                #[allow(unstable_name_collisions)]
                 let read_chunks = preloaded
                     .reads
                     .into_inner()
                     .into_iter()
-                    .map(|chunk| chunk.widen())
+                    .map(Widen::widen)
                     .collect::<Vec<_>>();
                 assert_eq!(
                     read_chunks, required,

@@ -40,7 +40,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::{
-    Widen as _,
+    Widen,
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
 };
@@ -875,7 +875,7 @@ pub(super) fn partial_chunk<B: bitmap::Readable<N>, const N: usize>(
     Some((last_chunk, next_bit))
 }
 
-/// Return complete and graftable chunk counts, enforcing the pending and pruning invariants.
+/// Return the graftable chunk count, enforcing the pending and pruning invariants.
 ///
 /// Returns [`Error::DataCorrupted`] if `complete` and `ops_leaves` imply more than one
 /// pending chunk, or if pruning has advanced past the graftable chunk boundary.
@@ -884,7 +884,7 @@ pub(super) fn graftable_chunk_window<F: merkle::Graftable>(
     complete: u64,
     pruned: u64,
     grafting_height: u32,
-) -> Result<(u64, u64), Error<F>> {
+) -> Result<u64, Error<F>> {
     let graftable = grafting::graftable_chunks::<F>(*ops_leaves, grafting_height).min(complete);
     let pending = complete - graftable;
     if pending > 1 {
@@ -897,7 +897,7 @@ pub(super) fn graftable_chunk_window<F: merkle::Graftable>(
         ));
     }
 
-    Ok((complete, graftable))
+    Ok(graftable)
 }
 
 /// Returns the bytes of the "pending" chunk if the bitmap currently has one, else `None`.
@@ -917,11 +917,11 @@ pub(super) fn pending_chunk<F: merkle::Graftable, B: bitmap::Readable<N>, const 
     ops_leaves: Location<F>,
     grafting_height: u32,
 ) -> Result<Option<[u8; N]>, Error<F>> {
-    #[allow(unstable_name_collisions)]
-    let (complete, graftable) = graftable_chunk_window(
+    let complete = Widen::widen(bitmap.complete_chunks());
+    let graftable = graftable_chunk_window(
         ops_leaves,
-        bitmap.complete_chunks().widen(),
-        bitmap.pruned_chunks().widen(),
+        complete,
+        Widen::widen(bitmap.pruned_chunks()),
         grafting_height,
     )?;
     if complete - graftable != 1 {
@@ -1086,11 +1086,10 @@ pub(super) async fn compute_grafted_root<
 
     // Validate bitmap invariants (pending <= 1, pruned <= graftable).
     let grafting_height = grafting::height::<N>();
-    #[allow(unstable_name_collisions)]
-    let (_complete_chunks, _graftable_chunks) = graftable_chunk_window(
+    graftable_chunk_window(
         ops_leaves,
-        status.complete_chunks().widen(),
-        status.pruned_chunks().widen(),
+        Widen::widen(status.complete_chunks()),
+        Widen::widen(status.pruned_chunks()),
         grafting_height,
     )?;
 
