@@ -146,14 +146,13 @@ jobs:
           - fuzz_dir: codec/fuzz
           - fuzz_dir: coding/fuzz
           - fuzz_dir: collector/fuzz
-          - fuzz_dir: consensus/fuzz
-            partition: "1/4"
-          - fuzz_dir: consensus/fuzz
-            partition: "2/4"
-          - fuzz_dir: consensus/fuzz
-            partition: "3/4"
-          - fuzz_dir: consensus/fuzz
-            partition: "4/4"
+          - fuzz_dir: consensus/fuzz/aggregation
+          - fuzz_dir: consensus/fuzz/marshal
+          - fuzz_dir: consensus/fuzz/simplex
+            partition: "1/2"
+          - fuzz_dir: consensus/fuzz/simplex
+            partition: "2/2"
+          - fuzz_dir: consensus/fuzz/structures
           - fuzz_dir: cryptography/fuzz
             partition: "1/2"
           - fuzz_dir: cryptography/fuzz

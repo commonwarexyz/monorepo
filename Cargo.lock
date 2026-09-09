@@ -1467,7 +1467,49 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-consensus-fuzz"
+name = "commonware-consensus-fuzz-aggregation"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-consensus-fuzz-core",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "libfuzzer-sys",
+ "rand_core 0.10.1",
+]
+
+[[package]]
+name = "commonware-consensus-fuzz-core"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-actor",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
+ "rand_distr",
+ "tracing",
+]
+
+[[package]]
+name = "commonware-consensus-fuzz-marshal"
 version = "2026.9.0"
 dependencies = [
  "arbitrary",
@@ -1477,9 +1519,9 @@ dependencies = [
  "commonware-codec",
  "commonware-coding",
  "commonware-consensus",
+ "commonware-consensus-fuzz-core",
  "commonware-cryptography",
  "commonware-macros",
- "commonware-math",
  "commonware-p2p",
  "commonware-parallel",
  "commonware-resolver",
@@ -1488,13 +1530,51 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
+ "tracing",
+]
+
+[[package]]
+name = "commonware-consensus-fuzz-simplex"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "bytes",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-consensus-fuzz-core",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "libfuzzer-sys",
  "proptest",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "rand_distr",
  "sancov",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-consensus-fuzz-structures"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "commonware-actor",
+ "commonware-codec",
+ "commonware-coding",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-math",
+ "commonware-parallel",
+ "commonware-utils",
+ "libfuzzer-sys",
 ]
 
 [[package]]
