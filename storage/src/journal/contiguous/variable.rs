@@ -2616,7 +2616,73 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 }
 
 #[commonware_macros::stability(ALPHA)]
+impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, V> {
+    type Journal = Journal<E, V>;
+
+    fn bounds(&self) -> Range<u64> {
+        self.bounds.clone()
+    }
+
+    /// Read recovery data through the acknowledged and rebuilt offsets.
+    async fn read(&self, pos: u64) -> Result<V, Error> {
+        if pos < self.bounds.start {
+            return Err(Error::ItemPruned(pos));
+        }
+        if pos >= self.bounds.end {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+        let per_blob = self.cfg.items_per_section.get();
+        let blob = position_to_blob(pos, per_blob);
+        let writer = self
+            .pending
+            .get(&blob)
+            .ok_or_else(|| Error::Corruption(format!("missing recovery data blob {blob}")))?;
+        let offset = self.offsets.item(pos).await?;
+        read_frame_at::<V>(
+            writer,
+            offset,
+            &self.cfg.codec_config,
+            self.cfg.compression.is_some(),
+        )
+        .await
+        .map(|(_, _, item)| item)
+    }
+
+    async fn reset(mut self, size: u64) -> Result<Self, Error> {
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        self.pending.clear();
+        let partition = self.cfg.data_partition();
+        self.offsets = self
+            .offsets
+            .clear_to_size_cleared(size, || {
+                Partition::<E>::remove_all(&self.context, &partition)
+            })
+            .await?;
+        self.discarded.clear();
+        self.recovered_scans.clear();
+        self.bounds = size..size;
+        Ok(self)
+    }
+
+    async fn finish(self, size: u64) -> Result<Self::Journal, Error> {
+        Ok(Journal(Box::new(Self::publish(self, size).await?)))
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
 impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
+    type Recovery = Recovery<E, V>;
+
+    async fn recover(
+        context: E,
+        cfg: Self::Config,
+        max_size: Option<u64>,
+    ) -> Result<Self::Recovery, Error> {
+        Recovery::open(context, cfg, max_size).await
+    }
+
     type Config = Config<V::Cfg>;
 
     async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
@@ -2697,7 +2763,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
+        journal::{
+            authenticated::BackingRecovery as _,
+            contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
+        },
         utils::codec::View,
     };
     use commonware_macros::test_traced;
@@ -2874,10 +2943,7 @@ mod tests {
                         .await
                         .unwrap();
                 assert_eq!(recovery.bounds, 10..10);
-                assert_eq!(
-                    (recovery.offsets.pruning_boundary()..recovery.offsets.size()),
-                    0..10
-                );
+                assert_eq!(recovery.offsets.bounds(), 0..10);
                 assert_eq!(recovery.discarded, vec![1]);
                 assert!(recovery.pending.is_empty());
                 recovery.offsets = recovery.offsets.truncate(10).await.unwrap();
@@ -2981,6 +3047,67 @@ mod tests {
                 drop(journal);
             }
         });
+    }
+
+    #[test]
+    fn test_selected_prefix_reuses_known_offsets() {
+        for start in [0, 7] {
+            for watermark in [start, 10, 13] {
+                deterministic::Runner::default().start(|context| async move {
+                    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let cfg = Config {
+                        partition: "selected-offset".into(),
+                        items_per_section: NZU64!(5),
+                        compression: None,
+                        codec_config: count.clone(),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8)),
+                        write_buffer: NZUsize!(1024),
+                        replay_buffer: NZUsize!(1024),
+                    };
+                    let mut journal =
+                        Journal::init_at_size(context.child("seed"), cfg.clone(), start)
+                            .await
+                            .unwrap();
+                    for value in start..13 {
+                        (journal, _) = journal.append(&Counted(value)).await.unwrap();
+                    }
+                    let journal = journal.sync().await.unwrap();
+                    drop(
+                        journal
+                            .test_set_offsets_recovery_watermark(watermark)
+                            .await
+                            .unwrap(),
+                    );
+                    let pending =
+                        Recovery::<_, Counted>::open(context.child("recover"), cfg, Some(12))
+                            .await
+                            .unwrap();
+                    count.store(0, std::sync::atomic::Ordering::Relaxed);
+                    // Every selectable end comes from a blob boundary, an acknowledged offset,
+                    // or the inspection scan. Resolving it must not decode frames again.
+                    for size in start..=12 {
+                        let first = (size / 5 * 5).max(start);
+                        assert_eq!(
+                            pending.terminal_offset(size).await.unwrap(),
+                            (size - first) * 9
+                        );
+                    }
+                    assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 0);
+                    for value in start..12 {
+                        assert_eq!(pending.read(value).await.unwrap().0, value);
+                    }
+                    assert_eq!(
+                        count.load(std::sync::atomic::Ordering::Relaxed),
+                        (12 - start) as usize
+                    );
+                    let journal = Journal(Box::new(pending.publish(7).await.unwrap()));
+                    assert_eq!(journal.bounds(), start..7);
+                    if start < 7 {
+                        assert_eq!(journal.read(6).await.unwrap().0, 6);
+                    }
+                });
+            }
+        }
     }
 
     #[test]

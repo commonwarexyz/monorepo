@@ -1030,8 +1030,80 @@ where
     }
 }
 
+/// A journal under initialization, with read access before its retained end is finalized.
+///
+/// Finishing consumes this owner. A live journal cannot regain recovery access. Opening may
+/// repair torn storage, but selecting a prefix does not itself discard journal history.
+pub trait BackingRecovery: Send + Sync + Sized {
+    /// The live journal produced after recovery finishes.
+    type Journal: Mutable;
+
+    /// Available item positions, including the retained pruning boundary.
+    fn bounds(&self) -> Range<u64>;
+
+    /// Read a retained item for initialization validation.
+    fn read(
+        &self,
+        position: u64,
+    ) -> impl core::future::Future<
+        Output = Result<<Self::Journal as Contiguous>::Item, JournalError>,
+    > + Send;
+
+    /// Discard stored items and establish an empty journal at `size` during initialization.
+    fn reset(
+        self,
+        size: u64,
+    ) -> impl core::future::Future<Output = Result<Self, JournalError>> + Send;
+
+    /// Durably retain at most `size` items and publish the live journal.
+    fn finish(
+        self,
+        size: u64,
+    ) -> impl core::future::Future<Output = Result<Self::Journal, JournalError>> + Send;
+
+    /// Select the latest retained item satisfying `predicate` below an exclusive ceiling.
+    fn last_matching<P>(
+        &self,
+        ceiling: u64,
+        mut predicate: P,
+    ) -> impl core::future::Future<Output = Result<u64, JournalError>> + Send
+    where
+        P: FnMut(&<Self::Journal as Contiguous>::Item) -> bool + Send,
+    {
+        async move {
+            let bounds = self.bounds();
+            if ceiling < bounds.start {
+                return Err(JournalError::ItemPruned(ceiling));
+            }
+            let mut end = bounds.end.min(ceiling);
+            while end > bounds.start {
+                if predicate(&self.read(end - 1).await?) {
+                    return Ok(end);
+                }
+                end -= 1;
+            }
+            if bounds.start != 0 {
+                return Err(JournalError::ItemPruned(bounds.start));
+            }
+            Ok(0)
+        }
+    }
+}
+
 /// A [Mutable] journal that can back an authenticated [Journal].
 pub trait Backing<E: Context>: Mutable {
+    /// Initialization-owned storage used to select and validate the retained prefix.
+    type Recovery: BackingRecovery<Journal = Self>;
+
+    /// Open recovery storage for an optional exclusive item end. Implementations may inspect
+    /// later storage to validate recovery boundaries. Returns [JournalError::ItemPruned] when
+    /// `max_size` lies below the retained start.
+    fn recover(
+        context: E,
+        cfg: Self::Config,
+        max_size: Option<u64>,
+    ) -> impl core::future::Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send;
 
