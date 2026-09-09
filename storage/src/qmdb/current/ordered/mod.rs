@@ -21,9 +21,6 @@ pub mod variable;
 pub type ExclusionProof<F, K, V, D, const N: usize> = proof::ExclusionProof<F, K, V, D, [u8; N]>;
 
 /// Proof that a key has no assigned value in the database, with a runtime-sized bitmap chunk.
-///
-/// The decoder configuration is `((chunk_size, max_digests), update_cfg, value_cfg)`.
-/// The chunk size is in bytes and is not encoded in the proof.
 pub type RuntimeExclusionProof<F, K, V, D> = proof::ExclusionProof<F, K, V, D, bytes::Bytes>;
 
 /// Wire tag for [ExclusionProof::KeyValue].

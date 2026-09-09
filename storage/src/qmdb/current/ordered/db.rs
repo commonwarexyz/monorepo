@@ -26,9 +26,6 @@ use futures::stream::Stream;
 pub type KeyValueProof<F, K, D, const N: usize> = super::proof::KeyValueProof<F, K, D, [u8; N]>;
 
 /// Proof information for verifying a key has a particular value, with a runtime-sized bitmap chunk.
-///
-/// The decoder configuration is `((chunk_size, max_digests), key_cfg)`.
-/// The chunk size is in bytes and is not encoded in the proof.
 pub type RuntimeKeyValueProof<F, K, D> = super::proof::KeyValueProof<F, K, D, bytes::Bytes>;
 
 /// The generic Db type for ordered Current QMDB variants.

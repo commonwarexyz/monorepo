@@ -27,8 +27,6 @@ use commonware_parallel::Strategy;
 pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
 
 /// A key-value proof with a runtime-sized bitmap chunk.
-///
-/// Decoding takes `(chunk_size, max_digests)` as configuration, as in [RuntimeOperationProof].
 pub type RuntimeKeyValueProof<F, D> = RuntimeOperationProof<F, D>;
 
 /// The generic Db type for unordered Current QMDB variants.
