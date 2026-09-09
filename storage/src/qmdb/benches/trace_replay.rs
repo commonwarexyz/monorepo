@@ -107,6 +107,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072); // 512 MiB
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
 // Record tags in trace.bin.
 const SREAD: u8 = 0x01;
@@ -256,6 +257,7 @@ fn main() {
             metadata_partition: "eth-merkle-metadata".into(),
             items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),
             page_cache: pc.clone(),
         };
@@ -273,6 +275,7 @@ fn main() {
                     codec_config: ((), (RangeCfg::new(0..=256), ())),
                     page_cache: pc,
                     write_buffer: WRITE_BUFFER,
+                    replay_buffer: REPLAY_BUFFER,
                 },
                 grafted_metadata_partition: "eth-grafted-metadata".into(),
                 translator: EightCap,
