@@ -3,6 +3,7 @@
 //! This module contains impl blocks that are generic over `ValueEncoding`, allowing them to be
 //! used by both fixed and variable unordered QMDB implementations.
 
+use super::proof::fixed::KeyValueProof;
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
@@ -15,19 +16,12 @@ use crate::{
             operation::update::Unordered as UnorderedUpdate,
             unordered::{Operation, Update},
         },
-        current::proof::{OperationProof, RuntimeOperationProof},
         operation::Key,
     },
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-
-/// Proof information for verifying a key has a particular value in the database.
-pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
-
-/// A key-value proof with a runtime-sized bitmap chunk.
-pub type RuntimeKeyValueProof<F, D> = RuntimeOperationProof<F, D>;
 
 /// The generic Db type for unordered Current QMDB variants.
 ///

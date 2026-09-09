@@ -3,6 +3,7 @@
 //! This module contains impl blocks that are generic over `ValueEncoding`, allowing them to be
 //! used by both fixed and variable ordered QMDB implementations.
 
+use super::proof::fixed::{ExclusionProof, KeyValueProof};
 use crate::{
     Context,
     index::Ordered as OrderedIndex,
@@ -21,12 +22,6 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
-
-/// Proof information for verifying a key has a particular value, with a fixed-size bitmap chunk.
-pub type KeyValueProof<F, K, D, const N: usize> = super::proof::KeyValueProof<F, K, D, [u8; N]>;
-
-/// Proof information for verifying a key has a particular value, with a runtime-sized bitmap chunk.
-pub type RuntimeKeyValueProof<F, K, D> = super::proof::KeyValueProof<F, K, D, bytes::Bytes>;
 
 /// The generic Db type for ordered Current QMDB variants.
 ///
@@ -119,7 +114,7 @@ where
     pub async fn exclusion_proof(
         &self,
         key: &K,
-    ) -> Result<super::ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
+    ) -> Result<ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
         match self.any.get_span(key).await? {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
@@ -127,7 +122,7 @@ where
                     return Err(Error::<F>::KeyExists);
                 }
                 let op_proof = self.operation_proof(loc).await?;
-                Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
+                Ok(ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
                 // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
@@ -143,7 +138,7 @@ where
                     self.any.last_commit_loc, floor
                 );
                 let op_proof = self.operation_proof(self.any.last_commit_loc).await?;
-                Ok(super::ExclusionProof::Commit(op_proof, value))
+                Ok(ExclusionProof::Commit(op_proof, value))
             }
         }
     }

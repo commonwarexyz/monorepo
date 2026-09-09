@@ -16,6 +16,25 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 
+/// Proofs with fixed-size bitmap chunks.
+pub mod fixed {
+    /// Proof information for verifying a key has a particular value in the database.
+    pub type KeyValueProof<F, K, D, const N: usize> = super::KeyValueProof<F, K, D, [u8; N]>;
+
+    /// Proof that a key has no assigned value in the database.
+    pub type ExclusionProof<F, K, V, D, const N: usize> =
+        super::ExclusionProof<F, K, V, D, [u8; N]>;
+}
+
+/// Proofs with runtime-sized bitmap chunks.
+pub mod dynamic {
+    /// Proof information for verifying a key has a particular value in the database.
+    pub type KeyValueProof<F, K, D> = super::KeyValueProof<F, K, D, bytes::Bytes>;
+
+    /// Proof that a key has no assigned value in the database.
+    pub type ExclusionProof<F, K, V, D> = super::ExclusionProof<F, K, V, D, bytes::Bytes>;
+}
+
 /// Proof information for verifying a key has a particular value in the database.
 ///
 /// `C` stores the embedded operation proof's bitmap chunk.

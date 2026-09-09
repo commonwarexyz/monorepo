@@ -1,4 +1,4 @@
-use super::{OperationProof, RangeProof, RuntimeOperationProof, required_chunks};
+use super::{RangeProof, dynamic, fixed, required_chunks};
 use crate::{
     merkle::{self, Graftable, Location, conformance::build_test_mem, mem::Mem},
     mmb, mmr,
@@ -121,7 +121,7 @@ async fn check_constructor_reads<F: Graftable>() {
                     reads: Mutex::new(BTreeSet::new()),
                 };
                 if let Some(loc) = location {
-                    let proof = OperationProof::<F, Digest, 1>::new::<Sha256, _>(
+                    let proof = fixed::OperationProof::<F, Digest, 1>::new::<Sha256, _>(
                         &preloaded, &storage, floor, loc, ops_root,
                     )
                     .await
@@ -130,7 +130,7 @@ async fn check_constructor_reads<F: Graftable>() {
                         proof.verify::<Sha256, _>(hasher.digest(&(*loc).to_be_bytes()), &root,)
                     );
                     let proof =
-                        RuntimeOperationProof::<F, Digest>::decode_cfg(proof.encode(), &(1, 64))
+                        dynamic::OperationProof::<F, Digest>::decode_cfg(proof.encode(), &(1, 64))
                             .unwrap();
                     assert!(proof.verify::<Sha256, _>(hasher.digest(&(*loc).to_be_bytes()), &root));
                 } else {

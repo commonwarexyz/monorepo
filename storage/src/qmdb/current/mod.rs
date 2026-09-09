@@ -302,7 +302,7 @@
 //!   the ops-tree topology but substitutes graftable chunks at height `gh`. When no chunks are
 //!   graftable, `grafted_root` still reflects the ops-tree peak structure. Used for proofs about
 //!   operation values and their activity status. See [RangeProof](proof::RangeProof) and
-//!   [OperationProof](proof::OperationProof).
+//!   [OperationProof](proof::fixed::OperationProof).
 //!
 //! - **Pending chunk digest** (optional): `H(pending_chunk_bytes)` when a chunk's bits are complete
 //!   but its height-`gh` ancestor has not yet been born in the ops tree. Absent in MMR and in the
@@ -1795,7 +1795,7 @@ pub mod tests {
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
             let kvp = db.key_value_proof(b.clone()).await.unwrap();
-            let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
+            let forged = ordered::proof::fixed::ExclusionProof::KeyValue(kvp.proof, span_b);
             assert!(!forged.verify::<Sha256>(&c, &root));
 
             db.destroy().await.unwrap();

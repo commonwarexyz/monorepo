@@ -5,9 +5,9 @@
 //! proofs (proving a key is currently inactive). Use [crate::qmdb::current::unordered::fixed] if
 //! exclusion proofs are not needed.
 //!
-//! See [Db] for the main database type and [super::ExclusionProof] for proving key inactivity.
+//! See [Db] for the main database type and
+//! [ExclusionProof](super::proof::fixed::ExclusionProof) for proving key inactivity.
 
-pub use super::db::{KeyValueProof, RuntimeKeyValueProof};
 use crate::{
     Context,
     index::ordered::Index,
@@ -201,17 +201,17 @@ pub mod test {
     }
 
     #[test_traced("DEBUG")]
-    fn test_current_db_runtime_key_value_proof_mmb() {
+    fn test_current_db_dynamic_key_value_proof_mmb() {
         shared::test_key_value_proof(open_db::<mmb::Family>);
     }
 
     #[test_traced("DEBUG")]
-    fn test_current_db_runtime_exclusion_proofs_mmb() {
+    fn test_current_db_dynamic_exclusion_proofs_mmb() {
         shared::test_exclusion_proofs(open_db::<mmb::Family>);
     }
 
     #[test_traced("DEBUG")]
-    fn test_current_db_runtime_inactive_proof_mmb() {
+    fn test_current_db_dynamic_inactive_proof_mmb() {
         shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmb::Family>);
     }
 

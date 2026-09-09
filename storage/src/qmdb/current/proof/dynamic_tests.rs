@@ -1,4 +1,4 @@
-use super::{OperationProof, RuntimeOperationProof, tests::current_range_proof_fixture};
+use super::{dynamic, fixed, tests::current_range_proof_fixture};
 use crate::{
     merkle::{Graftable, Location},
     mmb, mmr,
@@ -14,7 +14,7 @@ fn invalid_chunk_sizes() -> impl Iterator<Item = usize> {
         .chain(usize::try_from(1u64 << 60).ok())
 }
 
-async fn check_runtime_proofs<F: Graftable, const N: usize>() {
+async fn check_dynamic_proofs<F: Graftable, const N: usize>() {
     let chunk_bits = (N * 8) as u64;
     let height = chunk_bits.trailing_zeros() as u64;
     for leaves in [
@@ -42,7 +42,7 @@ async fn check_runtime_proofs<F: Graftable, const N: usize>() {
         for loc in [start, Location::new(leaves - 1)] {
             let (_, range_proof, operations, chunks, root, _) =
                 current_range_proof_fixture::<F, N>(leaves, loc..loc + 1).await;
-            let native = OperationProof::<F, Digest, N> {
+            let native = fixed::OperationProof::<F, Digest, N> {
                 loc,
                 chunk: chunks[0],
                 range_proof,
@@ -50,18 +50,20 @@ async fn check_runtime_proofs<F: Graftable, const N: usize>() {
             assert!(native.verify::<Sha256, _>(operations[0], &root));
             let encoded = native.encode();
             let max_digests = native.range_proof.proof.digests.len();
-            let runtime =
-                RuntimeOperationProof::<F, Digest>::decode_cfg(encoded.clone(), &(N, max_digests))
-                    .unwrap();
-            assert_eq!(runtime.encode(), encoded);
-            assert_eq!(runtime.encode_size(), encoded.len());
-            assert_eq!(runtime.loc, loc);
-            assert_eq!(runtime.chunk.as_ref(), native.chunk.as_slice());
-            assert!(runtime.verify::<Sha256, _>(operations[0], &root));
-            assert!(!runtime.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root,));
-            assert!(!runtime.verify::<Sha256, _>(operations[0], &Sha256::hash(&[b"wrong root"]),));
+            let dynamic = dynamic::OperationProof::<F, Digest>::decode_cfg(
+                encoded.clone(),
+                &(N, max_digests),
+            )
+            .unwrap();
+            assert_eq!(dynamic.encode(), encoded);
+            assert_eq!(dynamic.encode_size(), encoded.len());
+            assert_eq!(dynamic.loc, loc);
+            assert_eq!(dynamic.chunk.as_ref(), native.chunk.as_slice());
+            assert!(dynamic.verify::<Sha256, _>(operations[0], &root));
+            assert!(!dynamic.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root,));
+            assert!(!dynamic.verify::<Sha256, _>(operations[0], &Sha256::hash(&[b"wrong root"]),));
 
-            let mut inactive = runtime;
+            let mut inactive = dynamic;
             let mut chunk = inactive.chunk.to_vec();
             let bit = (*loc % chunk_bits) as usize;
             chunk[bit / 8] &= !(1 << (bit % 8));
@@ -72,20 +74,20 @@ async fn check_runtime_proofs<F: Graftable, const N: usize>() {
 }
 
 #[test_async]
-async fn runtime_proofs_match_native_mmr() {
-    check_runtime_proofs::<mmr::Family, 1>().await;
-    check_runtime_proofs::<mmr::Family, 32>().await;
-    check_runtime_proofs::<mmr::Family, 64>().await;
+async fn dynamic_proofs_match_native_mmr() {
+    check_dynamic_proofs::<mmr::Family, 1>().await;
+    check_dynamic_proofs::<mmr::Family, 32>().await;
+    check_dynamic_proofs::<mmr::Family, 64>().await;
 }
 
 #[test_async]
-async fn runtime_proofs_match_native_mmb() {
-    check_runtime_proofs::<mmb::Family, 1>().await;
-    check_runtime_proofs::<mmb::Family, 32>().await;
-    check_runtime_proofs::<mmb::Family, 64>().await;
+async fn dynamic_proofs_match_native_mmb() {
+    check_dynamic_proofs::<mmb::Family, 1>().await;
+    check_dynamic_proofs::<mmb::Family, 32>().await;
+    check_dynamic_proofs::<mmb::Family, 64>().await;
 }
 
-async fn check_runtime_range_rejections<F: Graftable>() {
+async fn check_dynamic_range_rejections<F: Graftable>() {
     const N: usize = 1;
     let start = Location::<F>::new(6);
     let (_, proof, operations, chunks, root, _) =
@@ -167,17 +169,17 @@ async fn check_runtime_range_rejections<F: Graftable>() {
 }
 
 #[test_async]
-async fn runtime_range_rejects_malformed_inputs() {
-    check_runtime_range_rejections::<mmr::Family>().await;
-    check_runtime_range_rejections::<mmb::Family>().await;
+async fn dynamic_range_rejects_malformed_inputs() {
+    check_dynamic_range_rejections::<mmr::Family>().await;
+    check_dynamic_range_rejections::<mmb::Family>().await;
 }
 
-async fn check_runtime_operation_codec_rejections<F: Graftable>() {
+async fn check_dynamic_operation_codec_rejections<F: Graftable>() {
     const N: usize = 32;
     let loc = Location::<F>::new(14);
     let (_, range_proof, operations, chunks, root, _) =
         current_range_proof_fixture::<F, N>(18, loc..loc + 1).await;
-    let native = OperationProof::<F, Digest, N> {
+    let native = fixed::OperationProof::<F, Digest, N> {
         loc,
         chunk: chunks[0],
         range_proof,
@@ -186,12 +188,12 @@ async fn check_runtime_operation_codec_rejections<F: Graftable>() {
     let max_digests = native.range_proof.proof.digests.len();
     assert!(max_digests > 0);
     assert!(
-        RuntimeOperationProof::<F, Digest>::decode_cfg(encoded.clone(), &(N, max_digests - 1),)
+        dynamic::OperationProof::<F, Digest>::decode_cfg(encoded.clone(), &(N, max_digests - 1),)
             .is_err()
     );
     for end in 0..encoded.len() {
         assert!(
-            RuntimeOperationProof::<F, Digest>::decode_cfg(&encoded[..end], &(N, max_digests),)
+            dynamic::OperationProof::<F, Digest>::decode_cfg(&encoded[..end], &(N, max_digests),)
                 .is_err(),
             "truncated proof decoded at {end}"
         );
@@ -199,12 +201,12 @@ async fn check_runtime_operation_codec_rejections<F: Graftable>() {
     let mut trailing = encoded.to_vec();
     trailing.push(0);
     assert!(
-        RuntimeOperationProof::<F, Digest>::decode_cfg(trailing.as_slice(), &(N, max_digests),)
+        dynamic::OperationProof::<F, Digest>::decode_cfg(trailing.as_slice(), &(N, max_digests),)
             .is_err()
     );
     for chunk_size in invalid_chunk_sizes() {
         assert!(matches!(
-            RuntimeOperationProof::<F, Digest>::decode_cfg(
+            dynamic::OperationProof::<F, Digest>::decode_cfg(
                 encoded.clone(),
                 &(chunk_size, max_digests),
             ),
@@ -212,24 +214,24 @@ async fn check_runtime_operation_codec_rejections<F: Graftable>() {
         ));
     }
     for chunk_size in [1, N / 2, N * 2] {
-        if let Ok(runtime) = RuntimeOperationProof::<F, Digest>::decode_cfg(
+        if let Ok(dynamic) = dynamic::OperationProof::<F, Digest>::decode_cfg(
             encoded.clone(),
             &(chunk_size, max_digests),
         ) {
-            assert!(!runtime.verify::<Sha256, _>(operations[0], &root));
+            assert!(!dynamic.verify::<Sha256, _>(operations[0], &root));
         }
     }
-    let runtime =
-        RuntimeOperationProof::<F, Digest>::decode_cfg(encoded, &(N, max_digests)).unwrap();
+    let dynamic =
+        dynamic::OperationProof::<F, Digest>::decode_cfg(encoded, &(N, max_digests)).unwrap();
     for chunk in [Bytes::new(), Bytes::from_static(&[0; 3])] {
-        let mut malformed = runtime.clone();
+        let mut malformed = dynamic.clone();
         malformed.chunk = chunk;
         assert!(!malformed.verify::<Sha256, _>(operations[0], &root));
     }
 }
 
 #[test_async]
-async fn runtime_operation_codec_rejects_malformed_inputs() {
-    check_runtime_operation_codec_rejections::<mmr::Family>().await;
-    check_runtime_operation_codec_rejections::<mmb::Family>().await;
+async fn dynamic_operation_codec_rejects_malformed_inputs() {
+    check_dynamic_operation_codec_rejections::<mmr::Family>().await;
+    check_dynamic_operation_codec_rejections::<mmb::Family>().await;
 }
