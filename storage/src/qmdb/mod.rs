@@ -690,7 +690,9 @@ where
     let decoders = if concurrency <= 3 {
         0
     } else {
-        (concurrency * 2 / 5).max(2).min(concurrency / 2)
+        // Divide before multiplying to preserve the ratio without overflowing large budgets.
+        let share = concurrency / 5 * 2 + concurrency % 5 * 2 / 5;
+        share.max(2).min(concurrency / 2)
     };
     let workers = if decoders == 0 {
         concurrency.saturating_sub(1).min(count)
@@ -815,7 +817,7 @@ where
             .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
         let mut spawn_next = |pending: &mut VecDeque<_>| {
             let Some(start) = starts.next() else {
-                return;
+                return false;
             };
             let log = log.clone();
             let len = SNAPSHOT_DECODE_CHUNK.min(end - start);
@@ -825,10 +827,13 @@ where
                 .dedicated()
                 .spawn(move |_| decode_snapshot_chunk::<F, C>(log, start, len, routing, tx));
             pending.push_back((rx, handle.abort_on_drop()));
+            true
         };
 
         for _ in 0..decoders {
-            spawn_next(&mut pending);
+            if !spawn_next(&mut pending) {
+                break;
+            }
         }
 
         while let Some((rx, _)) = pending.front_mut() {
