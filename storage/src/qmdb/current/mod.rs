@@ -1975,6 +1975,9 @@ pub mod tests {
     // MerkleizedBatch::get, batch chaining) which layer bitmap and grafted tree
     // computation on top of the `any` batch.
 
+    /// Bitmap chunk size in bits for the `N = 32` database aliases above.
+    const CHUNK_BITS: u64 = commonware_utils::bitmap::BitMap::<32>::CHUNK_SIZE_BITS;
+
     fn key(i: u64) -> Digest {
         Sha256::hash(&[&i.to_be_bytes()])
     }
@@ -2011,6 +2014,47 @@ pub mod tests {
         let (db, range) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         (db, range)
+    }
+
+    /// State observed after one generation of [build_generations].
+    struct Generation {
+        size: Location<mmr::Family>,
+        floor: Location<mmr::Family>,
+        sync_boundary: Location<mmr::Family>,
+        root: Digest,
+    }
+
+    /// Commit `generations` batches that each rewrite the same 384 keys. Every key stays active,
+    /// so each commit's floor lags its size by more than one bitmap chunk, and each generation
+    /// moves the floor past the previous generation's writes.
+    async fn build_generations(
+        ctx: &Context,
+        partition: &str,
+        generations: u64,
+    ) -> (UnorderedVariableDb, Vec<Generation>) {
+        let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+            ctx.child("storage"),
+            variable_config::<OneCap>(partition, ctx),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut history = Vec::new();
+        for generation in 0..generations {
+            (db, _) = commit_writes_with_metadata(
+                db,
+                (0..384).map(|i| (key(i), Some(val(generation * 1_000 + i)))),
+                None,
+            )
+            .await;
+            history.push(Generation {
+                size: db.bounds().end,
+                floor: db.inactivity_floor_loc(),
+                sync_boundary: db.sync_boundary(),
+                root: db.root(),
+            });
+        }
+        (db, history)
     }
 
     #[test_traced("INFO")]
@@ -2147,7 +2191,7 @@ pub mod tests {
     fn test_current_bounded_initialization_recovery_pruned_repeated_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            const COMMITS: u64 = 96;
+            const COMMITS: u64 = 200;
 
             let partition = "current-rewind-pruned-recovery";
             let ctx = context.child("db");
@@ -2174,14 +2218,19 @@ pub mod tests {
                 ));
             }
 
-            // Keep most ops-log history, but force bitmap pruning so bounded initialization uses
-            // pinned-node reconstruction (`pruned_chunks > 0` path).
-            let db = db.prune(Location::new(1)).await.unwrap();
+            // Prune to the chunk boundary below the floor of a commit three rounds back: the log
+            // keeps the last few commits, and the whole chunks below them leave the bitmap, so
+            // bounded initialization uses pinned-node reconstruction (`pruned_chunks > 0` path).
+            let (_, older_floor, _, _, _) = history[history.len() - 4];
+            let prune_loc = Location::new(*older_floor / CHUNK_BITS * CHUNK_BITS);
+            let db = db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(
                 pruned_bits > 0,
-                "expected bitmap pruning for the initialization test"
+                "expected bitmap pruning: prune_loc={prune_loc} bounds={:?}",
+                db.bounds()
             );
+            assert_eq!(pruned_bits, *prune_loc);
             let bounds = db.bounds();
 
             let (target_size, target_root, target_ops_root, target_value) = history
@@ -3134,11 +3183,14 @@ pub mod tests {
         });
     }
 
+    /// A retained commit is rejected when its inactivity floor lies at or above the log's
+    /// retained start but below the chunk-aligned bitmap boundary: the log holds the commit's
+    /// whole active range, but the bitmap chunk covering its floor is gone.
     #[test_traced("INFO")]
     fn test_current_bounded_initialization_rejects_target_below_bitmap_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            const COMMITS: u64 = 96;
+            const COMMITS: u64 = 120;
 
             let partition = "current-rewind-bitmap-floor";
             let ctx = context.child("db");
@@ -3150,6 +3202,8 @@ pub mod tests {
             .await
             .unwrap();
 
+            // Each round updates one key, moves the previous write and commits, so every commit
+            // keeps a floor two operations below its size.
             let mut history = Vec::new();
             for round in 0..COMMITS {
                 (db, _) =
@@ -3157,53 +3211,48 @@ pub mod tests {
                         .await;
                 history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
-            assert!(db.inactivity_floor_loc() > Location::new(64));
 
-            // Intentionally prune less than the inactivity floor: log retains older ops, but the
-            // bitmap still prunes to inactivity floor.
-            let prune_loc = Location::new(1);
+            // Prune to the first chunk boundary. The bitmap lands exactly there, while the log
+            // keeps whole sections and retains from below it.
+            let prune_loc = Location::new(CHUNK_BITS);
+            assert!(prune_loc <= db.sync_boundary());
             let db = db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
-            assert!(pruned_bits > 0);
+            assert_eq!(pruned_bits, CHUNK_BITS);
             let retained_start = db.bounds().start;
+            assert!(retained_start < prune_loc);
 
-            // Pick a historical commit that is still within retained log bounds but whose floor is
-            // below the bitmap pruning boundary.
-            let initialization_bound = history
+            // Pick a commit the log retains in full whose floor the bitmap has pruned.
+            let (target_size, target_floor) = history
                 .iter()
-                .find_map(|(size, floor)| {
-                    if *size > *retained_start
-                        && *size >= pruned_bits
-                        && *floor >= *retained_start
-                        && *floor < pruned_bits
-                    {
-                        Some(*size)
-                    } else {
-                        None
-                    }
+                .copied()
+                .find(|(size, floor)| {
+                    **size >= pruned_bits && *floor >= retained_start && **floor < pruned_bits
                 })
                 .unwrap_or_else(|| {
                     panic!(
                         "expected initialization target below bitmap boundary. \
                          retained_start={retained_start:?}, pruned_bits={pruned_bits}, \
-                         latest_floor={:?}, history={history:?}",
-                        db.inactivity_floor_loc()
+                         history={history:?}"
                     )
                 });
+            assert!(retained_start <= target_floor);
+            assert!(*target_floor < pruned_bits);
+            assert!(pruned_bits <= *target_size);
 
             let original_root = db.root();
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
                 variable_config::<OneCap>(partition, &ctx),
-                Some(initialization_bound),
+                Some(target_size),
             )
             .await
             else {
                 panic!("expected initialization rejection below bitmap floor");
             };
             assert!(
-                matches!(err, Error::HistoricalFloorPruned(_)),
+                matches!(err, Error::HistoricalFloorPruned(loc) if loc == target_size),
                 "unexpected bounded initialization error: {err:?}"
             );
             let db = UnorderedVariableDb::init(
@@ -3214,6 +3263,73 @@ pub mod tests {
             .await
             .unwrap();
             assert_eq!(db.root(), original_root);
+        });
+    }
+
+    /// Model the glue maintenance prune: four generations rewrite the same keys, the database
+    /// is pruned to the second generation's sync boundary, every generation from there up must
+    /// still initialize bounded with its recorded root and sync boundary, and the first
+    /// generation, below the retained start, is rejected.
+    #[test_traced("INFO")]
+    fn test_current_prune_keeps_retained_checkpoints_initializable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-prune-retained-checkpoints";
+            let ctx = context.child("db");
+            let (db, history) = build_generations(&ctx, partition, 4).await;
+
+            // The live sync boundary sits above the older generations' floors, so pruning the
+            // bitmap to it instead of to `prune_loc` would reject them.
+            assert!(history[2].floor < db.sync_boundary());
+
+            // Prune as the glue adapter does, to the oldest retained generation's sync boundary.
+            // That boundary is a whole chunk above zero, so the prune moves both the log and the
+            // bitmap, and the bitmap lands on the requested boundary rather than the log's
+            // section boundary.
+            let prune_loc = history[1].sync_boundary;
+            assert!(prune_loc >= Location::new(CHUNK_BITS));
+            let db = db.prune(prune_loc).await.unwrap();
+            assert_eq!(db.pruned_bits(), *prune_loc);
+            let retained_start = db.bounds().start;
+            assert!(retained_start > Location::new(0));
+            assert!(history[0].size <= retained_start);
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            for (label, generation) in [
+                ("gen3", &history[3]),
+                ("gen2", &history[2]),
+                ("gen1", &history[1]),
+            ] {
+                let db = UnorderedVariableDb::init(
+                    ctx.child(label),
+                    variable_config::<OneCap>(partition, &ctx),
+                    Some(generation.size),
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.bounds().end, generation.size);
+                assert_eq!(db.root(), generation.root);
+                assert_eq!(db.sync_boundary(), generation.sync_boundary);
+            }
+
+            let Err(err) = UnorderedVariableDb::init(
+                ctx.child("gen0"),
+                variable_config::<OneCap>(partition, &ctx),
+                Some(history[0].size),
+            )
+            .await
+            else {
+                panic!("expected initialization rejection below the retained start");
+            };
+            assert!(
+                matches!(
+                    err,
+                    Error::Journal(crate::journal::Error::ItemPruned(loc))
+                    if loc == *history[0].size
+                ),
+                "unexpected bounded initialization error: {err:?}"
+            );
         });
     }
 
