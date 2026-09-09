@@ -459,7 +459,7 @@ where
     pub fn sync_boundary(&self) -> Location<F> {
         sync_boundary::<F, N>(
             *self.any.inactivity_floor_loc / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
-            *self.any.last_commit_loc + 1,
+            *self.any.log.size(),
         )
     }
 
@@ -616,7 +616,7 @@ where
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.any.last_commit_loc + 1;
+        let current_size = *self.any.log.size();
         // No-op short-circuit. Avoids the post-rewind grafted-tree rebuild and the validation
         // and journal-read overhead below. Validation runs after this on the non-no-op path.
         if rewind_size == current_size {
@@ -1627,7 +1627,7 @@ mod tests {
             .await
             .unwrap();
             let db = populate_fixed_db::<mmr::Family, _>(db, 0, 140).await;
-            let base = db.any.last_commit_loc + 1;
+            let base = db.bounds().end;
 
             // The parent rewrites every live key, so its floor raise moves past the
             // whole committed prefix and far enough that the chunk-quantized sync

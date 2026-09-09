@@ -159,24 +159,26 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
-    /// A notification that a block has been verified by the application.
+    /// A notification that a block reached the verify stage. Persisting it
+    /// does not imply application validity.
     Verified {
         /// The span carried with this request.
         span: Span,
-        /// The round in which the block was verified.
+        /// The round of the verify request.
         round: Round,
-        /// The verified block.
+        /// The block.
         block: Arc<V::Block>,
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
-    /// A notification that a block has been certified by the application.
+    /// A notification that a block reached the certify stage. Persisting it
+    /// does not imply application validity.
     Certified {
         /// The span carried with this request.
         span: Span,
-        /// The round in which the block was certified.
+        /// The round of the certify request.
         round: Round,
-        /// The certified block.
+        /// The block.
         block: Arc<V::Block>,
         /// A channel sent once the block and notarization syncs have started; the
         /// handle covers both.
@@ -219,6 +221,13 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         span: Span,
         /// The finalization.
         finalization: Finalization<S, V::Commitment>,
+    },
+    /// A certification from the consensus engine.
+    Certification {
+        /// The span carried with this request.
+        span: Span,
+        /// The certified notarization.
+        notarization: Notarization<S, V::Commitment>,
     },
 }
 
@@ -293,6 +302,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Certified { span, .. }
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
+            | Self::Certification { span, .. }
             | Self::GetProcessedHeight { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
@@ -321,6 +331,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::Prune { .. } => "prune",
             Self::Notarization { .. } => "notarization",
             Self::Finalization { .. } => "finalization",
+            Self::Certification { .. } => "certification",
         }
     }
 
@@ -358,7 +369,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 
@@ -381,7 +393,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 }
@@ -912,7 +925,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Notifies the actor that a block has been verified.
+    /// Notifies the actor that a block reached the verify stage.
     ///
     /// Returns after the block is durably persisted. Mirrors [Self::certified]: the
     /// durable sync is awaited on the caller's task (off the actor), so the actor
@@ -927,7 +940,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         handle.durable(round, "verified").await
     }
 
-    /// Notifies the actor that a block has been certified.
+    /// Notifies the actor that a block reached the certify stage.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
@@ -1000,6 +1013,10 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
             Activity::Finalization(finalization) => Message::Finalization {
                 span: info_span!("marshal.mailbox.finalization", round = %finalization.round()),
                 finalization,
+            },
+            Activity::Certification(notarization) => Message::Certification {
+                span: info_span!("marshal.mailbox.certification", round = %notarization.round()),
+                notarization,
             },
             _ => return Feedback::Ok,
         };
