@@ -33,8 +33,7 @@
 //! `0` = off) and `concurrency` (`1` = serial, `2` and `3` decode on the init task with one or
 //! two insert workers, and larger values split between spawned decode and insert tasks while the
 //! init task merely forwards). It reports the replay-region size `R` (so a full-coverage cache is
-//! `cache = R`) and the elapsed time. Sweep cache/concurrency by driving the command from a shell
-//! loop.
+//! `cache = R`) and the elapsed time.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
 //! opens the database (untimed), then for each entry in the comma-separated concurrency list drops
