@@ -7950,9 +7950,8 @@ mod tests {
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<S> = elector
-                .clone()
-                .build(&participants.clone().try_into().unwrap());
+            let built_elector: RoundRobinElector<S> =
+                elector.clone().build(schemes[0].participants());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
                 &oracle,
@@ -8069,9 +8068,8 @@ mod tests {
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<S> = elector
-                .clone()
-                .build(&participants.clone().try_into().unwrap());
+            let built_elector: RoundRobinElector<S> =
+                elector.clone().build(schemes[0].participants());
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &context,
                 &oracle,
@@ -8221,9 +8219,8 @@ mod tests {
 
             // Setup application mock and voter
             let elector = RoundRobin::<Sha256>::default();
-            let built_elector: RoundRobinElector<S> = elector
-                .clone()
-                .build(&participants.clone().try_into().unwrap());
+            let built_elector: RoundRobinElector<S> =
+                elector.clone().build(schemes[0].participants());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
                 &oracle,
