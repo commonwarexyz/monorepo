@@ -1,10 +1,19 @@
-//! Linux storage ownership, permissions, and fork invariants.
+//! Linux backend for [crate::secret]: guarded mappings and permission transitions.
 //!
-//! The public contract is in [crate::secret]. This module owns the OS mappings
-//! behind that contract. [HardenedSecret] shares a [ProtectedAllocation] through
-//! `Arc`. Its metadata, including the reader mutex, lives in ordinary memory.
-//! [Mapping] independently owns raw data cleanup, so erasure does not depend on
-//! `T` being initialized or its destructor returning normally.
+//! Three owners split the work:
+//!
+//! - [Mapping] owns the pages and their cleanup. It never interprets the bytes
+//!   as `T`, so it can erase and unmap after partial construction, extraction,
+//!   or a panicking destructor.
+//! - [ProtectedAllocation] owns the initialized `T` and the reader count. Its
+//!   metadata, including the reader mutex, lives in ordinary memory.
+//! - [HardenedSecret] is an `Arc` handle. Clones share one allocation.
+//!
+//! Terminology here and in the item docs: the wrapper is the public `Secret<T>`,
+//! a handle is one `HardenedSecret<T>`, the allocation is its
+//! `ProtectedAllocation<T>`, the mapping is the whole mmap region including
+//! guards, and the data region is the page-rounded part between the guards.
+//! Only the data region is locked or changes permissions.
 //!
 //! # Layout
 //!
@@ -17,104 +26,70 @@
 //! +----------------+-----------------------+-------------+----------------+
 //! |<-- one page -->|<---------- whole data pages -------->|<-- one page -->|
 //!
-//! Guards: NONE throughout the mapping's lifetime
+//! Guards: NONE for the mapping's lifetime, never locked
 //! Data:   locked, excluded from kernel cores, wiped in fork children
-//! T:      ends at the trailing guard, with its alignment validated
-//!
-//! Separate identity mapping: one readable, unlocked page, also wiped on fork
+//! T:      ends at the trailing guard
 //! ```
 //!
-//! `data_len = round_up(max(size_of::<T>(), 1), page_size)`. Checked arithmetic
-//! includes both guards within Rust's `isize::MAX` allocation bound. Page size
-//! must be a power of two, and `T`'s alignment must divide it. Since Rust sizes
-//! are multiples of alignment, placing `T` against the trailing guard aligns it.
-//! A zero-sized value still owns a data page. Its non-null aligned pointer can
-//! coincide with the start of the trailing guard because it occupies no bytes.
-//! Unused data immediately before `T` shares the data permissions, so an underrun
-//! need not reach the leading guard.
+//! - `data_len = round_up(max(size_of::<T>(), 1), page_size)`, so a zero-sized
+//!   value still owns a data page. Checked arithmetic keeps both guards within
+//!   Rust's `isize::MAX` allocation bound.
+//! - The page size must be a power of two and `T`'s alignment must divide it.
+//!   Rust sizes are multiples of alignment, so ending `T` at the trailing guard
+//!   aligns it. A zero-sized `T` may sit exactly at the guard boundary.
+//! - Unused data bytes before `T` share the data permissions, so an underrun
+//!   need not reach the leading guard.
 //!
-//! # Permission and ownership states
+//! # Permissions
 //!
 //! ```text
-//! SETUP RW
-//!   establish required protections before sensitive writes
-//!   mark data dirty before copying T or invoking an initializer
-//!   inline source owns T until the copied bytes are sealed
-//!   zeroed byte arrays have a typed owner before the initializer callback
-//!        |
-//!        | protect(NONE), commit ownership, then publish
-//!        v
-//! IDLE NONE, readers = 0
-//!        |
-//!        | first reader: protect(READ), increment count
-//!        v
-//! READABLE READ, readers > 0
-//!        | nested/concurrent readers share the readable interval
-//!        | last reader: decrement to zero, protect(NONE)
-//!        v
-//! IDLE NONE
-//!        |
-//!        | unique extraction or final release
-//!        v
-//! RELEASE RW -> move out or destroy T -> erase data -> UNMAPPED
+//! SETUP     RW     allocate, then copy T
+//!   |
+//!   | protect(NONE), publish
+//!   v
+//! IDLE      NONE   readers = 0
+//!   |    ^
+//!   |    | first reader: protect(READ), readers = 1
+//!   |    | last reader:  readers = 0, protect(NONE)
+//!   v    |
+//! READABLE  READ   readers > 0, further readers only change the count
+//!
+//! IDLE -> RELEASE  RW   unique extraction or final release: move out or drop T,
+//!                       erase the data region, unmap
 //! ```
 //!
-//! `UNMAPPED` is terminal. Non-final handle drops may occur while another handle
-//! is reading. Final release and successful unique extraction require exclusive
-//! ownership, so no reader remains. Shared extraction failure returns its handle
-//! without entering this state machine or reading protected memory.
+//! - Hold the reader mutex across a permission change and its count update.
+//!   Release it before user code so nested and overlapping access cannot
+//!   deadlock. [ReadGuard] closes the interval on return or unwind. A plain
+//!   atomic counter would not serialize revocation against the next grant.
+//! - A `&T` exists only inside a [ReadGuard]'s lifetime or during the exclusive
+//!   RW phases of construction, extraction, and destruction. Otherwise `value`
+//!   is a raw pointer into inaccessible memory and must not be dereferenced.
+//! - Cleanup restores write access, erases every data byte including unused
+//!   bytes and padding, then unmaps while still locked. The data region is
+//!   already writable when [Mapping] takes over cleanup during construction.
+//! - Non-final handle drops may happen while another handle is reading. Final
+//!   release and unique extraction require exclusive ownership, so no reader
+//!   remains. A failed shared extraction returns the handle without entering
+//!   this state machine.
+//! - Before publication, any failure including final sealing returns an error
+//!   if cleanup succeeds. Hardening stages a raw copy while the inline source
+//!   still owns `T`, so an error leaves the source intact and success hands
+//!   ownership to the sealed allocation. After publication, permission
+//!   failures, count overflow, and cleanup failures abort rather than panic:
+//!   a failed mprotect leaves the region's permissions unknown, and continuing
+//!   could expose or corrupt the secret.
 //!
-//! Hold the reader mutex across permission changes and count updates. Release it
-//! before calling user code, allowing nested and overlapping access. [ReadGuard]
-//! closes the interval on return or unwind. A plain atomic counter would not
-//! serialize revocation against the next reader's permission grant.
+//! # Fork
 //!
-//! Permission state records the last fully successful transition, or an unknown
-//! state before a syscall whose failure may leave partial changes. Cleanup must
-//! restore write access after an unknown transition. Already writable data needs
-//! no redundant syscall. `dirty` is independent of initialization validity and
-//! is set before the first sensitive write. Raw cleanup erases all data bytes,
-//! including unused bytes and uninitialized padding, then unmaps while still
-//! locked. It never interprets bytes as `T`.
-//!
-//! Setup, including final sealing, can return an error if cleanup succeeds.
-//! Hardening stages a raw copy while the inline source still owns `T`. On error,
-//! raw cleanup erases the copy without destroying `T`, leaving the source intact.
-//! On success, ownership transfers to the sealed allocation and the caller erases
-//! the source without destroying it. Byte-array initialization instead installs a
-//! typed owner before invoking user code. Published access or extraction permission
-//! failures, count overflow, and cleanup failures abort. Abort does not run
-//! destructors or guarantee erasure.
-//!
-//! # Fork identity
-//!
-//! ```text
-//! Parent allocation                  Inherited child allocation
-//! +----------------------+           +----------------------+
-//! | initialized T        | --fork--> | wiped data bytes     |
-//! | identity byte = 1    |           | identity byte = 0    |
-//! +----------------------+           +----------------------+
-//! parent remains usable              reject typed access before mutex/ref
-//!                                    reject inherited read-guard return
-//!                                    final release unmaps without T::drop
-//! ```
-//!
-//! Each allocation retains its creator PID and its own [ForkIdentity] mapping.
-//! The readable marker is initialized once and never reset. It rejects inherited
-//! storage even when PID reuse or namespaces produce the same numeric PID. New
-//! allocations created in a child get independent markers. No process-global
-//! sentinel or inherited lock is needed to establish identity.
-//!
-//! Check identity before the reader mutex, typed access, unique extraction, and
-//! typed destruction. Check again when an access guard or initializer returns,
-//! because its callback may have forked. Child final release skips `T::drop` and
-//! erasure of already wiped data, then releases both mappings. Keep the identity
-//! mapping alive until data cleanup has finished. PID collisions in tests are
-//! simulated against real fork-wiped pages, without waiting for kernel PID reuse.
-//!
-//! These checks supplement the caller's fork safety obligations. References
-//! already inside a callback must never be used in the child. Wiped bytes may
-//! not be a valid `T`, and permission changes cannot enforce reference lifetimes.
+//! `MADV_WIPEONFORK` gives a child zeroed data pages, so the secret never
+//! crosses `fork`. Nothing detects the child. An inherited handle used there
+//! reads zeros, and dropping it runs `T`'s destructor on those zeros before
+//! erasing and unmapping the child's copy. The child also inherits the `Arc`
+//! count, the reader mutex, and the reader count exactly as they were at fork,
+//! so a mutex held by another parent thread at that moment stays locked forever
+//! in the child. The public contract makes leaving inherited hardened values
+//! alone in a child the caller's obligation.
 
 use crate::secret::{HardenError, InlineSecret};
 use commonware_utils::sync::Mutex;
@@ -123,20 +98,13 @@ use core::{
     mem::{ManuallyDrop, MaybeUninit, align_of, size_of},
     ptr::{self, NonNull},
 };
-use std::{
-    io, process,
-    sync::{
-        Arc,
-        atomic::{AtomicI32, Ordering},
-    },
-};
+use std::{io, process, sync::Arc};
 use zeroize::Zeroize;
 
-/// Shares one protected value without reallocating or cloning it.
+/// Handle to one shared protected allocation.
 ///
-/// OS-specific ownership and permission transitions stay behind this wrapper.
-/// See the module documentation for invariants and [crate::secret] for the public
-/// guarantees, type requirements, costs, and operational limits.
+/// [crate::secret] states the public contract. The module documentation covers
+/// the invariants behind it.
 pub(crate) struct HardenedSecret<T> {
     inner: Arc<ProtectedAllocation<T>>,
 }
@@ -151,12 +119,11 @@ impl<T> HardenedSecret<T> {
     /// without an intervening operation that can panic. On error, the source
     /// remains its sole owner and is unchanged.
     pub(crate) unsafe fn try_from_inline(value: &mut InlineSecret<T>) -> Result<Self, HardenError> {
-        let (mut mapping, destination) = Mapping::allocate::<T>()?;
+        let (mapping, destination) = Mapping::allocate::<T>()?;
         // Allocate metadata and prepare the reader mutex before transferring ownership.
         let mut inner = Arc::<ProtectedAllocation<T>>::new_uninit();
         let slot = Arc::get_mut(&mut inner).unwrap();
         let readers = Mutex::new(0);
-        mapping.dirty = true;
         value.access(|source| {
             // SAFETY: The destination is writable, aligned, and disjoint from the
             // initialized source. This is only a raw copy. Until sealing succeeds,
@@ -177,36 +144,22 @@ impl<T> HardenedSecret<T> {
         })
     }
 
-    /// Keeps the data readable for `f`, sharing the interval with other readers.
+    /// Runs `f` inside a shared readable interval.
     ///
-    /// The callback runs without the reader mutex held. Unwinding releases its
-    /// reader slot. Published permission failures and inherited use abort.
+    /// The reader mutex is not held during `f`, and unwinding releases the
+    /// reader slot.
     pub(crate) fn access<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
         self.inner.access(f)
     }
 
     /// Moves out `T` and erases its allocation, or returns this handle if shared.
     ///
-    /// The returned value is unprotected. A failed ownership check leaves the
-    /// allocation and its permissions unchanged. Extraction failures abort as
-    /// described in the type's documentation.
+    /// A shared allocation is left untouched.
     pub(crate) fn try_extract(self) -> Result<T, Self> {
         match Arc::try_unwrap(self.inner) {
             Ok(allocation) => Ok(allocation.extract()),
             Err(inner) => Err(Self { inner }),
         }
-    }
-}
-
-impl<const N: usize> HardenedSecret<[u8; N]> {
-    /// Initializes zeroed bytes after protection setup, before publication.
-    ///
-    /// The typed owner exists before user code can unwind or final sealing can
-    /// fail. Both paths erase the data and release the mappings if cleanup succeeds.
-    pub(crate) fn try_init(f: impl FnOnce(&mut [u8; N])) -> Result<Self, HardenError> {
-        ProtectedAllocation::try_init(f).map(|inner| Self {
-            inner: Arc::new(inner),
-        })
     }
 }
 
@@ -239,75 +192,11 @@ fn abort_on_error(result: libc::c_int) {
     }
 }
 
-/// Owns a readable marker that distinguishes this allocation from fork copies.
+/// Owns the raw pages independently of `T`'s initialization and destruction.
 ///
-/// The creator writes one once. WIPEONFORK supplies zero in every descendant,
-/// including when its numeric PID matches the creator's. An inherited marker is
-/// never reset. A child can create new allocations with independent markers.
-/// This page contains no secret and is not locked against swapping.
-struct ForkIdentity {
-    address: NonNull<u8>,
-    page: usize,
-}
-
-impl ForkIdentity {
-    /// Creates a read-only marker before the secret allocation is initialized.
-    fn new(page: usize) -> Result<Self, HardenError> {
-        // SAFETY: A null hint requests a fresh private mapping of one valid page.
-        let address = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                page,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if address == libc::MAP_FAILED {
-            return Err(system("mmap"));
-        }
-        let Some(address) = NonNull::new(address.cast::<u8>()) else {
-            // SAFETY: Release the mapping that cannot form a non-null Rust pointer.
-            unsafe { abort_on_error(libc::munmap(address, page)) };
-            return Err(HardenError::Layout);
-        };
-        let identity = Self { address, page };
-        // SAFETY: The marker is a page-aligned private anonymous mapping we own.
-        if unsafe { libc::madvise(address.as_ptr().cast(), page, libc::MADV_WIPEONFORK) } != 0 {
-            return Err(system("madvise(MADV_WIPEONFORK)"));
-        }
-        // SAFETY: Construction exclusively owns this writable marker page.
-        unsafe { address.as_ptr().write(1) };
-        // SAFETY: No writable references remain. Identity checks only read the marker.
-        if unsafe { libc::mprotect(address.as_ptr().cast(), page, libc::PROT_READ) } != 0 {
-            return Err(system("mprotect"));
-        }
-        Ok(identity)
-    }
-
-    /// Checks the marker before any inherited mutex or typed value can be used.
-    fn is_original(&self) -> bool {
-        // SAFETY: The mapping remains readable for this owner's lifetime. A fork
-        // child gets initialized zero bytes. Volatile prevents reusing a read
-        // made before a fork that occurs in a caller's access callback.
-        unsafe { self.address.as_ptr().read_volatile() == 1 }
-    }
-}
-
-impl Drop for ForkIdentity {
-    fn drop(&mut self) {
-        // SAFETY: This owner releases only its own private mapping, including in
-        // a child. The marker remains live until the secret mapping is released.
-        unsafe { abort_on_error(libc::munmap(self.address.as_ptr().cast(), self.page)) };
-    }
-}
-
-/// Owns raw pages independently of the initialization and destruction of `T`.
-///
-/// Only the data region is locked or changes permissions. This owner never
-/// interprets its bytes as `T`, allowing cleanup after partial construction,
-/// extraction, or a panicking destructor. See the module layout and state diagram.
+/// Only the data region is locked or changes permissions. The bytes are never
+/// interpreted as `T`. See the module documentation for the layout and the
+/// permission states.
 struct Mapping {
     /// Start of the entire mapping, including the leading guard.
     base: NonNull<u8>,
@@ -317,17 +206,6 @@ struct Mapping {
     data: NonNull<u8>,
     /// Page-rounded length of the data region, including unused bytes.
     data_len: usize,
-    /// Process that created the mapping, used to reject inherited handles.
-    pid: libc::pid_t,
-    /// Allocation-specific identity, independent of numeric PID reuse or namespaces.
-    identity: ForkIdentity,
-    // Last permissions successfully applied to the whole data region, or -1 if
-    // uncertain. The reader mutex or exclusive ownership serializes changes, so
-    // relaxed atomic access suffices for updates through shared references.
-    protection: AtomicI32,
-    // Set before the first write. Earlier construction failures can just unmap
-    // the untouched pages without restoring write access for erasure.
-    dirty: bool,
 }
 
 impl Mapping {
@@ -357,7 +235,6 @@ impl Mapping {
             .and_then(|guards| data_len.checked_add(guards))
             .filter(|size| *size <= isize::MAX as usize)
             .ok_or(HardenError::Layout)?;
-        let identity = ForkIdentity::new(page)?;
         // SAFETY: A null hint requests a new mapping. Length is checked above.
         let base = unsafe {
             libc::mmap(
@@ -380,26 +257,35 @@ impl Mapping {
         };
         // SAFETY: The data region follows the first guard within the mapping.
         let data = unsafe { NonNull::new_unchecked(base.as_ptr().add(page)) };
+        // Cleanup erases through write access, so the data region becomes
+        // writable before Drop takes over.
+        // SAFETY: The page-aligned data region lies entirely inside our mapping.
+        if unsafe {
+            libc::mprotect(
+                data.as_ptr().cast(),
+                data_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+            )
+        } != 0
+        {
+            let error = system("mprotect");
+            // SAFETY: Nothing was written. Release the mapping we own exclusively.
+            unsafe { abort_on_error(libc::munmap(base.as_ptr().cast(), total_len)) };
+            return Err(error);
+        }
         let mapping = Self {
             base,
             total_len,
             data,
             data_len,
-            // SAFETY: getpid has no preconditions.
-            pid: unsafe { libc::getpid() },
-            identity,
-            protection: AtomicI32::new(libc::PROT_NONE),
-            dirty: false,
         };
         // Establish all protections before writing secret bytes into the mapping.
-        mapping.protect(libc::PROT_READ | libc::PROT_WRITE)?;
         // SAFETY: The page-aligned data region lies entirely inside our mapping.
         if unsafe { libc::madvise(data.as_ptr().cast(), data_len, libc::MADV_DONTDUMP) } != 0 {
             return Err(system("madvise(MADV_DONTDUMP)"));
         }
         // SAFETY: The page-aligned region is private anonymous memory, as required
-        // by WIPEONFORK. Child-side access rejects the resulting invalid T bytes
-        // before constructing references or touching the inherited reader mutex.
+        // by WIPEONFORK.
         if unsafe { libc::madvise(data.as_ptr().cast(), data_len, libc::MADV_WIPEONFORK) } != 0 {
             return Err(system("madvise(MADV_WIPEONFORK)"));
         }
@@ -416,19 +302,15 @@ impl Mapping {
         Ok((mapping, value))
     }
 
-    /// Changes data permissions and records whether the entire operation succeeded.
+    /// Changes the data region's permissions.
     ///
     /// Callers serialize transitions with exclusive ownership or the reader mutex.
     /// They must not revoke permissions required by an outstanding reference.
     fn protect(&self, protection: libc::c_int) -> Result<(), HardenError> {
-        // A failed mprotect can have changed part of a region. Cleanup must
-        // reestablish writable permissions unless the full operation succeeded.
-        self.protection.store(-1, Ordering::Relaxed);
         // SAFETY: The data pointer and length describe our page-aligned mapping.
         if unsafe { libc::mprotect(self.data.as_ptr().cast(), self.data_len, protection) } != 0 {
             return Err(system("mprotect"));
         }
-        self.protection.store(protection, Ordering::Relaxed);
         Ok(())
     }
 
@@ -436,22 +318,7 @@ impl Mapping {
     ///
     /// Called only with exclusive ownership, when no reader remains active.
     fn make_writable(&self) {
-        if self.protection.load(Ordering::Relaxed) != (libc::PROT_READ | libc::PROT_WRITE)
-            && self.protect(libc::PROT_READ | libc::PROT_WRITE).is_err()
-        {
-            process::abort();
-        }
-    }
-
-    /// Checks whether this is the original mapping or a wiped fork-child copy.
-    fn in_creator(&self) -> bool {
-        // SAFETY: getpid has no preconditions.
-        self.pid == unsafe { libc::getpid() } && self.identity.is_original()
-    }
-
-    /// Rejects child-side access before touching inherited state or wiped bytes.
-    fn require_creator(&self) {
-        if !self.in_creator() {
+        if self.protect(libc::PROT_READ | libc::PROT_WRITE).is_err() {
             process::abort();
         }
     }
@@ -459,32 +326,29 @@ impl Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        if self.in_creator() && self.dirty {
-            self.make_writable();
-            // SAFETY: We exclusively own the writable data region. Any T has
-            // already been destroyed, moved out, or was never initialized.
-            // MaybeUninit permits erasing padding without reading uninitialized bytes.
-            unsafe {
-                core::slice::from_raw_parts_mut(
-                    self.data.as_ptr().cast::<MaybeUninit<u8>>(),
-                    self.data_len,
-                )
-                .zeroize();
-            }
+        self.make_writable();
+        // SAFETY: We exclusively own the writable data region. Any T has
+        // already been destroyed, moved out, or was never initialized.
+        // MaybeUninit permits erasing padding without reading uninitialized bytes.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.data.as_ptr().cast::<MaybeUninit<u8>>(),
+                self.data_len,
+            )
+            .zeroize();
         }
         // Unmapping also releases the memory lock. Keep the pages locked until
         // after erasure instead of unlocking them in a separate step.
-        // SAFETY: This mapping belongs to this process. In a fork child, unmapping
-        // its private inherited copy does not touch the parent's backing pages.
+        // SAFETY: This mapping belongs to this process, including a fork child's
+        // private inherited copy.
         unsafe { abort_on_error(libc::munmap(self.base.as_ptr().cast(), self.total_len)) };
     }
 }
 
-/// Owns an initialized `T` and coordinates its readable lifetime.
+/// Owns an initialized `T` and its reader count.
 ///
-/// Construction, extraction, and destruction have exclusive write access. After publication,
-/// the first reader grants read access and the last reader revokes it. The mutex
-/// serializes those transitions, but is released while callbacks run.
+/// Construction, extraction, and destruction hold exclusive write access. After
+/// publication, the first reader grants read access and the last revokes it.
 struct ProtectedAllocation<T> {
     mapping: Mapping,
     /// Aligned location of the initialized value within mapping's data region.
@@ -503,9 +367,6 @@ unsafe impl<T: Sync> Sync for ProtectedAllocation<T> {}
 impl<T> ProtectedAllocation<T> {
     /// Holds one reader slot across the callback, including panic unwinding.
     fn access<R>(&self, f: impl for<'a> FnOnce(&'a T) -> R) -> R {
-        // A fork child can inherit a held mutex. Reject it before locking or
-        // constructing a reference to the wiped value.
-        self.mapping.require_creator();
         // Release the mutex before user code so nested calls cannot deadlock.
         {
             let mut readers = self.readers.lock();
@@ -523,14 +384,13 @@ impl<T> ProtectedAllocation<T> {
 
     /// Moves out the value and erases the allocation before returning it.
     fn extract(self) -> T {
-        self.mapping.require_creator();
         self.mapping.make_writable();
         let mut owner = ManuallyDrop::new(self);
         let allocation = &mut *owner;
         // SAFETY: Exclusive ownership rules out active readers. The value is
         // initialized and readable. ManuallyDrop prevents destroying the moved-out T.
         // Explicitly drop both owning fields to erase and release the source and
-        // destroy the reader mutex. The remaining fields own no resources.
+        // destroy the reader mutex. The remaining field owns no resources.
         unsafe {
             let value = allocation.value.as_ptr().read();
             ptr::drop_in_place(&raw mut allocation.mapping);
@@ -540,35 +400,8 @@ impl<T> ProtectedAllocation<T> {
     }
 }
 
-impl<const N: usize> ProtectedAllocation<[u8; N]> {
-    /// Creates an owner for the zeroed array before running the initializer.
-    fn try_init(f: impl FnOnce(&mut [u8; N])) -> Result<Self, HardenError> {
-        let (mut mapping, value) = Mapping::allocate::<[u8; N]>()?;
-        mapping.dirty = true;
-        // Anonymous mappings are zeroed, so the array is already a valid value.
-        // Its owner must exist before the initializer can unwind.
-        let mut allocation = Self {
-            mapping,
-            value,
-            readers: Mutex::new(0),
-        };
-        // SAFETY: Construction exclusively owns the writable, zeroed byte array.
-        f(unsafe { allocation.value.as_mut() });
-        // The initializer may have forked. Reject its return in the child before
-        // publishing a handle whose array has been wiped.
-        allocation.mapping.require_creator();
-        allocation.mapping.protect(libc::PROT_NONE)?;
-        Ok(allocation)
-    }
-}
-
 impl<T> Drop for ProtectedAllocation<T> {
     fn drop(&mut self) {
-        // The child's wiped bytes may not represent a valid T. Mapping::drop
-        // still runs after this return and releases the inherited mapping.
-        if !self.mapping.in_creator() {
-            return;
-        }
         self.mapping.make_writable();
         // SAFETY: The last owner has exclusive access, permissions allow
         // destruction, and this owner is only constructed after initializing T.
@@ -582,8 +415,6 @@ struct ReadGuard<'a, T>(&'a ProtectedAllocation<T>);
 
 impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
-        // An unsafe fork inside the callback can also inherit this guard.
-        self.0.mapping.require_creator();
         let mut readers = self.0.readers.lock();
         *readers -= 1;
         if *readers == 0 && self.0.mapping.protect(libc::PROT_NONE).is_err() {
@@ -659,7 +490,6 @@ mod tests {
         child("enter_failure", Some(libc::SIGABRT));
         child("exit_failure", Some(libc::SIGABRT));
         child("cleanup_failure", Some(libc::SIGABRT));
-        child("final_seal_failure", None);
         child("harden_seal_failure", None);
     }
 
@@ -678,22 +508,8 @@ mod tests {
     }
 
     #[test]
-    fn fork_wipes_and_rejects_inherited_handles() {
-        child("fork_drop", None);
-        child("fork_access", None);
-        child("fork_extract", None);
-        child("fork_init", None);
-        child("fork_guard", None);
-        child("fork_collision_access", None);
-        child("fork_collision_locked", None);
-        child("fork_collision_extract", None);
-        child("fork_collision_drop", None);
-        child("fork_new_allocation", None);
-    }
-
-    #[test]
-    fn fork_identity_survives_pid_collision() {
-        child("fork_pid_collision", None);
+    fn fork_wipes_inherited_data() {
+        child("fork_wipe", None);
     }
 
     #[test]
@@ -712,10 +528,6 @@ mod tests {
                 .is_err()
             );
             assert_eq!(*secret.inner.readers.lock(), 1);
-            assert_eq!(
-                secret.inner.mapping.protection.load(Ordering::Relaxed),
-                libc::PROT_READ
-            );
             assert_eq!(value, &[42; 32]);
         });
         let barrier = Arc::new(Barrier::new(5));
@@ -737,10 +549,6 @@ mod tests {
             barrier.wait();
         });
         assert_eq!(*secret.inner.readers.lock(), 0);
-        assert_eq!(
-            secret.inner.mapping.protection.load(Ordering::Relaxed),
-            libc::PROT_NONE
-        );
         child("panic_protection", Some(libc::SIGSEGV));
     }
 
@@ -777,13 +585,9 @@ mod tests {
         }
     }
 
-    /// Checks both ends of the allocation and initializes every value byte.
+    /// Checks both ends of the allocation around a fully initialized value.
     fn check_layout<const N: usize>(pages: usize) {
-        let secret = HardenedSecret::<[u8; N]>::try_init(|value| {
-            assert_eq!(value, &[0; N]);
-            value.fill(37);
-        })
-        .unwrap();
+        let secret = harden(InlineSecret::new([37u8; N])).unwrap();
         let mapping = &secret.inner.mapping;
         let page = page_size();
         assert_eq!(mapping.data_len, pages * page);
@@ -798,28 +602,12 @@ mod tests {
         );
         secret.access(|value| assert_eq!(value, &[37; N]));
         let data = mapping.data.as_ptr();
-        let marker = mapping.identity.address.as_ptr();
         assert_eq!(secret.try_extract().unwrap(), [37; N]);
         assert_unmapped(data);
-        assert_unmapped(marker);
     }
 
     #[test]
     fn unwind_releases_mapping() {
-        let mut address = ptr::null_mut();
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| {
-                let _ = Secret::<[u8; 32]>::try_init(|value| {
-                    value.fill(99);
-                    address = value.as_mut_ptr();
-                    panic!("initializer panic");
-                });
-            }))
-            .is_err()
-        );
-        assert!(!address.is_null());
-        assert_unmapped(address);
-
         struct PanicOnDrop([u8; 32]);
         impl Drop for PanicOnDrop {
             fn drop(&mut self) {
@@ -829,10 +617,8 @@ mod tests {
         }
         let secret = harden(InlineSecret::new(PanicOnDrop([99; 32]))).unwrap();
         let data = secret.inner.mapping.data.as_ptr();
-        let marker = secret.inner.mapping.identity.address.as_ptr();
         assert!(catch_unwind(AssertUnwindSafe(|| drop(secret))).is_err());
         assert_unmapped(data);
-        assert_unmapped(marker);
     }
 
     #[test]
@@ -942,7 +728,6 @@ mod tests {
         }))
         .unwrap();
         let data = secret.inner.mapping.data.as_ptr();
-        let marker = secret.inner.mapping.identity.address.as_ptr();
         let clone = secret.clone();
         secret.access(|value| assert_eq!(value.bytes, [42; 32]));
         drop(secret);
@@ -950,7 +735,6 @@ mod tests {
         drop(clone);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_unmapped(data);
-        assert_unmapped(marker);
     }
 
     #[test]
@@ -962,10 +746,8 @@ mod tests {
         }))
         .unwrap();
         let data = secret.inner.mapping.data.as_ptr();
-        let marker = secret.inner.mapping.identity.address.as_ptr();
         let value = secret.try_extract().unwrap();
         assert_unmapped(data);
-        assert_unmapped(marker);
         assert_eq!(value.bytes, [42; 32]);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(value);
@@ -999,61 +781,10 @@ mod tests {
             assert_harden_failure("mlock");
             return;
         }
-        if case == "fork_pid_collision" {
-            let mut allocation =
-                Arc::try_unwrap(harden(InlineSecret::new([42u8; 32])).unwrap().inner)
-                    .ok()
-                    .unwrap();
-            // SAFETY: The child only checks mapping identity and exits. It never
-            // interprets the wiped allocation as T or enters inherited locks.
-            let pid = unsafe { libc::fork() };
-            assert!(pid >= 0);
-            if pid == 0 {
-                // Simulate a reused or namespace-relative PID with real fork-wiped
-                // pages. Waiting for actual numeric PID reuse would be unreliable.
-                // SAFETY: getpid and _exit have no memory preconditions.
-                unsafe {
-                    allocation.mapping.pid = libc::getpid();
-                    libc::_exit(if allocation.mapping.in_creator() {
-                        1
-                    } else {
-                        0
-                    });
-                }
-            }
-            let mut status = 0;
-            // SAFETY: pid names our child and status is writable.
-            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-            assert!(libc::WIFEXITED(status));
-            assert_eq!(libc::WEXITSTATUS(status), 0);
-            allocation.access(|value| assert_eq!(value, &[42; 32]));
-            return;
-        }
         match case.as_str() {
             "exit_failure" => {
                 exit_failure();
                 panic!("revocation did not abort");
-            }
-            "final_seal_failure" | "cleanup_failure" => {
-                let mut address = ptr::null_mut();
-                let result = Secret::<[u8; 32]>::try_init(|bytes| {
-                    bytes.fill(71);
-                    address = bytes.as_mut_ptr();
-                    if case == "cleanup_failure" {
-                        deny_mprotect(&[libc::PROT_NONE, libc::PROT_READ | libc::PROT_WRITE]);
-                    } else {
-                        deny_mprotect(&[libc::PROT_NONE]);
-                    }
-                });
-                assert!(matches!(
-                    result,
-                    Err(HardenError::System {
-                        operation: "mprotect",
-                        ..
-                    })
-                ));
-                assert_unmapped(address);
-                return;
             }
             "harden_seal_failure" => {
                 deny_mprotect(&[libc::PROT_NONE]);
@@ -1075,10 +806,6 @@ mod tests {
                 let returned = shared.try_extract().unwrap_err();
                 assert!(Arc::ptr_eq(&returned.inner, &clone.inner));
                 assert_eq!(*returned.inner.readers.lock(), 0);
-                assert_eq!(
-                    returned.inner.mapping.protection.load(Ordering::Relaxed),
-                    libc::PROT_NONE
-                );
                 drop(returned);
                 // SAFETY: Leave the disposable subprocess without destructors.
                 // Final release would require the deliberately forbidden write transition.
@@ -1102,41 +829,6 @@ mod tests {
                 // SAFETY: Deliberately probe the still-owned mapping after the last
                 // reader exits. This subprocess must fault on its sealed data page.
                 unsafe { std::hint::black_box(address.read_volatile()) };
-                return;
-            }
-            "fork_init" => {
-                let mut pid = -1;
-                let secret = Secret::<[u8; 32]>::try_init(|bytes| {
-                    bytes.fill(42);
-                    // SAFETY: Neither branch uses the array after fork. The child
-                    // returns only to the constructor's explicit rejection check.
-                    pid = unsafe { libc::fork() };
-                    assert!(pid >= 0);
-                })
-                .unwrap();
-                wait_for_child(pid, Some(libc::SIGABRT));
-                secret.access(|value| assert_eq!(value, &[42; 32]));
-                return;
-            }
-            "fork_guard" => {
-                let secret = harden(InlineSecret::new([42u8; 32])).unwrap();
-                let mut pid = -1;
-                secret.access(|_| {
-                    // SAFETY: The child returns directly to inherited-guard rejection
-                    // without using a reference to the fork-wiped value.
-                    pid = unsafe { libc::fork() };
-                    assert!(pid >= 0);
-                });
-                wait_for_child(pid, Some(libc::SIGABRT));
-                secret.access(|value| assert_eq!(value, &[42; 32]));
-                return;
-            }
-            "fork_collision_access"
-            | "fork_collision_locked"
-            | "fork_collision_extract"
-            | "fork_collision_drop"
-            | "fork_new_allocation" => {
-                fork_collision(&case);
                 return;
             }
             _ => {}
@@ -1198,24 +890,31 @@ mod tests {
                 }
                 secret.access(|_| ());
             }
-            "fork_drop" | "fork_access" | "fork_extract" => {
-                // SAFETY: The child only invokes the hardened handle's explicit
-                // child rejection/drop path, raw mapping syscalls, and _exit.
+            "cleanup_failure" => {
+                // SAFETY: Remove the data region so the final owner cannot restore
+                // write access. Nothing dereferences the stale pointer afterward.
+                unsafe {
+                    assert_eq!(
+                        libc::munmap(
+                            secret.inner.mapping.data.as_ptr().cast(),
+                            secret.inner.mapping.data_len
+                        ),
+                        0
+                    );
+                }
+                drop(secret);
+                panic!("cleanup did not abort");
+            }
+            "fork_wipe" => {
+                // SAFETY: The child inspects raw bytes, drops its inherited handle,
+                // and exits without returning to the test harness.
                 let pid = unsafe { libc::fork() };
                 assert!(pid >= 0);
                 if pid == 0 {
-                    if case == "fork_access" {
-                        secret.access(|_| ());
-                    }
-                    if case == "fork_extract" {
-                        let _ = secret.try_extract();
-                        // SAFETY: Reaching this point means child rejection failed.
-                        unsafe { libc::_exit(3) };
-                    }
                     let data = secret.inner.mapping.data.as_ptr();
                     let len = secret.inner.mapping.data_len;
-                    // SAFETY: Inspect raw bytes, never an inherited T. WIPEONFORK
-                    // supplies zero pages, and the child owns this private mapping.
+                    // SAFETY: WIPEONFORK supplies zero pages, and the child owns
+                    // this private mapping.
                     unsafe {
                         if libc::mprotect(data.cast(), len, libc::PROT_READ) != 0 {
                             libc::_exit(1);
@@ -1226,22 +925,13 @@ mod tests {
                             }
                         }
                     }
+                    // Dropping here is sound only because all-zero bytes are a
+                    // valid [u8; 32]. The public contract forbids it in general.
                     drop(secret);
                     // SAFETY: Terminate the child without invoking the test harness.
-                    unsafe {
-                        libc::_exit(0);
-                    }
+                    unsafe { libc::_exit(0) };
                 }
-                let mut status = 0;
-                // SAFETY: pid identifies our child and status is writable.
-                assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-                if case != "fork_drop" {
-                    assert!(libc::WIFSIGNALED(status));
-                    assert_eq!(libc::WTERMSIG(status), libc::SIGABRT);
-                } else {
-                    assert!(libc::WIFEXITED(status));
-                    assert_eq!(libc::WEXITSTATUS(status), 0);
-                }
+                wait_for_child(pid, None);
                 secret.access(|value| assert_eq!(value, &[42; 32]));
                 return;
             }
@@ -1257,7 +947,7 @@ mod tests {
         let secret = harden(InlineSecret::new(())).unwrap();
         secret.access(|_| {
             // SAFETY: Remove the test's data page to force last-reader mprotect
-            // failure. The marker and the ZST's trailing-guard address stay mapped.
+            // failure. The ZST's trailing-guard address stays mapped.
             unsafe {
                 assert_eq!(
                     libc::munmap(
@@ -1406,65 +1096,5 @@ mod tests {
             assert!(libc::WIFEXITED(status), "child status: {status}");
             assert_eq!(libc::WEXITSTATUS(status), 0);
         }
-    }
-
-    /// Exercises inherited state with a simulated PID match and real wiped pages.
-    fn fork_collision(case: &str) {
-        struct Value([u8; 32]);
-        impl Drop for Value {
-            fn drop(&mut self) {
-                // Wiped bytes must never reach typed destruction in the child.
-                assert_eq!(self.0, [42; 32]);
-            }
-        }
-        let mut allocation =
-            Arc::try_unwrap(harden(InlineSecret::new(Value([42; 32]))).unwrap().inner)
-                .ok()
-                .unwrap();
-        // SAFETY: The child only executes explicit rejection/drop paths or creates
-        // independent storage. It never uses a borrowed inherited value.
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0);
-        if pid == 0 {
-            // SAFETY: Alter only child-local metadata to model a numeric collision.
-            allocation.mapping.pid = unsafe { libc::getpid() };
-            match case {
-                "fork_collision_access" => {
-                    // Model forking during an overlapping read. Identity must be
-                    // rejected even when first-reader permission setup is skipped.
-                    *allocation.readers.lock() = 1;
-                    allocation.access(|_| ());
-                }
-                "fork_collision_locked" => {
-                    // A held inherited mutex must not be touched. An alarm turns
-                    // accidental blocking into a distinct, bounded test failure.
-                    let _held = allocation.readers.lock();
-                    // SAFETY: Set a child-local timeout for a potential deadlock.
-                    unsafe { libc::alarm(5) };
-                    allocation.access(|_| ());
-                }
-                "fork_collision_extract" => {
-                    let _ = allocation.extract();
-                }
-                "fork_collision_drop" => drop(allocation),
-                "fork_new_allocation" => {
-                    let fresh = harden(InlineSecret::new([73u8; 32])).unwrap();
-                    fresh.access(|bytes| assert_eq!(bytes, &[73; 32]));
-                    drop(fresh);
-                    assert!(!allocation.mapping.in_creator());
-                    drop(allocation);
-                }
-                _ => unreachable!(),
-            }
-            // SAFETY: Leave without running the inherited test harness.
-            unsafe { libc::_exit(0) };
-        }
-        let signal = if matches!(case, "fork_collision_drop" | "fork_new_allocation") {
-            None
-        } else {
-            Some(libc::SIGABRT)
-        };
-        wait_for_child(pid, signal);
-        allocation.access(|value| assert_eq!(value.0, [42; 32]));
     }
 }
