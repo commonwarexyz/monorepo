@@ -9,8 +9,8 @@ use commonware_codec::{
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf, IoBufMut, IoBufs, buffer::paged::Writer};
-use std::{future::Future, io::Cursor};
-use zstd::{bulk::compress, decode_all};
+use std::{future::Future, io::Cursor, io::Read as IoRead};
+use zstd::bulk::compress;
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
@@ -107,16 +107,45 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
 
     Ok((next_offset, item))
 }
+/// Maximum ratio between decompressed and compressed size. Payloads that
+/// expand beyond this factor are rejected as potential decompression bombs.
+const MAX_DECOMPRESSION_RATIO: usize = 16;
+
+/// Minimum decompressed size cap so that very small compressed frames
+/// still have a reasonable budget for decompression.
+const MIN_DECOMPRESSED_CAP: usize = 64 * 1024;
 
 /// Decode a frame's payload into an item, decompressing if needed.
+///
+/// When `compressed` is true, the decompressed output is bounded to
+/// `max(compressed_len * MAX_DECOMPRESSION_RATIO, MIN_DECOMPRESSED_CAP)`.
+/// Payloads that exceed this limit are rejected with
+/// [`Error::DecompressionLimitExceeded`].
 pub(super) fn decode_item<V: Codec>(
     item_data: impl Buf,
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<V, Error> {
     if compressed {
-        let decompressed =
-            decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
+        let compressed_len = item_data.remaining();
+        let cap = (compressed_len.saturating_mul(MAX_DECOMPRESSION_RATIO)).max(MIN_DECOMPRESSED_CAP);
+        let reader = item_data.reader();
+        let mut decoder =
+            zstd::Decoder::new(reader).map_err(|_| Error::DecompressionFailed)?;
+        let mut decompressed = Vec::with_capacity(compressed_len.min(cap));
+        // Read up to `cap + 1` bytes so we can detect overflow without
+        // allocating an unbounded buffer.
+        (&mut decoder)
+            .take((cap + 1) as u64)
+            .read_to_end(&mut decompressed)
+            .map_err(|_| Error::DecompressionFailed)?;
+        if decompressed.len() > cap {
+            return Err(Error::DecompressionLimitExceeded {
+                compressed_len,
+                decompressed_len: decompressed.len(),
+                limit: cap,
+            });
+        }
         V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
@@ -435,5 +464,37 @@ mod tests {
             Err(Error::ItemTooLarge(_))
         ));
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_decode_item_rejects_decompression_bomb() {
+        // Compress a large block of zeros that achieves a very high ratio.
+        // The decompressed size far exceeds compressed_len * MAX_DECOMPRESSION_RATIO.
+        let decompressed_size = MIN_DECOMPRESSED_CAP * MAX_DECOMPRESSION_RATIO;
+        let large = vec![0u8; decompressed_size];
+        let compressed =
+            zstd::bulk::compress(&large, 1).expect("compression should succeed");
+        assert!(
+            compressed.len() * MAX_DECOMPRESSION_RATIO < large.len(),
+            "test requires a high compression ratio to exercise the limit"
+        );
+
+        // Feed the compressed payload directly to decode_item. The codec type
+        // does not matter because decompression is rejected before decoding.
+        let result = decode_item::<u64>(&compressed[..], &(), true);
+        assert!(
+            matches!(result, Err(Error::DecompressionLimitExceeded { .. })),
+            "expected DecompressionLimitExceeded, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_item_accepts_normal_compressed_payload() {
+        // A normally compressed frame should decode successfully.
+        let buf = frame(Some(3), &42u64);
+        // Skip the varint prefix to get the compressed payload.
+        let (_, varint_len) = decode_length_prefix(&mut &buf[..]).unwrap();
+        let item: u64 = decode_item(&buf[varint_len..], &(), true).unwrap();
+        assert_eq!(item, 42);
     }
 }
