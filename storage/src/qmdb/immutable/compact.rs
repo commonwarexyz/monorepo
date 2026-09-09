@@ -630,49 +630,11 @@ where
         Ok(self)
     }
 
-    /// Rewind the db to the applied state with exactly `target` operations, discarding any
-    /// uncommitted batches and any later states. The rewind is made durable before this
-    /// method returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained applied state has exactly `target` operations (never applied, or pruned).
-    #[tracing::instrument(name = "qmdb.immutable.compact.db.rewind", level = "info", skip_all)]
-    pub async fn rewind(mut self, target: Location<F>) -> Result<Self, Error<F>>
-    where
-        F: Family,
-    {
-        // A clean current target only needs to settle its pipelined sync. An uncommitted target
-        // takes the regular rewind path so the witness journal becomes durable before return.
-        if self.size() == target
-            && self.witness.with(|w| w.size()) == target
-            && !self.witness.has_uncommitted_state()
-        {
-            self.witness.wait_for_sync().await?;
-            return Ok(self);
-        }
-
-        let last_commit_op;
-        (self.witness, last_commit_op) = self
-            .witness
-            .rewind::<H, S, Operation<F, K, V>>(&self.merkle, target, &self.commit_codec_config)
-            .await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
-        self.last_commit_metadata = last_commit_metadata;
-        self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = target - 1;
-        self.root = self.witness.with(|w| w.root);
-        Ok(self)
-    }
-
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
     /// the boundary may survive.
     ///
-    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness always
-    /// survives. The prune is made durable before this method returns.
+    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
+    /// always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
