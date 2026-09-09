@@ -360,6 +360,7 @@ impl Drop for Mapping {
 /// Construction, extraction, and destruction hold exclusive write access. After
 /// publication, the first reader grants read access and the last revokes it.
 struct ProtectedAllocation<T> {
+    /// Guarded pages holding the value. Erased and unmapped after `T` is gone.
     mapping: Mapping,
     /// Aligned location of the initialized value within mapping's data region.
     ///
@@ -377,6 +378,7 @@ struct ProtectedAllocation<T> {
 // SAFETY: T can be moved to another thread. The mapping has one owner, shared
 // access is coordinated by readers, and destruction requires exclusive ownership.
 unsafe impl<T: Send> Send for ProtectedAllocation<T> {}
+
 // SAFETY: T can be shared between threads. Permission transitions and reader
 // counts are serialized, and no reference outlives its read guard.
 unsafe impl<T: Sync> Sync for ProtectedAllocation<T> {}
@@ -438,9 +440,13 @@ struct ReadGuard<'a, T>(&'a ProtectedAllocation<T>);
 
 impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
+        // Runs on return and on unwind, so a panicking callback still gives up
+        // its slot.
         let mut readers = self.0.readers.lock();
         *readers -= 1;
 
+        // The last reader revokes access. Holding the mutex across the revoke
+        // keeps a concurrent first reader from granting access underneath it.
         if *readers == 0 && self.0.mapping.protect(libc::PROT_NONE).is_err() {
             process::abort();
         }
@@ -467,6 +473,7 @@ mod tests {
     /// Creates an allocation whose mappings can be inspected by backend tests.
     fn harden<T>(value: InlineSecret<T>) -> Result<HardenedSecret<T>, HardenError> {
         let mut value = ManuallyDrop::new(value);
+
         // SAFETY: Success immediately retires the source without dropping T.
         // Failure leaves it initialized, so only that path runs its destructor.
         unsafe {
@@ -487,7 +494,10 @@ mod tests {
         }
     }
 
-    /// Runs deliberate memory faults in a subprocess so the test runner survives.
+    /// Runs one `subprocess_child` case in a fresh process and checks how it ended.
+    ///
+    /// Faults and aborts must kill the child with `signal`. Every other case must
+    /// exit successfully.
     fn child(case: &str, signal: Option<i32>) -> Output {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([

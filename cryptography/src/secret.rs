@@ -562,6 +562,7 @@ mod tests {
         fn assert_sync<T: Sync>() {}
         fn assert_unwind_safe<T: core::panic::UnwindSafe>() {}
         fn assert_ref_unwind_safe<T: core::panic::RefUnwindSafe>() {}
+
         assert_send::<Cell<u8>>();
         assert_sync::<std::sync::MutexGuard<'static, ()>>();
         assert_unwind_safe::<Box<Cell<u8>>>();
@@ -572,6 +573,23 @@ mod tests {
         let secret = Secret::new(Cell::new(7));
         secret.access(|value| value.set(9));
         assert_eq!(secret.access(Cell::get), 9);
+    }
+
+    #[test]
+    fn test_inline_value_semantics() {
+        let secret = Secret::new([1u8, 2, 3, 4]);
+        assert!(!secret.is_hardened());
+
+        // Every access sees the stored value, and inline access keeps no state
+        // between calls.
+        secret.access(|value| assert_eq!(value, &[1, 2, 3, 4]));
+        secret.access(|value| assert_eq!(value[3], 4));
+
+        // An inline clone is an independent copy, and equality is by value.
+        let cloned = secret.clone();
+        secret.access(|a| cloned.access(|b| assert!(!core::ptr::eq(a, b))));
+        assert_eq!(secret, cloned);
+        assert_ne!(secret, Secret::new([5u8, 6, 7, 8]));
     }
 
     #[test]
@@ -589,6 +607,7 @@ mod tests {
             second: 0x12345678,
         }));
         let address = storage.as_mut_ptr();
+
         // SAFETY: The value is initialized and uniquely owned. The MaybeUninit
         // allocation stays live after destruction and does not drop it again.
         unsafe {
@@ -615,6 +634,7 @@ mod tests {
             }
         }
 
+        // Extraction hands the value over intact without running its destructor.
         fn check(secret: Secret<Value<'_>>, drops: &Cell<usize>) {
             let before = drops.get();
             let value = secret.try_extract().unwrap();
@@ -624,6 +644,7 @@ mod tests {
             assert_eq!(drops.get(), before + 1);
         }
 
+        // Inline and hardened storage behave the same through the public API.
         let drops = Cell::new(0);
         check(
             Secret::new(Value {
@@ -632,6 +653,7 @@ mod tests {
             }),
             &drops,
         );
+
         #[cfg(all(target_os = "linux", feature = "std", not(miri)))]
         {
             let mut secret = Secret::new(Value {
@@ -667,6 +689,7 @@ mod tests {
             }
         }
 
+        // A uniquely owned inline value moves out without cloning.
         let clones = Cell::new(0);
         let drops = Cell::new(0);
         let secret = Secret::new(Value {
@@ -681,6 +704,9 @@ mod tests {
 
         #[cfg(all(target_os = "linux", feature = "std", not(miri)))]
         {
+            // A shared hardened value cannot be moved out. Extraction fails without
+            // touching it, and extract_or_clone clones it instead while the other
+            // handle keeps its storage.
             let mut secret = Secret::new(Value {
                 clones: &clones,
                 drops: &drops,
@@ -717,48 +743,5 @@ mod tests {
     fn test_display_redacted() {
         let secret = Secret::new([1u8, 2, 3, 4]);
         assert_eq!(format!("{}", secret), "[REDACTED]");
-    }
-
-    #[test]
-    fn test_access() {
-        let secret = Secret::new([1u8, 2, 3, 4]);
-        secret.access(|v| {
-            assert_eq!(v, &[1u8, 2, 3, 4]);
-        });
-    }
-
-    #[test]
-    fn test_clone() {
-        let secret = Secret::new([1u8, 2, 3, 4]);
-        let cloned = secret.clone();
-        secret.access(|a| {
-            cloned.access(|b| {
-                assert_eq!(a, b);
-            });
-        });
-    }
-
-    #[test]
-    fn test_equality() {
-        let s1 = Secret::new([1u8, 2, 3, 4]);
-        let s2 = Secret::new([1u8, 2, 3, 4]);
-        let s3 = Secret::new([5u8, 6, 7, 8]);
-        assert_eq!(s1, s2);
-        assert_ne!(s1, s3);
-    }
-
-    #[test]
-    fn test_multiple_access() {
-        let secret = Secret::new([42u8; 32]);
-
-        // First access
-        secret.access(|v| {
-            assert_eq!(v[0], 42);
-        });
-
-        // Second access
-        secret.access(|v| {
-            assert_eq!(v[31], 42);
-        });
     }
 }
