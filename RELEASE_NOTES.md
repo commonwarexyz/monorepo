@@ -3,11 +3,11 @@
 ## v2026.9.0
 
 <details>
-<summary>Rollback</summary>
+<summary>Rollback Support</summary>
 
 To retain a path back to v2026.7.1:
 
-**Before upgrading, defer incompatible changes:**
+**Defer incompatible changes:**
 
 - **V1 blobs:** Set
   `tokio::Config::with_storage_blob_layouts(BlobLayout::V0..=BlobLayout::V0)`
@@ -19,13 +19,12 @@ To retain a path back to v2026.7.1:
   it to 4084 and can truncate existing data. Switching the setting back cannot
   recover discarded data ([#4184]).
 
-**When rolling back:**
+**To roll back:**
 
-1. Sync storage and stop all processes using its directory.
-2. For each prunable archive, remove only the partition named by its v2026.9.0
-   `metadata_partition` configuration. The previous release cannot maintain
-   these validation markers, so the next upgrade must recreate them by
-   validating all retained values ([#4610]). For marshal's epoch caches, remove
+1. Sync storage, then stop every process using the storage directory.
+2. Remove each prunable archive's `metadata_partition`. The archive will
+   revalidate its stored values on the next upgrade ([#4610]). For marshal's
+   epoch caches (which use the prunable archive), remove
    `{partition_prefix}-cache-{epoch}-{name}-metadata` for each epoch and each of
    `verified`, `notarized`, `certified`, `notarizations`, and `finalizations`
    ([#4610]).
