@@ -3,11 +3,23 @@
 # `just fuzz consensus/fuzz/simplex` keep working from here.
 
 set fallback := true
+set positional-arguments := true
 
-env_nightly_version := env("NIGHTLY_VERSION", "nightly")
+# Same toolchain selection as the root justfile: `NIGHTLY_VERSION` in the environment
+# wins; otherwise the pin CI uses (`.github/workflows/slow.yml`) applies, then `nightly`.
+ci_nightly_version := `sed -n 's/^ *NIGHTLY_VERSION: *//p' ../../.github/workflows/slow.yml | head -1`
+default_nightly_version := if ci_nightly_version != "" { ci_nightly_version } else { "nightly" }
+env_nightly_version := env("NIGHTLY_VERSION", default_nightly_version)
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
 features := ""
 feature_flags := if features != "" { "--no-default-features --features " + features } else { "" }
+
+alias b := build
+alias r := run
+
+# default recipe to display help information
+default:
+    @just --list
 
 # Build every fuzz target of the given packages (default: all) without running any.
 build *packages='':
@@ -21,4 +33,42 @@ build *packages='':
     fi
     for package in $packages; do
         cargo {{nightly_version}} fuzz build {{feature_flags}} --fuzz-dir $package
+    done
+
+# Run one fuzz target from whichever package defines it.
+run target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Extra arguments go to `cargo fuzz run`: a crash file or corpus directory to
+    # replay, or libFuzzer flags after `--`, as in `-- -max_total_time=60`.
+    target="$1"
+    shift
+    package=""
+    for candidate in $(grep -ls 'cargo-fuzz = true' */Cargo.toml | xargs -n1 dirname); do
+        # Read the listing in full before matching, so an early `grep -q` exit
+        # cannot break cargo-fuzz's pipe under `pipefail`.
+        listing=$(cargo {{nightly_version}} fuzz list --fuzz-dir "$candidate")
+        if grep -qx "$target" <<< "$listing"; then
+            package="$candidate"
+            break
+        fi
+    done
+    if [ -z "$package" ]; then
+        echo "no package under consensus/fuzz defines the fuzz target '$target'; see \`just list\`" >&2
+        exit 1
+    fi
+    cargo {{nightly_version}} fuzz run {{feature_flags}} --fuzz-dir "$package" "$target" "$@"
+
+# List every fuzz target of the given packages (default: all), grouped by package.
+list *packages='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `features` narrows the listing to the targets it enables, as in `build`.
+    packages="{{packages}}"
+    if [ -z "$packages" ]; then
+        packages=$(grep -ls 'cargo-fuzz = true' */Cargo.toml | xargs -n1 dirname)
+    fi
+    for package in $packages; do
+        echo "$package:"
+        python3 ../../.github/scripts/fuzz_targets.py {{nightly_version}} "$package" "{{features}}" | sed 's/^/  /'
     done

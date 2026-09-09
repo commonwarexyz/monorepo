@@ -38,7 +38,7 @@ version.
 
 Or use `just`, which builds every target in the package once and then runs each for
 `max_time` seconds. It takes its toolchain from the same `NIGHTLY_VERSION` variable,
-defaulting to `nightly`:
+defaulting to the CI pin:
 
 ```bash
 NIGHTLY_VERSION=<pinned> just fuzz consensus/fuzz/simplex 60
@@ -53,13 +53,17 @@ one job per partition to keep each job from compiling binaries it never fuzzes:
 NIGHTLY_VERSION=<pinned> just features=twins fuzz consensus/fuzz/simplex 60
 ```
 
-To only build, the local [`justfile`](./justfile) compiles every target of the named
-packages, or of all of them. Any other recipe falls back to the root justfile:
+The local [`justfile`](./justfile) works across all packages here without naming one,
+and defaults to the CI nightly pin. Any other recipe falls back to the root justfile:
 
 ```bash
 cd consensus/fuzz
-NIGHTLY_VERSION=<pinned> just build
-NIGHTLY_VERSION=<pinned> just features=twins build simplex
+just list                                  # every target, grouped by package
+just build                                 # build every target; `just build simplex` for one package
+just features=twins build simplex          # build one partition
+just run simplex_cert_mock                 # fuzz one target, whichever package defines it
+just run simplex_cert_mock -- -max_total_time=60
+just run simplex_cert_mock simplex/artifacts/simplex_cert_mock/<crash_file>
 ```
 
 Reproduce a failure from a crash file. Artifacts are written under the package that owns
