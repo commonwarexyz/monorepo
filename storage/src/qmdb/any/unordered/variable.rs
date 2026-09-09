@@ -51,11 +51,14 @@ where
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
     pub async fn init(
         context: E,
         cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<crate::merkle::Location<F>>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -118,11 +121,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: Option<crate::merkle::Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -201,7 +207,7 @@ pub(crate) mod test {
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed, &context);
-        AnyTest::init(context, config).await.unwrap()
+        AnyTest::init(context, config, None).await.unwrap()
     }
 
     /// Deterministic byte vector generator for variable-value tests.
@@ -522,7 +528,7 @@ pub(crate) mod test {
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         let cfg = create_test_config(0, &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("WARN")]

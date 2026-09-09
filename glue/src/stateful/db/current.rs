@@ -523,7 +523,7 @@ where
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -628,7 +628,7 @@ where
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -737,7 +737,7 @@ mod open {
         S: Strategy,
         Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     {
-        Db::init(context, config).await
+        Db::init(context, config, None).await
     }
 
     pub(super) async fn ordered_variable<F, E, K, V, H, T, const N: usize, S>(
@@ -754,7 +754,7 @@ mod open {
         S: Strategy,
         Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     {
-        OrderedVariableDb::init(context, config).await
+        OrderedVariableDb::init(context, config, None).await
     }
 }
 
@@ -1617,7 +1617,7 @@ mod tests {
     fn managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("matches-sync-target", &context);
-            let db = FixedDb::init(context.child("db"), config.clone())
+            let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -1635,7 +1635,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let verification_db = FixedDb::init(context.child("verification_db"), config)
+            let verification_db = FixedDb::init(context.child("verification_db"), config, None)
                 .await
                 .unwrap();
             let (verification_db, _) = verification_db
