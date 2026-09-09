@@ -26,7 +26,6 @@ pub mod storage;
 #[cfg(feature = "std")]
 pub mod verification;
 
-use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
@@ -133,8 +132,6 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
         Self::peaks(prune_pos)
             .filter(move |&(pos, _)| pos < prune_pos)
             .map(|(pos, _)| pos)
-            .collect::<Vec<_>>()
-            .into_iter()
     }
 
     /// Return the positions of the left and right children of the node at `pos` with the
@@ -388,10 +385,6 @@ pub enum Error<F: Family> {
     #[error("root mismatch")]
     RootMismatch,
 
-    /// A required digest is missing.
-    #[error("missing digest: {0}")]
-    MissingDigest(Position<F>),
-
     /// A metadata error occurred.
     #[cfg(feature = "std")]
     #[error("metadata error: {0}")]
@@ -401,11 +394,6 @@ pub enum Error<F: Family> {
     #[cfg(feature = "std")]
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
-
-    /// A runtime error occurred.
-    #[cfg(feature = "std")]
-    #[error("runtime error: {0}")]
-    Runtime(#[from] commonware_runtime::Error),
 
     /// A required node is missing.
     #[error("missing node: {0}")]

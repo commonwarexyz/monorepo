@@ -23,6 +23,7 @@ aws = [
 	"clap",
 	"commonware-cryptography",
 	"commonware-macros/std",
+	"commonware-utils",
 	"futures",
 	"reqwest",
 	"serde_yaml",
@@ -42,6 +43,7 @@ chrono = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 commonware-cryptography = { workspace = true, optional = true }
 commonware-macros.workspace = true
+commonware-utils = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }

@@ -198,9 +198,12 @@ pub trait Unordered: Send + Sync {
 }
 
 /// A trait for index types that can be constructed from a metrics context and translator.
-pub trait Factory<T: Translator>: Unordered + Sized {
+pub trait Factory: Unordered + Sized {
+    /// The translator used by this index.
+    type Translator: Translator;
+
     /// Create a new index with the given metrics context and translator.
-    fn new(ctx: impl Metrics, translator: T) -> Self;
+    fn new(ctx: impl Metrics, translator: Self::Translator) -> Self;
 }
 
 /// A trait defining the additional operations provided by a memory-efficient index that allows

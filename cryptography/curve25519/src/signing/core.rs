@@ -65,8 +65,8 @@ impl Signature {
 /// CSPRNG (and never revealed) are indistinguishable from exactly that. Deriving each signature's
 /// coefficient from its *position* rather than drawing all of them from the shared `rng` up
 /// front lets every thread compute its own signatures' coefficients locally -- and makes the
-/// batch's entire execution a deterministic function of `(items, seed)`, identical at every
-/// thread count.
+/// batch's coefficients and verdict deterministic functions of `(items, seed)`, identical at
+/// every thread count.
 fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
     let digest = sha512(&[seed, &block.to_le_bytes()]);
     core::array::from_fn(|k| {
@@ -275,7 +275,7 @@ fn verify_batch_inner<B: Backend>(
 ) -> bool {
     let n = items.len();
     if n == 0 {
-        return true;
+        return false;
     }
 
     // Every phase has a fixed work shape derived from the available parallelism. Disable adaptive
@@ -375,6 +375,8 @@ fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
 /// Verifies a batch of `(verifying_key_bytes, signature, message)` triples using a randomized
 /// linear combination.
 ///
+/// Empty input is rejected.
+///
 /// `A` is coalesced by its raw encoding before ever being decompressed (see [`group_ranges`]), so
 /// a signer reused across the batch is decompressed once, not once per signature, and the
 /// deduplicated `A` encodings join `R`'s per-signature encodings in the same decompression pass.
@@ -426,15 +428,15 @@ mod tests {
         let a = batch_coefficients(&seed, 0);
         let b = batch_coefficients(&seed, 0);
         for k in 0..4 {
-            assert_eq!(a[k].0, b[k].0);
+            assert_eq!(a[k].to_bytes(), b[k].to_bytes());
         }
         assert_ne!(
-            batch_coefficients(&seed, 0)[0].0,
-            batch_coefficients(&seed, 1)[0].0
+            batch_coefficients(&seed, 0)[0].to_bytes(),
+            batch_coefficients(&seed, 1)[0].to_bytes()
         );
         assert_ne!(
-            batch_coefficients(&seed, 0)[0].0,
-            batch_coefficients(&[8u8; 32], 0)[0].0
+            batch_coefficients(&seed, 0)[0].to_bytes(),
+            batch_coefficients(&[8u8; 32], 0)[0].to_bytes()
         );
     }
 
@@ -504,7 +506,7 @@ mod tests {
             });
     }
 
-    /// Batch verification's execution is a deterministic function of `(items, seed)` (see
+    /// Batch verification's verdict is a deterministic function of `(items, seed)` (see
     /// [`batch_coefficients`]), so serial and parallel strategies must agree on every batch --
     /// including invalid ones, where the accept/reject outcome depends on the derived
     /// coefficients.

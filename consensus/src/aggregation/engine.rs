@@ -30,6 +30,7 @@ use commonware_storage::journal::segmented::variable::{Config as JConfig, Journa
 use commonware_utils::{
     N3f1, PrioritySet,
     futures::{Pool as FuturesPool, rebind},
+    non_empty,
     ordered::Quorum,
 };
 use futures::future::{self, Either};
@@ -104,7 +105,7 @@ pub struct Engine<
 
     // Messaging
     /// Pool of pending futures to request a digest from the automaton.
-    digest_requests: FuturesPool<DigestRequest<D>>,
+    digest_requests: FuturesPool<'static, DigestRequest<D>>,
 
     // State
     /// The current epoch.
@@ -499,7 +500,8 @@ impl<
                 return (self, false);
             }
         };
-        let quorum = scheme.participants().quorum::<N3f1>();
+        let quorum = usize::try_from(scheme.participants().quorum::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
@@ -532,9 +534,12 @@ impl<
             .values()
             .filter(|a| a.item.digest == ack.item.digest)
             .collect::<Vec<_>>();
-        if filtered.len() >= quorum as usize
-            && let Some(certificate) = Certificate::from_acks(&*scheme, filtered, &self.strategy)
-        {
+        if filtered.len() >= quorum {
+            // Every stored acknowledgement is verified and signer-unique, so a same-item quorum
+            // satisfies the certificate scheme's assembly contract.
+            let certificate =
+                Certificate::from_acks(&*scheme, non_empty![@filtered], &self.strategy)
+                    .expect("verified acknowledgement quorum must assemble");
             self.metrics.certificates.inc();
             self = self.handle_certificate(certificate).await;
         }
@@ -969,5 +974,95 @@ impl<
             .await
             .expect("unable to sync journal");
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        aggregation::{mocks, scheme::ed25519},
+        simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
+    };
+    use commonware_actor::Feedback;
+    use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture};
+    use commonware_p2p::Blocker;
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    };
+    use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
+
+    #[derive(Clone)]
+    struct NoopBlocker;
+
+    impl Blocker for NoopBlocker {
+        type PublicKey = commonware_cryptography::ed25519::PublicKey;
+
+        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) =
+                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
+            receiver
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "verified acknowledgement quorum must assemble")]
+    fn assembly_failure_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"aggregation-recovery-failure", 4);
+            let provider = mocks::Provider::new();
+            assert!(provider.register(
+                epoch,
+                WrappedScheme::new(schemes[0].clone(), Behavior::RecoveryFailure),
+            ));
+            let (_, reporter) = mocks::Reporter::new(
+                context.child("reporter"),
+                WrappedScheme::new(verifier, Behavior::Honest),
+            );
+            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let mut engine = Engine::new(
+                context.child("engine"),
+                Config {
+                    monitor: mocks::Monitor::new(epoch),
+                    provider,
+                    automaton: mocks::Application::new(mocks::Strategy::Correct),
+                    reporter,
+                    blocker: NoopBlocker,
+                    priority_acks: false,
+                    rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
+                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                    window: NonZeroU64::new(1).unwrap(),
+                    activity_timeout: HeightDelta::new(10),
+                    journal_partition: "aggregation-recovery-failure".to_string(),
+                    journal_write_buffer: NZUsize!(4096),
+                    journal_replay_buffer: NZUsize!(4096),
+                    journal_heights_per_section: NonZeroU64::new(6).unwrap(),
+                    journal_compression: None,
+                    journal_page_cache: page_cache,
+                    strategy: Sequential,
+                },
+            );
+
+            let height = Height::new(0);
+            let digest = Sha256::hash(&[b"payload"]);
+            engine
+                .pending
+                .insert(height, Pending::Verified(digest, BTreeMap::new()));
+
+            for scheme in schemes.iter().take(3) {
+                let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
+                let ack = Ack::sign(&scheme, epoch, Item { height, digest }).unwrap();
+                (engine, _) = engine.handle_ack(&ack).await;
+            }
+        });
     }
 }

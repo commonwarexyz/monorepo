@@ -178,7 +178,9 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
+impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
+    type Translator = T;
+
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }

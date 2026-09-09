@@ -4,7 +4,9 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use cfg_if::cfg_if;
-use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode,
+};
 use commonware_macros::stability;
 #[stability(ALPHA)]
 use commonware_math::algebra::{FieldNTT, Ring};
@@ -25,10 +27,9 @@ use std::vec::Vec;
 ///
 /// More specifically, this configures how evaluation points of a polynomial
 /// are assigned to participant identities.
-#[derive(Copy, Clone, Default, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Mode {
-    #[default]
     NonZeroCounter = 0,
 
     /// Assigns participants to powers of a root of unity.
@@ -42,6 +43,22 @@ pub enum Mode {
         commonware_stability_RESERVED
     )))]
     RootsOfUnity = 1,
+}
+
+impl From<Mode> for CodecMode {
+    fn from(mode: Mode) -> Self {
+        match mode {
+            Mode::NonZeroCounter => mode!(0),
+            #[cfg(not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            )))]
+            Mode::RootsOfUnity => mode!(1),
+        }
+    }
 }
 
 impl Mode {
@@ -204,7 +221,7 @@ impl FixedSize for Mode {
 
 impl Write for Mode {
     fn write(&self, buf: &mut impl bytes::BufMut) {
-        buf.put_u8(*self as u8);
+        buf.put_u8(CodecMode::from(*self).into());
     }
 }
 
@@ -372,7 +389,8 @@ impl<V: Variant> Sharing<V> {
 
     /// Get the partial public key associated with a given participant.
     ///
-    /// This will return `None` if the index is greater >= [`Self::total`].
+    /// Returns [`Error::InvalidIndex`] if the index is greater than or equal to
+    /// [`Self::total`].
     pub fn partial_public(&self, i: Participant) -> Result<V::Public, Error> {
         cfg_if! {
             if #[cfg(feature = "std")] {
@@ -462,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_mode_read_rejects_mode_above_max_supported_mode() {
-        let encoded = [Mode::RootsOfUnity as u8];
+        let encoded = [1];
         Mode::read_cfg(&mut &encoded[..], &ModeVersion::v0())
             .expect_err("roots mode must be rejected when max mode is counter");
     }

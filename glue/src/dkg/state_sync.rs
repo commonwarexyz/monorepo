@@ -431,7 +431,7 @@ mod tests {
     use commonware_p2p::Address;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{N3f1, NZU32, TestRng, ordered::Set};
+    use commonware_utils::{N3f1, NZU32, TestRng, non_empty, ordered::Set};
     use std::net::SocketAddr;
 
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
@@ -455,8 +455,12 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("test finalize"))
             .collect::<Vec<_>>();
-        let floor = Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential)
-            .expect("test finalization quorum");
+        let floor = Finalization::from_finalizes(
+            &fixture.schemes[0],
+            non_empty![@finalizes.iter()],
+            &Sequential,
+        )
+        .expect("test finalization quorum");
         TestStateSync {
             info: EpochInfo {
                 outcome: EpochOutcome::Success,

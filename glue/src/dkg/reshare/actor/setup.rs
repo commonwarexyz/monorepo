@@ -320,6 +320,7 @@ where
             round,
             previous.clone(),
             self.sharing_mode,
+            self.reveal,
             participants.dealers.clone(),
             participants.players.clone(),
         )
@@ -354,14 +355,14 @@ where
 mod tests {
     use super::{dealer_for_phase, startup_height, state_sync_skips_inclusion_prefix};
     use crate::dkg::{
-        reshare::store::Store,
+        reshare::store::{AckOutcome, Store},
         tests::mocks::{MemorySecretStore, TestBlsVariant},
     };
     use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height};
     use commonware_cryptography::{
         Signer,
         bls12381::{
-            dkg::feldman_desmedt::{Info, Verdict, deal},
+            dkg::feldman_desmedt::{Info, Player, Reveal, deal},
             primitives::sharing::Mode,
         },
         ed25519::{PrivateKey, PublicKey},
@@ -434,6 +435,7 @@ mod tests {
                 epoch.get(),
                 Some(previous),
                 Mode::NonZeroCounter,
+                Reveal::V1,
                 players.clone(),
                 players.clone(),
             )
@@ -472,24 +474,21 @@ mod tests {
             let dealer_key = signer.public_key();
             for player_signer in &signers[1..] {
                 let player_key = player_signer.public_key();
-                let mut player = store
-                    .create_player::<PrivateKey, N3f1>(epoch, player_signer.clone(), info.clone())
-                    .expect("current player");
+                let mut player =
+                    Player::new(info.clone(), player_signer.clone()).expect("current player");
                 let (_, public, private) = recovered_dealer
                     .shares_to_distribute()
                     .find(|(recipient, _, _)| recipient == &player_key)
                     .expect("player dealing");
-                let Verdict::Valid(ack) = player
-                    .handle(&mut store, epoch, dealer_key.clone(), public, private)
-                    .await
-                else {
-                    panic!("valid dealing");
-                };
+                let ack = player
+                    .dealer_message::<N3f1>(dealer_key.clone(), public, private)
+                    .expect("valid dealing")
+                    .expect("new dealing");
                 assert!(matches!(
                     recovered_dealer
                         .handle(&mut store, epoch, player_key, ack)
                         .await,
-                    Verdict::Valid(())
+                    Ok(AckOutcome::Recorded)
                 ));
             }
             assert!(

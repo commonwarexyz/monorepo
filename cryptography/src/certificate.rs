@@ -72,14 +72,15 @@ use crate::{Digest, PublicKey};
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    Codec, CodecFixed, EncodeSize, Error, Read, ReadExt, Write, types::lazy::Lazy,
+    Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write, types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, Participant, bitmap::BitMap, ordered::Set};
+use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
+use thiserror::Error;
 
 /// A participant's attestation for a certificate.
 #[derive(Clone, Debug)]
@@ -121,7 +122,7 @@ impl<S: Scheme> EncodeSize for Attestation<S> {
 impl<S: Scheme> Read for Attestation<S> {
     type Cfg = ();
 
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let signer = Participant::read(reader)?;
         let signature = ReadExt::read(reader)?;
 
@@ -157,6 +158,26 @@ impl<S: Scheme> Verification<S> {
     pub const fn new(verified: Vec<Attestation<S>>, invalid: Vec<Participant>) -> Self {
         Self { verified, invalid }
     }
+}
+
+/// Errors returned while assembling attestations into a certificate.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AssemblyError {
+    /// Structurally valid attestations do not meet the scheme's quorum.
+    #[error("insufficient attestations: expected={0}, found={1}")]
+    InsufficientAttestations(u32, u32),
+    /// An attestation references an index outside the participant set.
+    #[error("unknown signer: {0}")]
+    UnknownSigner(Participant),
+    /// More than one attestation references the same signer.
+    #[error("duplicate signer: {0}")]
+    DuplicateSigner(Participant),
+    /// An attestation contains a malformed encoded signature.
+    #[error("malformed signature from signer: {0}")]
+    MalformedSignature(Participant),
+    /// The scheme could not recover a certificate from structurally valid attestations.
+    #[error("certificate recovery failed")]
+    RecoveryFailed,
 }
 
 /// Trait for namespace types that can derive themselves from a base namespace.
@@ -215,11 +236,12 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         R: CryptoRng,
         D: Digest;
 
-    /// Verifies a stream of certificates, returning `false` at the first failure.
+    /// Verifies a non-empty stream of certificates, returning `false` at the first verification
+    /// failure.
     fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
-        certificates: I,
+        certificates: NonEmpty<I>,
         strategy: &impl Strategy,
     ) -> bool
     where
@@ -241,6 +263,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// For batchable schemes, attempts batch verification first and bisects
     /// on failure to efficiently identify invalid certificates. For
     /// non-batchable schemes, verifies each certificate individually.
+    /// Empty input returns an empty result.
     fn verify_certificates_bisect<'a, R, D>(
         &self,
         rng: &mut R,
@@ -281,7 +304,11 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         //                    [6..7) pass  [7..8) fail
         let mut stack = vec![(0, len)];
         while let Some((start, end)) = stack.pop() {
-            if self.verify_certificates(rng, certificates[start..end].iter().copied(), strategy) {
+            let (first, rest) = certificates[start..end]
+                .split_first()
+                .expect("bisection ranges are non-empty");
+            let certificates = NonEmpty::new(*first, rest.iter().copied());
+            if self.verify_certificates(rng, certificates, strategy) {
                 verified[start..end].fill(true);
             } else if end - start > 1 {
                 let mid = start + (end - start) / 2;
@@ -345,10 +372,10 @@ pub trait Scheme: Verifier {
         D: Digest;
 
     /// Batch-verifies attestations and separates valid attestations from signer indices that failed
-    /// verification.
+    /// verification. Empty input produces an empty result in both sets.
     ///
-    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
-    /// is undefined behavior, implementations may panic or produce incorrect results.
+    /// Callers must not include duplicate attestations from the same signer: duplicates may
+    /// produce incorrect results.
     fn verify_attestations<R, D, I>(
         &self,
         rng: &mut R,
@@ -376,14 +403,17 @@ pub trait Scheme: Verifier {
         Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
+    /// Assembles a non-empty stream of attestations into a certificate.
     ///
-    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
-    /// is undefined behavior, implementations may panic or produce incorrect results.
-    fn assemble<I>(&self, attestations: I, strategy: &impl Strategy) -> Option<Self::Certificate>
+    /// Insufficient input returns [`AssemblyError::InsufficientAttestations`].
+    /// A signer-unique quorum already verified for one subject must assemble successfully.
+    fn assemble<I>(
+        &self,
+        attestations: NonEmpty<I>,
+        strategy: &impl Strategy,
+    ) -> Result<Self::Certificate, AssemblyError>
     where
-        I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send;
+        I: Iterator<Item = Attestation<Self>> + Send;
 
     /// Returns whether per-participant fault evidence can be safely exposed.
     ///
@@ -450,7 +480,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
     fn verify_certificates<'a, R, D, I>(
         &self,
         rng: &mut R,
-        certificates: I,
+        certificates: NonEmpty<I>,
         strategy: &impl Strategy,
     ) -> bool
     where
@@ -513,25 +543,35 @@ pub struct Signers {
 impl Signers {
     /// Builds [`Signers`] from an iterator of signer indices.
     ///
-    /// # Panics
-    ///
-    /// Panics if the sequence contains indices larger than the size of the participant set
-    /// or duplicates.
-    pub fn from(participants: usize, signers: impl IntoIterator<Item = Participant>) -> Self {
-        let mut bitmap = BitMap::zeroes(participants as u64);
+    /// Indices need not be sorted: some signing schemes aggregate commutatively, so ordering
+    /// is left to the caller.
+    pub fn new(
+        participants: u32,
+        signers: impl IntoIterator<Item = Participant>,
+    ) -> Result<Self, AssemblyError> {
+        let mut bitmap = BitMap::zeroes(u64::from(participants));
         for signer in signers.into_iter() {
-            assert!(
-                !bitmap.get(signer.get() as u64),
-                "duplicate signer index: {signer}",
-            );
-            // We opt to not assert order here because some signing schemes allow
-            // for commutative aggregation of signatures (and sorting is unnecessary
-            // overhead).
-
-            bitmap.set(signer.get() as u64, true);
+            let index = u64::from(signer.get());
+            if index >= bitmap.len() {
+                return Err(AssemblyError::UnknownSigner(signer));
+            }
+            if bitmap.get(index) {
+                return Err(AssemblyError::DuplicateSigner(signer));
+            }
+            bitmap.set(index, true);
         }
 
-        Self { bitmap }
+        Ok(Self { bitmap })
+    }
+
+    /// Requires at least `required` signers in an already validated set.
+    pub(crate) fn require(self, required: u32) -> Result<Self, AssemblyError> {
+        let found = u32::try_from(self.count()).expect("signer count exceeds u32::MAX");
+        if found < required {
+            return Err(AssemblyError::InsufficientAttestations(required, found));
+        }
+
+        Ok(self)
     }
 
     /// Returns the length of the bitmap (the size of the participant set).
@@ -553,6 +593,23 @@ impl Signers {
     }
 }
 
+/// Builds [`Signers`] using the participant set as the valid signer-index range.
+///
+/// # Panics
+///
+/// Panics if the participant count exceeds `u32::MAX`.
+impl<'a, P, I> TryFrom<(&'a Set<P>, I)> for Signers
+where
+    I: IntoIterator<Item = Participant>,
+{
+    type Error = AssemblyError;
+
+    fn try_from((participants, signers): (&'a Set<P>, I)) -> Result<Self, Self::Error> {
+        let total = u32::try_from(participants.len()).expect("participant count exceeds u32::MAX");
+        Self::new(total, signers)
+    }
+}
+
 impl Write for Signers {
     fn write(&self, writer: &mut impl BufMut) {
         self.bitmap.write(writer);
@@ -568,7 +625,7 @@ impl EncodeSize for Signers {
 impl Read for Signers {
     type Cfg = usize;
 
-    fn read_cfg(reader: &mut impl Buf, max_participants: &usize) -> Result<Self, Error> {
+    fn read_cfg(reader: &mut impl Buf, max_participants: &usize) -> Result<Self, CodecError> {
         let bitmap = BitMap::read_cfg(reader, &(*max_participants as u64))?;
         // The participant count is treated as an upper bound for decoding flexibility, e.g. one
         // might use `Scheme::certificate_codec_config_unbounded` for decoding certificates from
@@ -585,10 +642,11 @@ impl arbitrary::Arbitrary<'_> for Signers {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let participants = u.arbitrary_len::<u8>()? % 10;
         let signer_count = u.arbitrary_len::<u8>()?.min(participants);
-        let signers = (0..signer_count as u32)
+        let signers = (0..u32::try_from(signer_count).expect("signer count exceeds u32::MAX"))
             .map(Participant::new)
             .collect::<Vec<_>>();
-        Ok(Self::from(participants, signers))
+        Ok(Self::new(participants.try_into().unwrap(), signers)
+            .expect("indices are unique and in range"))
     }
 }
 
@@ -630,12 +688,12 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{TryCollect, ordered::Set, test_rng};
+    use commonware_utils::{TryCollect, non_empty, ordered::Set, test_rng};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]
-    fn test_from_signers() {
-        let signers = Signers::from(6, [0, 3, 5].map(Participant::new));
+    fn test_new_signers() {
+        let signers = Signers::new(6, [0, 3, 5].map(Participant::new)).unwrap();
         let collected: Vec<_> = signers.iter().collect();
         assert_eq!(
             collected,
@@ -648,25 +706,55 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "bit 4 out of bounds (len: 4)")]
-    fn test_from_out_of_bounds() {
-        Signers::from(4, [0, 4].map(Participant::new));
+    fn test_new_out_of_bounds() {
+        assert_eq!(
+            Signers::new(4, [0, 4].map(Participant::new)),
+            Err(AssemblyError::UnknownSigner(Participant::new(4)))
+        );
     }
 
     #[test]
-    #[should_panic(expected = "duplicate signer index: 0")]
-    fn test_from_duplicate() {
-        Signers::from(4, [0, 0, 1].map(Participant::new));
+    fn test_new_duplicate() {
+        assert_eq!(
+            Signers::new(4, [0, 0, 1].map(Participant::new)),
+            Err(AssemblyError::DuplicateSigner(Participant::new(0)))
+        );
     }
 
     #[test]
-    fn test_from_not_increasing() {
-        Signers::from(4, [2, 1].map(Participant::new));
+    fn test_new_not_increasing() {
+        assert!(Signers::new(4, [2, 1].map(Participant::new)).is_ok());
+    }
+
+    #[test]
+    fn test_try_from_set_and_require() {
+        let participants = Set::from_iter_dedup(0..4);
+        let signers = Signers::try_from((&participants, [0, 2, 3].map(Participant::new)))
+            .unwrap()
+            .require(3)
+            .unwrap();
+        assert_eq!(signers.count(), 3);
+        assert_eq!(
+            Signers::try_from((&participants, [0, 2].map(Participant::new)))
+                .unwrap()
+                .require(3),
+            Err(AssemblyError::InsufficientAttestations(3, 2))
+        );
+    }
+
+    #[test]
+    fn test_try_from_set_checks_signer_bounds() {
+        let participants = Set::<u8>::default();
+        let signer = Participant::new(0);
+        assert_eq!(
+            Signers::try_from((&participants, [signer])),
+            Err(AssemblyError::UnknownSigner(signer))
+        );
     }
 
     #[test]
     fn test_codec_round_trip() {
-        let signers = Signers::from(9, [1, 6].map(Participant::new));
+        let signers = Signers::new(9, [1, 6].map(Participant::new)).unwrap();
         let encoded = signers.encode();
         let decoded = Signers::decode_cfg(encoded, &9).unwrap();
         assert_eq!(decoded, signers);
@@ -674,7 +762,7 @@ mod tests {
 
     #[test]
     fn test_decode_respects_participant_limit() {
-        let signers = Signers::from(8, [0, 3, 7].map(Participant::new));
+        let signers = Signers::new(8, [0, 3, 7].map(Participant::new)).unwrap();
         let encoded = signers.encode();
         // More participants than expected should fail.
         assert!(Signers::decode_cfg(encoded.clone(), &2).is_err());
@@ -723,7 +811,7 @@ mod tests {
             .filter_map(|s| s.sign::<Sha256Digest>(TestSubject { message }))
             .collect();
         schemes[0]
-            .assemble(attestations, &Sequential)
+            .assemble(non_empty![@attestations], &Sequential)
             .expect("assembly failed")
     }
 
@@ -856,7 +944,7 @@ mod tests {
         let pairs = [(subject, &cert)];
         assert!(as_verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
-            pairs.iter().copied(),
+            non_empty![@pairs.iter().copied()],
             &Sequential,
         ));
         assert_eq!(

@@ -5,16 +5,19 @@ use crate::{
 use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
     Digest, Hasher as _,
-    certificate::{Attestation, Scheme as CertificateScheme, Verification, Verifier},
+    certificate::{
+        AssemblyError, Attestation, Scheme as CertificateScheme, Verification, Verifier,
+    },
     sha256::Sha256,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{Participant, modulo, test_rng};
+use commonware_utils::{Participant, iter::NonEmpty, modulo, non_empty, test_rng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
     Honest,
     CorruptSignature,
+    RecoveryFailure,
 }
 
 #[derive(Clone, Debug)]
@@ -198,7 +201,7 @@ where
     fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>> {
         let attestation = self.inner.sign(subject.clone())?;
         let signature = match self.behavior {
-            Behavior::Honest => attestation.signature,
+            Behavior::Honest | Behavior::RecoveryFailure => attestation.signature,
             Behavior::CorruptSignature => {
                 let signature = attestation
                     .signature
@@ -268,20 +271,23 @@ where
 
     fn assemble<I>(
         &self,
-        attestations: I,
+        attestations: NonEmpty<I>,
         strategy: &impl commonware_parallel::Strategy,
-    ) -> Option<Self::Certificate>
+    ) -> Result<Self::Certificate, AssemblyError>
     where
-        I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = Attestation<Self>> + Send,
     {
-        self.inner.assemble(
-            attestations.into_iter().map(|attestation| Attestation {
+        let result = self.inner.assemble(
+            non_empty![@attestations.into_iter().map(|attestation| Attestation {
                 signer: attestation.signer,
                 signature: attestation.signature,
-            }),
+            })],
             strategy,
-        )
+        );
+        if self.behavior == Behavior::RecoveryFailure {
+            return result.and(Err(AssemblyError::RecoveryFailed));
+        }
+        result
     }
 
     fn is_attributable() -> bool {

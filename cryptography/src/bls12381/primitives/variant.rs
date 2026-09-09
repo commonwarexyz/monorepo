@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
-use commonware_math::algebra::{CryptoGroup, HashToGroup, Space};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Space};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
 use core::{
@@ -50,6 +50,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     const MESSAGE: DST;
 
     /// Verify the signature from the provided public key and pre-hashed message.
+    /// Identity signatures are invalid.
     fn verify(
         public: &Self::Public,
         hm: &Self::Signature,
@@ -57,6 +58,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     ) -> Result<(), Error>;
 
     /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
+    /// An empty batch and any batch containing an identity signature are invalid.
     fn batch_verify(
         rng: &mut impl CryptoRng,
         publics: &[Self::Public],
@@ -87,6 +89,11 @@ impl Variant for MinPk {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
+        // Raw multi-pairing only evaluates the equation, so reject identity signatures at this
+        // verification boundary.
+        if signature == &Self::Signature::zero() {
+            return Err(Error::InvalidSignature);
+        }
         if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -130,8 +137,8 @@ impl Variant for MinPk {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
         assert_eq!(publics.len(), signatures.len());
-        if publics.is_empty() {
-            return Ok(());
+        if publics.is_empty() || signatures.contains(&Self::Signature::zero()) {
+            return Err(Error::InvalidSignature);
         }
 
         // Generate 128-bit random scalars (sufficient for batch verification security).
@@ -190,6 +197,11 @@ impl Variant for MinSig {
         hm: &Self::Signature,
         signature: &Self::Signature,
     ) -> Result<(), Error> {
+        // Raw multi-pairing only evaluates the equation, so reject identity signatures at this
+        // verification boundary.
+        if signature == &Self::Signature::zero() {
+            return Err(Error::InvalidSignature);
+        }
         if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
             return Err(Error::InvalidSignature);
         }
@@ -233,8 +245,8 @@ impl Variant for MinSig {
         // Ensure there is an equal number of public keys, messages, and signatures.
         assert_eq!(publics.len(), hms.len());
         assert_eq!(publics.len(), signatures.len());
-        if publics.is_empty() {
-            return Ok(());
+        if publics.is_empty() || signatures.contains(&Self::Signature::zero()) {
+            return Err(Error::InvalidSignature);
         }
 
         // Generate 128-bit random scalars (sufficient for batch verification security).
@@ -369,6 +381,48 @@ mod tests {
     fn test_batch_verify_correct() {
         batch_verify_correct::<MinPk>();
         batch_verify_correct::<MinSig>();
+    }
+
+    fn batch_verify_rejects_empty<V: Variant>() {
+        assert!(matches!(
+            V::batch_verify(&mut test_rng(), &[], &[], &[], &Sequential),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_empty() {
+        batch_verify_rejects_empty::<MinPk>();
+        batch_verify_rejects_empty::<MinSig>();
+    }
+
+    fn batch_verify_rejects_identity_entry<V: Variant>() {
+        let mut rng = test_rng();
+        let (private, public) = ops::keypair::<_, V>(&mut rng);
+        let namespace = b"test";
+        let message = b"message";
+        let signature = ops::sign_message::<V>(&private, namespace, message);
+        let hm = ops::hash_with_namespace::<V>(V::MESSAGE, namespace, message);
+        let identity_public = V::Public::zero();
+        let identity_signature = V::Signature::zero();
+        let identity_hm = ops::hash_with_namespace::<V>(V::MESSAGE, namespace, b"identity entry");
+
+        assert!(matches!(
+            V::batch_verify(
+                &mut rng,
+                &[public, identity_public],
+                &[hm, identity_hm],
+                &[signature, identity_signature],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_identity_entry() {
+        batch_verify_rejects_identity_entry::<MinPk>();
+        batch_verify_rejects_identity_entry::<MinSig>();
     }
 
     fn batch_verify_rejects_malleability<V: Variant>() {

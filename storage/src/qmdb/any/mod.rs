@@ -149,30 +149,29 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J, S>(
+pub async fn init<F, E, U, H, I, J, S>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::IndexBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, T, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
-pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
+pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<T, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
     bitmap: Option<bitmap::Prunable<N>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
@@ -180,8 +179,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    T: Translator,
-    I: IndexFactory<T, Value = Location<F>> + crate::qmdb::IndexBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -287,6 +285,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy,
                 page_cache: page_cache.clone(),
             },
@@ -295,6 +294,7 @@ pub(crate) mod test {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
@@ -340,6 +340,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -350,6 +351,7 @@ pub(crate) mod test {
                 codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
@@ -2857,7 +2859,7 @@ mod bitmap_tests {
         db
     }
 
-    /// CommitFloor convention: only the *current* `last_commit_loc` carries bit=1; every earlier
+    /// CommitFloor convention: only the *current* last commit carries bit=1; every earlier
     /// (now intermediate) commit boundary carries bit=0.
     ///
     /// Maintained by `apply_batch`'s explicit demote-then-promote pair on CommitFloor bits. If
@@ -2925,7 +2927,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b1).await.unwrap();
             let db = db.commit().await.unwrap();
-            let size_after_first = db.last_commit_loc + 1;
+            let size_after_first = db.bounds().end;
 
             let b2 = db
                 .new_batch()
@@ -2938,7 +2940,7 @@ mod bitmap_tests {
             // Setup sanity: both keys present, db has advanced past size_after_first.
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&k2).await.unwrap(), Some(vec![20]));
-            assert!(*db.last_commit_loc + 1 > *size_after_first);
+            assert!(*db.bounds().end > *size_after_first);
 
             // Rewind to the state after the first commit.
             let db = db.rewind(size_after_first).await.unwrap();

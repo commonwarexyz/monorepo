@@ -12,6 +12,7 @@ use crate::{
             },
         },
         current::BitmapPrunedBits,
+        operation::Key,
     },
     translator::Translator,
 };
@@ -48,7 +49,7 @@ crate::qmdb::any::traits::impl_db_any! {
     where {
         F: Graftable,
         E: Context,
-        K: Array,
+        K: Key,
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
@@ -89,7 +90,7 @@ impl<
 impl<
     F: Graftable,
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: Hasher,
     T: Translator,
@@ -166,7 +167,7 @@ crate::qmdb::any::traits::impl_db_any! {
     where {
         F: Graftable,
         E: Context,
-        K: Array,
+        K: Key,
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
@@ -179,7 +180,7 @@ crate::qmdb::any::traits::impl_db_any! {
 impl<
     F: Graftable,
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: Hasher,
     T: Translator,

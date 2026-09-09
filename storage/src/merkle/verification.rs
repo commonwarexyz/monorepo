@@ -20,7 +20,6 @@ use crate::merkle::{
 use ahash::AHashMap;
 use commonware_cryptography::Digest;
 use core::ops::Range;
-use futures::future::try_join_all;
 use std::collections::BTreeSet;
 
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
@@ -321,17 +320,12 @@ pub async fn historical_range_proof<
 ) -> Result<Proof<F, D>, Error<F>> {
     let bp = Blueprint::new(leaves, inactive_peaks, hasher.root_bagging(), range)?;
 
-    let all_positions: BTreeSet<_> = bp.required_positions().collect();
-
-    let node_futures: Vec<_> = all_positions
-        .into_iter()
-        .map(|pos| async move { merkle.get_node(pos).await.map(|digest| (pos, digest)) })
-        .collect();
-    let fetched = try_join_all(node_futures)
-        .await?
-        .into_iter()
-        .map(|(pos, digest)| digest.ok_or(Error::ElementPruned(pos)).map(|d| (pos, d)))
-        .collect::<Result<AHashMap<_, _>, _>>()?;
+    // `get_nodes` requires strictly increasing positions.
+    let mut positions: Vec<_> = bp.required_positions().collect();
+    positions.sort_unstable();
+    positions.dedup();
+    let digests = merkle.get_nodes(&positions).await?;
+    let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
 
     bp.build_proof(
         hasher,
@@ -368,20 +362,11 @@ pub async fn multi_proof<F: Family, D: Digest, S: Storage<Family = F, Digest = D
     // Collect all required node positions
     let size = merkle.size();
     let leaves = Location::try_from(size)?;
-    let node_positions: BTreeSet<_> =
-        merkle_proof::nodes_required_for_multi_proof(leaves, inactive_peaks, bagging, locations)?;
-
-    // Fetch all required digests in parallel and collect with positions
-    let node_futures: Vec<_> = node_positions
-        .iter()
-        .map(|&pos| async move { merkle.get_node(pos).await.map(|digest| (pos, digest)) })
-        .collect();
-    // Build the proof, returning error with correct position on pruned nodes.
-    let digests = try_join_all(node_futures)
-        .await?
-        .into_iter()
-        .map(|(pos, digest)| digest.ok_or(Error::ElementPruned(pos)))
-        .collect::<Result<Vec<_>, _>>()?;
+    let positions: Vec<_> =
+        merkle_proof::nodes_required_for_multi_proof(leaves, inactive_peaks, bagging, locations)?
+            .into_iter()
+            .collect();
+    let digests = merkle.get_nodes(&positions).await?;
 
     Ok(Proof {
         leaves,

@@ -102,7 +102,7 @@ impl Verifier {
     }
 
     /// Perform batch verification, returning `Ok(())` if all signatures were
-    /// valid and `Err` otherwise.
+    /// valid and `Err` if the batch is empty or any signature is invalid.
     ///
     /// # Warning
     ///
@@ -115,6 +115,10 @@ impl Verifier {
         mut rng: R,
         strategy: &impl Strategy,
     ) -> Result<(), Error> {
+        if self.signatures.is_empty() {
+            return Err(Error::InvalidSignature);
+        }
+
         // Seeds are drawn before an execution path is chosen so both paths
         // can borrow them.
         let manual = strategy.manual();

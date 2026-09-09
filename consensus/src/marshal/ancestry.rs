@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
+use tracing::debug;
 
 /// A stream of blocks used by application propose and verify calls.
 ///
@@ -265,9 +266,8 @@ pub trait BlockProvider: Send + 'static {
 // Expected parent height and digest for a pending fetch.
 struct ExpectedParent<D>(Height, D);
 
-// Pending parent fetch paired with the relationship it must satisfy.
-type PendingFetch<B> =
-    BoxFuture<'static, Option<(ExpectedParent<<B as Digestible>::Digest>, Arc<B>)>>;
+// Pending parent fetch that returns only a validated parent.
+type PendingFetch<B> = BoxFuture<'static, Option<Arc<B>>>;
 
 impl<D: Digest> ExpectedParent<D> {
     fn from_child<B: Block<Digest = D>>(child: &B) -> Self {
@@ -277,23 +277,30 @@ impl<D: Digest> ExpectedParent<D> {
         )
     }
 
-    fn assert_matches<B: Block<Digest = D>>(self, parent: &B) {
+    fn matches<B: Block<Digest = D>>(self, parent: &B) -> bool {
         let Self(parent_height, parent_digest) = self;
-        assert_eq!(
-            parent.height(),
-            parent_height,
-            "fetched parent must be contiguous in height"
-        );
-        assert_eq!(
-            parent.digest(),
-            parent_digest,
-            "fetched parent must be contiguous in ancestry"
-        );
+        if parent.height() != parent_height {
+            debug!(
+                expected = %parent_height,
+                actual = %parent.height(),
+                "ending ancestry stream: fetched parent has non-contiguous height"
+            );
+            return false;
+        }
+        if parent.digest() != parent_digest {
+            debug!(
+                expected = ?parent_digest,
+                actual = ?parent.digest(),
+                "ending ancestry stream: fetched parent has non-contiguous ancestry"
+            );
+            return false;
+        }
+        true
     }
 }
 
-// Builds a pending parent fetch that records successful fetch latency and carries the
-// expected relationship for validation when the parent is delivered.
+// Builds a parent fetch that records latency when a parent arrives. The fetch
+// returns only a parent with the expected height and digest.
 fn timed_parent_fetch<C, M>(
     clock: &Arc<C>,
     marshal: &M,
@@ -310,10 +317,9 @@ where
     marshal
         .subscribe_parent(child)
         .map(move |parent| {
-            parent.map(|parent| {
-                timer.observe(clock.as_ref());
-                (expected, parent)
-            })
+            let parent = parent?;
+            timer.observe(clock.as_ref());
+            expected.matches(parent.as_ref()).then_some(parent)
         })
         .boxed()
 }
@@ -439,8 +445,7 @@ where
                 // Explicitly poll the next future to kick off the fetch. If it's already ready,
                 // buffer it for the next poll.
                 match this.pending.as_mut().poll(cx) {
-                    Poll::Ready(Some(Some((expected, parent)))) => {
-                        expected.assert_matches(parent.as_ref());
+                    Poll::Ready(Some(Some(parent))) => {
                         this.buffered.push(parent);
                         *this.pending_child = None;
                     }
@@ -469,8 +474,7 @@ where
                 *this.pending_child = None;
                 Poll::Ready(None)
             }
-            Poll::Ready(Some(Some((expected, block)))) => {
-                expected.assert_matches(block.as_ref());
+            Poll::Ready(Some(Some(block))) => {
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
@@ -482,8 +486,7 @@ where
                     // Explicitly poll the next future to kick off the fetch. If it's already ready,
                     // buffer it for the next poll.
                     match this.pending.as_mut().poll(cx) {
-                        Poll::Ready(Some(Some((expected, parent)))) => {
-                            expected.assert_matches(parent.as_ref());
+                        Poll::Ready(Some(Some(parent))) => {
                             this.buffered.push(parent);
                             *this.pending_child = None;
                         }
@@ -580,6 +583,51 @@ mod test {
     }
 
     #[derive(Clone)]
+    struct PendingThenWrongProvider {
+        state: Arc<Mutex<(usize, Option<ParentSubscription>)>>,
+        wrong_parent: TestBlock,
+    }
+
+    impl PendingThenWrongProvider {
+        fn new(wrong_parent: TestBlock) -> Self {
+            Self {
+                state: Arc::new(Mutex::new((0, None))),
+                wrong_parent,
+            }
+        }
+
+        fn complete_first(&self, parent: Arc<TestBlock>) {
+            let subscription = self
+                .state
+                .lock()
+                .1
+                .take()
+                .expect("first parent subscription missing");
+            assert!(subscription.send(parent).is_ok());
+        }
+    }
+
+    impl BlockProvider for PendingThenWrongProvider {
+        type Block = TestBlock;
+
+        fn subscribe_parent(
+            &self,
+            _block: &Self::Block,
+        ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
+            let mut state = self.state.lock();
+            let call = state.0;
+            state.0 += 1;
+            if call == 0 {
+                let (subscription, parent) = oneshot::channel();
+                state.1 = Some(subscription);
+                parent.map(Result::ok).boxed()
+            } else {
+                std::future::ready(Some(Arc::new(self.wrong_parent.clone()))).boxed()
+            }
+        }
+    }
+
+    #[derive(Clone)]
     struct WrongParentProvider(TestBlock);
     impl BlockProvider for WrongParentProvider {
         type Block = TestBlock;
@@ -649,33 +697,64 @@ mod test {
     }
 
     #[test]
-    #[should_panic = "fetched parent must be contiguous in height"]
-    fn test_panics_on_non_contiguous_fetched_parent_height() {
+    fn test_ends_on_non_contiguous_fetched_parent_height() {
         deterministic::Runner::default().start(|context| async move {
             let parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
             let child = TestBlock::new(parent.digest(), Height::new(3), 3);
-            let stream = stream(&context, MockProvider(vec![parent]), [child]);
-            futures::pin_mut!(stream);
+            let mut stream = stream(&context, MockProvider(vec![parent]), [child.clone()]);
 
-            let waker = futures::task::noop_waker_ref();
-            let mut cx = std::task::Context::from_waker(waker);
-            let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(stream.next().await, None);
         });
     }
 
     #[test]
-    #[should_panic = "fetched parent must be contiguous in ancestry"]
-    fn test_panics_on_non_contiguous_fetched_parent_digest() {
+    fn test_ends_on_non_contiguous_fetched_parent_digest() {
         deterministic::Runner::default().start(|context| async move {
             let expected_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
             let fetched_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 1);
             let child = TestBlock::new(expected_parent.digest(), Height::new(1), 2);
-            let stream = stream(&context, WrongParentProvider(fetched_parent), [child]);
-            futures::pin_mut!(stream);
+            let mut stream = stream(
+                &context,
+                WrongParentProvider(fetched_parent),
+                [child.clone()],
+            );
 
-            let waker = futures::task::noop_waker_ref();
-            let mut cx = std::task::Context::from_waker(waker);
-            let _ = futures::Stream::poll_next(stream.as_mut(), &mut cx);
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(stream.next().await, None);
+        });
+    }
+
+    #[test]
+    fn test_ends_on_delayed_non_contiguous_fetched_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            let expected_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
+            let fetched_parent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 1);
+            let child = TestBlock::new(expected_parent.digest(), Height::new(1), 2);
+            let provider = PendingProvider::default();
+            let mut stream = stream(&context, provider.clone(), [child.clone()]);
+
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            assert_eq!(provider.subscription_count(), 1);
+            provider.complete_all(Arc::new(fetched_parent));
+            assert_eq!(stream.next().await, None);
+        });
+    }
+
+    #[test]
+    fn test_ends_on_immediate_bad_grandparent_after_delayed_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            let expected_grandparent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
+            let wrong_grandparent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 1);
+            let parent = TestBlock::new(expected_grandparent.digest(), Height::new(1), 2);
+            let child = TestBlock::new(parent.digest(), Height::new(2), 3);
+            let provider = PendingThenWrongProvider::new(wrong_grandparent);
+            let mut stream = stream(&context, provider.clone(), [child.clone()]);
+
+            assert_eq!(stream.next().await.as_deref(), Some(&child));
+            provider.complete_first(Arc::new(parent.clone()));
+            assert_eq!(stream.next().await.as_deref(), Some(&parent));
+            assert_eq!(stream.next().await, None);
         });
     }
 

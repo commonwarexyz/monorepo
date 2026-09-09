@@ -9,18 +9,18 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
 
-/// Encode operations, append them to a compact Merkle batch, merkleize, and compute the
-/// post-apply root, all as one CPU-bound job submitted through [`Strategy::spawn`].
+/// Encode operations, append them to a compact Merkle batch, merkleize, and compute the post-apply
+/// root, all as one CPU-bound job submitted through [`Strategy::spawn`].
 ///
 /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
-/// strategy hosts the batch's dominant CPU phase on its own pool instead of occupying the
-/// calling task. If the caller is cancelled mid-job, the job still runs to completion against
-/// its snapshot and the result is discarded.
+/// strategy can offload the dominant CPU phase onto its own pool instead of occupying the calling
+/// task. If the caller is cancelled mid-job, the job still runs to completion against its snapshot
+/// and the result is discarded.
 #[allow(clippy::type_complexity)]
 pub(crate) async fn merkleize_ops<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     batch: compact::UnmerkleizedBatch<F, H::Digest, S>,
-    ops: Vec<Op>,
+    ops: impl Into<Arc<Vec<Op>>>,
     inactive_peaks: usize,
 ) -> Result<(Arc<batch::MerkleizedBatch<F, H::Digest, S>>, H::Digest), merkle::Error<F>>
 where
@@ -29,12 +29,13 @@ where
     S: Strategy,
     Op: EncodeShared + 'static,
 {
+    let ops = ops.into();
     let first_leaf = batch.leaves();
     let ancestors = batch.retain_ancestors();
     let mem = merkle.mem();
     let strategy = merkle.strategy().clone();
     strategy
-        .spawn(move |strategy| {
+        .spawn(ops.len(), move |strategy| {
             let hasher = qmdb::hasher::<H>();
             let leaf_digests =
                 strategy.map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
@@ -74,10 +75,14 @@ mod tests {
             compact::Merkle::<F, <Sha256 as Hasher>::Digest, Sequential>::new(Sequential);
 
         // Build a speculative suffix over a prefix that will be committed independently.
-        let (prefix, _) =
-            merkleize_ops::<F, Sha256, _, _>(&merkle, merkle.new_batch(), (0..8u64).collect(), 0)
-                .await
-                .unwrap();
+        let (prefix, _) = merkleize_ops::<F, Sha256, _, _>(
+            &merkle,
+            merkle.new_batch(),
+            (0..8u64).collect::<Vec<_>>(),
+            0,
+        )
+        .await
+        .unwrap();
         let (pending, _) = merkleize_ops::<F, Sha256, _, _>(
             &merkle,
             compact::UnmerkleizedBatch::wrap(prefix.new_batch()),

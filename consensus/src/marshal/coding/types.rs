@@ -2,6 +2,7 @@
 
 use crate::{
     Block, CertifiableBlock, Heightable,
+    marshal::core::ExpectedCommitment,
     types::{Height, coding::Commitment},
 };
 use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
@@ -16,24 +17,21 @@ use std::{
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
-pub struct Shard<C: Scheme, H: Hasher> {
+pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
     /// The coding commitment
-    pub(crate) commitment: Commitment,
+    pub(crate) commitment: Commitment<B, C, H>,
     /// The index of this shard within the commitment.
     pub(crate) index: u16,
     /// An individual shard within the commitment.
     pub(crate) inner: C::Shard,
-    /// Phantom data for the hasher.
-    _hasher: PhantomData<H>,
 }
 
-impl<C: Scheme, H: Hasher> Shard<C, H> {
-    pub const fn new(commitment: Commitment, index: u16, inner: C::Shard) -> Self {
+impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
+    pub const fn new(commitment: Commitment<B, C, H>, index: u16, inner: C::Shard) -> Self {
         Self {
             commitment,
             index,
             inner,
-            _hasher: PhantomData,
         }
     }
 
@@ -43,7 +41,7 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
     }
 
     /// Returns the [`Commitment`] for this shard.
-    pub const fn commitment(&self) -> Commitment {
+    pub const fn commitment(&self) -> Commitment<B, C, H> {
         self.commitment
     }
 
@@ -53,26 +51,25 @@ impl<C: Scheme, H: Hasher> Shard<C, H> {
     }
 }
 
-impl<C: Scheme, H: Hasher> Clone for Shard<C, H> {
+impl<B: Digestible, C: Scheme, H: Hasher> Clone for Shard<B, C, H> {
     fn clone(&self) -> Self {
         Self {
             commitment: self.commitment,
             index: self.index,
             inner: self.inner.clone(),
-            _hasher: PhantomData,
         }
     }
 }
 
-impl<C: Scheme, H: Hasher> Committable for Shard<C, H> {
-    type Commitment = Commitment;
+impl<B: Digestible, C: Scheme, H: Hasher> Committable for Shard<B, C, H> {
+    type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
     }
 }
 
-impl<C: Scheme, H: Hasher> Write for Shard<C, H> {
+impl<B: Digestible, C: Scheme, H: Hasher> Write for Shard<B, C, H> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.commitment.write(buf);
         self.index.write(buf);
@@ -86,7 +83,7 @@ impl<C: Scheme, H: Hasher> Write for Shard<C, H> {
     }
 }
 
-impl<C: Scheme, H: Hasher> EncodeSize for Shard<C, H> {
+impl<B: Digestible, C: Scheme, H: Hasher> EncodeSize for Shard<B, C, H> {
     fn encode_size(&self) -> usize {
         self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_size()
     }
@@ -96,14 +93,14 @@ impl<C: Scheme, H: Hasher> EncodeSize for Shard<C, H> {
     }
 }
 
-impl<C: Scheme, H: Hasher> Read for Shard<C, H> {
+impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
     type Cfg = commonware_coding::CodecConfig;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
         cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let commitment = Commitment::read(buf)?;
+        let commitment = Commitment::<B, C, H>::read(buf)?;
         let index = u16::read(buf)?;
         let inner = C::Shard::read_cfg(buf, cfg)?;
 
@@ -111,12 +108,11 @@ impl<C: Scheme, H: Hasher> Read for Shard<C, H> {
             commitment,
             index,
             inner,
-            _hasher: PhantomData,
         })
     }
 }
 
-impl<C: Scheme, H: Hasher> PartialEq for Shard<C, H> {
+impl<B: Digestible, C: Scheme, H: Hasher> PartialEq for Shard<B, C, H> {
     fn eq(&self, other: &Self) -> bool {
         self.commitment == other.commitment
             && self.index == other.index
@@ -124,11 +120,12 @@ impl<C: Scheme, H: Hasher> PartialEq for Shard<C, H> {
     }
 }
 
-impl<C: Scheme, H: Hasher> Eq for Shard<C, H> {}
+impl<B: Digestible, C: Scheme, H: Hasher> Eq for Shard<B, C, H> {}
 
 #[cfg(feature = "arbitrary")]
-impl<C: Scheme, H: Hasher> arbitrary::Arbitrary<'_> for Shard<C, H>
+impl<B: Digestible, C: Scheme, H: Hasher> arbitrary::Arbitrary<'_> for Shard<B, C, H>
 where
+    Commitment<B, C, H>: for<'a> arbitrary::Arbitrary<'a>,
     C::Shard: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -136,7 +133,6 @@ where
             commitment: u.arbitrary()?,
             index: u.arbitrary()?,
             inner: u.arbitrary()?,
-            _hasher: PhantomData,
         })
     }
 }
@@ -185,11 +181,14 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     }
 
     /// Create a new [`CodedBlock`] from a [`Block`] and trusted [`Commitment`].
-    pub fn new_trusted(inner: B, commitment: Commitment) -> Self {
+    ///
+    /// `commitment` must encode `inner`. [`Self::shards`] generates shards on
+    /// demand and panics if the coding root does not match.
+    pub fn new_trusted(inner: B, commitment: Commitment<B, C, H>) -> Self {
         Self::new_trusted_shared(Arc::new(inner), commitment)
     }
 
-    fn new_trusted_shared(inner: Arc<B>, commitment: Commitment) -> Self {
+    fn new_trusted_shared(inner: Arc<B>, commitment: Commitment<B, C, H>) -> Self {
         Self {
             inner,
             config: commitment.config(),
@@ -211,6 +210,9 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         self.shards.get_or_init(|| {
             let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
 
+            // A mismatch means a commitment trusted at construction does not
+            // encode this block, which is a contract violation or a consensus
+            // safety failure. Never serve shards under a different root.
             assert_eq!(
                 commitment, self.commitment,
                 "coded block constructed with trusted commitment does not match commitment"
@@ -221,7 +223,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     }
 
     /// Returns a [`Shard`] at the given index, if the index is valid.
-    pub fn shard(&self, index: u16) -> Option<Shard<C, H>>
+    pub fn shard(&self, index: u16) -> Option<Shard<B, C, H>>
     where
         B: CertifiableBlock,
     {
@@ -274,10 +276,10 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> Committable for CodedBlock<B, C, H> {
-    type Commitment = Commitment;
+    type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
-        Commitment::from((
+        Commitment::<B, C, H>::from((
             self.digest(),
             self.commitment,
             hash_context::<H, _>(&self.inner.context()),
@@ -309,18 +311,18 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
 
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
-/// Pairs the inner block's codec config with the [`Commitment`] that the
-/// decoded block must match. The [`Read`] impl rejects any block whose
-/// recoded form would not produce `expected` without performing the full
-/// re-encoding.
-pub struct CodedBlockCfg<B: Block> {
+/// Decoding checks the expected digest and coding configuration.
+/// [`ExpectedCommitment::Untrusted`] also recomputes the coding root;
+/// [`ExpectedCommitment::Trusted`] reuses it and defers shard generation to
+/// [`CodedBlock::shards`].
+pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
-    /// The commitment the decoded block must match.
-    pub expected: Commitment,
+    /// The expected commitment and its certification evidence.
+    pub expected: ExpectedCommitment<Commitment<B, C, H>>,
 }
 
-impl<B: Block> Clone for CodedBlockCfg<B> {
+impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -330,7 +332,7 @@ impl<B: Block> Clone for CodedBlockCfg<B> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
-    type Cfg = CodedBlockCfg<B>;
+    type Cfg = CodedBlockCfg<B, C, H>;
 
     fn read_cfg(
         buf: &mut impl bytes::Buf,
@@ -338,20 +340,34 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, &cfg.inner)?;
         let config = CodingConfig::read(buf)?;
+        let (ExpectedCommitment::Trusted(expected) | ExpectedCommitment::Untrusted(expected)) =
+            cfg.expected;
 
-        if config != cfg.expected.config() {
+        if config != expected.config() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "config mismatch",
             ));
         }
-        if inner.digest() != cfg.expected.block() {
+        if inner.digest() != expected.block() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
                 "block digest mismatch",
             ));
         }
 
+        // A certified commitment already fixes the coding root of these bytes,
+        // so recomputing it would only re-derive the root already in `expected`.
+        if matches!(cfg.expected, ExpectedCommitment::Trusted(_)) {
+            return Ok(Self::new_trusted(inner, expected));
+        }
+
+        // Recompute the coding root and require it to match the expected
+        // commitment.
+        //
+        // The context digest is not checkable here because [`Block`] does not
+        // expose a context, so callers that need the full commitment to match
+        // must compare it after decoding.
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
@@ -359,6 +375,12 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
             C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
                 commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
             })?;
+        if commitment != expected.root() {
+            return Err(commonware_codec::Error::Invalid(
+                "CodedBlock",
+                "coding root mismatch",
+            ));
+        }
 
         Ok(Self {
             inner: Arc::new(inner),
@@ -411,8 +433,9 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// A [`CodedBlock`] paired with its [`Commitment`] for efficient storage and retrieval.
 ///
 /// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
-/// should never be sent over the network. Use [`CodedBlock`] for network transmission,
-/// as it re-encodes the block with [`Scheme::encode`] on deserialization to ensure integrity.
+/// should never be sent over the network. Use [`CodedBlock`] for network transmission.
+/// Its [`Read`] impl recomputes the coding root with [`Scheme::encode`] unless the
+/// expected commitment is trusted (see [`CodedBlockCfg`]).
 ///
 /// When reading from storage, we don't need to re-encode the block to compute
 /// the commitment - we stored it alongside the block when we first verified it.
@@ -422,8 +445,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// to detect storage corruption, but does not re-encode the block.
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,
-    commitment: Commitment,
-    _scheme: PhantomData<(C, H)>,
+    commitment: Commitment<B, C, H>,
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
@@ -435,7 +457,6 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
         Self {
             commitment: block.commitment(),
             inner: block.inner,
-            _scheme: PhantomData,
         }
     }
 
@@ -464,13 +485,12 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for StoredCodedBlock<B, C, H> {
         Self {
             commitment: self.commitment,
             inner: Arc::clone(&self.inner),
-            _scheme: PhantomData,
         }
     }
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Committable for StoredCodedBlock<B, C, H> {
-    type Commitment = Commitment;
+    type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
@@ -507,10 +527,10 @@ impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
         block_cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let inner = B::read_cfg(buf, block_cfg)?;
-        let commitment = Commitment::read(buf)?;
+        let commitment = Commitment::<B, C, H>::read(buf)?;
 
         // Light verification to detect storage corruption
-        if inner.digest() != commitment.block::<B::Digest>() {
+        if inner.digest() != commitment.block() {
             return Err(commonware_codec::Error::Invalid(
                 "StoredCodedBlock",
                 "storage corruption: block digest mismatch",
@@ -520,7 +540,6 @@ impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
         Ok(Self {
             commitment,
             inner: Arc::new(inner),
-            _scheme: PhantomData,
         })
     }
 }
@@ -586,8 +605,8 @@ mod test {
 
     type H = Sha256;
     type RS = ReedSolomon<H>;
-    type RShard = Shard<RS, H>;
     type TestBlock = EmptyBlock<H>;
+    type RShard = Shard<TestBlock, RS, H>;
 
     #[test]
     fn test_shard_wrapper_codec_roundtrip() {
@@ -665,7 +684,7 @@ mod test {
             encoded,
             &CodedBlockCfg {
                 inner: (),
-                expected: coded_block.commitment(),
+                expected: ExpectedCommitment::Untrusted(coded_block.commitment()),
             },
         )
         .unwrap();
@@ -694,7 +713,7 @@ mod test {
             encoded.as_ref(),
             &CodedBlockCfg {
                 inner: (),
-                expected,
+                expected: ExpectedCommitment::Untrusted(expected),
             },
         ) else {
             panic!("config mismatch should be rejected");
@@ -704,6 +723,161 @@ mod test {
             matches!(err, Error::Invalid("CodedBlock", "config mismatch")),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_coded_block_decode_rejects_coding_root_mismatch() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        // Build an expected commitment that differs only in its coding root.
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let commitment = coded.commitment();
+        let wrong_root = Sha256::hash(&[b"wrong root"]);
+        assert_ne!(wrong_root, commitment.root());
+        let expected = Commitment::<TestBlock, RS, H>::from((
+            commitment.block(),
+            wrong_root,
+            commitment.context(),
+            commitment.config(),
+        ));
+
+        // Decoding must reject bytes that do not satisfy the exact expected
+        // commitment.
+        let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
+            coded.encode(),
+            &CodedBlockCfg {
+                inner: (),
+                expected: ExpectedCommitment::Untrusted(expected),
+            },
+        ) else {
+            panic!("coding root mismatch should be rejected");
+        };
+
+        assert!(
+            matches!(err, Error::Invalid("CodedBlock", "coding root mismatch")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_coded_block_decode_trusted_is_lazy() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
+            coded.encode(),
+            &CodedBlockCfg {
+                inner: (),
+                expected: ExpectedCommitment::Trusted(coded.commitment()),
+            },
+        )
+        .unwrap();
+
+        // The root comes from the commitment and shards are generated on demand.
+        assert_eq!(decoded.commitment(), coded.commitment());
+        assert!(decoded.shard(0).is_none());
+        assert_eq!(decoded.shards(&Sequential), coded.shards(&Sequential));
+    }
+
+    #[test]
+    fn test_coded_block_decode_trusted_rejects_config_mismatch() {
+        const EXPECTED_CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(3),
+        };
+        const EMBEDDED_CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(2),
+        };
+
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let expected =
+            CodedBlock::<TestBlock, RS, H>::new(block.clone(), EXPECTED_CONFIG, &Sequential)
+                .commitment();
+        let encoded = (block, EMBEDDED_CONFIG).encode();
+
+        let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
+            encoded.as_ref(),
+            &CodedBlockCfg {
+                inner: (),
+                expected: ExpectedCommitment::Trusted(expected),
+            },
+        ) else {
+            panic!("config mismatch should be rejected");
+        };
+
+        assert!(
+            matches!(err, Error::Invalid("CodedBlock", "config mismatch")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_coded_block_decode_trusted_rejects_block_digest_mismatch() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let other = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(43), 1_234_567);
+        let expected = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential).commitment();
+        assert_ne!(other.digest(), expected.block());
+        let encoded = (other, CONFIG).encode();
+
+        let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
+            encoded.as_ref(),
+            &CodedBlockCfg {
+                inner: (),
+                expected: ExpectedCommitment::Trusted(expected),
+            },
+        ) else {
+            panic!("block digest mismatch should be rejected");
+        };
+
+        assert!(
+            matches!(err, Error::Invalid("CodedBlock", "block digest mismatch")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match commitment")]
+    fn test_coded_block_trusted_wrong_root_panics_on_shards() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        // A trusted commitment is not re-encoded at decode, so a root that does
+        // not encode the block is only caught when shards are generated.
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
+        let commitment = coded.commitment();
+        let expected = Commitment::<TestBlock, RS, H>::from((
+            commitment.block(),
+            Sha256::hash(&[b"wrong root"]),
+            commitment.context(),
+            commitment.config(),
+        ));
+        let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
+            coded.encode(),
+            &CodedBlockCfg {
+                inner: (),
+                expected: ExpectedCommitment::Trusted(expected),
+            },
+        )
+        .unwrap();
+
+        decoded.shards(&Sequential);
     }
 
     #[test]
@@ -822,7 +996,7 @@ mod test {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Shard<ReedSolomon<Sha256>, Sha256>>,
+            CodecConformance<Shard<TestBlock, ReedSolomon<Sha256>, Sha256>>,
         }
     }
 }

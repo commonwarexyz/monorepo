@@ -11,15 +11,15 @@ use crate::{
 use commonware_cryptography::{Digest, certificate::Verification};
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::ordered::Set;
+use commonware_utils::{non_empty, ordered::Set};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{future::Future, mem, sync::Arc};
 use tracing::{Instrument as _, Span, info_span};
 
 /// Runs a CPU-bound job through [Strategy::spawn], entering `span` on the worker thread and
-/// instrumenting the awaited future so the offloaded work stays attributed to the caller's trace.
-async fn offload<P, F, T>(span: Span, strategy: &P, job: F) -> T
+/// instrumenting the returned future so the offloaded work stays attributed to the caller's trace.
+fn offload<P, F, T>(len: usize, span: Span, strategy: &P, job: F) -> impl Future<Output = T> + Send
 where
     P: Strategy,
     F: FnOnce(P) -> T + Send + 'static,
@@ -27,9 +27,8 @@ where
 {
     let worker_span = span.clone();
     strategy
-        .spawn(move |strategy| worker_span.in_scope(|| job(strategy)))
+        .spawn(len, move |strategy| worker_span.in_scope(|| job(strategy)))
         .instrument(span)
-        .await
 }
 
 /// Certification progress for one kind of vote.
@@ -304,8 +303,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     }
 
     /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with an unconsumed
-    /// verified quorum. Call repeatedly to drain every constructible kind.
+    /// (notarization, then nullification, then finalization) with a verified
+    /// quorum. Call repeatedly to drain every constructible kind.
     ///
     /// Once recovery starts, it consumes the verified votes. Do not cancel unless
     /// the verifier will also be discarded.
@@ -320,9 +319,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 view = self.round.view().traced()
             );
             let scheme = Arc::clone(&self.scheme);
-            let notarization = offload(span, strategy, move |strategy| {
-                Notarization::from_owned_notarizes(scheme.as_ref(), notarizes, &strategy)
-                    .expect("verified notarize quorum must assemble")
+            let notarization = offload(notarizes.len(), span, strategy, move |strategy| {
+                Notarization::from_owned_notarizes(
+                    scheme.as_ref(),
+                    non_empty![@notarizes],
+                    &strategy,
+                )
+                .expect("verified notarize quorum must assemble")
             })
             .await;
             return Some(Certificate::Notarization(notarization));
@@ -335,9 +338,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 view = self.round.view().traced()
             );
             let scheme = Arc::clone(&self.scheme);
-            let nullification = offload(span, strategy, move |strategy| {
-                Nullification::from_owned_nullifies(scheme.as_ref(), nullifies, &strategy)
-                    .expect("verified nullify quorum must assemble")
+            let nullification = offload(nullifies.len(), span, strategy, move |strategy| {
+                Nullification::from_owned_nullifies(
+                    scheme.as_ref(),
+                    non_empty![@nullifies],
+                    &strategy,
+                )
+                .expect("verified nullify quorum must assemble")
             })
             .await;
             return Some(Certificate::Nullification(nullification));
@@ -350,9 +357,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 view = self.round.view().traced()
             );
             let scheme = Arc::clone(&self.scheme);
-            let finalization = offload(span, strategy, move |strategy| {
-                Finalization::from_owned_finalizes(scheme.as_ref(), finalizes, &strategy)
-                    .expect("verified finalize quorum must assemble")
+            let finalization = offload(finalizes.len(), span, strategy, move |strategy| {
+                Finalization::from_owned_finalizes(
+                    scheme.as_ref(),
+                    non_empty![@finalizes],
+                    &strategy,
+                )
+                .expect("verified finalize quorum must assemble")
             })
             .await;
             return Some(Certificate::Finalization(finalization));
@@ -519,7 +530,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 );
                 let scheme = Arc::clone(&self.scheme);
                 let mut rng = StdRng::from_rng(rng);
-                offload(span, strategy, move |strategy| {
+                offload(notarizes.len(), span, strategy, move |strategy| {
                     let (proposals, attestations): (Vec<_>, Vec<_>) = notarizes
                         .into_iter()
                         .map(|n| (n.proposal, n.attestation))
@@ -577,7 +588,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 let round = nullifies[0].round;
                 let scheme = Arc::clone(&self.scheme);
                 let mut rng = StdRng::from_rng(rng);
-                offload(span, strategy, move |strategy| {
+                offload(nullifies.len(), span, strategy, move |strategy| {
                     let Verification { verified, invalid } = scheme.verify_attestations::<_, D, _>(
                         &mut rng,
                         Subject::Nullify { round },
@@ -633,7 +644,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                 );
                 let scheme = Arc::clone(&self.scheme);
                 let mut rng = StdRng::from_rng(rng);
-                offload(span, strategy, move |strategy| {
+                offload(finalizes.len(), span, strategy, move |strategy| {
                     let (proposals, attestations): (Vec<_>, Vec<_>) = finalizes
                         .into_iter()
                         .map(|n| (n.proposal, n.attestation))
@@ -664,12 +675,15 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::scheme::{
-            bls12381_multisig,
-            bls12381_threshold::{
-                standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
+        simplex::{
+            mocks::wrapped,
+            scheme::{
+                bls12381_multisig,
+                bls12381_threshold::{
+                    standard as bls12381_threshold_std, vrf as bls12381_threshold_vrf,
+                },
+                ed25519, secp256r1,
             },
-            ed25519, secp256r1,
         },
         types::{Epoch, Round, View},
     };
@@ -2194,10 +2208,9 @@ mod tests {
         assert_eq!(batch, 2);
         assert!(invalid.is_empty());
         assert!(votes.pending().is_empty());
-        assert!(votes.try_complete().is_none());
+        assert_eq!(votes.try_complete(), None);
 
-        // At quorum, recovery surrenders the votes and completes. All later
-        // votes are dropped.
+        // At quorum, recovery completes the phase and consumes the votes.
         votes.add(3, true);
         assert_eq!(votes.try_complete(), Some(vec![1, 2, 3]));
         assert!(votes.is_complete());
@@ -2210,7 +2223,10 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(votes.try_complete().is_none());
+        assert_eq!(votes.try_complete(), None);
+
+        votes.complete();
+        assert!(votes.is_complete());
 
         // Network certificates complete without any votes.
         let mut votes = Certification::<u64>::new(3, true);
@@ -2258,8 +2274,32 @@ mod tests {
         late_leader_vote_after_certification(ed25519::fixture);
     }
 
-    /// Constructible kinds drain in certificate order, exercising local
-    /// assembly for every kind.
+    #[test_async]
+    #[should_panic(expected = "verified notarize quorum must assemble")]
+    async fn test_construct_panics_on_recovery_failure() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let schemes: Vec<_> = schemes
+            .into_iter()
+            .map(|scheme| wrapped::Scheme::new(scheme, wrapped::Behavior::RecoveryFailure))
+            .collect();
+        let quorum = N3f1::quorum(schemes.len());
+        let quorum_size = usize::try_from(quorum).expect("quorum exceeds usize::MAX");
+        let round = Round::new(Epoch::new(0), View::new(1));
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
+
+        let leader_notarize = create_notarize(&schemes[0], round, View::new(0), 1);
+        verifier.set_leader(leader_notarize.signer(), Some(&leader_notarize));
+        for scheme in schemes.iter().take(quorum_size) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::new(0), 1)),
+                true,
+            );
+        }
+
+        let _ = verifier.try_construct_certificate(&Sequential).await;
+    }
+
     #[test_async]
     async fn test_construct_drains_kinds_in_order() {
         let mut rng = test_rng();

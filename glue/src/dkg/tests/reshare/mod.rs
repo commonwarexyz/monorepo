@@ -3,7 +3,7 @@ use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
-use commonware_utils::Probability;
+use commonware_utils::probability;
 use rstest::rstest;
 use std::time::Duration;
 
@@ -483,7 +483,7 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary(#[case] network: Network
     .link(Link {
         latency: Duration::from_millis(4),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     })
     .crash(Crash::ProcessedHeight {
         participant: delayed.clone(),
@@ -532,7 +532,7 @@ fn reshare_e2e_state_sync_active_player_late_restart(#[case] network: Network) {
     .link(Link {
         latency: Duration::from_millis(4),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     })
     .crash(Crash::DelayRound {
         participants: vec![delayed.clone()],
@@ -590,7 +590,7 @@ fn reshare_e2e_late_state_sync_carries_share_across_failure(#[case] network: Net
     .link(Link {
         latency: Duration::from_millis(4),
         jitter: Duration::from_millis(1),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     })
     .crash(Crash::DelayRound {
         participants: vec![delayed.clone()],
@@ -758,7 +758,7 @@ fn reshare_e2e_lossy_network(#[case] network: Network) {
     .link(Link {
         latency: Duration::from_millis(100),
         jitter: Duration::from_millis(50),
-        success_rate: Probability!(0.7),
+        success_rate: probability!(0.7),
     })
     .timeout(Duration::from_secs(720))
     .run()

@@ -20,9 +20,9 @@
 //! This implementation is only available on Linux systems that support io_uring.
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
-use super::Header;
+use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{self},
     telemetry::metrics::Register,
     utils,
@@ -31,52 +31,22 @@ use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, Read, Seek, SeekFrom, Write},
+    io::{Error as IoError, Seek, SeekFrom, Write},
     ops::RangeInclusive,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
-
-/// Reads a blob's leading bytes and resolves its header (see [super::header::resolve]).
-fn resolve_header(
-    file: &mut File,
-    raw_len: u64,
-    versions: &RangeInclusive<u16>,
-    partition: &str,
-    name: &[u8],
-) -> Result<Option<(u64, u16, u64)>, Error> {
-    let mut raw = vec![0u8; Header::resolve_len(raw_len)];
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| Error::ReadFailed)?;
-    file.read_exact(&mut raw).map_err(|_| Error::ReadFailed)?;
-    super::header::resolve(&raw, raw_len, versions, partition, name)
-}
-
-/// Syncs a directory to ensure directory entry changes are durable.
-/// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
-fn sync_dir(path: &Path) -> Result<(), Error> {
-    let dir = File::open(path).map_err(|e| {
-        Error::BlobOpenFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })?;
-    dir.sync_all().map_err(|e| {
-        Error::BlobSyncFailed(
-            path.to_string_lossy().to_string(),
-            "directory".to_string(),
-            e.into(),
-        )
-    })
-}
 
 /// Configuration for a [Storage].
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
-    /// Configuration for the iouring instance.
+    /// Blob layouts accepted by storage.
+    pub blob_layouts: RangeInclusive<Layout>,
+    /// Configuration for the iouring instance. `single_issuer` is forced on and
+    /// `shutdown_timeout` is forced to `None`: the ring must drain every
+    /// in-flight operation before the directory hold releases.
     pub iouring_config: iouring::Config,
     /// Stack size for the dedicated io_uring worker thread.
     pub thread_stack_size: usize,
@@ -86,6 +56,7 @@ pub struct Config {
 pub struct Storage {
     lock: Arc<Mutex<()>>,
     storage_directory: PathBuf,
+    blob_layouts: RangeInclusive<Layout>,
     io_handle: iouring::Handle,
     pool: BufferPool,
 }
@@ -95,6 +66,7 @@ impl Storage {
     pub(crate) fn start(cfg: Config, registry: &mut impl Register, pool: BufferPool) -> Self {
         let Config {
             storage_directory,
+            blob_layouts,
             mut iouring_config,
             thread_stack_size,
         } = cfg;
@@ -105,16 +77,36 @@ impl Storage {
         // the ring is the only thread submitting work to it.
         iouring_config.single_issuer = true;
 
+        // The directory hold's guarantee requires the ring to drain in-flight
+        // operations before it exits: a finite shutdown deadline would let the
+        // loop abandon operations that then land after the hold releases.
+        iouring_config.shutdown_timeout = None;
+
         let (io_handle, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
+
+        let hold = Hold::acquire(&storage_directory).unwrap_or_else(|e| {
+            panic!(
+                "failed to acquire storage directory hold ({}): {e}",
+                storage_directory.display()
+            )
+        });
 
         let storage = Self {
             lock: Arc::new(Mutex::new(())),
             storage_directory,
+            blob_layouts,
             io_handle,
             pool,
         };
 
-        utils::thread::spawn(thread_stack_size, move || iouring_loop.run());
+        utils::thread::spawn(thread_stack_size, move || {
+            // Hold the storage directory until the ring has drained. The loop
+            // exits only after every ring handle is dropped and in-flight work
+            // completes, and the storage instance and every blob own a handle,
+            // so the hold outlives them and every operation they issue.
+            let _hold = hold;
+            iouring_loop.run()
+        });
         storage
     }
 }
@@ -126,8 +118,8 @@ impl crate::Storage for Storage {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Blob, u64, u16), Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
 
         // Acquire the filesystem lock
@@ -153,9 +145,16 @@ impl crate::Storage for Storage {
 
         let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Handle header: existing blobs have their header read; new blobs and blobs left torn
-        // by an interrupted creation get a fresh header written.
-        let existing = resolve_header(&mut file, raw_len, &versions, partition, name)?;
+        // Handle the header. Existing blobs have their header read. New blobs and blobs left
+        // torn by an interrupted creation get a fresh header written.
+        let existing = resolve_header(
+            &mut file,
+            raw_len,
+            &self.blob_layouts,
+            &versions,
+            partition,
+            name,
+        )?;
         let (logical_len, blob_version, data_offset) = match existing {
             Some(resolved) => resolved,
             None => {
@@ -168,7 +167,7 @@ impl crate::Storage for Storage {
                 sync_dir(&self.storage_directory)?;
 
                 // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, blob_version) = Header::create(&versions);
+                let (region, blob_version) = Header::create(&self.blob_layouts, &versions);
                 let data_offset = region.len() as u64;
                 file.set_len(0)
                     .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
@@ -433,6 +432,7 @@ impl crate::Blob for Blob {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::{Header, *};
     use crate::{
@@ -471,6 +471,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: thread::system_thread_stack_size(),
             },
@@ -490,6 +491,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
         std::fs::create_dir_all(&storage_directory).unwrap();
         storage_directory
+    }
+
+    #[tokio::test]
+    async fn test_hold_retained_by_open_blob() {
+        let (storage, storage_directory) = create_test_storage();
+
+        // An open blob keeps the ring alive (and with it the directory hold),
+        // since a write or resize through it can still straggle. Dropping the
+        // storage while the blob lives must not release the hold.
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        drop(storage);
+
+        let dir = storage_directory.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut registry = Registry::default();
+            let pool = test_pool(&mut registry.sub_registry("pool"));
+            let second = Storage::start(
+                Config {
+                    storage_directory: dir,
+                    blob_layouts: Layout::ALL,
+                    iouring_config: Default::default(),
+                    thread_stack_size: thread::system_thread_stack_size(),
+                },
+                &mut registry.sub_registry("storage"),
+                pool,
+            );
+            tx.send(()).unwrap();
+            drop(second);
+        });
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("second instance did not stay blocked on the hold: {other:?}"),
+        }
+        drop(blob);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("second instance did not acquire the hold after the blob dropped");
+        handle.join().unwrap();
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
     /// Verify the end-to-end storage-page alignment invariant on the io_uring backend: paged
@@ -591,7 +632,7 @@ mod tests {
         // Header version (bytes 4-5) and App version (bytes 6-7)
         assert_eq!(
             &raw_content[4..6],
-            &Layout::V1.runtime_version().to_be_bytes()
+            &Layout::V1.layout_version().to_be_bytes()
         );
         // Data should start at the data offset
         assert_eq!(&raw_content[data_offset as usize..], data);
@@ -951,18 +992,18 @@ mod tests {
     #[tokio::test]
     async fn test_open_reports_partition_creation_failure() {
         // Verify opening a blob reports partition-creation failures when the
-        // configured storage root is not a directory.
+        // partition path is occupied by a regular file. (An unusable storage
+        // root fails Storage::start itself, when the directory hold is
+        // acquired.)
         let storage_directory = create_test_directory();
-        let storage_root = storage_directory.join("root-file");
-        std::fs::write(&storage_root, b"not a directory").unwrap();
+        std::fs::write(storage_directory.join("partition"), b"not a directory").unwrap();
 
-        // Start storage against the invalid root so `open` reaches the
-        // filesystem setup path under realistic wrapper code.
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
         let storage = Storage::start(
             Config {
-                storage_directory: storage_root.clone(),
+                storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
@@ -974,10 +1015,9 @@ mod tests {
             .open("partition", b"blob")
             .await
             .err()
-            .expect("invalid storage root should fail");
+            .expect("occupied partition path should fail");
         assert_eq!(err.to_string(), "partition creation failed: partition");
 
-        let _ = std::fs::remove_file(&storage_root);
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
@@ -998,6 +1038,7 @@ mod tests {
         let storage = Storage::start(
             Config {
                 storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
                 iouring_config: Default::default(),
                 thread_stack_size: utils::thread::system_thread_stack_size(),
             },
@@ -1366,17 +1407,13 @@ mod tests {
     async fn test_blob_v0_legacy_read() {
         let (storage, storage_directory) = create_test_storage();
 
-        // Fabricate a legacy V0 blob on disk (creation is always V1): an 8-byte header
+        // Fabricate a legacy V0 blob on disk (creation here produces V1): an 8-byte header
         // followed immediately by the payload.
         let payload = b"hello world";
         let partition_dir = storage_directory.join("partition");
         std::fs::create_dir_all(&partition_dir).unwrap();
         let file_path = partition_dir.join(hex(b"v0"));
-        std::fs::write(
-            &file_path,
-            crate::storage::header::tests::v0_blob_bytes(0, payload),
-        )
-        .unwrap();
+        std::fs::write(&file_path, crate::storage::tests::v0_blob_bytes(0, payload)).unwrap();
 
         // The blob opens with its data intact and remains readable and writable in place.
         let (blob, size) = storage.open("partition", b"v0").await.unwrap();

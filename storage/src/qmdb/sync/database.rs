@@ -165,6 +165,7 @@ mod tests {
             metadata_partition: "local-pins-metadata".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, NZU16!(111), NZUsize!(5)),
         }
@@ -219,6 +220,7 @@ mod tests {
                 items_per_blob: config.items_per_blob,
                 page_cache: config.page_cache.clone(),
                 write_buffer: config.write_buffer,
+                replay_buffer: config.replay_buffer,
             };
             let journal = fixed::Journal::<_, Digest>::init(
                 context.child("interrupted_reset"),

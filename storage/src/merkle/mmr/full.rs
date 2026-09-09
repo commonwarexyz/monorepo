@@ -50,6 +50,7 @@ mod tests {
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
@@ -322,6 +323,7 @@ mod tests {
                 metadata_partition: "ref-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };

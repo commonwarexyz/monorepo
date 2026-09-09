@@ -63,6 +63,11 @@
 //! applied. Invalid batches must not be used: their methods may return incorrect data rather than
 //! erroring.
 //!
+//! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
+//! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
+//! base while merkleizing, so it must be merkleized before the base is pruned past any leaf it
+//! updates.
+//!
 //! # Example (MMR)
 //!
 //! ```ignore
@@ -635,6 +640,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// `hasher`.
     pub fn proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
         inactive_peaks: usize,
@@ -642,7 +648,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
-        self.range_proof(hasher, loc..loc + 1, inactive_peaks)
+        self.range_proof(base, hasher, loc..loc + 1, inactive_peaks)
             .map_err(|e| match e {
                 Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
                 _ => e,
@@ -653,6 +659,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// by `hasher`.
     pub fn range_proof(
         &self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
         inactive_peaks: usize,
@@ -662,7 +669,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             self.leaves(),
             inactive_peaks,
             range,
-            |pos| Self::get_node(self, pos),
+            |pos| Self::get_node(self, pos).or_else(|| base.get_node(pos)),
             Error::ElementPruned,
         )
     }
@@ -1003,6 +1010,48 @@ mod tests {
         });
     }
 
+    /// A proof requested directly from a speculative [`MerkleizedBatch`], before it is applied to
+    /// `base`, must succeed even when the Merkle path needs nodes that only exist in `base`. The
+    /// batch chain alone does not contain nodes committed before the fork.
+    fn speculative_proof_uses_base_fallback<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            let base = build_reference::<F>(&hasher, 50);
+            let mut batch = base.new_batch();
+            for i in 50u64..55 {
+                let element = hasher.digest(&i.to_be_bytes());
+                batch = batch.add(&hasher, &element);
+            }
+            let m = batch.merkleize(&base, &hasher);
+            let expected_root = batch_root(&base, &m, &hasher);
+
+            // A newly appended leaf: the path needs the committed peaks.
+            let loc = Location::<F>::new(52);
+            let element = hasher.digest(&52u64.to_be_bytes());
+            let proof = m.proof(&base, &hasher, loc, 0).unwrap();
+            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root));
+
+            // A committed leaf: the path needs committed siblings as well as committed peaks.
+            let loc = Location::<F>::new(49);
+            let element = hasher.digest(&49u64.to_be_bytes());
+            let proof = m.proof(&base, &hasher, loc, 0).unwrap();
+            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root));
+
+            // A range of new leaves and a range spanning the fork boundary.
+            for range in [
+                Location::<F>::new(50)..Location::<F>::new(55),
+                Location::<F>::new(45)..Location::<F>::new(55),
+            ] {
+                let elements: Vec<D> = (*range.start..*range.end)
+                    .map(|i| hasher.digest(&i.to_be_bytes()))
+                    .collect();
+                let rp = m.range_proof(&base, &hasher, range.clone(), 0).unwrap();
+                assert!(rp.verify_range_inclusion(&hasher, &elements, range.start, &expected_root));
+            }
+        });
+    }
+
     fn empty_batch<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1252,6 +1301,10 @@ mod tests {
         proof_verification::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_speculative_proof_uses_base_fallback() {
+        speculative_proof_uses_base_fallback::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_empty_batch() {
         empty_batch::<crate::mmr::Family>();
     }
@@ -1374,6 +1427,10 @@ mod tests {
     #[test]
     fn mmb_proof_verification() {
         proof_verification::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_speculative_proof_uses_base_fallback() {
+        speculative_proof_uses_base_fallback::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_empty_batch() {

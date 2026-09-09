@@ -171,6 +171,7 @@ mod tests {
     use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::non_empty;
 
     fn finalization(
         schemes: &[TestScheme],
@@ -186,7 +187,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect::<Vec<_>>();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
             .expect("recover finalization")
     }
 

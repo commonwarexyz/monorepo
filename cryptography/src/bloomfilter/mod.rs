@@ -58,7 +58,7 @@ const LN2_INV: (u64, u64) = (29145, 20201);
 ///   [Blake3](crate::blake3::Blake3) is faster for larger items (4KB+).
 #[derive(Clone, Debug)]
 pub struct BloomFilter<H: Hasher = Sha256> {
-    hashers: u8,
+    hashers: NonZeroU8,
     bits: BitMap,
     _marker: PhantomData<H>,
 }
@@ -88,7 +88,7 @@ impl<H: Hasher> BloomFilter<H> {
             .checked_next_power_of_two()
             .unwrap_or(1 << (usize::BITS - 1));
         Self {
-            hashers: hashers.get(),
+            hashers,
             bits: BitMap::zeroes(bits as u64),
             _marker: PhantomData,
         }
@@ -120,7 +120,7 @@ impl<H: Hasher> BloomFilter<H> {
 
     /// Returns the number of hashers used by the filter.
     pub const fn hashers(&self) -> NonZeroU8 {
-        NonZeroU8::new(self.hashers).expect("hashers is never zero")
+        self.hashers
     }
 
     /// Returns the number of bits used by the filter.
@@ -145,7 +145,7 @@ impl<H: Hasher> BloomFilter<H> {
         // Generate `hashers` hashes using the Kirsch-Mitzenmacher optimization:
         //
         // `h_i(x) = (h1(x) + i * h2(x)) mod m`
-        let hashers = self.hashers as u64;
+        let hashers = self.hashers.get() as u64;
         let mask = self.bits.len() - 1;
         (0..hashers).map(move |hasher| h1.wrapping_add(hasher.wrapping_mul(h2)) & mask)
     }
@@ -182,7 +182,7 @@ impl<H: Hasher> BloomFilter<H> {
         let ones = self.bits.count_ones();
         let len = self.bits.len();
         let fill_ratio = BigRational::new(ones.into(), len.into());
-        fill_ratio.pow(self.hashers as i32)
+        fill_ratio.pow(self.hashers.get() as i32)
     }
 
     /// Estimates the number of items that have been inserted.
@@ -195,7 +195,7 @@ impl<H: Hasher> BloomFilter<H> {
     pub fn estimated_count(&self) -> BigRational {
         let m = self.bits.len();
         let x = self.bits.count_ones();
-        let k = self.hashers as u64;
+        let k = self.hashers.get() as u64;
         if x >= m {
             return BigRational::from_usize(usize::MAX);
         }
@@ -216,15 +216,16 @@ impl<H: Hasher> BloomFilter<H> {
     /// Uses [`BigRational`] for determinism. The result is clamped to [1, 16] since
     /// beyond ~10-12 hashes provides negligible improvement while increasing CPU cost.
     #[cfg(feature = "std")]
-    pub fn optimal_hashers(expected_items: usize, bits: usize) -> u8 {
+    pub fn optimal_hashers(expected_items: usize, bits: usize) -> NonZeroU8 {
         if expected_items == 0 {
-            return 1;
+            return NonZeroU8::MIN;
         }
 
         // k = (m/n) * ln(2)
         let ln2 = BigRational::from_frac_u64(LN2.0, LN2.1);
         let k_ratio = BigRational::from_usize(bits) * ln2 / BigRational::from_usize(expected_items);
-        k_ratio.to_integer().to_u8().unwrap_or(16).clamp(1, 16)
+        let hashers = k_ratio.to_integer().to_u8().unwrap_or(16).clamp(1, 16);
+        NonZeroU8::new(hashers).expect("clamped to at least 1")
     }
 
     /// Calculates the optimal number of bits for a given capacity and false positive rate.
@@ -264,7 +265,7 @@ impl<H: Hasher> BloomFilter<H> {
 
 impl<H: Hasher> Write for BloomFilter<H> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.hashers.write(buf);
+        self.hashers.get().write(buf);
         self.bits.write(buf);
     }
 }
@@ -298,7 +299,7 @@ impl<H: Hasher> Read for BloomFilter<H> {
             ));
         }
         Ok(Self {
-            hashers,
+            hashers: *hashers_cfg,
             bits,
             _marker: PhantomData,
         })
@@ -307,7 +308,7 @@ impl<H: Hasher> Read for BloomFilter<H> {
 
 impl<H: Hasher> EncodeSize for BloomFilter<H> {
     fn encode_size(&self) -> usize {
-        self.hashers.encode_size() + self.bits.encode_size()
+        self.hashers.get().encode_size() + self.bits.encode_size()
     }
 }
 
@@ -315,7 +316,7 @@ impl<H: Hasher> EncodeSize for BloomFilter<H> {
 impl<H: Hasher> arbitrary::Arbitrary<'_> for BloomFilter<H> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         // Ensure at least 1 hasher
-        let hashers = u8::arbitrary(u)?.max(1);
+        let hashers = NonZeroU8::arbitrary(u).unwrap_or(NonZeroU8::MIN);
         // Generate u64 in u16 range to avoid OOM, then round to power of two
         let bits_len = u.int_in_range(0..=u16::MAX as u64)?.next_power_of_two();
         let mut bits = BitMap::with_capacity(bits_len);
@@ -502,7 +503,7 @@ mod tests {
         let expected_bits = BloomFilter::<Sha256>::optimal_bits(1000, &fp_rate);
         let expected_hashers = BloomFilter::<Sha256>::optimal_hashers(1000, expected_bits);
         assert_eq!(bf.bits().get(), expected_bits);
-        assert_eq!(bf.hashers().get(), expected_hashers);
+        assert_eq!(bf.hashers(), expected_hashers);
 
         // Insert 1000 items
         for i in 0..1000usize {
@@ -532,31 +533,31 @@ mod tests {
         // For 1000 items in 10000 bits, optimal k = (10000/1000) * ln(2) = 6.93
         // Integer math truncates to 6
         let k = BloomFilter::<Sha256>::optimal_hashers(1000, 10000);
-        assert_eq!(k, 6);
+        assert_eq!(k.get(), 6);
 
         // For 100 items in 1000 bits, optimal k = (1000/100) * ln(2) = 6.93
         // Integer math truncates to 6
         let k = BloomFilter::<Sha256>::optimal_hashers(100, 1000);
-        assert_eq!(k, 6);
+        assert_eq!(k.get(), 6);
 
         // Edge case: very few bits per item, clamped to 1
         let k = BloomFilter::<Sha256>::optimal_hashers(1000, 100);
-        assert_eq!(k, 1);
+        assert_eq!(k.get(), 1);
 
         // Edge case: many bits per item, clamped to 16
         let k = BloomFilter::<Sha256>::optimal_hashers(100, 100000);
-        assert_eq!(k, 16);
+        assert_eq!(k.get(), 16);
 
         // Edge case: zero items returns 1
         let k = BloomFilter::<Sha256>::optimal_hashers(0, 1000);
-        assert_eq!(k, 1);
+        assert_eq!(k.get(), 1);
 
         // Edge case: extreme values that would overflow (n << 16 wraps to 0 for n >= 2^48)
         // Should not panic, should return clamped value
         let k = BloomFilter::<Sha256>::optimal_hashers(1 << 48, 1000);
-        assert_eq!(k, 1);
+        assert_eq!(k.get(), 1);
         let k = BloomFilter::<Sha256>::optimal_hashers(usize::MAX, usize::MAX);
-        assert!((1..=16).contains(&k));
+        assert!((1..=16).contains(&k.get()));
     }
 
     #[test]

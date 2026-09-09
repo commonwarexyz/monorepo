@@ -4,7 +4,7 @@
 use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
-use commonware_utils::{cache::Clock, sync::RwLock};
+use commonware_utils::{Widen, cache::Clock, sync::RwLock};
 use futures::{FutureExt, future::Shared};
 use std::{
     collections::hash_map::Entry,
@@ -16,7 +16,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace};
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
@@ -121,7 +121,7 @@ struct Cache {
 
     /// Logical size of each page in bytes (the payload stored per page, excluding the CRC
     /// record appended on disk).
-    page_size: usize,
+    page_size: NonZeroU16,
 
     /// Pool the page buffers were allocated from.
     pool: BufferPool,
@@ -146,7 +146,7 @@ pub struct CacheRef {
     /// blob for writing treats the mismatched pages as invalid trailing data and silently truncates
     /// the blob (potentially to empty). Changing an existing store's page size is a destructive
     /// format migration, not a configuration change.
-    page_size: u64,
+    page_size: NonZeroU16,
 
     /// The next id to assign to a blob that will be managed by this cache.
     next_id: Arc<AtomicU64>,
@@ -165,27 +165,23 @@ impl CacheRef {
     /// [Self::page_size] for how this relates to a page's physical size on disk).
     /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
     ///
-    /// Any `page_size` is accepted, but one whose physical pages do not align with storage
-    /// pages (see the module docs) logs a warning: behavior stays correct, at the cost of
-    /// amplified cold random reads. Use [super::page_size] to pick an aligned value.
+    /// Any `page_size` is accepted, but physical pages that do not align with storage pages (see
+    /// the module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
     /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
-        let page_size_u64 = page_size.get() as u64;
+        let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
         if !physical_page_size.is_multiple_of(STORAGE_PAGE_SIZE)
             && !STORAGE_PAGE_SIZE.is_multiple_of(physical_page_size)
         {
-            warn!(
+            debug!(
                 page_size = page_size.get(),
-                physical_page_size,
-                "page size produces physical pages that do not align with storage pages; pick a \
-                 page size via paged::page_size to avoid amplifying cold random reads (changing \
-                 an existing store's page size is a destructive format migration)"
+                physical_page_size, "physical pages do not align with storage pages"
             );
         }
 
         Self {
-            page_size: page_size_u64,
+            page_size,
             next_id: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
             pool,
@@ -205,7 +201,7 @@ impl CacheRef {
     /// The page size used by this page cache: the logical payload bytes stored per page. Each
     /// page occupies `page_size() + CHECKSUM_SIZE` bytes on disk (its physical size).
     #[inline]
-    pub const fn page_size(&self) -> u64 {
+    pub const fn page_size(&self) -> NonZeroU16 {
         self.page_size
     }
 
@@ -222,7 +218,7 @@ impl CacheRef {
 
     /// Convert a logical offset into the number of the page it belongs to and the offset within
     /// that page.
-    pub const fn offset_to_page(&self, offset: u64) -> (u64, u64) {
+    pub fn offset_to_page(&self, offset: u64) -> (u64, u64) {
         Cache::offset_to_page(self.page_size, offset)
     }
 
@@ -263,9 +259,8 @@ impl CacheRef {
         // stalling each lookup behind the previous range's copy.
         let mut srcs: Vec<Option<&[u8]>> = Vec::with_capacity(ranges.len());
         for (buf, offset) in ranges.iter() {
-            let (page_num, offset_in_page) = Cache::offset_to_page(page_size as u64, *offset);
-            let offset_in_page = offset_in_page as usize;
-            let seg = std::cmp::min(buf.len(), page_size - offset_in_page);
+            let (page_num, offset_in_page, remaining) = Cache::locate(page_size, *offset);
+            let seg = std::cmp::min(buf.len(), remaining);
             srcs.push(
                 page_cache
                     .get_page(blob_id, page_num)
@@ -345,8 +340,7 @@ impl CacheRef {
     ) -> Result<usize, Error> {
         assert!(!buf.is_empty());
 
-        let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
-        let offset_in_page = offset_in_page as usize;
+        let (page_num, offset_in_page, _) = Cache::locate(self.page_size, offset);
         trace!(page_num, blob_id, "page fault");
 
         // Create or clone a future that retrieves the desired page from the underlying blob. This
@@ -446,7 +440,7 @@ impl CacheRef {
         assert_eq!(offset_in_page, 0);
         {
             // Write lock the page cache.
-            let page_size = self.page_size as usize;
+            let page_size: usize = self.page_size.widen();
             let mut page_cache = self.cache.write();
             while buf.len() >= page_size {
                 page_cache.cache(blob_id, &buf[..page_size], page_num);
@@ -481,9 +475,9 @@ impl Cache {
     /// Return a new empty page cache with a max cache capacity of `capacity` pages, each of size
     /// `page_size` bytes.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
-        let page_size = page_size.get() as usize;
+        let slot_size: usize = page_size.widen();
         let mut cache = Clock::new(capacity);
-        cache.prefill(|| pool.alloc_zeroed(page_size));
+        cache.prefill(|| pool.alloc_zeroed(slot_size));
         let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
             cache,
@@ -496,8 +490,19 @@ impl Cache {
 
     /// Convert a logical offset into the number of the page it belongs to and the offset within
     /// that page.
-    const fn offset_to_page(page_size: u64, offset: u64) -> (u64, u64) {
+    fn offset_to_page(page_size: NonZeroU16, offset: u64) -> (u64, u64) {
+        let page_size: u64 = page_size.widen();
         (offset / page_size, offset % page_size)
+    }
+
+    /// Locate `offset` within its page: the page number, the offset inside that page, and the
+    /// bytes remaining in the page at that offset.
+    fn locate(page_size: NonZeroU16, offset: u64) -> (u64, usize, usize) {
+        let (page_num, offset_in_page) = Self::offset_to_page(page_size, offset);
+        let offset_in_page = offset_in_page as usize;
+        let width: usize = page_size.widen();
+        let remaining = width - offset_in_page;
+        (page_num, offset_in_page, remaining)
     }
 
     /// Attempt to fetch blob data starting at `offset` from the page cache. Returns the number of
@@ -506,15 +511,13 @@ impl Cache {
     /// page boundary, so multiple reads may be required even if all data in the desired range is
     /// buffered.
     fn read_at(&self, blob_id: u64, buf: &mut [u8], logical_offset: u64) -> usize {
-        let (page_num, offset_in_page) =
-            Self::offset_to_page(self.page_size as u64, logical_offset);
+        let (page_num, offset_in_page, remaining) = Self::locate(self.page_size, logical_offset);
         let Some(page) = self.get_page(blob_id, page_num) else {
             return 0;
         };
         let page = page.as_ref();
 
-        let offset_in_page = offset_in_page as usize;
-        let bytes_to_copy = std::cmp::min(buf.len(), self.page_size - offset_in_page);
+        let bytes_to_copy = std::cmp::min(buf.len(), remaining);
         buf[..bytes_to_copy].copy_from_slice(&page[offset_in_page..offset_in_page + bytes_to_copy]);
 
         bytes_to_copy
@@ -522,9 +525,9 @@ impl Cache {
 
     /// Put the given `page` into the page cache and record its slot hint.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
-        assert_eq!(page.len(), self.page_size);
+        let page_size: usize = self.page_size.widen();
+        assert_eq!(page.len(), page_size);
         let pool = &self.pool;
-        let page_size = self.page_size;
         let (slot, buf) = self
             .cache
             .get_or_insert_mut((blob_id, page_num), || pool.alloc_zeroed(page_size));
@@ -577,17 +580,19 @@ impl Cache {
 async fn fetch_cacheable_page(
     blob: &impl Blob,
     page_num: u64,
-    page_size: u64,
+    page_size: NonZeroU16,
 ) -> Result<IoBuf, Arc<Error>> {
     // CacheRef retains the page, so the source page need not remain in the OS page cache.
-    let page = get_page_from_blob(blob, page_num, page_size, ReadOptions::DONT_CACHE)
+    let width: u64 = page_size.widen();
+    let page = get_page_from_blob(blob, page_num, width, ReadOptions::DONT_CACHE)
         .await
         .map_err(Arc::new)?;
 
     // We should never be fetching partial pages through the page cache. This can happen if a
     // non-last page is corrupted and falls back to a partial CRC.
     let len = page.len();
-    if len != page_size as usize {
+    let expected: usize = page_size.widen();
+    if len != expected {
         error!(
             page_num,
             expected = page_size,

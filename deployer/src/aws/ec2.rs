@@ -3,7 +3,10 @@
 use super::{METRICS_PORT, SYSTEM_PORT};
 use crate::aws::{
     PortConfig,
-    utils::{DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, RETRY_INTERVAL, exact_cidr},
+    utils::{
+        DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, MAX_SDK_ATTEMPTS, RETRY_INTERVAL,
+        SDK_INITIAL_BACKOFF, SDK_MAX_BACKOFF, exact_cidr,
+    },
 };
 pub use aws_config::Region;
 use aws_config::{BehaviorVersion, retry::RetryConfig};
@@ -74,9 +77,9 @@ const RETRYABLE_LAUNCH_STATUS_CODES: &[u16] = &[500, 502, 503, 504];
 /// Creates an EC2 client for the specified AWS region
 pub async fn create_client(region: Region) -> Ec2Client {
     let retry = aws_config::retry::RetryConfig::adaptive()
-        .with_max_attempts(u32::MAX)
-        .with_initial_backoff(Duration::from_millis(500))
-        .with_max_backoff(Duration::from_secs(30))
+        .with_max_attempts(MAX_SDK_ATTEMPTS)
+        .with_initial_backoff(SDK_INITIAL_BACKOFF)
+        .with_max_backoff(SDK_MAX_BACKOFF)
         .with_reconnect_mode(aws_sdk_ec2::config::retry::ReconnectMode::ReconnectOnTransientError);
     let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .region(region)

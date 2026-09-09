@@ -18,6 +18,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Additive;
 use commonware_parallel::Strategy;
+use commonware_utils::iter::NonEmpty;
 
 /// An aggregated public key from multiple individual public keys.
 ///
@@ -194,10 +195,10 @@ where
 /// verified with [`verify_proof_of_possession`](super::verify_proof_of_possession). Skipping these
 /// checks can let an attacker make an invalid aggregate signature verify, including through a
 /// rogue-key attack.
-pub fn combine_public_keys<'a, V, I>(public_keys: I) -> PublicKey<V>
+pub fn combine_public_keys<'a, V, I>(public_keys: NonEmpty<I>) -> PublicKey<V>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a V::Public>,
+    I: Iterator<Item = &'a V::Public>,
     V::Public: 'a,
 {
     let mut p = PublicKey::zero();
@@ -214,10 +215,10 @@ where
 /// This function assumes a group check was already performed on each `signature` and
 /// that each `signature` is unique. If any of these assumptions are violated, an attacker can
 /// exploit this function to verify an incorrect aggregate signature.
-pub fn combine_signatures<'a, V, I>(signatures: I) -> Signature<V>
+pub fn combine_signatures<'a, V, I>(signatures: NonEmpty<I>) -> Signature<V>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a V::Signature>,
+    I: Iterator<Item = &'a V::Signature>,
     V::Signature: 'a,
 {
     let mut s = Signature::zero();
@@ -232,11 +233,10 @@ where
 /// # Warning
 ///
 /// It is not safe to provide duplicate messages.
-pub fn combine_messages<'a, V, I>(messages: I, strategy: &impl Strategy) -> Message<V>
+pub fn combine_messages<'a, V, I>(messages: NonEmpty<I>, strategy: &impl Strategy) -> Message<V>
 where
     V: Variant,
-    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8])> + Send,
-    I::IntoIter: Send,
+    I: Iterator<Item = &'a (&'a [u8], &'a [u8])> + Send,
 {
     strategy.fold(
         messages,
@@ -312,7 +312,7 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng, union_unique};
+    use commonware_utils::{NZUsize, non_empty, test_rng, union_unique};
 
     fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,
@@ -366,10 +366,10 @@ mod tests {
         let sig2 = sign_message::<V>(&private2, namespace, message);
         let sig3 = sign_message::<V>(&private3, namespace, message);
         let pks = vec![public1, public2, public3];
-        let signatures = vec![sig1, sig2, sig3];
+        let signatures = [sig1, sig2, sig3];
 
-        let aggregate_pk = aggregate::combine_public_keys::<V, _>(&pks);
-        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
+        let aggregate_pk = aggregate::combine_public_keys::<V, _>(non_empty![@pks.iter()]);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(non_empty![@signatures.iter()]);
 
         verify_same_message::<V>(&aggregate_pk, namespace, message, &aggregate_sig)
             .expect("Aggregated signature should be valid");
@@ -395,12 +395,13 @@ mod tests {
         let sig1 = sign_message::<V>(&private1, namespace, message);
         let sig2 = sign_message::<V>(&private2, namespace, message);
         let sig3 = sign_message::<V>(&private3, namespace, message);
-        let signatures = vec![sig1, sig2, sig3];
+        let signatures = [sig1, sig2, sig3];
 
         let (_, public4) = keypair::<_, V>(&mut rng);
-        let wrong_pks = vec![public1, public2, public4];
-        let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
-        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
+        let wrong_pks = [public1, public2, public4];
+        let wrong_aggregate_pk =
+            aggregate::combine_public_keys::<V, _>(non_empty![@wrong_pks.iter()]);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(non_empty![@signatures.iter()]);
         let result =
             verify_same_message::<V>(&wrong_aggregate_pk, namespace, message, &aggregate_sig);
         assert!(matches!(result, Err(Error::InvalidSignature)));
@@ -422,11 +423,12 @@ mod tests {
         let sig1 = sign_message::<V>(&private1, namespace, message);
         let sig2 = sign_message::<V>(&private2, namespace, message);
         let sig3 = sign_message::<V>(&private3, namespace, message);
-        let signatures = vec![sig1, sig2, sig3];
+        let signatures = [sig1, sig2, sig3];
 
-        let wrong_pks = vec![public1, public2];
-        let wrong_aggregate_pk = aggregate::combine_public_keys::<V, _>(&wrong_pks);
-        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
+        let wrong_pks = [public1, public2];
+        let wrong_aggregate_pk =
+            aggregate::combine_public_keys::<V, _>(non_empty![@wrong_pks.iter()]);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(non_empty![@signatures.iter()]);
         let result =
             verify_same_message::<V>(&wrong_aggregate_pk, namespace, message, &aggregate_sig);
         assert!(matches!(result, Err(Error::InvalidSignature)));
@@ -487,14 +489,16 @@ mod tests {
             .map(|(namespace, msg)| sign_message::<V>(&private, namespace, msg))
             .collect();
 
-        let aggregate_sig = aggregate::combine_signatures::<V, _>(&signatures);
+        let aggregate_sig = aggregate::combine_signatures::<V, _>(non_empty![@signatures.iter()]);
 
-        let combined_msg = aggregate::combine_messages::<V, _>(&messages, &Sequential);
+        let combined_msg =
+            aggregate::combine_messages::<V, _>(non_empty![@messages.iter()], &Sequential);
         aggregate::verify_same_signer::<V>(&public, &combined_msg, &aggregate_sig)
             .expect("Aggregated signature should be valid");
 
         let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        let combined_msg_parallel = aggregate::combine_messages::<V, _>(&messages, &parallel);
+        let combined_msg_parallel =
+            aggregate::combine_messages::<V, _>(non_empty![@messages.iter()], &parallel);
         aggregate::verify_same_signer::<V>(&public, &combined_msg_parallel, &aggregate_sig)
             .expect("Aggregated signature should be valid with parallelism");
 
@@ -511,6 +515,23 @@ mod tests {
     fn test_aggregate_verify_same_signer_correct() {
         aggregate_verify_same_signer_correct::<MinPk>();
         aggregate_verify_same_signer_correct::<MinSig>();
+    }
+
+    fn aggregate_verify_same_signer_rejects_identity<V: Variant>() {
+        let (_, public) = keypair::<_, V>(&mut test_rng());
+        let combined_msg = Message::zero();
+        let aggregate_sig = Signature::zero();
+
+        assert!(matches!(
+            aggregate::verify_same_signer::<V>(&public, &combined_msg, &aggregate_sig),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_aggregate_verify_same_signer_rejects_identity() {
+        aggregate_verify_same_signer_rejects_identity::<MinPk>();
+        aggregate_verify_same_signer_rejects_identity::<MinSig>();
     }
 
     #[cfg(feature = "arbitrary")]

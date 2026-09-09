@@ -26,7 +26,8 @@
 //! let n = NZU32!(5);
 //!
 //! // Generate commitment and shares
-//! let (sharing, shares) = dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Mode::default(), n);
+//! let (sharing, shares) =
+//!     dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Mode::NonZeroCounter, n);
 //!
 //! // Generate partial signatures from shares
 //! let namespace = b"demo";

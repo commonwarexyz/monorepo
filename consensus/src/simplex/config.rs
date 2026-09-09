@@ -11,7 +11,48 @@ use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use rand_core::CryptoRng;
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
+
+/// Selects the maximum number of unfinalized terms that may be skipped.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum SkipBudget {
+    /// Uses the participant count as the budget.
+    #[default]
+    Participants,
+    /// Uses the specified budget.
+    Fixed(NonZeroU64),
+}
+
+impl SkipBudget {
+    /// Resolves the configured budget for a participant count.
+    pub(crate) const fn resolve(self, participants: usize) -> u64 {
+        match self {
+            Self::Participants => participants as u64,
+            Self::Fixed(budget) => budget.get(),
+        }
+    }
+}
+
+/// Controls whether `nullify(v)` may be broadcast before the normal round deadlines.
+///
+/// Normal round deadlines remain active when the policy does not permit a skip.
+#[derive(Debug, Clone, Copy)]
+pub enum SkipPolicy {
+    /// Disables skips.
+    Disabled,
+    /// Enables skips under the configured timeout and budget.
+    Enabled {
+        /// Duration after which an inactive leader may trigger a skip.
+        ///
+        /// This timeout must be greater than the certification timeout and timeout retry.
+        timeout: Duration,
+        /// Maximum number of unfinalized terms that may be skipped.
+        budget: SkipBudget,
+    },
+}
 
 /// Controls whether and how the engine proactively forwards blocks when
 /// entering the next view.
@@ -22,22 +63,22 @@ use std::{num::NonZeroUsize, time::Duration};
 /// locally, so a certificate signer whose vote never reached us still counts
 /// as silent.
 #[derive(Debug, Clone, Copy)]
-pub enum ForwardingPolicy {
+pub enum ForwardPolicy {
     /// Do nothing when a proposal becomes eligible for forwarding.
     Disabled,
     /// Forward the block to all participants whose matching vote was not
     /// observed locally.
     ///
-    /// To only send to the leader of the newly entered view, see [ForwardingPolicy::SilentLeader].
+    /// To only send to the leader of the newly entered view, see [ForwardPolicy::SilentLeader].
     SilentVoters,
     /// Forward the block to the leader of the newly entered view if the
     /// leader's matching vote was not observed locally.
     ///
-    /// To forward to all such participants, see [ForwardingPolicy::SilentVoters].
+    /// To forward to all such participants, see [ForwardPolicy::SilentVoters].
     SilentLeader,
 }
 
-impl ForwardingPolicy {
+impl ForwardPolicy {
     /// Returns true if the policy is enabled.
     pub const fn is_enabled(&self) -> bool {
         !matches!(self, Self::Disabled)
@@ -202,17 +243,14 @@ where
     /// journal) for recent activity.
     pub view_retention: ViewDelta,
 
-    /// Move to nullify immediately if the selected leader has been inactive
-    /// for at least this long while a quorum of participants has been active.
-    ///
-    /// This timeout must be greater than the certification timeout and timeout retry.
-    pub skip_timeout: Duration,
+    /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
+    pub skip: SkipPolicy,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
     /// Policy for proactively forwarding blocks when entering the next view.
-    pub forwarding: ForwardingPolicy,
+    pub forward: ForwardPolicy,
 }
 
 impl<
@@ -241,7 +279,7 @@ impl<
 
         // Vote-to-nullify timeouts.
         // certification_timeout > leader_timeout > 0.
-        // skip_timeout > certification_timeout and timeout_retry.
+        // skip timeout > certification_timeout and timeout_retry, when enabled.
         assert!(
             self.leader_timeout > Duration::default(),
             "leader timeout must be greater than zero"
@@ -251,14 +289,16 @@ impl<
             "certification timeout must be greater than leader timeout"
         );
 
-        assert!(
-            self.skip_timeout > self.certification_timeout,
-            "skip timeout must be greater than certification timeout"
-        );
-        assert!(
-            self.skip_timeout > self.timeout_retry,
-            "skip timeout must be greater than timeout retry"
-        );
+        if let SkipPolicy::Enabled { timeout, .. } = self.skip {
+            assert!(
+                timeout > self.certification_timeout,
+                "skip timeout must be greater than certification timeout"
+            );
+            assert!(
+                timeout > self.timeout_retry,
+                "skip timeout must be greater than timeout retry"
+            );
+        }
         assert!(
             self.timeout_retry > Duration::default(),
             "timeout retry broadcast must be greater than zero"
@@ -273,5 +313,18 @@ impl<
         );
         self.floor
             .assert(self.epoch, rng, &self.scheme, &self.strategy);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SkipBudget;
+    use std::num::NonZeroU64;
+
+    #[test]
+    fn skip_budget_resolves() {
+        assert_eq!(SkipBudget::default().resolve(4), 4);
+        assert_eq!(SkipBudget::Participants.resolve(7), 7);
+        assert_eq!(SkipBudget::Fixed(NonZeroU64::new(9).unwrap()).resolve(4), 9);
     }
 }

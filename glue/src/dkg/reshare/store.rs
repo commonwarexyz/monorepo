@@ -26,8 +26,10 @@ use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
-            Dealer as CryptoDealer, DealerLog, DealerPrivMsg, DealerPubMsg, Error as DkgError,
-            Info, Logs, Output, Player as CryptoPlayer, PlayerAck, SignedDealerLog, Verdict,
+            Dealer as CryptoDealer, DealerLog, DealerMessageError as DkgDealerMessageError,
+            DealerPrivMsg, DealerPubMsg, Error as DkgError, FinalizeError as DkgFinalizeError,
+            Info, Logs, Output, Player as CryptoPlayer, PlayerAck, PlayerAckError as DkgAckError,
+            SignedDealerLog,
         },
         primitives::{group, variant::Variant},
     },
@@ -353,6 +355,7 @@ where
             .unwrap_or_default()
     }
 
+    /// Persists a public/private dealing already accepted by the cryptographic player.
     async fn append_dealing(
         &mut self,
         epoch: Epoch,
@@ -556,6 +559,15 @@ pub struct Dealer<V: Variant, C: Signer> {
     finalized: Option<SignedDealerLog<V, C>>,
 }
 
+/// Successful outcome of processing a player acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AckOutcome {
+    /// The acknowledgement was newly persisted.
+    Recorded,
+    /// The acknowledgement was already recorded.
+    Duplicate,
+}
+
 impl<V: Variant, C: Signer> Dealer<V, C> {
     /// Returns whether the recorded acknowledgements form a quorum.
     pub fn has_acknowledgement_quorum<M: Faults>(&self, players: usize) -> bool {
@@ -564,38 +576,40 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
 
     /// Records a player ack.
     ///
-    /// Returns [`Verdict::Fault`] if the player signed an invalid ack so the
-    /// caller can penalize them. A duplicate or unsolicited ack, or one for a
-    /// round we are not dealing in, is a benign [`Verdict::Skip`].
+    /// Returns [`AckOutcome::Recorded`] for a new acknowledgement and
+    /// [`AckOutcome::Duplicate`] for one already recorded.
+    /// [`DkgAckError::UnexpectedPlayer`] identifies a sender outside the round's
+    /// player set, while [`DkgAckError::InvalidAck`] identifies a signature that
+    /// does not match this dealer's transcript.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after the dealer has finalized.
     pub async fn handle<E, SS, D>(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, D>,
         epoch: Epoch,
         player: C::PublicKey,
         ack: PlayerAck<C::PublicKey>,
-    ) -> Verdict<()>
+    ) -> Result<AckOutcome, DkgAckError>
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
         D: Directory<C::PublicKey>,
     {
-        if !self.unsent.contains_key(&player) {
-            return Verdict::Skip;
+        let dealer = self
+            .dealer
+            .as_mut()
+            .expect("acknowledgements are handled only before dealer finalization");
+        dealer.receive_player_ack(player.clone(), ack.clone())?;
+        if self.unsent.remove(&player).is_none() {
+            return Ok(AckOutcome::Duplicate);
         }
-        let Some(dealer) = &mut self.dealer else {
-            return Verdict::Skip;
-        };
-        match dealer.receive_player_ack(player.clone(), ack.clone()) {
-            Ok(()) => {}
-            Err(DkgError::InvalidAck) => return Verdict::Fault,
-            Err(_) => return Verdict::Skip,
-        }
-        self.unsent.remove(&player);
-        if store.append_ack(epoch, player, ack).await {
-            Verdict::Valid(())
-        } else {
-            Verdict::Skip
-        }
+        assert!(
+            store.append_ack(epoch, player, ack).await,
+            "pending acknowledgement must not already be persisted"
+        );
+        Ok(AckOutcome::Recorded)
     }
 
     /// Finalizes once and returns true if a new log became available.
@@ -639,9 +653,10 @@ pub struct Player<V: Variant, C: Signer> {
 impl<V: Variant, C: Signer> Player<V, C> {
     /// Handles a dealer message, persisting it before returning the ack.
     ///
-    /// Returns [`Verdict::Fault`] if the dealing is provably invalid so the
-    /// caller can penalize the dealer. A duplicate dealing is a benign
-    /// [`Verdict::Skip`].
+    /// A previously processed dealer returns its cached acknowledgement. A first
+    /// message returns the exact [`DkgDealerMessageError`] for an unexpected
+    /// dealer, invalid commitment degree, mismatched reshare commitment, or
+    /// invalid private share. Rejected messages are not persisted.
     pub async fn handle<E, SS, D>(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, D>,
@@ -649,38 +664,34 @@ impl<V: Variant, C: Signer> Player<V, C> {
         dealer: C::PublicKey,
         public: DealerPubMsg<V>,
         private: DealerPrivMsg,
-    ) -> Verdict<PlayerAck<C::PublicKey>>
+    ) -> Result<PlayerAck<C::PublicKey>, DkgDealerMessageError>
     where
         E: BufferPooler + Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
         D: Directory<C::PublicKey>,
     {
         if let Some(ack) = self.acks.get(&dealer) {
-            return Verdict::Valid(ack.clone());
+            return Ok(ack.clone());
         }
-        let ack = match self.player.dealer_message::<N3f1>(
-            dealer.clone(),
-            public.clone(),
-            private.clone(),
-        ) {
-            Verdict::Valid(ack) => ack,
-            Verdict::Skip => return Verdict::Skip,
-            Verdict::Fault => return Verdict::Fault,
-        };
+        let ack = self
+            .player
+            .dealer_message::<N3f1>(dealer.clone(), public.clone(), private.clone())?
+            .expect("processed dealer must have a cached acknowledgement");
         store
             .append_dealing(epoch, dealer.clone(), public, private)
             .await;
         self.acks.insert(dealer, ack.clone());
-        Verdict::Valid(ack)
+        Ok(ack)
     }
 
     /// Finalizes and returns the public output plus local share.
+    #[allow(clippy::type_complexity)]
     pub fn finalize<M, B>(
         self,
         rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<(Output<V, C::PublicKey>, group::Share), DkgError>
+    ) -> Result<(Output<V, C::PublicKey>, group::Share), DkgFinalizeError<C::PublicKey>>
     where
         M: Faults,
         B: BatchVerifier<PublicKey = C::PublicKey>,
@@ -701,7 +712,7 @@ mod tests {
     use commonware_cryptography::{
         Signer,
         bls12381::{
-            dkg::feldman_desmedt::{Info, Output, deal},
+            dkg::feldman_desmedt::{Info, Output, Reveal, deal},
             primitives::{sharing::Mode, variant::MinPk},
         },
         ed25519::{PrivateKey, PublicKey},
@@ -786,6 +797,7 @@ mod tests {
                 0,
                 None,
                 Mode::NonZeroCounter,
+                Reveal::V1,
                 players.clone(),
                 players.clone(),
             )
@@ -812,7 +824,9 @@ mod tests {
                 .shares_to_distribute()
                 .find(|(recipient, _, _)| *recipient == player_pk)
                 .expect("dealing for player");
-            let Verdict::Valid(ack) = player
+            let duplicate_public = public.clone();
+            let duplicate_private = private.clone();
+            let ack = player
                 .handle(
                     &mut store,
                     Epoch::zero(),
@@ -821,14 +835,52 @@ mod tests {
                     private,
                 )
                 .await
-            else {
-                panic!("ack");
-            };
+                .expect("valid dealing");
+            let duplicate_ack = player
+                .handle(
+                    &mut store,
+                    Epoch::zero(),
+                    dealer_pk.clone(),
+                    duplicate_public.clone(),
+                    duplicate_private.clone(),
+                )
+                .await
+                .expect("cached dealing");
+            assert_eq!(duplicate_ack, ack);
+
+            // Sender membership and signature failures remain visible to the
+            // authenticated transport policy without consuming pending state.
+            let stranger = PrivateKey::from_seed(u64::MAX).public_key();
             assert!(matches!(
                 dealer
-                    .handle(&mut store, Epoch::zero(), player_pk.clone(), ack)
+                    .handle(&mut store, Epoch::zero(), stranger, ack.clone())
                     .await,
-                Verdict::Valid(())
+                Err(DkgAckError::UnexpectedPlayer)
+            ));
+            assert!(matches!(
+                dealer
+                    .handle(
+                        &mut store,
+                        Epoch::zero(),
+                        signers[2].public_key(),
+                        ack.clone(),
+                    )
+                    .await,
+                Err(DkgAckError::InvalidAck)
+            ));
+
+            // Acknowledgements distinguish new and duplicate outcomes.
+            assert!(matches!(
+                dealer
+                    .handle(&mut store, Epoch::zero(), player_pk.clone(), ack.clone())
+                    .await,
+                Ok(AckOutcome::Recorded)
+            ));
+            assert!(matches!(
+                dealer
+                    .handle(&mut store, Epoch::zero(), player_pk.clone(), ack.clone())
+                    .await,
+                Ok(AckOutcome::Duplicate)
             ));
             assert!(dealer.finalize::<N3f1>());
             let signed = dealer.finalized().expect("signed log");
@@ -836,18 +888,31 @@ mod tests {
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);
 
-            let store = init_store(context.child("restart"), "replay", secret_store).await;
+            let mut store = init_store(context.child("restart"), "replay", secret_store).await;
+
             // The current epoch is not persisted; the setup state re-derives it from
             // finalized blocks, so a restarted store has no current epoch on its own.
             assert!(store.current().is_none());
+
             // The public recovery journal is replayed.
             assert_eq!(store.dealings(Epoch::zero()).len(), 1);
             assert_eq!(store.acks(Epoch::zero()).len(), 1);
             assert_eq!(store.logs(Epoch::zero()).len(), 1);
-            let replayed_player = store
+            let mut replayed_player = store
                 .create_player::<PrivateKey, N3f1>(Epoch::zero(), signers[1].clone(), info)
                 .expect("player");
             assert_eq!(replayed_player.acks.len(), 1);
+            let replayed_ack = replayed_player
+                .handle(
+                    &mut store,
+                    Epoch::zero(),
+                    dealer_pk,
+                    duplicate_public,
+                    duplicate_private,
+                )
+                .await
+                .expect("replayed dealing");
+            assert_eq!(replayed_ack, ack);
         });
     }
 
@@ -869,6 +934,7 @@ mod tests {
                 0,
                 None,
                 Mode::NonZeroCounter,
+                Reveal::V1,
                 players.clone(),
                 players.clone(),
             )
@@ -893,18 +959,15 @@ mod tests {
             // n=4, f=1 the log tolerates at most one reveal, so three players ack.
             for idx in [1usize, 2, 3] {
                 let player_pk = signers[idx].public_key();
-                let mut player = store
-                    .create_player::<PrivateKey, N3f1>(
-                        Epoch::zero(),
-                        signers[idx].clone(),
-                        info.clone(),
-                    )
-                    .expect("player");
+                let mut player = Player {
+                    player: CryptoPlayer::new(info.clone(), signers[idx].clone()).expect("player"),
+                    acks: BTreeMap::new(),
+                };
                 let (_, public, private) = dealer
                     .shares_to_distribute()
                     .find(|(recipient, _, _)| *recipient == player_pk)
                     .expect("dealing for player");
-                let Verdict::Valid(ack) = player
+                let ack = player
                     .handle(
                         &mut store,
                         Epoch::zero(),
@@ -913,14 +976,12 @@ mod tests {
                         private,
                     )
                     .await
-                else {
-                    panic!("ack");
-                };
+                    .expect("valid dealing");
                 assert!(matches!(
                     dealer
                         .handle(&mut store, Epoch::zero(), player_pk, ack)
                         .await,
-                    Verdict::Valid(())
+                    Ok(AckOutcome::Recorded)
                 ));
             }
             assert!(dealer.finalize::<N3f1>());
@@ -972,6 +1033,7 @@ mod tests {
                 0,
                 None,
                 Mode::NonZeroCounter,
+                Reveal::V1,
                 players.clone(),
                 players,
             )
@@ -998,12 +1060,10 @@ mod tests {
                 .shares_to_distribute()
                 .find(|(recipient, _, _)| *recipient == player_pk)
                 .expect("dealing for player");
-            assert!(matches!(
-                player
-                    .handle(&mut store, Epoch::zero(), dealer_pk, public, private)
-                    .await,
-                Verdict::Valid(_)
-            ));
+            player
+                .handle(&mut store, Epoch::zero(), dealer_pk, public, private)
+                .await
+                .expect("valid dealing");
             assert_eq!(store.dealings(Epoch::zero()).len(), 1);
             drop(store);
 

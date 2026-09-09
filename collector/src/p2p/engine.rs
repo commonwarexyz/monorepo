@@ -123,7 +123,7 @@ where
         );
 
         // Create futures pool
-        let mut processed: Pool<Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
+        let mut processed: Pool<'_, Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {

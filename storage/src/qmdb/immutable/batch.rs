@@ -4,7 +4,7 @@ use super::Immutable;
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{Family, Location},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
@@ -17,6 +17,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_utils::iter::zip_eq;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -241,7 +242,7 @@ where
 
         if !db_keys.is_empty() {
             let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }
@@ -295,8 +296,8 @@ where
         let total_size = base + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Leaf and node hashing dominate merkleization, so run them as one job through the
+        // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .journal
             .merkleize(self.journal_batch, ops, inactive_peaks)
@@ -342,6 +343,74 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Return the operations this batch appends to the log and the location of the first.
+    #[allow(clippy::type_complexity)]
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, K, V>>>) {
+        (
+            self.bounds.base.size,
+            Arc::clone(self.journal_batch.items()),
+        )
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The pair verifies against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor.
+    pub fn proof<E, C, H, T>(
+        &self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Proof<F, D>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        H: Hasher<Digest = D>,
+        T: Translator,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        db.journal
+            .speculative_proof(&self.journal_batch, inactive_peaks)
+            .map_err(Into::into)
+    }
+
+    /// The Merkle frontier at the first operation returned by [`Self::operations`]
+    /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
+    /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor.
+    pub fn pinned_nodes<E, C, H, T>(
+        &self,
+        db: &Immutable<F, E, K, V, C, H, T, S>,
+    ) -> Result<Vec<D>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, K, V>>,
+        H: Hasher<Digest = D>,
+        T: Translator,
+    {
+        db.journal
+            .speculative_pinned_nodes(&self.journal_batch)
+            .map_err(Into::into)
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
@@ -432,7 +501,7 @@ where
 
         if !db_keys.is_empty() {
             let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }

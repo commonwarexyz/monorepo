@@ -84,9 +84,6 @@ pub struct Db<
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location<F>,
 
-    /// The location of the last commit operation.
-    pub(crate) last_commit_loc: Location<F>,
-
     /// An index of all currently active operations, mapping each key to the location in the
     /// log containing its most recent update.
     ///
@@ -108,7 +105,7 @@ pub struct Db<
     ///
     /// - `bitmap.len() == log.size()`.
     /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
-    /// - CommitFloor: only the current `last_commit_loc` carries bit = 1; earlier commits
+    /// - CommitFloor: only the current last commit carries bit = 1; earlier commits
     ///   are 0.
     pub(crate) bitmap: bitmap::Prunable<N>,
 
@@ -170,7 +167,8 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
-        match self.log.read(*self.last_commit_loc).await? {
+        // The log always ends with a commit operation.
+        match self.log.read(*self.log.size() - 1).await? {
             Operation::CommitFloor(metadata, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
         }
@@ -183,7 +181,7 @@ where
 
     /// The [`Commitment`] for the database's current state.
     pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
-        Commitment::new(self.last_commit_loc + 1, self.root)
+        Commitment::new(self.log.size(), self.root)
     }
 
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
@@ -388,7 +386,7 @@ where
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
-            *self.last_commit_loc,
+            bounds.end - 1,
         );
     }
 
@@ -514,7 +512,7 @@ where
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds both the authenticated log and the in-memory index, then restores metadata
-    /// (`last_commit_loc`, `inactivity_floor_loc`, `active_keys`) for the new tip commit.
+    /// (`inactivity_floor_loc`, `active_keys`) for the new tip commit.
     ///
     /// # Errors
     ///
@@ -537,13 +535,13 @@ where
         skip_all,
         fields(
             target_size = *size,
-            prev_size = *self.last_commit_loc + 1,
+            prev_size = *self.log.size(),
         ),
     )]
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
+        let current_size = *self.log.size();
 
         if rewind_size == current_size {
             return Ok(self);
@@ -659,7 +657,7 @@ where
             }
         }
 
-        // The rewound tail's preceding op (validated above) is the new `last_commit_loc`.
+        // The rewound tail's preceding op (validated above) is the new last commit.
         // Set its bit to 1 to match the CommitFloor convention; previous intermediate
         // commits in the truncated range stay at 0 from `truncate`. `rewind_size > 0` is
         // guaranteed by the early-return at the top of this function.
@@ -671,7 +669,6 @@ where
             .ok_or(Error::DataCorrupted(
                 "active_keys underflow while rewinding",
             ))?;
-        self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
         self.root = self
             .log
@@ -709,14 +706,11 @@ where
         // Share the log so the index build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
         let log = Arc::new(log);
-        let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
+        let (inactivity_floor_loc, active_keys, bitmap) = {
             let bounds = log.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
-            );
+            if bounds.end == 0 {
+                return Err(Error::HistoricalFloorPruned(Location::new(bounds.end)));
+            }
             let inactivity_floor_loc =
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
                     .await?;
@@ -758,7 +752,7 @@ where
                 bitmap.push(is_active);
             }
 
-            (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
+            (inactivity_floor_loc, active_keys, bitmap)
         };
 
         // The build has returned, so every worker clone of the log is dropped. Reclaim it.
@@ -779,7 +773,6 @@ where
             root,
             inactivity_floor_loc,
             index,
-            last_commit_loc,
             active_keys,
             bitmap,
             metrics,
@@ -795,7 +788,7 @@ where
         level = "info",
         skip_all,
         fields(
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),
@@ -822,7 +815,7 @@ where
         level = "info",
         skip_all,
         fields(
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),
@@ -842,7 +835,7 @@ where
         level = "info",
         skip_all,
         fields(
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),

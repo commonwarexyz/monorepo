@@ -7,6 +7,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig},
 };
 use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::{iter::NonEmpty, non_empty};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroUsize;
 
@@ -107,26 +108,26 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::CombinePublicKeysMinPk { public_keys } => {
-            if !public_keys.is_empty() {
-                let _result = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
+            if let Some(public_keys) = NonEmpty::try_new(public_keys.iter()) {
+                let _result = aggregate::combine_public_keys::<MinPk, _>(public_keys);
             }
         }
 
         FuzzOperation::CombinePublicKeysMinSig { public_keys } => {
-            if !public_keys.is_empty() {
-                let _result = aggregate::combine_public_keys::<MinSig, _>(&public_keys);
+            if let Some(public_keys) = NonEmpty::try_new(public_keys.iter()) {
+                let _result = aggregate::combine_public_keys::<MinSig, _>(public_keys);
             }
         }
 
         FuzzOperation::CombineSignaturesMinPk { signatures } => {
-            if !signatures.is_empty() {
-                let _result = aggregate::combine_signatures::<MinPk, _>(&signatures);
+            if let Some(signatures) = NonEmpty::try_new(signatures.iter()) {
+                let _result = aggregate::combine_signatures::<MinPk, _>(signatures);
             }
         }
 
         FuzzOperation::CombineSignaturesMinSig { signatures } => {
-            if !signatures.is_empty() {
-                let _result = aggregate::combine_signatures::<MinSig, _>(&signatures);
+            if let Some(signatures) = NonEmpty::try_new(signatures.iter()) {
+                let _result = aggregate::combine_signatures::<MinSig, _>(signatures);
             }
         }
 
@@ -136,9 +137,9 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            if !public_keys.is_empty() {
-                let agg_pk = aggregate::combine_public_keys::<MinPk, _>(&public_keys);
-                let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
+            if let Some(public_keys) = NonEmpty::try_new(public_keys.iter()) {
+                let agg_pk = aggregate::combine_public_keys::<MinPk, _>(public_keys);
+                let agg_sig = aggregate::combine_signatures::<MinPk, _>(non_empty![&signature]);
                 let _ = aggregate::verify_same_message::<MinPk>(
                     &agg_pk, &namespace, &message, &agg_sig,
                 );
@@ -151,9 +152,9 @@ fn fuzz(op: FuzzOperation) {
             message,
             signature,
         } => {
-            if !public_keys.is_empty() {
-                let agg_pk = aggregate::combine_public_keys::<MinSig, _>(&public_keys);
-                let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
+            if let Some(public_keys) = NonEmpty::try_new(public_keys.iter()) {
+                let agg_pk = aggregate::combine_public_keys::<MinSig, _>(public_keys);
+                let agg_sig = aggregate::combine_signatures::<MinSig, _>(non_empty![&signature]);
                 let _ = aggregate::verify_same_message::<MinSig>(
                     &agg_pk, &namespace, &message, &agg_sig,
                 );
@@ -173,11 +174,17 @@ fn fuzz(op: FuzzOperation) {
 
             let combined_msg = if concurrency > 1 {
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                aggregate::combine_messages::<MinPk, _>(&messages_refs, &strategy)
+                aggregate::combine_messages::<MinPk, _>(
+                    non_empty![@messages_refs.iter()],
+                    &strategy,
+                )
             } else {
-                aggregate::combine_messages::<MinPk, _>(&messages_refs, &Sequential)
+                aggregate::combine_messages::<MinPk, _>(
+                    non_empty![@messages_refs.iter()],
+                    &Sequential,
+                )
             };
-            let agg_sig = aggregate::combine_signatures::<MinPk, _>([&signature]);
+            let agg_sig = aggregate::combine_signatures::<MinPk, _>(non_empty![&signature]);
             let _ = aggregate::verify_same_signer::<MinPk>(&public_key, &combined_msg, &agg_sig);
         }
 
@@ -194,11 +201,17 @@ fn fuzz(op: FuzzOperation) {
 
             let combined_msg = if concurrency > 1 {
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                aggregate::combine_messages::<MinSig, _>(&messages_refs, &strategy)
+                aggregate::combine_messages::<MinSig, _>(
+                    non_empty![@messages_refs.iter()],
+                    &strategy,
+                )
             } else {
-                aggregate::combine_messages::<MinSig, _>(&messages_refs, &Sequential)
+                aggregate::combine_messages::<MinSig, _>(
+                    non_empty![@messages_refs.iter()],
+                    &Sequential,
+                )
             };
-            let agg_sig = aggregate::combine_signatures::<MinSig, _>([&signature]);
+            let agg_sig = aggregate::combine_signatures::<MinSig, _>(non_empty![&signature]);
             let _ = aggregate::verify_same_signer::<MinSig>(&public_key, &combined_msg, &agg_sig);
         }
     }

@@ -94,7 +94,7 @@ impl<V: Variant> Subscriptions<V> {
         span: Span,
         key: KeyFor<V>,
         response: oneshot::Sender<Arc<V::Block>>,
-        waiters: &mut AbortablePool<Result<Arc<V::Block>, KeyFor<V>>>,
+        waiters: &mut AbortablePool<'_, Result<Arc<V::Block>, KeyFor<V>>>,
         buffer: &Buf,
     ) {
         let subscriber = Subscriber {
@@ -144,7 +144,7 @@ mod tests {
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
-    type TestWaiters = AbortablePool<Result<Arc<TestBlock>, KeyFor<TestVariant>>>;
+    type TestWaiters = AbortablePool<'static, Result<Arc<TestBlock>, KeyFor<TestVariant>>>;
     type Subscriber = oneshot::Sender<Arc<TestBlock>>;
     type Subscribers = Arc<Mutex<Vec<Subscriber>>>;
 

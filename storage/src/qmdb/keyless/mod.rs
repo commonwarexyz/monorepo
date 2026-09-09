@@ -114,9 +114,6 @@ where
     /// Cached canonical operations root.
     root: H::Digest,
 
-    /// The location of the last commit, if any.
-    last_commit_loc: Location<F>,
-
     /// The inactivity floor declared by the last committed batch. Operations at locations below
     /// this value are considered inactive by the application and may be pruned.
     inactivity_floor_loc: Location<F>,
@@ -187,7 +184,6 @@ where
         let db = Self {
             journal,
             root,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };
@@ -247,11 +243,6 @@ where
         Ok(result)
     }
 
-    /// Returns the location of the last commit.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
-    }
-
     /// Returns the inactivity floor declared by the last committed batch.
     pub const fn inactivity_floor_loc(&self) -> Location<F> {
         self.inactivity_floor_loc
@@ -271,7 +262,7 @@ where
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
-            *self.last_commit_loc,
+            bounds.end - 1,
         );
     }
 
@@ -284,7 +275,8 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
-        let op = self.journal.read(*self.last_commit_loc).await?;
+        // The journal always ends with a commit operation.
+        let op = self.journal.read(*self.journal.size() - 1).await?;
         let Operation::Commit(metadata, _floor) = op else {
             return Ok(None);
         };
@@ -411,7 +403,7 @@ where
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
+        let current_size = *self.journal.size();
         if rewind_size == current_size {
             return Ok(self);
         }
@@ -436,10 +428,9 @@ where
             floor
         };
 
-        // Journal rewind happens before in-memory commit-location updates. If a later step fails,
+        // Journal rewind happens before the in-memory floor and root updates. If a later step fails,
         // this handle may be internally diverged and must be dropped by the caller.
         self.journal = self.journal.rewind(rewind_size).await?;
-        self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
         let inactive_peaks = F::inactive_peaks(size, rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
@@ -493,7 +484,7 @@ where
 
     /// The [`Commitment`](batch_chain::Commitment) for the database's current state.
     pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root)
+        batch_chain::Commitment::new(self.journal.size(), self.root)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -558,11 +549,10 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
-        let start_loc = self.last_commit_loc + 1;
+        let start_loc = self.journal.size();
 
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
         let end_loc = batch.bounds.tip.size;
@@ -630,7 +620,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::qmdb::verify_proof;
+    use crate::qmdb::{verify_proof, verify_proof_and_pinned_nodes};
     use commonware_codec::Encode as _;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
@@ -660,10 +650,49 @@ pub(crate) mod tests {
         }
     }
 
+    /// Emits the named test against `mmr::Family` and `mmb::Family`.
+    macro_rules! keyless_tests {
+        ($($name:ident => $scenario:ident, $fixture:ident;)*) => {
+            $(
+                #[test_traced]
+                fn $name() {
+                    deterministic::Runner::default().start(|ctx| async move {
+                        keyless_tests!(@fixture $fixture, $scenario, mmr, ctx);
+                    });
+                }
+            )*
+            paste::paste! {
+                $(
+                    #[test_traced]
+                    fn [<$name _mmb>]() {
+                        deterministic::Runner::default().start(|ctx| async move {
+                            keyless_tests!(@fixture $fixture, $scenario, mmb, ctx);
+                        });
+                    }
+                )*
+            }
+        };
+        (@fixture db, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            tests::$scenario(db).await;
+        };
+        (@fixture reopen, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            tests::$scenario($ctx, db, reopen::<$family::Family>()).await;
+        };
+        (@fixture reopen_indexed, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db =
+                open_db::<$family::Family>($ctx.child("db").with_attribute("index", 1)).await;
+            tests::$scenario($ctx, db, reopen::<$family::Family>()).await;
+        };
+    }
+
+    pub(super) use keyless_tests;
+
     /// Reads stay exact after the ancestor batches are dropped, because the
     /// journal batch retains every ancestor's items.
     #[boxed]
-    pub(crate) async fn test_keyless_dropped_ancestor_reads<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_dropped_ancestor_reads<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -731,7 +760,7 @@ pub(crate) mod tests {
     /// A surviving child chain merkleizes across a prune whose floor passed the chain
     /// base without losing the nodes its graft needs.
     #[boxed]
-    pub(crate) async fn test_keyless_merkleize_across_prune<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_merkleize_across_prune<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -791,7 +820,7 @@ pub(crate) mod tests {
     /// Once a sibling batch is applied, reads and merkleization through the losing fork
     /// refuse with [`Error::StaleRead`], while applying it is separately rejected.
     #[boxed]
-    pub(crate) async fn test_keyless_stale_fork_refuses<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_stale_fork_refuses<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -851,7 +880,7 @@ pub(crate) mod tests {
     /// A proof snapshot stays byte-stable and verifiable against its captured root while the
     /// live database applies batches, commits, and prunes past it.
     #[boxed]
-    pub(crate) async fn test_keyless_db_snapshot<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_snapshot<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -936,7 +965,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_empty<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_empty<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -950,7 +979,7 @@ pub(crate) mod tests {
         assert_eq!(bounds.end, 1); // initial commit should exist
         assert_eq!(bounds.start, Location::new(0));
         assert_eq!(db.get_metadata().await.unwrap(), None);
-        assert_eq!(db.last_commit_loc(), Location::new(0));
+        assert_eq!(db.bounds().end - 1, Location::new(0));
 
         // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
         let root = db.root();
@@ -987,19 +1016,157 @@ pub(crate) mod tests {
         assert_eq!(db.bounds().end, 2); // commit op should remain after re-open.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), Location::new(1));
+        assert_eq!(db.bounds().end - 1, Location::new(1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, for a db-based
+    /// batch and for a chained batch applied after its ancestor.
+    #[boxed]
+    pub(crate) async fn run_operations_match_applied_log<F: Family, V, C, H, S: Strategy>(
+        db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared + PartialEq + core::fmt::Debug,
+    {
+        let seed = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .append(V::Value::make(2))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        let (seed_start, seed_ops) = seed.operations();
+        let seed_root = seed.root();
+        let seed_proof = seed.proof(&db).unwrap();
+        let seed_pins = seed.pinned_nodes(&db).unwrap();
+        let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+        assert_eq!(seed_start, seed_range.start);
+        assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+        // A chained batch's operations are its own suffix only.
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        let child = parent
+            .new_batch::<H>()
+            .append(V::Value::make(4))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        let (parent_start, parent_ops) = parent.operations();
+        let (child_start, child_ops) = child.operations();
+        let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_pins, child_pins) = (
+            parent.pinned_nodes(&db).unwrap(),
+            child.pinned_nodes(&db).unwrap(),
+        );
+        let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+        let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(parent_start, parent_range.start);
+        assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+        assert_eq!(child_start, child_range.start);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+        // A write-free batch still captures its commit-only suffix.
+        let empty = db
+            .new_batch()
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        let (empty_start, empty_ops) = empty.operations();
+        let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let empty_pins = empty.pinned_nodes(&db).unwrap();
+        let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+        assert_eq!(empty_start, empty_range.start);
+        assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root with and without the pins.
+        for (start, ops, proof, pins, root) in [
+            (seed_start, seed_ops, seed_proof, seed_pins, seed_root),
+            (
+                parent_start,
+                parent_ops,
+                parent_proof,
+                parent_pins,
+                parent_root,
+            ),
+            (child_start, child_ops, child_proof, child_pins, child_root),
+            (empty_start, empty_ops, empty_proof, empty_pins, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<H, _, _>(&proof, start, &ops, &root));
+            assert!(verify_proof_and_pinned_nodes::<H, _, _>(
+                &proof, start, &ops, &pins, &root
+            ));
+        }
+
+        // Flushing the applied batch prunes the store to its peaks. The late batch's base is
+        // mid-mountain, so its artifacts are refused rather than returned unverifiable.
+        let late = db
+            .new_batch()
+            .append(V::Value::make(5))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        assert!(matches!(
+            late.proof(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+        assert!(matches!(
+            late.pinned_nodes(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+
+        // A batch built on the flushed store reads every node below it from the pinned peaks.
+        let flushed = db
+            .new_batch()
+            .append(V::Value::make(6))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await
+            .unwrap();
+        let (flushed_start, flushed_ops) = flushed.operations();
+        let flushed_root = flushed.root();
+        let flushed_proof = flushed.proof(&db).unwrap();
+        let flushed_pins = flushed.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<H, _, _>(
+            &flushed_proof,
+            flushed_start,
+            &flushed_ops,
+            &flushed_pins,
+            &flushed_root
+        ));
+        let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+        assert_eq!(flushed_start, flushed_range.start);
+        assert_eq!(
+            *flushed_start + flushed_ops.len() as u64,
+            *flushed_range.end
+        );
 
         db.destroy().await.unwrap();
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_commit_after_sync_recovery<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_commit_after_sync_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1048,7 +1215,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_build_basic<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_build_basic<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1100,7 +1267,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1179,7 +1346,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_proof<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_proof<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1223,7 +1390,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_metadata<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_metadata<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1253,7 +1420,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_pruning<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_pruning<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1283,7 +1450,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.last_commit_loc(), first_commit_loc);
+        assert_eq!(db.bounds().end - 1, first_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), first_commit_loc);
 
         // Append one more, advancing the floor with it.
@@ -1312,7 +1479,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_empty_db_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_empty_db_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1368,7 +1535,7 @@ pub(crate) mod tests {
         let mut db = reopen(context.child("db").with_attribute("index", 5)).await;
         assert_eq!(db.bounds().end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), Location::new(0));
+        assert_eq!(db.bounds().end - 1, Location::new(0));
 
         // Apply the ops one last time but fully commit them this time, then clean up.
         {
@@ -1391,13 +1558,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_replay_with_trailing_appends<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_replay_with_trailing_appends<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1439,7 +1600,7 @@ pub(crate) mod tests {
         );
         assert_eq!(db.root(), committed_root, "Root should match last commit");
         assert_eq!(
-            db.last_commit_loc(),
+            db.bounds().end - 1,
             committed_size - 1,
             "Last commit location should be correct"
         );
@@ -1490,7 +1651,7 @@ pub(crate) mod tests {
             "Root should match last commit after multiple appends"
         );
         assert_eq!(
-            db.last_commit_loc(),
+            db.bounds().end - 1,
             new_committed_size - 1,
             "Last commit location should be correct after multiple appends"
         );
@@ -1501,7 +1662,7 @@ pub(crate) mod tests {
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns
     /// results consistent with individual `get` calls.
     #[boxed]
-    pub(crate) async fn test_keyless_get_many<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_get_many<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1555,7 +1716,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_chained<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_chained<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1597,7 +1758,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_stale_batch<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_stale_batch<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1623,7 +1784,7 @@ pub(crate) mod tests {
         let (db, _) = db.apply_batch(batch_a).await.unwrap();
         let db = db.commit().await.unwrap();
         let root = db.root();
-        let last_commit_loc = db.last_commit_loc();
+        let last_commit_loc = db.bounds().end - 1;
 
         let result = db.apply_batch(batch_b).await;
         assert!(matches!(result, Err(Error::StaleBatch)));
@@ -1631,12 +1792,12 @@ pub(crate) mod tests {
         // The rejection mutated nothing: reopening recovers the committed state.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), last_commit_loc);
+        assert_eq!(db.bounds().end - 1, last_commit_loc);
         db.destroy().await.unwrap();
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_partial_ancestor_commit<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1677,7 +1838,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_delayed_merkleize_after_ancestor_apply<
+    pub(crate) async fn run_delayed_merkleize_after_ancestor_apply<
         F: Family,
         V,
         C,
@@ -1716,7 +1877,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_to_batch<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_to_batch<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1751,7 +1912,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_non_empty_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_non_empty_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -1769,7 +1930,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
+            let new_commit = db.bounds().end + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await.unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1781,7 +1942,7 @@ pub(crate) mod tests {
         let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), op_count - 1);
+        assert_eq!(db.bounds().end - 1, op_count - 1);
         drop(db);
 
         // Insert many operations without commit, then simulate failure.
@@ -1801,7 +1962,7 @@ pub(crate) mod tests {
 
         // Repeat after pruning to the last commit.
         let db = reopen(context.child("db").with_attribute("index", 3)).await;
-        let last_commit = db.last_commit_loc();
+        let last_commit = db.bounds().end - 1;
         let db = db.prune(last_commit).await.unwrap();
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
@@ -1838,13 +1999,12 @@ pub(crate) mod tests {
         let bounds = db.bounds();
         assert!(bounds.end > op_count);
         assert_ne!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), bounds.end - 1);
 
         db.destroy().await.unwrap();
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_proof_comprehensive<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_proof_comprehensive<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1917,7 +2077,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_proof_with_pruning<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_proof_with_pruning<F: Family, V, C, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, Sha256, S>,
         reopen: Reopen<TestKeyless<F, V, C, Sha256, S>>,
@@ -1932,7 +2092,7 @@ pub(crate) mod tests {
             for i in 0u64..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
+            let new_commit = db.bounds().end + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await.unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1942,7 +2102,7 @@ pub(crate) mod tests {
             for i in ELEMENTS..ELEMENTS * 2 {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
+            let new_commit = db.bounds().end + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await.unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1996,7 +2156,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_get_out_of_bounds<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_get_out_of_bounds<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2030,7 +2190,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_get<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_batch_get<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2072,7 +2232,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_stacked_get<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_stacked_get<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2102,7 +2262,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_speculative_root<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_batch_speculative_root<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2136,7 +2296,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_merkleized_batch_get<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_merkleized_batch_get<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2174,13 +2334,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_chained_apply_sequential<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_batch_chained_apply_sequential<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2220,7 +2374,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_many_sequential<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_many_sequential<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2266,7 +2420,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_empty<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_batch_empty<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2300,7 +2454,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_chained_merkleized_get<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_chained_merkleized_get<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2346,7 +2500,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_batch_large<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_batch_large<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2388,7 +2542,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_stale_batch_chained<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_stale_batch_chained<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2447,12 +2601,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_sequential_commit_parent_then_child<
-        F: Family,
-        V,
-        C,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_sequential_commit_parent_then_child<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2479,7 +2628,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family, V, C, S: Strategy>(
+    pub(crate) async fn run_stale_batch_child_before_parent<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2507,12 +2656,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_child_root_matches_pending_and_committed<
-        F: Family,
-        V,
-        C,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_child_root_matches_pending_and_committed<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2564,7 +2708,7 @@ pub(crate) mod tests {
         // Tests that don't specifically exercise floor behavior advance the floor to the new
         // commit location, so pruning up to the last commit works analogously to the pre-floor
         // semantics.
-        let base_size = *db.last_commit_loc() + 1;
+        let base_size = *db.bounds().end;
         let appends_iter: Vec<_> = values.into_iter().collect();
         let new_commit_loc = Location::new(base_size + appends_iter.len() as u64);
         let mut batch = db.new_batch();
@@ -2581,7 +2725,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_recovery<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_rewind_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2606,7 +2750,7 @@ pub(crate) mod tests {
 
         let root_before = db.root();
         let size_before = db.bounds().end;
-        let commit_before = db.last_commit_loc();
+        let commit_before = db.bounds().end - 1;
         assert_eq!(size_before, first_range.end);
 
         let value_c = V::Value::make(4);
@@ -2620,7 +2764,7 @@ pub(crate) mod tests {
         let db = db.rewind(size_before).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc(), commit_before);
+        assert_eq!(db.bounds().end - 1, commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
         assert_eq!(
             db.get(Location::new(1)).await.unwrap(),
@@ -2642,7 +2786,7 @@ pub(crate) mod tests {
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc(), commit_before);
+        assert_eq!(db.bounds().end - 1, commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(
             db.get(Location::new(1)).await.unwrap(),
@@ -2680,13 +2824,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_pruned_target_errors<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_rewind_pruned_target_errors<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2708,7 +2846,7 @@ pub(crate) mod tests {
 
             (db, _) =
                 commit_appends(db, (0..16).map(|i| V::Value::make(round * 100 + i)), None).await;
-            let last_commit = db.last_commit_loc();
+            let last_commit = db.bounds().end - 1;
             db = db.prune(last_commit).await.unwrap();
 
             if db.bounds().start > first_range.start {
@@ -2739,7 +2877,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_tracking<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_floor_tracking<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2795,7 +2933,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_regression_rejected<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_floor_regression_rejected<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2817,7 +2955,7 @@ pub(crate) mod tests {
         let db = db.commit().await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc();
+        let last_commit_before = db.bounds().end - 1;
 
         // Try to commit with a lower floor; apply_batch rejects.
         let merkleized = db
@@ -2837,20 +2975,14 @@ pub(crate) mod tests {
         // Reopen the partition and verify the rejected batch persisted nothing.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
-        assert_eq!(db.last_commit_loc(), last_commit_before);
+        assert_eq!(db.bounds().end - 1, last_commit_before);
         assert_eq!(db.root(), root_before);
 
         db.destroy().await.unwrap();
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_floor_beyond_commit_loc_rejected<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -2864,7 +2996,7 @@ pub(crate) mod tests {
         // A floor > 3 (the commit location) is invalid — even floor == 4 (one past the commit)
         // is rejected so a subsequent prune cannot remove the last readable commit.
         let floor = db.inactivity_floor_loc();
-        let last_commit_loc = db.last_commit_loc();
+        let last_commit_loc = db.bounds().end - 1;
         let root = db.root();
         let merkleized = db
             .new_batch()
@@ -2884,7 +3016,7 @@ pub(crate) mod tests {
         // Reopen and confirm nothing persisted.
         let db = reopen(context.child("reopen_boundary")).await;
         assert_eq!(db.inactivity_floor_loc(), floor);
-        assert_eq!(db.last_commit_loc(), last_commit_loc);
+        assert_eq!(db.bounds().end - 1, last_commit_loc);
         assert_eq!(db.root(), root);
 
         // Boundary: floor == total_size (= commit_loc + 1) is also rejected.
@@ -2905,7 +3037,7 @@ pub(crate) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_restores_floor<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_rewind_restores_floor<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -2924,7 +3056,7 @@ pub(crate) mod tests {
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = db.last_commit_loc() + 1;
+        let rewind_target = db.bounds().end;
 
         // Second commit: floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -2957,7 +3089,7 @@ pub(crate) mod tests {
     /// Floor is embedded in the Commit operation and therefore in the Merkle root: two databases
     /// with identical appends but different floors must produce different roots.
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_changes_root<F: Family, V, C, H, S: Strategy>(
+    pub(crate) async fn run_floor_changes_root<F: Family, V, C, H, S: Strategy>(
         db_a: TestKeyless<F, V, C, H, S>,
         db_b: TestKeyless<F, V, C, H, S>,
     ) where
@@ -2998,13 +3130,7 @@ pub(crate) mod tests {
 
     /// A floor equal to the commit operation's location is on the tight boundary of acceptance.
     #[boxed]
-    pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_floor_at_commit_loc_accepted<F: Family, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -3030,13 +3156,7 @@ pub(crate) mod tests {
 
     /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
     #[boxed]
-    pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<
-        F: Family,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_rewind_after_reopen_with_floor<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -3057,7 +3177,7 @@ pub(crate) mod tests {
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = db.last_commit_loc() + 1;
+        let rewind_target = db.bounds().end;
 
         // Second commit: 2 appends + commit, floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -3078,7 +3198,7 @@ pub(crate) mod tests {
         // Rewind to the first commit; floor should restore to floor_a.
         let db = db.rewind(rewind_target).await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), floor_a);
-        assert_eq!(db.last_commit_loc(), Location::new(3));
+        assert_eq!(db.bounds().end - 1, Location::new(3));
 
         // Commit the rewind so it's durable, then reopen and confirm the floor again.
         db.commit().await.unwrap();
@@ -3093,13 +3213,7 @@ pub(crate) mod tests {
     /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
     /// invariant.
     #[boxed]
-    pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<
-        F,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_ancestor_floor_regression_rejected<F, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -3126,7 +3240,7 @@ pub(crate) mod tests {
             .unwrap();
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc();
+        let last_commit_before = db.bounds().end - 1;
         let floor_before = db.inactivity_floor_loc();
 
         let Err(err) = db.apply_batch(child).await else {
@@ -3140,7 +3254,7 @@ pub(crate) mod tests {
         // Reopen the partition and verify the rejected chain persisted nothing.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc(), last_commit_before);
+        assert_eq!(db.bounds().end - 1, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
@@ -3149,13 +3263,7 @@ pub(crate) mod tests {
     /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
     /// rejected — identifying the ancestor's bound, not the tip's.
     #[boxed]
-    pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<
-        F,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_ancestor_floor_beyond_commit_loc_rejected<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,
@@ -3195,7 +3303,7 @@ pub(crate) mod tests {
     /// readable, the root is preserved, reopen recovers `inactivity_floor_loc` from the sole
     /// remaining op, and a follow-on batch applies cleanly on top.
     #[boxed]
-    pub(crate) async fn test_keyless_db_single_commit_live_set<F, V, C, H, S: Strategy>(
+    pub(crate) async fn run_single_commit_live_set<F, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
@@ -3220,7 +3328,7 @@ pub(crate) mod tests {
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.bounds().end - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
@@ -3239,7 +3347,7 @@ pub(crate) mod tests {
         // The commit op remains readable; its metadata is intact.
         assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata.clone()));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
-        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.bounds().end - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         // Prune does not affect the root (documented invariant on `prune`).
         assert_eq!(db.root(), root_after_commit);
@@ -3257,7 +3365,7 @@ pub(crate) mod tests {
         let db = reopen(context.child("reopened")).await;
         let reopened_bounds = db.bounds();
         assert_eq!(reopened_bounds.end, commit_loc + 1);
-        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.bounds().end - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
@@ -3277,7 +3385,7 @@ pub(crate) mod tests {
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc(), next_commit_loc);
+        assert_eq!(db.bounds().end - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
         // New appends readable; the original commit op is also still in the live set (not
@@ -3291,13 +3399,7 @@ pub(crate) mod tests {
 
     /// A multi-level chain with strictly-monotonic, within-bounds floors applies cleanly.
     #[boxed]
-    pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<
-        F,
-        V,
-        C,
-        H,
-        S: Strategy,
-    >(
+    pub(crate) async fn run_chained_apply_with_valid_floors_succeeds<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
     ) where
         F: Family,
@@ -3331,7 +3433,7 @@ pub(crate) mod tests {
         let (db, _) = db.apply_batch(grandchild).await.unwrap();
 
         // Grandchild's commit is the last op; tip's floor is the live floor.
-        assert_eq!(db.last_commit_loc(), Location::new(6));
+        assert_eq!(db.bounds().end - 1, Location::new(6));
         assert_eq!(db.inactivity_floor_loc(), Location::new(5));
 
         db.destroy().await.unwrap();

@@ -4,7 +4,7 @@ use crate::dkg::{
     reshare::{
         Actor, EpochInfoResponse, Message as MailboxMessage,
         metrics::Phase,
-        store::{Dealer, Player, Store},
+        store::{AckOutcome, Dealer, Player, Store},
     },
     types::Message,
 };
@@ -16,7 +16,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Signer,
-    bls12381::{dkg::feldman_desmedt::Verdict, primitives::variant::Variant as BlsVariant},
+    bls12381::{
+        dkg::feldman_desmedt::{
+            DealerMessageError as DkgDealerMessageError, PlayerAckError as DkgAckError,
+        },
+        primitives::variant::Variant as BlsVariant,
+    },
     certificate::Scheme,
 };
 use commonware_macros::select_loop;
@@ -198,10 +203,28 @@ where
                     .handle(store, epoch, from.clone(), public, private)
                     .await
                 {
-                    Verdict::Valid(ack) => ack,
-                    Verdict::Skip => return,
-                    Verdict::Fault => {
-                        commonware_p2p::block!(self.blocker, from, ?epoch, "invalid dealing");
+                    Ok(ack) => ack,
+                    Err(DkgDealerMessageError::UnexpectedDealer) => {
+                        commonware_p2p::block!(
+                            self.blocker,
+                            from,
+                            ?epoch,
+                            "dealing from unexpected dealer"
+                        );
+                        return;
+                    }
+                    Err(
+                        reason @ (DkgDealerMessageError::InvalidCommitmentDegree { .. }
+                        | DkgDealerMessageError::MismatchedReshareCommitment
+                        | DkgDealerMessageError::InvalidDealerShare),
+                    ) => {
+                        commonware_p2p::block!(
+                            self.blocker,
+                            from,
+                            ?epoch,
+                            ?reason,
+                            "invalid dealing"
+                        );
                         return;
                     }
                 };
@@ -223,12 +246,22 @@ where
                     return;
                 };
                 match dealer.handle(store, epoch, from.clone(), ack).await {
-                    Verdict::Valid(()) => {
+                    Ok(AckOutcome::Recorded) => {
                         self.metrics.record_ack(&from, epoch.get());
                         info!(?epoch, player = ?from, "received ack");
                     }
-                    Verdict::Skip => {}
-                    Verdict::Fault => {
+                    Ok(AckOutcome::Duplicate) => {}
+                    Err(DkgAckError::UnexpectedPlayer) => {
+                        // An authenticated non-player cannot legitimately acknowledge this round.
+                        commonware_p2p::block!(
+                            self.blocker,
+                            from,
+                            ?epoch,
+                            "ack from unexpected player"
+                        );
+                    }
+                    Err(DkgAckError::InvalidAck) => {
+                        // The authenticated sender acknowledged a transcript this actor never sent.
                         commonware_p2p::block!(self.blocker, from, ?epoch, "invalid ack signature");
                     }
                 }
@@ -251,13 +284,14 @@ where
                 let Some(player) = player.as_deref_mut() else {
                     continue;
                 };
-                let Verdict::Valid(ack) = player
+                let ack = player
                     .handle(store, epoch, public_key.clone(), public, private)
                     .await
-                else {
-                    continue;
-                };
-                let _ = dealer.handle(store, epoch, public_key.clone(), ack).await;
+                    .expect("locally generated dealing must validate");
+                dealer
+                    .handle(store, epoch, public_key.clone(), ack)
+                    .await
+                    .expect("locally generated acknowledgement must validate");
                 continue;
             }
 
@@ -280,13 +314,19 @@ mod tests {
     use super::*;
     use crate::dkg::{
         fence::Fence,
-        reshare::actor::Config,
+        reshare::actor::{Config, utils},
         state_sync::Plan as StateSyncPlan,
         tests::mocks::{self, MemorySecretStore},
     };
     use commonware_actor::Feedback;
     use commonware_consensus::{Reporter, marshal};
-    use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::feldman_desmedt::{Dealer as CryptoDealer, Info, Player as CryptoPlayer, Reveal},
+            primitives::sharing::Mode,
+        },
+        ed25519,
+    };
     use commonware_p2p::{
         Receiver,
         simulated::{Config as NetworkConfig, Network},
@@ -295,7 +335,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{IoBuf, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        Acknowledgement, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set,
+        Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact, ordered::Set,
     };
     use std::{
         collections::VecDeque,
@@ -308,6 +348,7 @@ mod tests {
     };
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_DEALING_TEST";
+    const FAULT_TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_AUTHENTICATED_FAULT_TEST";
 
     #[derive(Debug)]
     struct QueuedReceiver {
@@ -372,6 +413,7 @@ mod tests {
                     fence,
                     namespace: TEST_NAMESPACE,
                     sharing_mode: Mode::NonZeroCounter,
+                    reveal: Reveal::V1,
                     mailbox_size: NZUsize!(16),
                     partition_prefix: "dealing-priority-actor".into(),
                     max_participants: NZU32!(16),
@@ -410,6 +452,170 @@ mod tests {
                 .await
                 .expect("finalized block should be acknowledged");
             assert_eq!(received.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn authenticated_invalid_messages_block_senders() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers: Vec<_> = (0..4).map(ed25519::PrivateKey::from_seed).collect();
+            let participants = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+            let players =
+                Set::from_iter_dedup([0usize, 1, 2].map(|index| signers[index].public_key()));
+            let target = signers[0].clone();
+            let dealer = signers[1].clone();
+            let outsider = signers[3].clone();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.iter().cloned(),
+            )
+            .await;
+            let _network = network.start();
+            let (mut actor, _mailbox) = utils::new_actor(
+                context.child("actor_fixture"),
+                target.clone(),
+                participants.clone(),
+                &oracle,
+                FAULT_TEST_NAMESPACE,
+                "authenticated-fault",
+                NZU64!(8),
+            )
+            .await;
+            let mut store = Store::init(
+                context.child("store"),
+                "authenticated-fault-store",
+                NZU32!(16),
+                MemorySecretStore::default(),
+            )
+            .await;
+            let info = Info::new::<N3f1>(
+                FAULT_TEST_NAMESPACE,
+                0,
+                None,
+                Mode::NonZeroCounter,
+                Reveal::V1,
+                participants.clone(),
+                players,
+            )
+            .expect("valid info");
+            let mut player = store
+                .create_player::<ed25519::PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    info.clone(),
+                )
+                .expect("target is a player");
+            let (_dealer, public, private) =
+                CryptoDealer::start::<N3f1>(TestRng::new(0), info.clone(), dealer.clone(), None)
+                    .expect("dealer should start");
+            let wrong_private = private
+                .into_iter()
+                .find_map(|(recipient, private)| {
+                    (recipient == signers[2].public_key()).then_some(private)
+                })
+                .expect("dealing for another player");
+            let (mut sender, _) = inert_channel([dealer.public_key(), outsider.public_key()]);
+
+            // A configured dealer that sends an invalid private share is blocked.
+            actor
+                .handle_message(
+                    Epoch::zero(),
+                    &mut store,
+                    None,
+                    Some(&mut player),
+                    &mut sender,
+                    (
+                        dealer.public_key(),
+                        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Dealer(
+                            public,
+                            wrong_private,
+                        )
+                        .encode()
+                        .into(),
+                    ),
+                )
+                .await;
+
+            let seed = store.seed_or_random(Epoch::zero(), TestRng::new(0)).await;
+            let mut local_dealer = store
+                .create_dealer::<ed25519::PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    info.clone(),
+                    None,
+                    seed,
+                )
+                .expect("target is a dealer");
+
+            // Build a valid acknowledgement for a different dealer transcript.
+            let ack_player = signers[2].clone();
+            let (_source, public, private) =
+                CryptoDealer::start::<N3f1>(TestRng::new(1), info.clone(), target.clone(), None)
+                    .expect("source dealer should start");
+            let private = private
+                .into_iter()
+                .find_map(|(recipient, private)| {
+                    (recipient == ack_player.public_key()).then_some(private)
+                })
+                .expect("dealing for configured player");
+            let mut source_player =
+                CryptoPlayer::new(info, ack_player.clone()).expect("ack sender is a player");
+            let ack = source_player
+                .dealer_message::<N3f1>(target.public_key(), public, private)
+                .expect("valid fixture dealing")
+                .expect("new fixture dealing");
+
+            // The local dealer has one recoverable transcript, so a configured
+            // authenticated player acknowledging another transcript is blocked.
+            actor
+                .handle_message(
+                    Epoch::zero(),
+                    &mut store,
+                    Some(&mut local_dealer),
+                    None,
+                    &mut sender,
+                    (
+                        ack_player.public_key(),
+                        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack.clone())
+                            .encode()
+                            .into(),
+                    ),
+                )
+                .await;
+
+            // The same acknowledgement from an authenticated non-player is a
+            // distinct membership violation.
+            actor
+                .handle_message(
+                    Epoch::zero(),
+                    &mut store,
+                    Some(&mut local_dealer),
+                    None,
+                    &mut sender,
+                    (
+                        outsider.public_key(),
+                        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack)
+                            .encode()
+                            .into(),
+                    ),
+                )
+                .await;
+
+            assert_eq!(
+                oracle.blocked().await.expect("network remains available"),
+                vec![
+                    (target.public_key(), dealer.public_key()),
+                    (target.public_key(), ack_player.public_key()),
+                    (target.public_key(), outsider.public_key()),
+                ]
+            );
         });
     }
 }

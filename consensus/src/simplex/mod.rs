@@ -31,8 +31,8 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active for `skip_timeout` while a quorum of participants
-//!       has been, set both `t_l` and `t_a` to 0.
+//!     * If leader `l` has not been active for the configured skip timeout while a quorum of
+//!       participants has been, set both `t_l` and `t_a` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
@@ -117,8 +117,8 @@
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
 //! * Skip "leader timeout" and "certification timeout" if a designated leader has not participated
-//!   for `skip_timeout` while a quorum of participants has (again to trigger early view transition
-//!   for an unresponsive leader).
+//!   for the configured skip timeout while a quorum of participants has (again to trigger early
+//!   view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
@@ -347,17 +347,17 @@
 //! an uncertified parent inside the optimistic issuance window: its certificate is still forming
 //! from live votes (see [Optimistic Validation](#optimistic-validation)).
 //!
-//! Certification repairs a missed certificate the same way. A notarized view certifies only after
-//! its parent certifies, which requires the parent's exact-view notarization. When the voter holds
-//! a view's notarization but not its parent's, the parent's votes have stopped circulating.
-//! Peers broadcast a certificate only once, so the voter requests the parent's notarization from
-//! the term's leader, or from any peer when the term's leader is unknown.
+//! The same split can block certification. A notarized view certifies only after its parent
+//! certifies, and certifying the parent requires its exact-view notarization. When the voter holds
+//! a view's notarization but not its parent's, the parent's votes have stopped circulating, and
+//! peers broadcast a certificate only once. A leader that withheld the certificate may never
+//! answer a fetch, so the voter requests the parent's notarization from any peer.
 //!
 //! A resolver key identifies a view, not a certificate. A notarization and a covering nullification
 //! for one view answer opposite questions, so a peer can return valid evidence that does not settle
 //! the request. The requester records that evidence and retries without faulting the peer. A
 //! delivered notarization completes its fetch on arrival, because certification judges evidence
-//! already in hand. Matching evidence or finalization retires targeted work.
+//! already in hand. Matching evidence or finalization retires pending work.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -457,10 +457,11 @@
 //!
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
-//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried during
-//! the same run. The safe way to stop working on certification is to keep the request pending until
-//! Simplex drops it after finalizing the block or a descendant.
+//! uncertifiable for that round and also causes a local nullify. Closing `certify` does not cause
+//! `nullify(v)` to be broadcast before the normal round deadline and can halt progress because
+//! certification requests are not retried during the same run. The safe way to stop working on
+//! certification is to keep the request pending until Simplex drops it after finalizing the block
+//! or a descendant.
 
 pub mod elector;
 pub mod scheme;
@@ -558,7 +559,7 @@ cfg_if::cfg_if! {
 
         mod actors;
         pub mod config;
-        pub use config::{Config, Floor, ForwardingPolicy};
+        pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
         mod metrics;
@@ -655,7 +656,7 @@ mod tests {
     use crate::{
         Monitor, Viewable,
         simplex::{
-            elector::{self, Config as _, Elector as _, Random, RoundRobin},
+            elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -697,8 +698,8 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, Probability, TestRng, ordered::Set, sync::Mutex,
-        test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, non_empty, ordered::Set, probability,
+        sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -713,30 +714,31 @@ mod tests {
     use tracing::{debug, info, warn};
     use types::Activity;
 
-    // Invoke `$cb!($($args)*, $suffix, $elector, $fixture)` once per canonical
-    // (elector, scheme) fixture.
+    // Invoke `$cb!($($args)*, $suffix, $elector, $fixture, $elector_config)`
+    // once per canonical (elector, scheme) fixture.
     macro_rules! for_each_fixture {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, bls12381_threshold_vrf_min_pk, Random, bls12381_threshold_vrf::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_threshold_vrf_min_sig, Random, bls12381_threshold_vrf::fixture::<MinSig, _>);
-            $cb!($($args)*, bls12381_threshold_std_min_pk, RoundRobin, bls12381_threshold_std::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_threshold_std_min_sig, RoundRobin, bls12381_threshold_std::fixture::<MinSig, _>);
-            $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_multisig_min_sig, RoundRobin, bls12381_multisig::fixture::<MinSig, _>);
-            $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture);
-            $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture);
+            $cb!($($args)*, bls12381_threshold_vrf_min_pk, Random, bls12381_threshold_vrf::fixture::<MinPk, _>, Random::new(RandomVersion::V1));
+            $cb!($($args)*, bls12381_threshold_vrf_min_sig, Random, bls12381_threshold_vrf::fixture::<MinSig, _>, Random::new(RandomVersion::V1));
+            $cb!($($args)*, bls12381_threshold_std_min_pk, RoundRobin, bls12381_threshold_std::fixture::<MinPk, _>, RoundRobin::default());
+            $cb!($($args)*, bls12381_threshold_std_min_sig, RoundRobin, bls12381_threshold_std::fixture::<MinSig, _>, RoundRobin::default());
+            $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>, RoundRobin::default());
+            $cb!($($args)*, bls12381_multisig_min_sig, RoundRobin, bls12381_multisig::fixture::<MinSig, _>, RoundRobin::default());
+            $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture, RoundRobin::default());
+            $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture, RoundRobin::default());
         };
     }
 
     // Generate one `#[test_group("slow")] #[test_traced]` test per canonical
     // (elector, scheme) fixture, named `test_<callee>_<suffix>`. The helper takes
-    // the elector config type as its third generic parameter.
+    // the elector config type as its third generic parameter and the concrete
+    // config after the fixture argument.
     //
     // Supported forms:
-    //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
-    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, arg)
+    //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture, config)
+    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, config, arg)
     //   test_for_all_fixtures!(callee, arg, level = "INFO"); // arg with a trace-level override
-    //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
+    //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture, config)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
         ($callee:ident) => {
@@ -754,22 +756,22 @@ mod tests {
         ($callee:ident, $arg:expr) => {
             for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [, _] [, $arg]));
         };
-        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr) => {
+        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr, $elector_config:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[$traced]
                 fn [<test_ $callee _ $suffix>]() {
-                    $callee::<_, _, $elector $($generics)*>($fixture $($args)*);
+                    $callee::<_, _, $elector $($generics)*>($fixture, $elector_config $($args)*);
                 }
             }
         };
-        (@seeded $n:expr, $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+        (@seeded $n:expr, $callee:ident, $suffix:ident, $elector:ty, $fixture:expr, $elector_config:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[test_traced]
                 fn [<test_ $callee _ $suffix>]() {
                     for seed in 0..$n {
-                        $callee::<_, _, $elector>(seed, $fixture);
+                        $callee::<_, _, $elector>(seed, $fixture, $elector_config);
                     }
                 }
             }
@@ -779,6 +781,13 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    type TestChannel = (
+        Sender<PublicKey, deterministic::Context>,
+        Receiver<PublicKey>,
+    );
+    type TestRegistration = (TestChannel, TestChannel, TestChannel);
+    type TestRegistrations = HashMap<PublicKey, TestRegistration>;
 
     /// Builds a [Lookahead] with a term length of 5.
     fn test_lookahead(optimistic_views: u64) -> Lookahead {
@@ -870,20 +879,7 @@ mod tests {
     async fn register_validator(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validator: PublicKey,
-    ) -> (
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-        (
-            Sender<PublicKey, deterministic::Context>,
-            Receiver<PublicKey>,
-        ),
-    ) {
+    ) -> TestRegistration {
         let control = oracle.control(validator.clone());
         let (vote_sender, vote_receiver) = control.register(0, TEST_QUOTA).await.unwrap();
         let (certificate_sender, certificate_receiver) =
@@ -900,23 +896,7 @@ mod tests {
     async fn register_validators(
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         validators: &[PublicKey],
-    ) -> HashMap<
-        PublicKey,
-        (
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-        ),
-    > {
+    ) -> TestRegistrations {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let registration = register_validator(oracle, validator.clone()).await;
@@ -1048,6 +1028,7 @@ mod tests {
 
     fn all_online<S, F, L, T>(
         mut fixture: F,
+        elector: L,
         strategy: impl FnOnce(&mut deterministic::Context) -> T + Send + 'static,
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1084,12 +1065,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1141,11 +1121,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1290,18 +1273,20 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
-        all_online::<_, _, Random, _>(bls12381_threshold_vrf::fixture::<MinPk, _>, |context| {
-            context.strategy(NZUsize!(2))
-        });
+        all_online::<_, _, Random, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            Random::new(RandomVersion::V1),
+            |context| context.strategy(NZUsize!(2)),
+        );
     }
 
-    fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F)
+    fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(L::default(), fixture);
+        non_genesis_floor_joiner_catches_tip_with_term::<S, F, L>(elector, fixture);
     }
 
     fn non_genesis_floor_joiner_catches_tip_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -1337,7 +1322,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, active, Action::Link(link.clone()), None).await;
 
@@ -1399,7 +1384,10 @@ mod tests {
                     timeout_retry,
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(
@@ -1407,7 +1395,7 @@ mod tests {
                         PAGE_SIZE,
                         PAGE_CACHE_SIZE,
                     ),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(validator_context.child("engine"), cfg);
@@ -1519,11 +1507,14 @@ mod tests {
                 timeout_retry,
                 fetch_timeout: Duration::from_secs(1),
                 view_retention,
-                skip_timeout,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
@@ -1605,7 +1596,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -1666,11 +1657,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1811,11 +1805,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(12),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(12),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -1845,7 +1842,7 @@ mod tests {
                 Link {
                     latency: link_latency,
                     jitter: Duration::from_millis(0),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 },
                 TermLength::new(NZU32!(128)),
                 ViewDelta::new(128),
@@ -1896,7 +1893,7 @@ mod tests {
                 Link {
                     latency: Duration::from_millis(1_000),
                     jitter: Duration::from_millis(1),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 },
                 TermLength::new(NZU32!(1000)),
                 ViewDelta::new(100),
@@ -1988,7 +1985,7 @@ mod tests {
         });
     }
 
-    fn observer<S, F, L>(mut fixture: F)
+    fn observer<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2032,12 +2029,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &all_validators, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
 
@@ -2096,11 +2092,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2140,13 +2139,13 @@ mod tests {
 
     test_for_all_fixtures!(observer);
 
-    fn unclean_shutdown<S, F, L>(fixture: F)
+    fn unclean_shutdown<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        unclean_shutdown_with_term::<S, F, L>(L::default(), fixture);
+        unclean_shutdown_with_term::<S, F, L>(elector, fixture);
     }
 
     fn unclean_shutdown_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -2202,7 +2201,7 @@ mod tests {
                 let link = Link {
                     latency: Duration::from_millis(50),
                     jitter: Duration::from_millis(50),
-                    success_rate: Probability!(1.0),
+                    success_rate: probability!(1.0),
                 };
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -2261,11 +2260,14 @@ mod tests {
                         timeout_retry: Duration::from_millis(500),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -2359,16 +2361,7 @@ mod tests {
         );
     }
 
-    fn backfill<S, F, L>(fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
-    {
-        backfill_with_term::<S, F, L>(L::default(), fixture);
-    }
-
-    fn backfill_with_term<S, F, L>(elector: L, mut fixture: F)
+    fn backfill<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2397,7 +2390,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2465,11 +2458,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2497,7 +2493,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2536,7 +2532,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(3),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2586,11 +2582,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention,
-                skip_timeout,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -2618,7 +2617,8 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_backfill_stable_leader_optimistic() {
-        backfill_with_term::<_, _, RoundRobin>(
+        backfill::<_, _, RoundRobin>(
+            ed25519::fixture,
             // Keep the stall timeout long so the healthy prefix of the run
             // (finalizing with one validator offline) never stall-nullifies.
             RoundRobin::default().with_term(
@@ -2626,17 +2626,16 @@ mod tests {
                 Duration::from_secs(51),
                 ViewDelta::new(2),
             ),
-            ed25519::fixture,
         );
     }
 
-    fn one_offline<S, F, L>(fixture: F)
+    fn one_offline<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        one_offline_with_term::<S, F, L>(L::default(), fixture);
+        one_offline_with_term::<S, F, L>(elector, fixture);
     }
 
     fn one_offline_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -2670,7 +2669,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -2737,11 +2736,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2878,7 +2880,7 @@ mod tests {
         );
     }
 
-    fn slow_validator<S, F, L>(mut fixture: F)
+    fn slow_validator<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2907,12 +2909,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -2975,11 +2976,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3050,7 +3054,7 @@ mod tests {
 
     test_for_all_fixtures!(slow_validator);
 
-    fn all_recovery<S, F, L>(mut fixture: F)
+    fn all_recovery<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3079,12 +3083,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_secs(3),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3136,11 +3139,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3187,7 +3193,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -3245,7 +3251,7 @@ mod tests {
 
     test_for_all_fixtures!(all_recovery);
 
-    fn all_crash_after_nullify<S, F, L>(mut fixture: F)
+    fn all_crash_after_nullify<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3272,7 +3278,6 @@ mod tests {
 
             // Participant 0 never starts an engine and no links exist yet, so no
             // view can produce a certificate before the crash below.
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -3329,11 +3334,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3381,7 +3389,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(
                 &mut oracle,
@@ -3446,11 +3454,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3479,13 +3490,13 @@ mod tests {
 
     test_for_all_fixtures!(all_crash_after_nullify);
 
-    fn partition<S, F, L>(fixture: F)
+    fn partition<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        partition_with_term::<S, F, L>(L::default(), fixture);
+        partition_with_term::<S, F, L>(elector, fixture);
     }
 
     fn partition_with_term<S, F, L>(elector: L, mut fixture: F)
@@ -3517,7 +3528,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
 
@@ -3574,11 +3585,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3679,13 +3693,13 @@ mod tests {
         );
     }
 
-    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, fixture: F) -> String
+    fn slow_and_lossy_links_seeded<S, F, L>(seed: u64, fixture: F, elector: L) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        slow_and_lossy_links_seeded_with_term::<S, F, L>(L::default(), seed, fixture)
+        slow_and_lossy_links_seeded_with_term::<S, F, L>(elector, seed, fixture)
     }
 
     fn slow_and_lossy_links_seeded_with_term<S, F, L>(
@@ -3724,7 +3738,7 @@ mod tests {
             let degraded_link = Link {
                 latency: Duration::from_millis(200),
                 jitter: Duration::from_millis(150),
-                success_rate: Probability!(0.5),
+                success_rate: probability!(0.5),
             };
             link_validators(
                 &mut oracle,
@@ -3786,11 +3800,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3831,13 +3848,13 @@ mod tests {
         })
     }
 
-    fn slow_and_lossy_links<S, F, L>(fixture: F) -> String
+    fn slow_and_lossy_links<S, F, L>(fixture: F, elector: L) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        slow_and_lossy_links_seeded::<_, _, L>(6, fixture)
+        slow_and_lossy_links_seeded::<_, _, L>(6, fixture, elector)
     }
 
     test_for_all_fixtures!(slow_and_lossy_links);
@@ -3856,7 +3873,7 @@ mod tests {
         );
     }
 
-    fn determinism<S, F, L>(seed: u64, fixture: F)
+    fn determinism<S, F, L>(seed: u64, fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
@@ -3865,8 +3882,8 @@ mod tests {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         assert_eq!(
-            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture),
-            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture),
+            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture, elector.clone()),
+            slow_and_lossy_links_seeded::<_, _, L>(seed, fixture, elector),
         );
     }
 
@@ -3877,10 +3894,10 @@ mod tests {
     fn test_distinct_states() {
         // Sanity check that different schemes produce different audit states.
         macro_rules! collect {
-            ($vec:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+            ($vec:ident, $suffix:ident, $elector:ty, $fixture:expr, $elector_config:expr) => {
                 $vec.push((
                     stringify!($suffix),
-                    slow_and_lossy_links_seeded::<_, _, $elector>(7, $fixture),
+                    slow_and_lossy_links_seeded::<_, _, $elector>(7, $fixture, $elector_config),
                 ));
             };
         }
@@ -3895,7 +3912,7 @@ mod tests {
         }
     }
 
-    fn conflicter<S, F, L>(seed: u64, mut fixture: F)
+    fn conflicter<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3927,12 +3944,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -3995,11 +4011,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4060,7 +4079,7 @@ mod tests {
 
     test_for_all_fixtures!(conflicter, seeds = 5);
 
-    fn invalid<S, F, L>(seed: u64, mut fixture: F)
+    fn invalid<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4107,12 +4126,12 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = wrapped::Config(L::default());
+            let elector = wrapped::Config(elector);
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4163,11 +4182,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4225,7 +4247,7 @@ mod tests {
     test_for_all_fixtures!(invalid, seeds = 5);
 
     // Test that when a node receives finalizations, it reports them.
-    fn received_certificates_are_reported<S, F, L>(mut fixture: F)
+    fn received_certificates_are_reported<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4262,7 +4284,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(100),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             fn link_graph(_: usize, i: usize, j: usize) -> bool {
                 if i == 0 || j == 0 {
@@ -4278,7 +4300,6 @@ mod tests {
             )
             .await;
 
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4327,11 +4348,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4391,7 +4415,7 @@ mod tests {
 
     test_for_all_fixtures!(received_certificates_are_reported);
 
-    fn survives_burst<S, F, L>(mut fixture: F)
+    fn survives_burst<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4422,7 +4446,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(0),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             oracle
                 .add_link(injector_pk.clone(), me.clone(), link)
@@ -4446,7 +4470,7 @@ mod tests {
                     .take(quorum)
                     .map(|scheme| TNotarize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
                     .expect("notarization requires quorum")
             };
             let finalization = |view: View, parent: View, payload: &[u8]| {
@@ -4457,7 +4481,7 @@ mod tests {
                     .take(quorum)
                     .map(|scheme| TFinalize::sign(scheme, proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
                     .expect("finalization requires quorum")
             };
 
@@ -4471,7 +4495,6 @@ mod tests {
                 injector_sender.send(Recipients::One(me.clone()), certificate.encode(), true);
             }
 
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -4513,11 +4536,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(11),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(11),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -4531,7 +4557,7 @@ mod tests {
 
     test_for_all_fixtures!(survives_burst);
 
-    fn impersonator<S, F, L>(seed: u64, mut fixture: F)
+    fn impersonator<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4563,12 +4589,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -4634,11 +4659,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4680,13 +4708,13 @@ mod tests {
 
     test_for_all_fixtures!(impersonator, seeds = 5);
 
-    fn equivocator_seeded<S, F, L>(seed: u64, fixture: F) -> bool
+    fn equivocator_seeded<S, F, L>(seed: u64, fixture: F, elector: L) -> bool
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        equivocator_seeded_with_term::<S, F, L>(seed, L::default(), fixture)
+        equivocator_seeded_with_term::<S, F, L>(seed, elector, fixture)
     }
 
     fn equivocator_seeded_with_term<S, F, L>(seed: u64, elector: L, mut fixture: F) -> bool
@@ -4721,7 +4749,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -4795,11 +4823,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4888,11 +4919,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention,
-                skip_timeout,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -4923,13 +4957,14 @@ mod tests {
         })
     }
 
-    fn equivocator<S, F, L>(fixture: F)
+    fn equivocator<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
         L: elector::Config<S>,
     {
-        let detected = (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture));
+        let detected =
+            (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture, elector.clone()));
         assert!(
             detected,
             "expected at least one seed to detect equivocation"
@@ -4958,7 +4993,7 @@ mod tests {
         );
     }
 
-    fn reconfigurer<S, F, L>(seed: u64, mut fixture: F)
+    fn reconfigurer<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -4990,12 +5025,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -5060,11 +5094,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5106,7 +5143,7 @@ mod tests {
 
     test_for_all_fixtures!(reconfigurer, seeds = 5);
 
-    fn nuller<S, F, L>(seed: u64, mut fixture: F)
+    fn nuller<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5138,12 +5175,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -5205,11 +5241,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5267,7 +5306,7 @@ mod tests {
 
     test_for_all_fixtures!(nuller, seeds = 5);
 
-    fn outdated<S, F, L>(seed: u64, mut fixture: F)
+    fn outdated<S, F, L>(seed: u64, mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5299,12 +5338,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
@@ -5367,11 +5405,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -5408,7 +5449,7 @@ mod tests {
 
     test_for_all_fixtures!(outdated, seeds = 5);
 
-    fn run_1k<S, F, L>(mut fixture: F)
+    fn run_1k<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5438,12 +5479,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(0.98),
+                success_rate: probability!(0.98),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -5495,11 +5535,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -5541,10 +5584,10 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_1k() {
-        run_1k::<_, _, RoundRobin>(scheme_mocks::fixture);
+        run_1k::<_, _, RoundRobin>(scheme_mocks::fixture, RoundRobin::default());
     }
 
-    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
+    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, elector: L, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5572,12 +5615,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(1),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engine
-            let elector = L::default();
             let reporter_config = mocks::reporter::Config {
                 participants: participants.clone().try_into().unwrap(),
                 scheme: schemes[0].clone(),
@@ -5617,11 +5659,14 @@ mod tests {
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 view_retention: ViewDelta::new(4),
-                skip_timeout: Duration::from_secs(2),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(2),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -5675,29 +5720,29 @@ mod tests {
         });
     }
 
-    fn children_shutdown_on_engine_abort<S, F, L>(seed: u64, fixture: F)
+    fn children_shutdown_on_engine_abort<S, F, L>(seed: u64, fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        engine_shutdown::<S, F, L>(seed, fixture, false);
+        engine_shutdown::<S, F, L>(seed, fixture, elector, false);
     }
 
     test_for_all_fixtures!(children_shutdown_on_engine_abort, seeds = 10);
 
-    fn graceful_shutdown<S, F, L>(seed: u64, fixture: F)
+    fn graceful_shutdown<S, F, L>(seed: u64, fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        engine_shutdown::<S, F, L>(seed, fixture, true);
+        engine_shutdown::<S, F, L>(seed, fixture, elector, true);
     }
 
     test_for_all_fixtures!(graceful_shutdown, seeds = 10);
 
-    fn attributable_reporter_filtering<S, F, L>(mut fixture: F)
+    fn attributable_reporter_filtering<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5728,12 +5773,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines with `AttributableReporter` wrapper
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -5792,11 +5836,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -5880,7 +5927,7 @@ mod tests {
 
     test_for_all_fixtures!(attributable_reporter_filtering);
 
-    fn split_views_no_lockup<S, F, L>(mut fixture: F)
+    fn split_views_no_lockup<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -5944,7 +5991,7 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             // Helper: assemble notarization from explicit signer indices
@@ -5952,14 +5999,14 @@ mod tests {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_nullification = |round: Round| -> TNullification<_> {
                 let votes: Vec<_> = (0..=quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             // Choose F=1 and construct B_1, B_2A, B_2B
@@ -5990,34 +6037,14 @@ mod tests {
             let null_a = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 1)));
             let null_b = build_nullification(Round::new(Epoch::new(333), View::new(f_view + 2)));
 
-            // Create an 11th non-participant injector and obtain senders
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
-
-            // Create minimal one-way links from injector to all participants (not full mesh)
+            // Create an 11th non-participant injector with one-way links to all participants
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // ========== Broadcast certificates over recovered network. ==========
 
@@ -6054,7 +6081,6 @@ mod tests {
             // Start engines after preloading certificates into each participant's
             // recovered channel (ensuring processing before any leader attempts to issue a
             // conflicting vote).
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut honest_reporters = Vec::new();
             for (idx, validator) in participants.iter().enumerate() {
@@ -6128,11 +6154,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(
@@ -6243,13 +6272,161 @@ mod tests {
 
     test_for_all_fixtures!(split_views_no_lockup);
 
+    type CertifiedSplitReporter<S, L> =
+        mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>;
+
+    struct CertifiedSplitEngineConfig<'a, S, L> {
+        oracle: &'a Oracle<PublicKey, deterministic::Context>,
+        participants: &'a [PublicKey],
+        schemes: &'a [S],
+        registrations: &'a mut TestRegistrations,
+        silent: usize,
+        elector: &'a L,
+        epoch: Epoch,
+        view_retention: ViewDelta,
+        skip_timeout: Duration,
+    }
+
+    /// Registers a non-committee peer that can preload certificates while
+    /// validators are partitioned from one another.
+    async fn start_certificate_injector(
+        context: &deterministic::Context,
+        oracle: &mut Oracle<PublicKey, deterministic::Context>,
+        participants: &[PublicKey],
+        link: &Link,
+    ) -> Sender<PublicKey, deterministic::Context> {
+        let injector = PrivateKey::from_seed(1_000_000).public_key();
+        let (sender, _receiver) = oracle
+            .control(injector.clone())
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+        for participant in participants {
+            oracle
+                .add_link(injector.clone(), participant.clone(), link.clone())
+                .await
+                .unwrap();
+        }
+        oracle.manager().track(
+            1,
+            TrackedPeers::new(
+                Set::from_iter_dedup(participants.iter().cloned()),
+                Set::from_iter_dedup(std::iter::once(injector)),
+            ),
+        );
+        context.sleep(Duration::from_millis(10)).await;
+        sender
+    }
+
+    /// Starts every validator except `silent`, whose network registration is
+    /// dropped.
+    fn start_certified_split_engines<S, L>(
+        context: &deterministic::Context,
+        cfg: CertifiedSplitEngineConfig<'_, S, L>,
+    ) -> HashMap<usize, CertifiedSplitReporter<S, L>>
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: elector::Config<S>,
+    {
+        let CertifiedSplitEngineConfig {
+            oracle,
+            participants,
+            schemes,
+            registrations,
+            silent,
+            elector,
+            epoch,
+            view_retention,
+            skip_timeout,
+        } = cfg;
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+        let mut reporters = HashMap::new();
+
+        for (idx, validator) in participants.iter().enumerate() {
+            let registration = registrations
+                .remove(validator)
+                .expect("validator should be registered");
+            if idx == silent {
+                drop(registration);
+                continue;
+            }
+
+            let reporter_config = mocks::reporter::Config {
+                participants: participants.to_vec().try_into().unwrap(),
+                scheme: schemes[idx].clone(),
+                elector: elector.clone(),
+            };
+            let reporter = mocks::reporter::Reporter::new(
+                context
+                    .child("reporter")
+                    .with_attribute("public_key", validator),
+                reporter_config,
+            );
+            reporters.insert(idx, reporter.clone());
+
+            let application_cfg = mocks::application::Config::<Sha256, _> {
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (250.0, 50.0), // ensure we process certificates first
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (actor, application) = mocks::application::Application::new(
+                context
+                    .child("application")
+                    .with_attribute("public_key", validator),
+                application_cfg,
+            );
+            actor.start();
+
+            let cfg = config::Config {
+                scheme: schemes[idx].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(validator.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                strategy: Sequential,
+                partition: validator.to_string(),
+                mailbox_size: NZUsize!(1024),
+                epoch,
+                floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                leader_timeout: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(11),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                view_retention,
+                skip: SkipPolicy::Enabled {
+                    timeout: skip_timeout,
+                    budget: SkipBudget::Participants,
+                },
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                forward: ForwardPolicy::Disabled,
+                track_historical_votes: false,
+            };
+            let engine = Engine::new(
+                context
+                    .child("engine")
+                    .with_attribute("public_key", validator),
+                cfg,
+            );
+            let (pending, recovered, resolver) = registration;
+            engine.start(pending, recovered, resolver);
+        }
+
+        reporters
+    }
+
     /// Heals a certified-notarization/nullification split in a group-led view.
     ///
     /// One honest validator certifies Notarization(3), two hold Nullification(3), and
     /// the fourth Byzantine validator stays silent. A group leader builds on parent 2.
     /// Targeted repair supplies the missing nullification, so group-led view 11
     /// becomes the first new finalization.
-    fn certified_split_heals_in_group_led_view<S, F, L>(mut fixture: F)
+    fn certified_split_heals_in_group_led_view<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6281,7 +6458,7 @@ mod tests {
             // lone participant leads view 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
-            let schedule = L::default().build(&participant_set);
+            let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
             let byzantine = leader_of(10);
@@ -6294,14 +6471,14 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             let build_nullification = |view: u64| -> TNullification<_> {
@@ -6309,7 +6486,7 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             let payload_b2 = Sha256::hash(&[b"B_2"]);
@@ -6323,31 +6500,13 @@ mod tests {
             let b3_notarization = build_notarization(&proposal_b3);
             let null_3 = build_nullification(3);
 
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // Split the view-3 certificates by role and share all other evidence.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
@@ -6370,80 +6529,20 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-            let mut honest_reporters = HashMap::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                if idx == byzantine {
-                    drop(pending);
-                    drop(recovered);
-                    drop(resolver);
-                    continue;
-                }
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.clone().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter = mocks::reporter::Reporter::new(
-                    context
-                        .child("reporter")
-                        .with_attribute("public_key", validator),
-                    reporter_config,
-                );
-                honest_reporters.insert(idx, reporter.clone());
-
-                let application_cfg = mocks::application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (250.0, 50.0), // ensure we process certificates first
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Always,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context
-                        .child("application")
-                        .with_attribute("public_key", validator),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: validator.to_string(),
-                    mailbox_size: NZUsize!(1024),
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: byzantine,
+                    elector: &elector,
                     epoch,
-                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(11),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
                     view_retention,
                     skip_timeout,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
-                    track_historical_votes: false,
-                };
-                let engine = Engine::new(
-                    context
-                        .child("engine")
-                        .with_attribute("public_key", validator),
-                    cfg,
-                );
-                engine.start(pending, recovered, resolver);
-            }
+                },
+            );
 
             // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
@@ -6527,14 +6626,17 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_in_group_led_view() {
-        certified_split_heals_in_group_led_view::<_, _, RoundRobin>(ed25519::fixture);
+        certified_split_heals_in_group_led_view::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Heals a certified-notarization/nullification split when the holder leads first.
     ///
     /// The group fetches and certifies Notarization(3) from the leader. The
     /// recovered parent becomes the first new finalization.
-    fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F)
+    fn certified_split_heals_when_lone_holder_leads_first<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6566,7 +6668,7 @@ mod tests {
             // the group leads views 12..=13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
-            let schedule = L::default().build(&participant_set);
+            let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
             let byzantine = leader_of(10);
@@ -6579,14 +6681,14 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             let build_nullification = |view: u64| -> TNullification<_> {
@@ -6594,7 +6696,7 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             let payload_b2 = Sha256::hash(&[b"B_2"]);
@@ -6608,31 +6710,13 @@ mod tests {
             let b3_notarization = build_notarization(&proposal_b3);
             let null_3 = build_nullification(3);
 
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // Split the view-3 certificates by role and share all other evidence.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
@@ -6655,80 +6739,20 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-            let mut honest_reporters = HashMap::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                if idx == byzantine {
-                    drop(pending);
-                    drop(recovered);
-                    drop(resolver);
-                    continue;
-                }
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.clone().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter = mocks::reporter::Reporter::new(
-                    context
-                        .child("reporter")
-                        .with_attribute("public_key", validator),
-                    reporter_config,
-                );
-                honest_reporters.insert(idx, reporter.clone());
-
-                let application_cfg = mocks::application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (250.0, 50.0), // ensure we process certificates first
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Always,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context
-                        .child("application")
-                        .with_attribute("public_key", validator),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: validator.to_string(),
-                    mailbox_size: NZUsize!(1024),
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: byzantine,
+                    elector: &elector,
                     epoch,
-                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(11),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
                     view_retention,
                     skip_timeout,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
-                    track_historical_votes: false,
-                };
-                let engine = Engine::new(
-                    context
-                        .child("engine")
-                        .with_attribute("public_key", validator),
-                    cfg,
-                );
-                engine.start(pending, recovered, resolver);
-            }
+                },
+            );
 
             // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
@@ -6816,7 +6840,10 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_when_lone_holder_leads_first() {
-        certified_split_heals_when_lone_holder_leads_first::<_, _, RoundRobin>(ed25519::fixture);
+        certified_split_heals_when_lone_holder_leads_first::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Repairs ancestry gaps below a displaced certified view.
@@ -6824,7 +6851,7 @@ mod tests {
     /// One validator certifies Notarization(5) but lacks Nullification(3..=5),
     /// which the group holds. Targeted repair fetches each gap in order and lets
     /// the first group-led proposal finalize.
-    fn certified_split_heals_with_displaced_certified_view<S, F, L>(mut fixture: F)
+    fn certified_split_heals_with_displaced_certified_view<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6856,7 +6883,7 @@ mod tests {
             // lone participant leads view 13.
             let epoch = Epoch::new(333);
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
-            let schedule = L::default().build(&participant_set);
+            let schedule = elector.clone().build(&participant_set);
             let leader_of =
                 |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
             let byzantine = leader_of(10);
@@ -6869,14 +6896,14 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNotarize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TNotarization::from_notarizes(&schemes[0], &votes, &Sequential)
+                TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("notarization quorum")
             };
             let build_finalization = |proposal: &Proposal<D>| -> TFinalization<_, D> {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TFinalize::sign(&schemes[i], proposal.clone()).unwrap())
                     .collect();
-                TFinalization::from_finalizes(&schemes[0], &votes, &Sequential)
+                TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("finalization quorum")
             };
             let build_nullification = |view: u64| -> TNullification<_> {
@@ -6884,7 +6911,7 @@ mod tests {
                 let votes: Vec<_> = (0..quorum)
                     .map(|i| TNullify::sign::<D>(&schemes[i], round).unwrap())
                     .collect();
-                TNullification::from_nullifies(&schemes[0], &votes, &Sequential)
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
                     .expect("nullification quorum")
             };
             let payload_b2 = Sha256::hash(&[b"B_2"]);
@@ -6897,31 +6924,13 @@ mod tests {
             let b2_finalization = build_finalization(&proposal_b2);
             let b5_notarization = build_notarization(&proposal_b5);
 
-            let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
-            let (mut injector_sender, _inj_certificate_receiver) = oracle
-                .control(injector_pk.clone())
-                .register(1, TEST_QUOTA)
-                .await
-                .unwrap();
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(0),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
-            for p in participants.iter() {
-                oracle
-                    .add_link(injector_pk.clone(), p.clone(), link.clone())
-                    .await
-                    .unwrap();
-            }
-            oracle.manager().track(
-                1,
-                TrackedPeers::new(
-                    Set::from_iter_dedup(participants.iter().cloned()),
-                    Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
-                ),
-            );
-            context.sleep(Duration::from_millis(10)).await;
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
 
             // Split view-5 notarization from nullifications 3 through 5.
             let msg = Certificate::<_, D>::Notarization(b2_notarization).encode();
@@ -6946,80 +6955,20 @@ mod tests {
             }
 
             // Start honest engines before GST so preload rebroadcasts are lost.
-            let elector = L::default();
-            let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
-            let mut honest_reporters = HashMap::new();
-            for (idx, validator) in participants.iter().enumerate() {
-                let (pending, recovered, resolver) = registrations
-                    .remove(validator)
-                    .expect("validator should be registered");
-                if idx == byzantine {
-                    drop(pending);
-                    drop(recovered);
-                    drop(resolver);
-                    continue;
-                }
-                let reporter_config = mocks::reporter::Config {
-                    participants: participants.clone().try_into().unwrap(),
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                };
-                let reporter = mocks::reporter::Reporter::new(
-                    context
-                        .child("reporter")
-                        .with_attribute("public_key", validator),
-                    reporter_config,
-                );
-                honest_reporters.insert(idx, reporter.clone());
-
-                let application_cfg = mocks::application::Config::<Sha256, _> {
-                    relay: relay.clone(),
-                    me: validator.clone(),
-                    propose_latency: (250.0, 50.0), // ensure we process certificates first
-                    verify_latency: (10.0, 5.0),
-                    certify_latency: (10.0, 5.0),
-                    should_certify: mocks::application::Certifier::Always,
-                };
-                let (actor, application) = mocks::application::Application::new(
-                    context
-                        .child("application")
-                        .with_attribute("public_key", validator),
-                    application_cfg,
-                );
-                actor.start();
-                let blocker = oracle.control(validator.clone());
-                let cfg = config::Config {
-                    scheme: schemes[idx].clone(),
-                    elector: elector.clone(),
-                    blocker,
-                    automaton: application.clone(),
-                    relay: application.clone(),
-                    reporter: reporter.clone(),
-                    strategy: Sequential,
-                    partition: validator.to_string(),
-                    mailbox_size: NZUsize!(1024),
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: byzantine,
+                    elector: &elector,
                     epoch,
-                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                    leader_timeout: Duration::from_secs(10),
-                    certification_timeout: Duration::from_secs(11),
-                    timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
                     view_retention,
                     skip_timeout,
-                    replay_buffer: NZUsize!(1024 * 1024),
-                    write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
-                    track_historical_votes: false,
-                };
-                let engine = Engine::new(
-                    context
-                        .child("engine")
-                        .with_attribute("public_key", validator),
-                    cfg,
-                );
-                engine.start(pending, recovered, resolver);
-            }
+                },
+            );
 
             // Drain the preload before checking the split.
             context.sleep(Duration::from_secs(2)).await;
@@ -7112,10 +7061,364 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_certified_split_heals_with_displaced_certified_view() {
-        certified_split_heals_with_displaced_certified_view::<_, _, RoundRobin>(ed25519::fixture);
+        certified_split_heals_with_displaced_certified_view::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
     }
 
-    fn tle<V, L>()
+    /// Two terms led by an offline validator give the honest validators
+    /// different certified floors. Progress requires a missing parent
+    /// notarization from an available validator.
+    ///
+    /// Terms are five views long and the offline participant leads term 1
+    /// (views 1..=5) and term 5 (views 21..=25).
+    ///
+    /// An injector builds this pre-GST state while validator links are down:
+    /// - `b` and `c` certify views 1 and 2 (term 1). `a` never sees them.
+    /// - `a` and `b` certify views 21 and 22 (term 5). `c` never sees them.
+    /// - Terms 2..=4 are nullified at their term starts for everyone.
+    ///
+    /// After GST, the three honest participants form the only quorum. Each
+    /// proposal names its proposer's highest certified view. One honest peer
+    /// lacks the named chain.
+    ///
+    /// If `suppress_backfill` is true, the deprived participants receive
+    /// term-start nullifications that suppress background repair. Otherwise,
+    /// the nullifications occur one view past the notarized heads (views 3 and
+    /// 23), so repair can see each head.
+    fn stable_leader_cross_term_certified_split<S, F, L>(
+        mut fixture: F,
+        elector: L,
+        suppress_backfill: bool,
+    ) where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: elector::Config<S>,
+    {
+        let n = 4;
+        let quorum = quorum(n) as usize;
+        assert_eq!(quorum, 3);
+        let view_retention = ViewDelta::new(10);
+        let skip_timeout = Duration::from_secs(12);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(300));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let mut oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                false,
+            )
+            .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Choose an epoch where the same participant leads terms 1 and 5.
+            let epoch = Epoch::new(2);
+            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let schedule = elector.clone().build(&participant_set);
+            let leader_of =
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+            let offline = leader_of(1);
+            assert_eq!(offline, leader_of(21), "offline must lead terms 1 and 5");
+            let honest: Vec<usize> = (0..n as usize).filter(|idx| *idx != offline).collect();
+            let (a, b, c) = (honest[0], honest[1], honest[2]);
+            for view in [6u64, 11, 16, 26, 31, 36] {
+                assert_ne!(leader_of(view), offline, "term start must be honest");
+            }
+            // The view-26 leader must have certified view 22.
+            assert_ne!(
+                leader_of(26),
+                c,
+                "view-26 leader must hold certification 22"
+            );
+            // The halt detector ends when term 9 returns to the offline validator.
+            assert_eq!(leader_of(41), offline, "term 9 must return to offline");
+
+            let build_notarization =
+                |proposal: &Proposal<D>, signers: [usize; 3]| -> TNotarization<_, D> {
+                    let votes: Vec<_> = signers
+                        .iter()
+                        .map(|i| TNotarize::sign(&schemes[*i], proposal.clone()).unwrap())
+                        .collect();
+                    TNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
+                        .expect("notarization quorum")
+                };
+            let build_nullification = |view: u64, signers: [usize; 3]| -> TNullification<_> {
+                let round = Round::new(epoch, View::new(view));
+                let votes: Vec<_> = signers
+                    .iter()
+                    .map(|i| TNullify::sign::<D>(&schemes[*i], round).unwrap())
+                    .collect();
+                TNullification::from_nullifies(&schemes[0], non_empty![@&votes], &Sequential)
+                    .expect("nullification quorum")
+            };
+
+            // Term 1 chain (views 1 and 2), certified by `b` and `c`.
+            let payload_1 = Sha256::hash(&[b"V1"]);
+            let proposal_1 =
+                Proposal::new(Round::new(epoch, View::new(1)), View::new(0), payload_1);
+            let payload_2 = Sha256::hash(&[b"V2"]);
+            let proposal_2 =
+                Proposal::new(Round::new(epoch, View::new(2)), View::new(1), payload_2);
+            // Term 5 chain (views 21 and 22), certified by `a` and `b`. The
+            // view-21 proposal names genesis, so `a` can vote without
+            // certifying term 1.
+            let payload_21 = Sha256::hash(&[b"V21"]);
+            let proposal_21 =
+                Proposal::new(Round::new(epoch, View::new(21)), View::new(0), payload_21);
+            let payload_22 = Sha256::hash(&[b"V22"]);
+            let proposal_22 =
+                Proposal::new(Round::new(epoch, View::new(22)), View::new(21), payload_22);
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: probability!(1.0),
+            };
+            let mut injector_sender =
+                start_certificate_injector(&context, &mut oracle, &participants, &link).await;
+
+            {
+                let mut send_to = |certificate: Certificate<S, D>, targets: &[usize]| {
+                    let msg = certificate.encode();
+                    for idx in targets {
+                        injector_sender.send(
+                            Recipients::One(participants[*idx].clone()),
+                            msg.clone(),
+                            true,
+                        );
+                    }
+                };
+
+                // Term 1: `b` and `c` follow the chain; `a` only learns the
+                // term was abandoned.
+                send_to(
+                    Certificate::Notarization(build_notarization(&proposal_1, [b, c, offline])),
+                    &[b, c],
+                );
+                send_to(
+                    Certificate::Notarization(build_notarization(&proposal_2, [b, c, offline])),
+                    &[b, c],
+                );
+                send_to(
+                    Certificate::Nullification(build_nullification(3, [b, c, offline])),
+                    &[b, c],
+                );
+                let a_skip = if suppress_backfill { 1 } else { 3 };
+                send_to(
+                    Certificate::Nullification(build_nullification(a_skip, [a, c, offline])),
+                    &[a, b],
+                );
+
+                // Terms 2..=4 are abandoned at their term starts by everyone.
+                for view in [6u64, 11, 16] {
+                    send_to(
+                        Certificate::Nullification(build_nullification(view, [a, b, c])),
+                        &[a, b, c],
+                    );
+                }
+
+                // Term 5: `a` and `b` follow the chain; `c` only learns the
+                // term was abandoned.
+                send_to(
+                    Certificate::Notarization(build_notarization(&proposal_21, [a, b, offline])),
+                    &[a, b],
+                );
+                send_to(
+                    Certificate::Notarization(build_notarization(&proposal_22, [a, b, offline])),
+                    &[a, b],
+                );
+                let c_skip = if suppress_backfill { 21 } else { 23 };
+                send_to(
+                    Certificate::Nullification(build_nullification(c_skip, [a, c, offline])),
+                    &[c],
+                );
+                send_to(
+                    Certificate::Nullification(build_nullification(23, [a, b, offline])),
+                    &[a, b],
+                );
+            }
+
+            // Start honest engines before GST. The partition drops their
+            // preload broadcasts.
+            let mut honest_reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: offline,
+                    elector: &elector,
+                    epoch,
+                    view_retention,
+                    skip_timeout,
+                },
+            );
+
+            // Drain the preload before checking the split.
+            context.sleep(Duration::from_secs(2)).await;
+
+            // Confirm the intended cross-term split before GST.
+            for (idx, reporter) in honest_reporters.iter() {
+                let certifications = reporter.certifications.lock();
+                let has_term1 = certifications.contains_key(&View::new(2));
+                let has_term5 = certifications.contains_key(&View::new(22));
+                if *idx == a {
+                    assert!(!has_term1 && has_term5, "a: {has_term1} {has_term5}");
+                } else if *idx == b {
+                    assert!(has_term1 && has_term5, "b: {has_term1} {has_term5}");
+                } else {
+                    assert!(has_term1 && !has_term5, "c: {has_term1} {has_term5}");
+                }
+                assert!(
+                    reporter.finalizations.lock().is_empty(),
+                    "reporter {idx} finalized during preload"
+                );
+            }
+
+            // End the partition (GST).
+            link_validators(&mut oracle, &participants, Action::Link(link.clone()), None).await;
+
+            // Wait until every honest validator finalizes after GST.
+            let target = View::new(26);
+            let mut finalizers = Vec::new();
+            for (idx, reporter) in honest_reporters.iter_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(
+                    context
+                        .child("finalizer")
+                        .with_attribute("index", idx)
+                        .spawn(move |_| async move {
+                            while latest < target {
+                                latest = monitor.recv().await.expect("finalization missing");
+                            }
+                        }),
+                );
+            }
+            // Reaching the next offline-led term proves each honest validator
+            // led a full term without finalizing.
+            let progress_reporters: Vec<_> = honest_reporters.values().cloned().collect();
+            let next_byzantine_term =
+                context
+                    .child("next_byzantine_term")
+                    .spawn(move |context| async move {
+                        loop {
+                            let reached = progress_reporters.iter().all(|reporter| {
+                                reporter
+                                    .nullifications
+                                    .lock()
+                                    .keys()
+                                    .any(|view| *view >= View::new(41))
+                            });
+                            if reached {
+                                return;
+                            }
+                            context.sleep(Duration::from_secs(1)).await;
+                        }
+                    });
+            let finalized = select! {
+                _ = join_all(finalizers) => true,
+                _ = next_byzantine_term => false,
+            };
+
+            for reporter in honest_reporters.values() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
+            }
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
+
+            if !finalized {
+                // Each deprived validator fetched the proposal parent from an
+                // honest proposer but lacks the preceding notarization needed
+                // to certify it.
+                let a_reporter = &honest_reporters[&a];
+                assert!(
+                    a_reporter.notarizations.lock().contains_key(&View::new(2)),
+                    "halted, but a is missing notarization(2)"
+                );
+                assert!(
+                    !a_reporter.notarizations.lock().contains_key(&View::new(1)),
+                    "halted, but a repaired notarization(1)"
+                );
+                assert!(
+                    !a_reporter.certifications.lock().contains_key(&View::new(2)),
+                    "halted, but a certified view 2"
+                );
+
+                let c_reporter = &honest_reporters[&c];
+                assert!(
+                    c_reporter.notarizations.lock().contains_key(&View::new(22)),
+                    "halted, but c is missing notarization(22)"
+                );
+                assert!(
+                    !c_reporter.notarizations.lock().contains_key(&View::new(21)),
+                    "halted, but c repaired notarization(21)"
+                );
+                assert!(
+                    !c_reporter.certifications.lock().contains_key(&View::new(22)),
+                    "halted, but c certified view 22"
+                );
+
+                panic!(
+                    "all honest leaders exhausted a term, but recursive parent repair never finalized"
+                );
+            }
+            for (idx, reporter) in honest_reporters.iter() {
+                assert!(
+                    reporter
+                        .finalizations
+                        .lock()
+                        .keys()
+                        .any(|view| *view >= target),
+                    "reporter {idx} never finalized after GST"
+                );
+            }
+            let c_certifications = honest_reporters[&c].certifications.lock();
+            for view in [View::new(21), View::new(22)] {
+                assert!(
+                    c_certifications.contains_key(&view),
+                    "c did not recover and certify view {view} from an honest validator"
+                );
+            }
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_stable_leader_cross_term_certified_split_recovers() {
+        stable_leader_cross_term_certified_split::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(12),
+                ViewDelta::new(0),
+            ),
+            true,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_stable_leader_cross_term_certified_split_backfillable() {
+        stable_leader_cross_term_certified_split::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(12),
+                ViewDelta::new(0),
+            ),
+            false,
+        );
+    }
+
+    fn tle<V, L>(elector: L)
     where
         V: Variant,
         L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
@@ -7142,12 +7445,11 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(5),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines and reporters
-            let elector = L::default();
             let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -7205,11 +7507,14 @@ mod tests {
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_millis(100),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7226,7 +7531,9 @@ mod tests {
             let message = b"Secret message for future view10"; // 32 bytes
 
             // Encrypt message
-            let ciphertext = schemes[0].encrypt(&mut context, target, *message);
+            let ciphertext = schemes[0]
+                .encrypt(&mut context, target, *message)
+                .expect("valid TLE encryption inputs");
 
             // Wait for consensus to reach the target view and then decrypt
             let reporter = monitor_reporter.lock().clone().unwrap();
@@ -7255,8 +7562,8 @@ mod tests {
 
     #[test_traced]
     fn test_tle() {
-        tle::<MinPk, Random>();
-        tle::<MinSig, Random>();
+        tle::<MinPk, Random>(Random::new(RandomVersion::V1));
+        tle::<MinSig, Random>(Random::new(RandomVersion::V1));
     }
 
     fn run_hailstorm<S, F, L>(
@@ -7294,7 +7601,7 @@ mod tests {
             let link = Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(1),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             };
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -7350,11 +7657,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7451,11 +7761,14 @@ mod tests {
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     view_retention,
-                    skip_timeout,
+                    skip: SkipPolicy::Enabled {
+                        timeout: skip_timeout,
+                        budget: SkipBudget::Participants,
+                    },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                    forwarding: ForwardingPolicy::Disabled,
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -7572,15 +7885,15 @@ mod tests {
 
     // The hailstorm run must be deterministic: two runs with identical inputs
     // must produce identical audit state.
-    fn hailstorm<S, F, L>(fixture: F)
+    fn hailstorm<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
         L: elector::Config<S>,
     {
         assert_eq!(
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), L::default(), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), elector.clone(), fixture,),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), elector, fixture),
         );
     }
 
@@ -7709,7 +8022,8 @@ mod tests {
             let elector = elector.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
-            let cfg = deterministic::Config::new().with_rng(Box::new(StdRng::from_rng(&mut *rng)));
+            let rng: deterministic::BoxDynRng = Box::new(StdRng::from_rng(&mut *rng));
+            let cfg = deterministic::Config::new().with_rng(rng);
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
                 let Fixture {
@@ -7882,11 +8196,14 @@ mod tests {
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
                             view_retention,
-                            skip_timeout,
+                            skip: SkipPolicy::Enabled {
+                                timeout: skip_timeout,
+                                budget: SkipBudget::Participants,
+                            },
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                            forwarding: ForwardingPolicy::Disabled,
+                            forward: ForwardPolicy::Disabled,
                             track_historical_votes: false,
                         };
                         let engine = Engine::new(context.child("engine"), cfg);
@@ -7951,11 +8268,14 @@ mod tests {
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         view_retention,
-                        skip_timeout,
+                        skip: SkipPolicy::Enabled {
+                            timeout: skip_timeout,
+                            budget: SkipBudget::Participants,
+                        },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                        forwarding: ForwardingPolicy::Disabled,
+                        forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -8107,7 +8427,7 @@ mod tests {
     const TWINS_LINK: Link = Link {
         latency: Duration::from_millis(500),
         jitter: Duration::from_millis(500),
-        success_rate: Probability!(1.0),
+        success_rate: probability!(1.0),
     };
 
     /// Runs `campaign` with `elector` over a fast link and the slow [TWINS_LINK].
@@ -8116,7 +8436,7 @@ mod tests {
             Link {
                 latency: Duration::from_millis(10),
                 jitter: Duration::from_millis(10),
-                success_rate: Probability!(1.0),
+                success_rate: probability!(1.0),
             },
             TWINS_LINK,
         ] {
@@ -8209,7 +8529,7 @@ mod tests {
         );
     }
 
-    fn twins<S, F, L>(fixture: F)
+    fn twins<S, F, L>(fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -8218,7 +8538,7 @@ mod tests {
         twins_campaign::<_, _, L>(
             &mut test_rng(),
             TWINS_CAMPAIGN,
-            L::default(),
+            elector,
             TWINS_LINK,
             fixture,
         );

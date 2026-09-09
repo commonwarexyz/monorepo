@@ -117,6 +117,9 @@ pub struct Config<S: Strategy> {
     /// The size of the write buffer to use for each blob in the backing journal.
     pub write_buffer: NonZeroUsize,
 
+    /// Buffer size for sequential reads during recovery.
+    pub replay_buffer: NonZeroUsize,
+
     /// Strategy used to parallelize batch operations.
     pub strategy: S,
 
@@ -274,6 +277,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             items_per_blob: cfg.items_per_blob,
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
+            replay_buffer: cfg.replay_buffer,
         };
         let mut journal =
             Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
@@ -467,6 +471,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             partition: cfg.config.journal_partition.clone(),
             items_per_blob: cfg.config.items_per_blob,
             write_buffer: cfg.config.write_buffer,
+            replay_buffer: cfg.config.replay_buffer,
             page_cache: cfg.config.page_cache.clone(),
         };
 
@@ -1259,6 +1264,7 @@ mod tests {
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
@@ -1854,6 +1860,7 @@ mod tests {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
@@ -1921,6 +1928,7 @@ mod tests {
             metadata_partition: "unpruned-metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: cfg_pruned.page_cache.clone(),
         };
@@ -2280,6 +2288,7 @@ mod tests {
                 metadata_partition: "ref-metadata-pruned".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
@@ -2344,6 +2353,7 @@ mod tests {
                 metadata_partition: "server-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
@@ -2373,6 +2383,7 @@ mod tests {
                 metadata_partition: "client-metadata".into(),
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
@@ -2999,6 +3010,7 @@ mod tests {
             items_per_blob: cfg.items_per_blob,
             page_cache: cfg.page_cache.clone(),
             write_buffer: cfg.write_buffer,
+            replay_buffer: cfg.replay_buffer,
         };
         let journal = Journal::<_, Digest>::init(context.child("interrupted_reset"), journal_cfg)
             .await
@@ -3108,6 +3120,7 @@ mod tests {
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
+            replay_buffer: NZUsize!(64),
             strategy: Sequential,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
@@ -3709,6 +3722,7 @@ mod tests {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )

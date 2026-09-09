@@ -29,9 +29,10 @@
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while
 //! another holds a covering nullification. Proposal verification exposes the missing ancestry and
-//! targets the first gap at the proposal's leader. Matching evidence, finalization, or a failed
-//! certification verdict retires that request, whereas a certified-floor raise retires only
-//! background work.
+//! targets the first gap at the proposal's leader. A blocked certification exposes the same gap
+//! and asks any peer, since the leader that withheld the certificate may never answer. Matching
+//! evidence, finalization, or a failed certification verdict retires that request, whereas a
+//! certified-floor raise retires only background work.
 //!
 //! The wire key names only the view. A retained finalization settles every ask at or below it.
 //! Otherwise serving prefers an exact certified notarization to a covering nullification, matching
@@ -121,6 +122,7 @@ mod test_helpers {
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_parallel::Sequential;
+    use commonware_utils::non_empty;
 
     type TestScheme = ed25519::Scheme;
 
@@ -135,7 +137,8 @@ mod test_helpers {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
             .collect();
-        Nullification::from_nullifies(verifier, &votes, &Sequential).expect("nullification quorum")
+        Nullification::from_nullifies(verifier, non_empty![@&votes], &Sequential)
+            .expect("nullification quorum")
     }
 
     pub(super) fn build_notarization(
@@ -153,7 +156,8 @@ mod test_helpers {
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Notarization::from_notarizes(verifier, &votes, &Sequential).expect("notarization quorum")
+        Notarization::from_notarizes(verifier, non_empty![@&votes], &Sequential)
+            .expect("notarization quorum")
     }
 
     pub(super) fn build_finalization(
@@ -171,6 +175,7 @@ mod test_helpers {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
-        Finalization::from_finalizes(verifier, &votes, &Sequential).expect("finalization quorum")
+        Finalization::from_finalizes(verifier, non_empty![@&votes], &Sequential)
+            .expect("finalization quorum")
     }
 }

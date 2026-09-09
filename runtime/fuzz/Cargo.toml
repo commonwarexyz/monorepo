@@ -10,7 +10,8 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
-commonware-runtime.workspace = true
+commonware-cryptography.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
 
@@ -23,5 +24,11 @@ doc = false
 [[bin]]
 name = "blob_integrity"
 path = "fuzz_targets/blob_integrity.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "blob_creation"
+path = "fuzz_targets/blob_creation.rs"
 test = false
 doc = false

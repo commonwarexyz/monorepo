@@ -60,7 +60,8 @@
 //!     master_public,
 //!     (b"_TLE_", &target),
 //!     &message,
-//! );
+//! )
+//! .expect("encryption should succeed");
 //!
 //! // Later, when someone has a signature over the target...
 //! let signature = sign_message::<MinPk>(&master_secret, b"_TLE_", &target);
@@ -93,9 +94,10 @@ use crate::{
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_math::algebra::CryptoGroup;
+use commonware_math::algebra::{Additive, CryptoGroup};
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
+use thiserror::Error;
 use zeroize::Zeroizing;
 
 /// Domain separation tag for hashing the `h3` message to a scalar.
@@ -106,6 +108,14 @@ const BLOCK_SIZE: usize = Digest::SIZE;
 
 /// Block type for IBE.
 pub type Block = FixedBytes<BLOCK_SIZE>;
+
+/// Errors returned while encrypting a message.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum Error {
+    /// The master public key is the group identity.
+    #[error("master public key is the group identity")]
+    InvalidPublicKey,
+}
 
 impl From<Digest> for Block {
     fn from(digest: Digest) -> Self {
@@ -185,9 +195,6 @@ mod hash {
         combined.extend_from_slice(message);
 
         // Map the combined bytes to a scalar via RFC9380 hash-to-field.
-        //
-        // Strictly speaking, this needs to not be 0, but the odds of this happening
-        // are negligible.
         Scalar::map(DST, &combined)
     }
 
@@ -200,51 +207,11 @@ mod hash {
 }
 
 /// XOR two [Block]s together.
-///
-/// This function takes advantage of the fixed-size nature of blocks
-/// to enable better compiler optimizations. Since we know blocks are
-/// exactly 32 bytes, we can unroll the operation completely.
 #[inline]
 fn xor(a: &Block, b: &Block) -> Block {
-    let a_bytes = a.as_ref();
-    let b_bytes = b.as_ref();
-
-    // Since Block is exactly 32 bytes, we can use array initialization
-    // with const generics to let the compiler fully optimize this
-    Block::new([
-        a_bytes[0] ^ b_bytes[0],
-        a_bytes[1] ^ b_bytes[1],
-        a_bytes[2] ^ b_bytes[2],
-        a_bytes[3] ^ b_bytes[3],
-        a_bytes[4] ^ b_bytes[4],
-        a_bytes[5] ^ b_bytes[5],
-        a_bytes[6] ^ b_bytes[6],
-        a_bytes[7] ^ b_bytes[7],
-        a_bytes[8] ^ b_bytes[8],
-        a_bytes[9] ^ b_bytes[9],
-        a_bytes[10] ^ b_bytes[10],
-        a_bytes[11] ^ b_bytes[11],
-        a_bytes[12] ^ b_bytes[12],
-        a_bytes[13] ^ b_bytes[13],
-        a_bytes[14] ^ b_bytes[14],
-        a_bytes[15] ^ b_bytes[15],
-        a_bytes[16] ^ b_bytes[16],
-        a_bytes[17] ^ b_bytes[17],
-        a_bytes[18] ^ b_bytes[18],
-        a_bytes[19] ^ b_bytes[19],
-        a_bytes[20] ^ b_bytes[20],
-        a_bytes[21] ^ b_bytes[21],
-        a_bytes[22] ^ b_bytes[22],
-        a_bytes[23] ^ b_bytes[23],
-        a_bytes[24] ^ b_bytes[24],
-        a_bytes[25] ^ b_bytes[25],
-        a_bytes[26] ^ b_bytes[26],
-        a_bytes[27] ^ b_bytes[27],
-        a_bytes[28] ^ b_bytes[28],
-        a_bytes[29] ^ b_bytes[29],
-        a_bytes[30] ^ b_bytes[30],
-        a_bytes[31] ^ b_bytes[31],
-    ])
+    let a = a.as_ref();
+    let b = b.as_ref();
+    Block::new(core::array::from_fn(|i| a[i] ^ b[i]))
 }
 
 /// Encrypt a message for a given target.
@@ -263,13 +230,18 @@ fn xor(a: &Block, b: &Block) -> Block {
 /// * `message` - Message to encrypt
 ///
 /// # Returns
-/// * `Ciphertext<V>` - The encrypted ciphertext
+/// * `Result<Ciphertext<V>, Error>` - The encrypted ciphertext, or an encryption error
 pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
     public: V::Public,
     target: (&[u8], &[u8]),
     message: &Block,
-) -> Ciphertext<V> {
+) -> Result<Ciphertext<V>, Error> {
+    // An identity master key makes the pairing mask independent of the secret key.
+    if public == V::Public::zero() {
+        return Err(Error::InvalidPublicKey);
+    }
+
     // Hash target to get Q_id in signature group using the variant's message DST
     let (namespace, target) = target;
     let q_id = hash_with_namespace::<V>(V::MESSAGE, namespace, target);
@@ -301,7 +273,7 @@ pub fn encrypt<R: CryptoRng, V: Variant>(
     let h4_value = Zeroizing::new(hash::h4(&sigma));
     let w = xor(message, &h4_value);
 
-    Ciphertext { u, v, w }
+    Ok(Ciphertext { u, v, w })
 }
 
 /// Decrypt a ciphertext with a signature over the target specified
@@ -320,6 +292,11 @@ pub fn encrypt<R: CryptoRng, V: Variant>(
 /// # Returns
 /// * `Option<Block>` - The decrypted message
 pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>) -> Option<Block> {
+    // An identity signature collapses the pairing to a public constant and bypasses target binding.
+    if signature == &V::Signature::zero() {
+        return None;
+    }
+
     // Compute e(U, signature)
     let gt = V::pairing(&ciphertext.u, signature);
 
@@ -352,6 +329,45 @@ mod tests {
     use commonware_math::algebra::Random as _;
     use commonware_utils::test_rng;
 
+    fn identity_signature_cannot_decrypt<V: Variant>() {
+        let sigma = Block::new([1; BLOCK_SIZE]);
+        let message = Block::new([2; BLOCK_SIZE]);
+        let r = hash::h3(&sigma, message.as_ref());
+
+        let mut u = V::Public::generator();
+        u *= &r;
+        let identity_pairing = V::pairing(&V::Public::zero(), &V::Signature::generator());
+        let ciphertext = Ciphertext {
+            u,
+            v: xor(&sigma, &hash::h2(&identity_pairing)),
+            w: xor(&message, &hash::h4(&sigma)),
+        };
+
+        assert!(decrypt::<V>(&V::Signature::zero(), &ciphertext).is_none());
+    }
+
+    #[test]
+    fn test_identity_signature_cannot_decrypt() {
+        identity_signature_cannot_decrypt::<MinPk>();
+        identity_signature_cannot_decrypt::<MinSig>();
+    }
+
+    fn identity_public_key_cannot_encrypt<V: Variant>() {
+        let result = encrypt::<_, V>(
+            &mut test_rng(),
+            V::Public::zero(),
+            (b"test", b"target"),
+            &Block::new([0; BLOCK_SIZE]),
+        );
+        assert_eq!(result, Err(Error::InvalidPublicKey));
+    }
+
+    #[test]
+    fn test_identity_public_key_cannot_encrypt() {
+        identity_public_key_cannot_encrypt::<MinPk>();
+        identity_public_key_cannot_encrypt::<MinSig>();
+    }
+
     #[test]
     fn test_encrypt_decrypt_minpk() {
         let mut rng = test_rng();
@@ -372,7 +388,8 @@ mod tests {
             master_public,
             (b"_TLE_", &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Decrypt
         let decrypted =
@@ -401,7 +418,8 @@ mod tests {
             master_public,
             (b"_TLE_", &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Decrypt
         let decrypted =
@@ -427,7 +445,8 @@ mod tests {
             master_public1,
             (b"_TLE_", &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Try to decrypt with signature from second master
         let wrong_signature = ops::sign_message::<MinPk>(&master_secret2, b"_TLE_", &target);
@@ -453,7 +472,8 @@ mod tests {
             master_public,
             (b"_TLE_", &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Tamper with ciphertext by creating a modified w
         let mut w_bytes = [0u8; BLOCK_SIZE];
@@ -491,7 +511,8 @@ mod tests {
             master_public,
             (namespace, &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Decrypt
         let decrypted =
@@ -524,7 +545,8 @@ mod tests {
             master_public,
             (namespace1, &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Encrypt with namespace2
         let ciphertext_ns2 = encrypt::<_, MinPk>(
@@ -532,7 +554,8 @@ mod tests {
             master_public,
             (namespace2, &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Try to decrypt namespace1 ciphertext with namespace2 signature - should fail
         let result1 = decrypt::<MinPk>(&signature_ns2, &ciphertext_ns1);
@@ -569,7 +592,8 @@ mod tests {
             master_public,
             (b"_TLE_", &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Modify V component (encrypted sigma)
         let mut v_bytes = [0u8; BLOCK_SIZE];
@@ -603,7 +627,8 @@ mod tests {
             master_public,
             (b"_TLE_", &target),
             &Block::new(*message),
-        );
+        )
+        .expect("encryption should succeed");
 
         // Modify U component (this should make decryption fail due to FO transform)
         let mut modified_u = ciphertext.u;

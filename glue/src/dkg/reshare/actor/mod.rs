@@ -153,7 +153,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
-    bls12381::primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
+    bls12381::{
+        dkg::feldman_desmedt::Reveal,
+        primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
+    },
     certificate::Scheme,
 };
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
@@ -175,6 +178,8 @@ mod dkg;
 mod follower;
 mod inclusion;
 mod setup;
+#[cfg(test)]
+mod utils;
 use setup::{Setup, StateSyncStart};
 
 /// Configuration for the crate-private one-shot DKG mode.
@@ -262,6 +267,9 @@ where
     /// Sharing mode used for newly generated threshold outputs.
     pub sharing_mode: SharingMode,
 
+    /// Revealed-share calculation used for each newly prepared ceremony.
+    pub reveal: Reveal,
+
     /// Actor mailbox capacity.
     pub mailbox_size: NonZeroUsize,
 
@@ -310,6 +318,7 @@ where
     fence: Fence,
     namespace: &'static [u8],
     sharing_mode: SharingMode,
+    reveal: Reveal,
     partition_prefix: String,
     max_participants: NonZeroU32,
     blocks_per_epoch: NonZeroU64,
@@ -359,6 +368,7 @@ where
                 fence: config.fence,
                 namespace: config.namespace,
                 sharing_mode: config.sharing_mode,
+                reveal: config.reveal,
                 partition_prefix: config.partition_prefix,
                 max_participants: config.max_participants,
                 blocks_per_epoch: config.blocks_per_epoch,

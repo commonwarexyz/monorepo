@@ -4,7 +4,7 @@ mod properties;
 use crate::simulate::action::{Action, Crash, Schedule};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
-use commonware_utils::Probability;
+use commonware_utils::probability;
 use harness::{
     DkgEngine, good_link, run_activation_failure_completes_empty, run_closed_network_receiver,
     run_plan, run_restart_completion_state_is_fresh,
@@ -30,7 +30,7 @@ fn dkg_e2e_lossy_network() {
         Link {
             latency: Duration::from_millis(60),
             jitter: Duration::from_millis(20),
-            success_rate: Probability!(0.75),
+            success_rate: probability!(0.75),
         },
         vec![],
         ExpectedOutcome::Success,

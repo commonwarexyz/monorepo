@@ -25,14 +25,22 @@ use commonware_consensus::{
         self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver, standard::Deferred,
     },
-    simplex::{self, Floor, config::ForwardingPolicy, elector::RoundRobin, types::Context},
+    simplex::{
+        self, Floor,
+        config::{ForwardPolicy, SkipBudget, SkipPolicy},
+        elector::RoundRobin,
+        types::Context,
+    },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
     BatchVerifier, Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
-    bls12381::primitives::{
-        sharing::{Mode as SharingMode, ModeVersion},
-        variant::Variant,
+    bls12381::{
+        dkg::feldman_desmedt::Reveal,
+        primitives::{
+            sharing::{Mode as SharingMode, ModeVersion},
+            variant::Variant,
+        },
     },
     certificate::{ConstantProvider, Verifier as _},
     ed25519,
@@ -88,6 +96,9 @@ pub struct Config<M, X, SS, T, D = Unit> {
 
     /// Sharing mode used for the generated threshold output.
     pub sharing_mode: SharingMode,
+
+    /// Revealed-share calculation used for the DKG ceremony.
+    pub reveal: Reveal,
 
     /// Maximum sharing mode version accepted when decoding blocks.
     pub max_supported_mode: ModeVersion,
@@ -394,7 +405,6 @@ where
                 peer_provider: self.config.manager.clone(),
                 blocker: self.config.blocker.clone(),
                 mailbox_size: MAILBOX_SIZE,
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -469,6 +479,7 @@ where
                 fence,
                 namespace: self.config.namespace,
                 sharing_mode: self.config.sharing_mode,
+                reveal: self.config.reveal,
                 mailbox_size: MAILBOX_SIZE,
                 partition_prefix: format!("{}-reshare", self.config.partition_prefix),
                 max_participants,
@@ -516,9 +527,12 @@ where
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_millis(500),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(5),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: SkipBudget::Participants,
+                },
                 fetch_timeout: Duration::from_secs(2),
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
         );
@@ -628,6 +642,7 @@ fn archive_config<C>(
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_partition: format!("{prefix}-{name}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),
@@ -656,6 +671,7 @@ mod tests {
             strategy: (),
             namespace: b"test",
             sharing_mode: SharingMode::RootsOfUnity,
+            reveal: Reveal::V1,
             max_supported_mode: ModeVersion::v0(),
             partition_prefix: "test".into(),
             participants: Set::default(),
