@@ -8462,7 +8462,7 @@ mod tests {
         });
     }
 
-    /// Dispatch preserves the buffered block object and performs no archive read after its write.
+    /// Dispatch preserves the buffered block object without rereading it from the archive.
     #[test_traced("WARN")]
     fn test_standard_dispatch_delivers_staged_block_without_archive_read() {
         const PARTITION_PREFIX: &str = "staged-dispatch";
@@ -8650,7 +8650,7 @@ mod tests {
         staged_dispatch_deduplicates_finalizations(true);
     }
 
-    /// Staging retains twice the ack capacity until dispatch or a floor skips the blocks.
+    /// Staging retains at most twice the ack capacity until dispatch or a floor skips the blocks.
     #[test_traced("WARN")]
     fn test_standard_staged_blocks_bounded() {
         const PARTITION_PREFIX: &str = "staged-bounded";
