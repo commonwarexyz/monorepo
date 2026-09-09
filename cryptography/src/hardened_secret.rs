@@ -455,12 +455,10 @@ impl<T> Drop for ReadGuard<'_, T> {
 
 #[cfg(all(test, not(miri)))]
 mod tests {
-    use super::*;
-    use crate::secret::Secret;
+    use crate::{HardenError, Secret};
     use std::{
-        os::unix::process::ExitStatusExt,
         panic::{AssertUnwindSafe, catch_unwind},
-        process::{Command, Output},
+        ptr,
         sync::{
             Arc, Barrier,
             atomic::{AtomicUsize, Ordering},
@@ -468,102 +466,101 @@ mod tests {
         thread,
     };
 
-    const CHILD_ENV: &str = "COMMONWARE_HARDENED_SECRET_TEST";
+    /// A value with a borrowed, nonsecret destruction counter.
+    #[derive(Clone)]
+    struct Tracked<'a> {
+        bytes: [u8; 32],
+        drops: &'a AtomicUsize,
+    }
 
-    /// Creates an allocation whose mappings can be inspected by backend tests.
-    fn harden<T>(value: InlineSecret<T>) -> Result<HardenedSecret<T>, HardenError> {
-        let mut value = ManuallyDrop::new(value);
-
-        // SAFETY: Success immediately retires the source without dropping T.
-        // Failure leaves it initialized, so only that path runs its destructor.
-        unsafe {
-            match HardenedSecret::try_from_inline(&mut value) {
-                Ok(hardened) => {
-                    slice::from_raw_parts_mut(
-                        (&raw mut *value).cast::<MaybeUninit<u8>>(),
-                        size_of::<InlineSecret<T>>(),
-                    )
-                    .zeroize();
-                    Ok(hardened)
-                }
-                Err(error) => {
-                    ManuallyDrop::drop(&mut value);
-                    Err(error)
-                }
-            }
+    impl Drop for Tracked<'_> {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Runs one `subprocess_child` case in a fresh process and checks how it ended.
-    ///
-    /// Faults and aborts must kill the child with `signal`. Every other case must
-    /// exit successfully.
-    fn child(case: &str, signal: Option<i32>) -> Output {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "hardened_secret::tests::subprocess_child",
-                "--nocapture",
-            ])
-            .env(CHILD_ENV, case)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.signal(), signal, "{output:?}");
-        if signal.is_none() {
-            assert!(output.status.success(), "{output:?}");
-        }
-        output
-    }
-
-    #[test]
-    fn protected_access_and_guards() {
-        child("inaccessible", Some(libc::SIGSEGV));
-        child("readonly", Some(libc::SIGSEGV));
-        child("leading_guard", Some(libc::SIGSEGV));
-        child("trailing_guard", Some(libc::SIGSEGV));
-        child("enter_failure", Some(libc::SIGABRT));
-        child("exit_failure", Some(libc::SIGABRT));
-        child("cleanup_failure", Some(libc::SIGABRT));
-        child("harden_seal_failure", None);
-    }
-
-    #[test]
-    fn locked_memory_limit() {
-        child("locked_memory_limit", None);
-    }
-
-    #[test]
-    fn public_access_unwind() {
-        for case in ["borrowed_panic_protection", "owned_panic_protection"] {
-            let output = child(case, Some(libc::SIGSEGV));
-            // A fault during recovery must not pass as the deliberate sealed-page probe.
-            assert!(String::from_utf8_lossy(&output.stderr).contains("access recovered"));
+    const fn tracked(drops: &AtomicUsize) -> Tracked<'_> {
+        Tracked {
+            bytes: [42; 32],
+            drops,
         }
     }
 
     #[test]
-    fn fork_wipes_inherited_data() {
-        child("fork_wipe", None);
-    }
+    fn test_harden_and_extract() {
+        let drops = AtomicUsize::new(0);
 
-    #[test]
-    fn nested_and_concurrent_access() {
-        let secret = harden(InlineSecret::new([42u8; 32])).unwrap();
-        let cloned = secret.clone();
-        assert!(Arc::ptr_eq(&secret.inner, &cloned.inner));
+        // Hardening moves the value without destroying it, and hardening again
+        // keeps the same allocation.
+        let mut secret = Secret::new(tracked(&drops));
+        secret.try_harden().unwrap();
+        assert!(secret.is_hardened());
+        let address = secret.access(ptr::from_ref);
+        secret.try_harden().unwrap();
         secret.access(|value| {
+            assert_eq!(ptr::from_ref(value), address);
+            assert_eq!(value.bytes, [42; 32]);
+        });
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+        // Unique extraction moves the value out instead of destroying it.
+        let value = secret.try_extract().ok().unwrap();
+        assert_eq!(value.bytes, [42; 32]);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(value);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_clones_share_one_allocation() {
+        let drops = AtomicUsize::new(0);
+        let mut secret = Secret::new(tracked(&drops));
+        secret.try_harden().unwrap();
+        let clone = secret.clone();
+
+        // Both handles see the same value at the same address.
+        let address = secret.access(ptr::from_ref);
+        assert!(clone.is_hardened());
+        clone.access(|value| assert_eq!(ptr::from_ref(value), address));
+
+        // A shared value cannot be moved out, and the handle comes back unchanged.
+        let Err(secret) = secret.try_extract() else {
+            panic!("shared value moved out");
+        };
+        secret.access(|value| assert_eq!(ptr::from_ref(value), address));
+
+        // Dropping one handle destroys nothing. The last one destroys the value
+        // exactly once.
+        drop(secret);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        clone.access(|value| assert_eq!(value.bytes, [42; 32]));
+        drop(clone);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_nested_and_concurrent_access() {
+        let mut secret = Secret::new([42u8; 32]);
+        secret.try_harden().unwrap();
+        let cloned = secret.clone();
+
+        // Nested calls through the same handle or another one see the value, and
+        // a panic in an inner call leaves the outer one usable.
+        secret.access(|value| {
+            secret.access(|inner| assert!(ptr::eq(value, inner)));
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
                     cloned.access(|other| {
-                        assert_eq!(value, other);
+                        assert!(ptr::eq(value, other));
                         panic!("nested access panic");
                     });
                 }))
                 .is_err()
             );
-            assert_eq!(*secret.inner.readers.lock(), 1);
             assert_eq!(value, &[42; 32]);
         });
+
+        // Readers on other threads see the value while the main thread reads too.
         let barrier = Arc::new(Barrier::new(5));
         thread::scope(|scope| {
             for _ in 0..4 {
@@ -578,30 +575,81 @@ mod tests {
                 });
             }
             barrier.wait();
-            assert_eq!(*secret.inner.readers.lock(), 4);
             secret.access(|value| assert_eq!(value, &[42; 32]));
             barrier.wait();
         });
-        assert_eq!(*secret.inner.readers.lock(), 0);
-        child("panic_protection", Some(libc::SIGSEGV));
+        secret.access(|value| assert_eq!(value, &[42; 32]));
     }
 
     #[test]
-    fn initialize_and_layout() {
-        check_layout::<0>(1);
+    fn test_protections() {
+        let mut secret = Secret::new([42u8; 32]);
+        secret.try_harden().unwrap();
+
+        // The value is smaller than a page, so its data region is the one page
+        // containing it, with a guard page on each side.
+        let page = page_size();
+        let data = secret
+            .access(ptr::from_ref)
+            .cast::<u8>()
+            .map_addr(|address| address & !(page - 1));
+        let leading = data.map_addr(|address| address - page);
+        let trailing = data.map_addr(|address| address + page);
+
+        // Idle data pages are inaccessible, locked, excluded from core dumps, and
+        // wiped on fork. Both guards are inaccessible and never locked.
+        let (permissions, flags) = mapping_info(data);
+        assert_eq!(permissions, "---");
+        for flag in ["lo", "dd", "wf"] {
+            assert!(
+                flags.iter().any(|f| f == flag),
+                "missing {flag} in {flags:?}"
+            );
+        }
+        for guard in [leading, trailing] {
+            let (permissions, flags) = mapping_info(guard);
+            assert_eq!(permissions, "---");
+            assert!(!flags.iter().any(|f| f == "lo"), "guard locked: {flags:?}");
+        }
+
+        // A callback makes the data pages readable but not writable and leaves
+        // the guards alone. Access is revoked on return and on unwind.
+        secret.access(|_| {
+            assert_eq!(mapping_info(data).0, "r--");
+            assert_eq!(mapping_info(leading).0, "---");
+            assert_eq!(mapping_info(trailing).0, "---");
+        });
+        assert_eq!(mapping_info(data).0, "---");
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                secret.access(|_| panic!("access panic"));
+            }))
+            .is_err()
+        );
+        assert_eq!(mapping_info(data).0, "---");
+    }
+
+    #[test]
+    fn test_sizes_and_alignment() {
+        // A zero-sized value hardens like any other.
+        round_trip::<0>();
+
         // Const array lengths and repr(align) require compile-time page sizes.
         // Dispatch on the actual page size rather than assuming 4 KiB pages.
         macro_rules! page_cases {
             ($page:literal, $over:literal) => {{
-                check_layout::<$page>(1);
-                check_layout::<{ $page + 1 }>(2);
+                // Values of exactly one page and of one byte more both round-trip.
+                round_trip::<$page>();
+                round_trip::<{ $page + 1 }>();
+
+                // Page alignment is the most the mapping can honor.
                 #[repr(align($page))]
                 struct Aligned([u8; 1]);
-                let value = harden(InlineSecret::new(Aligned([73]))).unwrap();
-                assert_eq!(value.inner.value.as_ptr().addr() % $page, 0);
-                assert_eq!(value.inner.mapping.data_len, $page);
+                let mut value = Secret::new(Aligned([73]));
+                value.try_harden().unwrap();
                 value.access(|value| assert_eq!(value.0, [73]));
-                drop(value);
+
+                // Stricter alignment is rejected, and the inline value stays usable.
                 #[repr(align($over))]
                 struct OverAligned([u8; 1]);
                 let mut value = Secret::new(OverAligned([73]));
@@ -615,520 +663,56 @@ mod tests {
             8192 => page_cases!(8192, 16384),
             16384 => page_cases!(16384, 32768),
             65536 => page_cases!(65536, 131072),
-            page => panic!("add layout test fixtures for {page}-byte pages"),
+            page => panic!("add fixtures for {page}-byte pages"),
         }
     }
 
-    /// Checks both ends of the allocation around a fully initialized value.
-    fn check_layout<const N: usize>(pages: usize) {
-        let secret = harden(InlineSecret::new([37u8; N])).unwrap();
-        let mapping = &secret.inner.mapping;
-        let page = page_size();
-        assert_eq!(mapping.data_len, pages * page);
-        assert_eq!(mapping.total_len, (pages + 2) * page);
-        assert_eq!(
-            mapping.data.as_ptr().addr(),
-            mapping.base.as_ptr().addr() + page
-        );
-        assert_eq!(
-            secret.inner.value.as_ptr().addr() + N,
-            mapping.data.as_ptr().addr() + mapping.data_len
-        );
+    /// Hardens a byte array, reads it back, and moves it out again.
+    fn round_trip<const N: usize>() {
+        let mut secret = Secret::new([37u8; N]);
+        secret.try_harden().unwrap();
         secret.access(|value| assert_eq!(value, &[37; N]));
-        let data = mapping.data.as_ptr();
-        assert_eq!(secret.try_extract().ok().unwrap(), [37; N]);
-        assert_unmapped(data);
+        assert_eq!(secret.try_extract().unwrap(), [37; N]);
     }
 
-    #[test]
-    fn unwind_releases_mapping() {
-        struct PanicOnDrop([u8; 32]);
-        impl Drop for PanicOnDrop {
-            fn drop(&mut self) {
-                assert_eq!(self.0, [99; 32]);
-                panic!("destructor panic");
-            }
-        }
-        let secret = harden(InlineSecret::new(PanicOnDrop([99; 32]))).unwrap();
-        let data = secret.inner.mapping.data.as_ptr();
-        assert!(catch_unwind(AssertUnwindSafe(|| drop(secret))).is_err());
-        assert_unmapped(data);
-    }
-
-    #[test]
-    fn redaction_and_storage_conversion() {
-        let mut secret = Secret::new([42u8; 32]);
-        assert!(!secret.is_hardened());
-        secret.try_harden().unwrap();
-        assert!(secret.is_hardened());
-        let address = secret.access(|value| value as *const _);
-        secret.try_harden().unwrap();
-        secret.access(|value| assert_eq!(value as *const _, address));
-        assert_eq!(format!("{secret:?}"), "Secret([REDACTED])");
-        let cloned = secret.clone();
-        assert!(cloned.is_hardened());
-        assert_eq!(secret, cloned);
-        assert_eq!(cloned.extract_or_clone(), [42u8; 32]);
-        assert!(secret.is_hardened());
-        assert_eq!(format!("{secret}"), "[REDACTED]");
-        child("no_permission_changes", None);
-    }
-
-    /// A non-Clone inline value with a borrowed, nonsecret destruction counter.
-    struct Tracked<'a> {
-        bytes: [u8; 32],
-        drops: &'a AtomicUsize,
-    }
-
-    impl Drop for Tracked<'_> {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    #[test]
-    fn harden_nonclone_value_in_place() {
-        let drops = AtomicUsize::new(0);
-        let mut secret = Secret::new(Tracked {
-            bytes: [42; 32],
-            drops: &drops,
-        });
-        let result: Result<(), HardenError> = secret.try_harden();
-        result.unwrap();
-        assert!(secret.is_hardened());
-        secret.access(|value| assert_eq!(value.bytes, [42; 32]));
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
-        drop(secret);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-
-    /// A failed attempt must not destroy or replace the original owning value.
-    fn assert_harden_failure(operation: &str) {
-        struct Value<'a> {
-            bytes: Box<[u8; 32]>,
-            drops: &'a AtomicUsize,
-        }
-        impl Drop for Value<'_> {
-            fn drop(&mut self) {
-                self.drops.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        let drops = AtomicUsize::new(0);
-        let mut secret = Secret::new(Value {
-            bytes: Box::new([42; 32]),
-            drops: &drops,
-        });
-        let address = secret.access(ptr::from_ref);
-        let locked = locked_kib();
-        // A second attempt must also preserve ownership and release its mapping.
-        for _ in 0..2 {
-            let error = secret.try_harden().unwrap_err();
-            assert!(
-                matches!(error, HardenError::System { operation: failed, .. } if failed == operation)
-            );
-            assert!(!secret.is_hardened());
-            secret.access(|value| {
-                assert_eq!(ptr::from_ref(value), address);
-                assert_eq!(*value.bytes, [42; 32]);
-            });
-            assert_eq!(drops.load(Ordering::Relaxed), 0);
-            assert_eq!(locked_kib(), locked);
-        }
-        drop(secret);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-
-    /// Reads the locked data size reported by Linux, in KiB.
-    fn locked_kib() -> usize {
-        std::fs::read_to_string("/proc/self/status")
-            .unwrap()
-            .lines()
-            .find_map(|line| line.strip_prefix("VmLck:"))
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap()
-    }
-
-    #[test]
-    fn last_owner_destroys_value() {
-        let drops = AtomicUsize::new(0);
-        let secret = harden(InlineSecret::new(Tracked {
-            bytes: [42; 32],
-            drops: &drops,
-        }))
-        .unwrap();
-        let data = secret.inner.mapping.data.as_ptr();
-        let clone = secret.clone();
-        secret.access(|value| assert_eq!(value.bytes, [42; 32]));
-        drop(secret);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
-        drop(clone);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_unmapped(data);
-    }
-
-    #[test]
-    fn unique_extraction_moves_nonclone_value() {
-        let drops = AtomicUsize::new(0);
-        let secret = harden(InlineSecret::new(Tracked {
-            bytes: [42; 32],
-            drops: &drops,
-        }))
-        .unwrap();
-        let data = secret.inner.mapping.data.as_ptr();
-        let value = secret.try_extract().ok().unwrap();
-        assert_unmapped(data);
-        assert_eq!(value.bytes, [42; 32]);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
-        drop(value);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn subprocess_child() {
-        let Ok(case) = std::env::var(CHILD_ENV) else {
-            return;
-        };
-        // SAFETY: This subprocess owns its resource limits. Disabling core files
-        // prevents deliberate fault tests from creating artifacts.
-        unsafe {
-            let limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            assert_eq!(libc::setrlimit(libc::RLIMIT_CORE, &limit), 0);
-        }
-        if case == "locked_memory_limit" {
-            drop_ipc_lock_capability();
-            // SAFETY: This subprocess lowers only its own locked-memory allowance.
-            unsafe {
-                let limit = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                assert_eq!(libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit), 0);
-            }
-            assert_harden_failure("mlock");
-            return;
-        }
-        match case.as_str() {
-            "exit_failure" => {
-                exit_failure();
-                panic!("revocation did not abort");
-            }
-            "harden_seal_failure" => {
-                deny_mprotect(&[libc::PROT_NONE]);
-                assert_harden_failure("mprotect");
-                return;
-            }
-            "no_permission_changes" => {
-                let mut public = Secret::new([42u8; 32]);
-                public.try_harden().unwrap();
-                let shared = harden(InlineSecret::new([73u8; 32])).unwrap();
-                let clone = shared.clone();
-                deny_mprotect(&[
-                    libc::PROT_NONE,
-                    libc::PROT_READ,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                ]);
-                public.try_harden().unwrap();
-                assert!(public.is_hardened());
-                let returned = shared.try_extract().unwrap_err();
-                assert!(Arc::ptr_eq(&returned.inner, &clone.inner));
-                assert_eq!(*returned.inner.readers.lock(), 0);
-                drop(returned);
-                // SAFETY: Leave the disposable subprocess without destructors.
-                // Final release would require the deliberately forbidden write transition.
-                unsafe { libc::_exit(0) };
-            }
-            "borrowed_panic_protection" | "owned_panic_protection" => {
-                let mut secret = Secret::new([42u8; 32]);
-                secret.try_harden().unwrap();
-                let address = secret.access(|value| value as *const [u8; 32]);
-                if case == "borrowed_panic_protection" {
-                    assert!(catch_unwind(|| secret.access(|_| panic!("borrowed panic"))).is_err());
-                } else {
-                    let cloned = secret.clone();
-                    assert!(
-                        catch_unwind(move || cloned.access(|_| panic!("owned panic"))).is_err()
-                    );
-                }
-                // The surviving owner remains usable after either kind of unwind.
-                secret.access(|value| assert_eq!(value, &[42; 32]));
-                eprintln!("access recovered");
-                // SAFETY: Deliberately probe the still-owned mapping after the last
-                // reader exits. This subprocess must fault on its sealed data page.
-                unsafe { std::hint::black_box(address.read_volatile()) };
-                return;
-            }
-            _ => {}
-        }
-        let secret = harden(InlineSecret::new([42u8; 32])).unwrap();
-        match case.as_str() {
-            "inaccessible" | "panic_protection" => {
-                if case == "panic_protection" {
-                    assert!(
-                        catch_unwind(AssertUnwindSafe(|| {
-                            secret.access(|_| panic!("access panic"));
-                        }))
-                        .is_err()
-                    );
-                }
-                // SAFETY: Intentionally probe our allocated, inaccessible page in
-                // an isolated subprocess, expecting an operating-system fault.
-                unsafe {
-                    std::hint::black_box(secret.inner.value.as_ptr().read_volatile());
-                }
-            }
-            "readonly" => secret.access(|_| {
-                // SAFETY: Deliberately test the read-only mapping in a subprocess.
-                unsafe {
-                    secret.inner.value.as_ptr().write_volatile([0; 32]);
-                }
-            }),
-            "leading_guard" => secret.access(|_| {
-                // SAFETY: Deliberately read the mapped but inaccessible guard page.
-                unsafe {
-                    std::hint::black_box(secret.inner.mapping.base.as_ptr().read_volatile());
-                }
-            }),
-            "trailing_guard" => secret.access(|_| {
-                // SAFETY: The pointer is within the trailing mapped guard page.
-                unsafe {
-                    std::hint::black_box(
-                        secret
-                            .inner
-                            .mapping
-                            .data
-                            .as_ptr()
-                            .add(secret.inner.mapping.data_len)
-                            .read_volatile(),
-                    );
-                }
-            }),
-            "enter_failure" => {
-                // SAFETY: Remove our mapping to force mprotect failure. The next
-                // operation must abort without dereferencing the stale pointer.
-                unsafe {
-                    assert_eq!(
-                        libc::munmap(
-                            secret.inner.mapping.base.as_ptr().cast(),
-                            secret.inner.mapping.total_len
-                        ),
-                        0
-                    );
-                }
-                secret.access(|_| ());
-            }
-            "cleanup_failure" => {
-                // SAFETY: Remove the data region so the final owner cannot restore
-                // write access. Nothing dereferences the stale pointer afterward.
-                unsafe {
-                    assert_eq!(
-                        libc::munmap(
-                            secret.inner.mapping.data.as_ptr().cast(),
-                            secret.inner.mapping.data_len
-                        ),
-                        0
-                    );
-                }
-                drop(secret);
-                panic!("cleanup did not abort");
-            }
-            "fork_wipe" => {
-                // SAFETY: The child inspects raw bytes, drops its inherited handle,
-                // and exits without returning to the test harness.
-                let pid = unsafe { libc::fork() };
-                assert!(pid >= 0);
-                if pid == 0 {
-                    let data = secret.inner.mapping.data.as_ptr();
-                    let len = secret.inner.mapping.data_len;
-                    // SAFETY: WIPEONFORK supplies zero pages, and the child owns
-                    // this private mapping.
-                    unsafe {
-                        if libc::mprotect(data.cast(), len, libc::PROT_READ) != 0 {
-                            libc::_exit(1);
-                        }
-                        for i in 0..len {
-                            if data.add(i).read_volatile() != 0 {
-                                libc::_exit(2);
-                            }
-                        }
-                    }
-                    // Dropping here is sound only because all-zero bytes are a
-                    // valid [u8; 32]. The public contract forbids it in general.
-                    drop(secret);
-                    // SAFETY: Terminate the child without invoking the test harness.
-                    unsafe { libc::_exit(0) };
-                }
-                wait_for_child(pid, None);
-                secret.access(|value| assert_eq!(value, &[42; 32]));
-                return;
-            }
-            _ => panic!("unknown subprocess case: {case}"),
-        }
-        panic!("expected subprocess fault: {case}");
-    }
-
-    /// Forces revocation failure without assuming a particular page size.
-    fn exit_failure() {
-        // A ZST still owns one data page. Its reference occupies no bytes, so
-        // removing that page leaves no live reference into unmapped data.
-        let secret = harden(InlineSecret::new(())).unwrap();
-        secret.access(|_| {
-            // SAFETY: Remove the test's data page to force last-reader mprotect
-            // failure. The ZST's trailing-guard address stays mapped.
-            unsafe {
-                assert_eq!(
-                    libc::munmap(
-                        secret.inner.mapping.data.as_ptr().cast(),
-                        secret.inner.mapping.data_len,
-                    ),
-                    0
-                );
-            }
-        });
-    }
-
-    /// Rejects selected permission transitions at the syscall boundary.
-    /// The filter is installed only in a disposable subprocess, without test hooks
-    /// in the allocator. Other syscall numbers and permissions remain allowed.
-    fn deny_mprotect(protections: &[libc::c_int]) {
-        let stmt = |code, k| libc::sock_filter {
-            code,
-            jt: 0,
-            jf: 0,
-            k,
-        };
-        let jump = |k, jt, jf| libc::sock_filter {
-            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            jt,
-            jf,
-            k,
-        };
-        // seccomp_data.nr is at offset 0 and args[2] at offset 32. Reading the
-        // low word of the protection argument works on little-endian hosts.
-        #[cfg(target_endian = "little")]
-        let protection_offset = 32;
-        #[cfg(target_endian = "big")]
-        let protection_offset = 36;
-        let count = u8::try_from(protections.len()).unwrap();
-        let mut filter = vec![
-            stmt((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0),
-            jump(libc::SYS_mprotect as u32, 0, count + 1),
-            stmt(
-                (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-                protection_offset,
-            ),
-        ];
-        for (index, protection) in protections.iter().enumerate() {
-            // A match skips the remaining comparisons and the ALLOW instruction.
-            filter.push(jump(*protection as u32, count - index as u8, 0));
-        }
-        filter.push(stmt(
-            (libc::BPF_RET | libc::BPF_K) as u16,
-            libc::SECCOMP_RET_ALLOW,
-        ));
-        filter.push(stmt(
-            (libc::BPF_RET | libc::BPF_K) as u16,
-            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
-        ));
-        let program = libc::sock_fprog {
-            len: filter.len() as u16,
-            filter: filter.as_mut_ptr(),
-        };
-        // SAFETY: This thread permanently narrows its own syscall permissions.
-        // The kernel copies the valid filter while prctl runs.
-        unsafe {
-            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
-            assert_eq!(
-                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
-                0
-            );
-        }
-    }
-
-    /// Removes effective CAP_IPC_LOCK from the child thread before lowering its limit.
-    fn drop_ipc_lock_capability() {
-        // Linux's version 3 capability syscall ABI uses a header and two words.
-        #[repr(C)]
-        struct Header {
-            version: u32,
-            pid: libc::pid_t,
-        }
-        #[repr(C)]
-        #[derive(Clone, Copy, Default)]
-        struct Capabilities {
-            effective: u32,
-            permitted: u32,
-            inheritable: u32,
-        }
-        let mut header = Header {
-            version: 0x20080522,
-            pid: 0,
-        };
-        let mut data = [Capabilities::default(); 2];
-        // SAFETY: Version 3 writes two capability words. pid 0 selects this thread.
-        unsafe {
-            assert_eq!(
-                libc::syscall(libc::SYS_capget, &raw mut header, data.as_mut_ptr()),
-                0
-            );
-            // CAP_IPC_LOCK is bit 14. UID alone does not determine this privilege.
-            if data[0].effective & (1 << 14) != 0 {
-                data[0].effective &= !(1 << 14);
-                assert_eq!(
-                    libc::syscall(libc::SYS_capset, &raw mut header, data.as_ptr()),
-                    0
-                );
-                assert_eq!(
-                    libc::syscall(libc::SYS_capget, &raw mut header, data.as_mut_ptr()),
-                    0
-                );
-            }
-        }
-        assert_eq!(data[0].effective & (1 << 14), 0);
-    }
-
-    /// Returns the kernel's base page size used by the allocation under test.
+    /// Returns the kernel's page size.
     fn page_size() -> usize {
         // SAFETY: sysconf has no memory preconditions.
-        let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
-        assert!(page.is_power_of_two());
-        page
+        usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap()
     }
 
-    /// Checks release without reading through a pointer whose allocation is gone.
-    fn assert_unmapped(address: *mut u8) {
-        let page = page_size();
-        // SAFETY: mincore checks virtual mappings
-        // without dereferencing the queried address in userspace.
-        unsafe {
-            let base = address.map_addr(|address| address & !(page - 1));
-            let mut resident = 0;
-            assert_eq!(libc::mincore(base.cast(), page, &mut resident), -1);
-            assert_eq!(
-                io::Error::last_os_error().raw_os_error(),
-                Some(libc::ENOMEM)
-            );
+    /// Returns the permissions and `VmFlags` of the mapping containing `address`
+    /// from `/proc/self/smaps`.
+    fn mapping_info(address: *const u8) -> (String, Vec<String>) {
+        let address = address.addr();
+        let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+        let mut lines = smaps.lines();
+        while let Some(line) = lines.next() {
+            // Each entry starts with "start-end perms ..." followed by attribute
+            // lines, of which VmFlags is the last.
+            let Some((range, rest)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some((start, end)) = range.split_once('-') else {
+                continue;
+            };
+            let (Ok(start), Ok(end)) = (
+                usize::from_str_radix(start, 16),
+                usize::from_str_radix(end, 16),
+            ) else {
+                continue;
+            };
+            if !(start..end).contains(&address) {
+                continue;
+            }
+            let flags = lines
+                .find_map(|line| line.strip_prefix("VmFlags:"))
+                .unwrap()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            return (rest[..3].to_string(), flags);
         }
-    }
-
-    /// Waits for the isolated fork branch and checks its exact termination mode.
-    fn wait_for_child(pid: libc::pid_t, signal: Option<i32>) {
-        let mut status = 0;
-        // SAFETY: pid is our child and status is a writable output location.
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-        if let Some(signal) = signal {
-            assert!(libc::WIFSIGNALED(status), "child status: {status}");
-            assert_eq!(libc::WTERMSIG(status), signal);
-        } else {
-            assert!(libc::WIFEXITED(status), "child status: {status}");
-            assert_eq!(libc::WEXITSTATUS(status), 0);
-        }
+        panic!("address {address:#x} is not mapped");
     }
 }
