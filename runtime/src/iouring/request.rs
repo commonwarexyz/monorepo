@@ -992,7 +992,6 @@ impl PollRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::callbacks::Panics;
     use bytes::Bytes;
     use std::{
         os::{
@@ -1230,11 +1229,11 @@ mod tests {
         assert!(matches!(output, RequestOutput::Send(Err(Error::Timeout))));
         assert_eq!(*guard, 0);
         drop(guard);
-        let mut panics = Panics::default();
+
         // One outer boundary contains the owner panic while ordinary container
         // drop glue releases the remaining nonpanicking owner.
-        panics.run(|| drop(retired));
-        let panic = panics.take().expect("owner panic was not caught");
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(retired)))
+            .expect_err("owner panic was not caught");
         assert_eq!(panic.downcast_ref::<&str>(), Some(&"external owner panic"));
         assert_eq!(*local.lock(), 2);
     }

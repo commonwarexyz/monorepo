@@ -33,7 +33,6 @@
 
 use super::{
     admission::Admissions,
-    callbacks::{Panic, Panics, RetirementGuard},
     driver::{Completed, Driver},
     mailbox::{Mailbox, Message},
     operation::Operations,
@@ -78,6 +77,7 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use rayon::ThreadPoolBuilder;
 use std::{
+    any::Any,
     cell::RefCell,
     convert::Infallible,
     env,
@@ -1001,6 +1001,59 @@ pub(super) fn current() -> Option<Rc<RefCell<Local>>> {
         .flatten()
 }
 
+/// Panic payload reported after mandatory worker cleanup.
+type Panic = Box<dyn Any + Send + 'static>;
+
+/// Retain the first panic while allowing the remaining cleanup to run.
+///
+/// Later payloads are leaked because their destructors may panic. An unclaimed
+/// first payload is also leaked when this accumulator is dropped, including
+/// during an existing unwind.
+#[derive(Default)]
+struct Panics {
+    /// First failure, held until the worker can report it.
+    first: Option<Panic>,
+}
+
+impl Panics {
+    /// Run a callback without letting its panic interrupt cleanup.
+    fn run(&mut self, f: impl FnOnce()) {
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(f)) {
+            self.retain(panic);
+        }
+    }
+
+    /// Retain the first payload and leak any later ones.
+    fn retain(&mut self, panic: Panic) {
+        if self.first.is_none() {
+            self.first = Some(panic);
+        } else {
+            mem::forget(panic);
+        }
+    }
+
+    /// Take the retained panic.
+    fn take(&mut self) -> Option<Panic> {
+        self.first.take()
+    }
+}
+
+impl Drop for Panics {
+    fn drop(&mut self) {
+        mem::forget(self.first.take());
+    }
+}
+
+/// Abort if cleanup exits before kernel-visible resources can be released.
+/// Forget this guard only after all outstanding operations have retired.
+struct RetirementGuard;
+
+impl Drop for RetirementGuard {
+    fn drop(&mut self) {
+        std::process::abort();
+    }
+}
+
 /// Reusable typed callback storage detached from Local before invocation.
 #[derive(Default)]
 pub(super) struct Deferred {
@@ -1116,7 +1169,7 @@ impl Worker {
         }
         // Protect every retirement transition, including observer removal
         // before the first drain turn, against unexpected infrastructure unwind.
-        let mut retirement = RetirementGuard::new();
+        let retirement = RetirementGuard;
         self.begin_close();
         for message in self.inbox.drain(..) {
             task::contain(|| drop(message));
@@ -1185,7 +1238,7 @@ impl Worker {
             drop(local);
             parked.expect("io_uring shutdown wait failed");
         }
-        retirement.disarm();
+        mem::forget(retirement);
         let driver = self.local.borrow_mut().driver.take();
         self.panics.run(|| drop(driver));
         self.finished = true;
@@ -1293,8 +1346,8 @@ impl Worker {
         let max_spin =
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
         loop {
-            if self.panics.is_pending() {
-                return Err(self.panics.take().unwrap());
+            if let Some(panic) = self.panics.take() {
+                return Err(panic);
             }
             for _ in 0..64 {
                 let Some(mut running) = self.local.borrow_mut().tasks.take() else {
@@ -1347,8 +1400,8 @@ impl Worker {
             let woke = self.service(defer);
             self.messages(&mailbox, woke);
             self.callbacks();
-            if self.panics.is_pending() {
-                return Err(self.panics.take().unwrap());
+            if let Some(panic) = self.panics.take() {
+                return Err(panic);
             }
 
             let (ready, needs_kernel, pending_submissions, deadline) = {
@@ -1648,6 +1701,7 @@ mod tests {
     use futures::{
         executor::block_on,
         future::{pending, poll_fn},
+        task::{ArcWake, waker},
     };
     use std::{
         sync::{
@@ -1667,6 +1721,71 @@ mod tests {
 
     fn config() -> Config {
         Config::new().with_idle_spinner(SpinnerConfig::disabled())
+    }
+
+    #[test]
+    fn test_callback_failure_does_not_skip_siblings() {
+        struct Callback {
+            calls: Arc<AtomicUsize>,
+            panics: bool,
+        }
+
+        impl ArcWake for Callback {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                arc_self.calls.fetch_add(1, Ordering::Relaxed);
+                assert!(!arc_self.panics, "wake failed");
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callbacks = [true, false].map(|panics| {
+            waker(Arc::new(Callback {
+                calls: calls.clone(),
+                panics,
+            }))
+        });
+        let mut deferred = Deferred {
+            wakes: callbacks.into(),
+            ..Deferred::default()
+        };
+        let mut panics = Panics::default();
+        assert!(panics.take().is_none());
+
+        // The first wake fails, but the rest of the batch must still run.
+        deferred.run(&mut panics);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert!(deferred.is_empty());
+
+        assert_eq!(
+            panics.take().unwrap().downcast_ref::<&str>(),
+            Some(&"wake failed")
+        );
+        assert!(panics.take().is_none());
+    }
+
+    #[test]
+    fn test_unreported_panic_payloads_are_not_destroyed() {
+        struct Dangerous;
+
+        impl Drop for Dangerous {
+            fn drop(&mut self) {
+                panic!("payload destructor must not run");
+            }
+        }
+
+        let mut panics = Panics::default();
+        panics.retain(Box::new("first"));
+        panics.retain(Box::new(Dangerous));
+
+        // A later failure must preserve the original payload without dropping its own.
+        assert_eq!(
+            panics.take().unwrap().downcast_ref::<&str>(),
+            Some(&"first")
+        );
+
+        // Dropping the accumulator must also leave an unclaimed payload alone.
+        panics.retain(Box::new(Dangerous));
+        drop(panics);
     }
 
     #[test]

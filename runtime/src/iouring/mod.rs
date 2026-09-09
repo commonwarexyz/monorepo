@@ -52,7 +52,6 @@
 //! ```
 
 mod admission;
-mod callbacks;
 mod driver;
 mod mailbox;
 pub(crate) mod operation;
