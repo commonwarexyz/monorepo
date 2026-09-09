@@ -2008,10 +2008,6 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
     }
 
     type Config = Config;
-
-    async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
-        Self::init(context, cfg).await
-    }
 }
 
 #[cfg(test)]
