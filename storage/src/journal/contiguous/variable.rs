@@ -2224,8 +2224,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )))
     }
 
-    /// Discard all items and reposition the journal at `new_size`.
-    ///
+    /// Discard all items and reposition the journal at or beyond its current end.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
@@ -2325,8 +2324,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
     /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
     /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
-    /// changes the journal. A failed offsets or recovery-watermark sync is not observed by
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
+    /// journal. A failed offsets or recovery-watermark sync is not observed by
     /// commit and resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
