@@ -824,13 +824,11 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_unordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            // Concurrency 201 (200 workers) rounds down to 128 equal two-partition ranges for
-            // P=1 (count=256) and 301 exceeds the partition count and clamps. Both must
-            // reconstruct the same root without panicking.
+            // Cover partition-range rounding and budgets beyond the partition and chunk counts.
             check_parallel_init_equivalence::<1>(
                 context,
                 "unordered_parallel_equiv_p1",
-                &[1, 2, 3, 5, 9, 201, 301],
+                &[1, 2, 3, 5, 9, 201, 301, usize::MAX],
             )
             .await;
         });
@@ -1053,7 +1051,7 @@ pub(crate) mod test {
     fn test_unordered_partitioned_parallel_init_empty_log() {
         deterministic::Runner::default().start(|context| async move {
             let mut results = Vec::new();
-            for concurrency in [1usize, 4] {
+            for concurrency in [1usize, 4, usize::MAX / 2, usize::MAX] {
                 let cfg =
                     fixed_db_config_partitioned::<OneCap>("unordered_parallel_empty", &context);
                 let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
@@ -1088,7 +1086,7 @@ pub(crate) mod test {
                 assert_eq!(result.0, 0);
                 results.push(result);
             }
-            assert_eq!(results[0], results[1]);
+            assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
         });
     }
 
