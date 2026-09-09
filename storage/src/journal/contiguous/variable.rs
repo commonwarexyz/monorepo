@@ -51,8 +51,6 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-#[commonware_macros::stability(ALPHA)]
-use tracing::debug;
 use tracing::warn;
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
@@ -1519,86 +1517,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         })
     }
 
-    /// See [Journal::init_sync].
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn init_sync(
-        context: E,
-        cfg: Config<V::Cfg>,
-        range: Range<u64>,
-    ) -> Result<Box<Self>, Error> {
-        assert!(!range.is_empty(), "range must not be empty");
-
-        debug!(
-            range.start,
-            range.end,
-            items_per_blob = cfg.items_per_section.get(),
-            "initializing contiguous variable journal for sync"
-        );
-
-        // Initialize contiguous journal
-        let journal = Box::new(Self::init(context.child("journal"), cfg.clone()).await?);
-
-        let size = journal.size();
-
-        // No existing data - reset to sync range start if needed
-        if size == 0 {
-            if range.start == 0 {
-                debug!("no existing journal data, returning empty journal");
-                return Ok(journal);
-            } else {
-                debug!(
-                    range.start,
-                    "no existing journal data, resetting to sync range start"
-                );
-                return journal.clear_to_size(range.start).await;
-            }
-        }
-
-        // A pruned start cannot be reconstructed from the retained suffix.
-        let bounds = journal.bounds.clone();
-        if bounds.start > range.start {
-            debug!(
-                size,
-                bounds.start,
-                range.start,
-                range.end,
-                "existing journal is incompatible with sync range, resetting to start position"
-            );
-            return journal.clear_to_size(range.start).await;
-        }
-
-        // Sync targets describe the same append-only log, so progress beyond an older target can
-        // retain its authenticated prefix instead of refetching it.
-        let journal = if size > range.end {
-            debug!(size, range.end, "rewinding journal to sync range end");
-            journal.rewind(range.end).await?
-        } else {
-            journal
-        };
-        let size = journal.size();
-
-        // If all existing data is before our sync range, reset to range start
-        if size <= range.start {
-            debug!(
-                size,
-                range.start, "existing journal data is stale, resetting to start position"
-            );
-            return journal.clear_to_size(range.start).await;
-        }
-
-        // Prune to lower bound if needed
-        if !bounds.is_empty() && bounds.start < range.start {
-            debug!(
-                oldest_pos = bounds.start,
-                range.start, "pruning journal to sync range start"
-            );
-            let (journal, _) = journal.prune(range.start).await?;
-            return Ok(journal);
-        }
-
-        Ok(journal)
-    }
-
     /// See [Journal::rewind].
     pub(crate) async fn rewind(mut self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
         match size.cmp(&self.bounds.end) {
@@ -2339,38 +2257,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )))
     }
 
-    /// Initialize a [Journal] for use in state sync.
-    ///
-    /// The bounds are item locations (not blob indexes). This function prepares the
-    /// on-disk journal so that subsequent appends go to the correct physical location for the
-    /// requested range.
-    ///
-    /// Behavior by existing on-disk state:
-    /// - Fresh (no data): returns an empty journal, resetting to `range.start` if needed.
-    /// - Stale (all data strictly before `range.start`): resets to `range.start` using the
-    ///   crash-safe clear path and returns an empty journal.
-    /// - Overlap within [`range.start`, `range.end`]: prunes toward `range.start`
-    ///   (blob-aligned, so some items before `range.start` may be retained).
-    /// - Data that has pruned `range.start`: resets to `range.start`.
-    /// - Data beyond `range.end`: rewinds to `range.end` and retains the requested prefix.
-    ///
-    /// # Arguments
-    /// - `context`: storage context
-    /// - `cfg`: journal configuration
-    /// - `range`: range of item locations to retain
-    ///
-    /// # Returns
-    /// A contiguous journal ready for sync operations. The journal's size will be within the range.
-    ///
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn init_sync(
-        context: E,
-        cfg: Config<V::Cfg>,
-        range: Range<u64>,
-    ) -> Result<Self, Error> {
-        Ok(Self(Inner::init_sync(context, cfg, range).await?))
-    }
-
     /// Discard all items and reposition the journal at `new_size`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
@@ -2659,10 +2545,6 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
     }
 
     type Config = Config<V::Cfg>;
-
-    async fn init(context: E, cfg: Self::Config) -> Result<Self, Error> {
-        Self::init(context, cfg).await
-    }
 }
 
 #[cfg(test)]
@@ -8273,8 +8155,8 @@ mod tests {
             // Initialize journal with sync boundaries when no existing data exists
             let lower_bound = 10;
             let upper_bound = 26;
-            let mut journal = Journal::init_sync(
-                context.child("storage"),
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8332,8 +8214,8 @@ mod tests {
             // lower_bound: 8 (blob 1), upper_bound: 31 (last location 30, blob 6)
             let lower_bound = 8;
             let upper_bound = 31;
-            let mut journal = Journal::<_, u64>::init_sync(
-                context.child("storage"),
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8387,8 +8269,8 @@ mod tests {
             };
 
             #[allow(clippy::reversed_empty_ranges)]
-            let _result = Journal::<_, u64>::init_sync(
-                context.child("storage"),
+            let _result = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("storage"),
                 cfg,
                 10..5, // invalid range: lower > upper
             )
@@ -8428,8 +8310,8 @@ mod tests {
             // Initialize with sync boundaries that exactly match existing data
             let lower_bound = 5; // blob 1
             let upper_bound = 20; // blob 3
-            let mut journal = Journal::<_, u64>::init_sync(
-                context.child("storage"),
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8466,9 +8348,9 @@ mod tests {
         });
     }
 
-    /// Test `init_sync` rewinds data that exceeds the sync target range.
+    /// Test `init_sync` truncates data that exceeds the sync target range.
     #[test_traced]
-    fn test_init_sync_rewinds_data_exceeding_upper_bound() {
+    fn test_init_sync_truncates_data_exceeding_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let items_per_section = NZU64!(5);
@@ -8498,13 +8380,13 @@ mod tests {
             // Initialize with sync boundaries that are exceeded by existing data.
             let lower_bound = 8; // blob 1
             let upper_bound = 20;
-            let journal = Journal::<_, u64>::init_sync(
-                context.child("sync"),
+            let journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("sync"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
             .await
-            .expect("Failed to rewind journal to the older sync range");
+            .expect("Failed to truncate journal to the older sync range");
 
             assert_eq!(journal.bounds(), 5..upper_bound);
             for i in lower_bound..upper_bound {
@@ -8543,8 +8425,8 @@ mod tests {
 
             let lower_bound = 10;
             let upper_bound = 26;
-            let mut journal = Journal::<_, u64>::init_sync(
-                context.child("second"),
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8597,8 +8479,8 @@ mod tests {
 
             let lower_bound = 7;
             let upper_bound = 20;
-            let journal = Journal::<_, u64>::init_sync(
-                context.child("second"),
+            let journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8646,8 +8528,8 @@ mod tests {
             // Initialize with sync boundaries beyond all existing data
             let lower_bound = 15; // blob 3
             let upper_bound = 26; // last element in blob 5
-            let journal = Journal::<_, u64>::init_sync(
-                context.child("second"),
+            let journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8700,8 +8582,8 @@ mod tests {
             // Test sync boundaries exactly at blob boundaries
             let lower_bound = 15; // Exactly at blob boundary (15/5 = 3)
             let upper_bound = 25; // Last element exactly at blob boundary (24/5 = 4)
-            let mut journal = Journal::<_, u64>::init_sync(
-                context.child("storage"),
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8770,8 +8652,8 @@ mod tests {
             // Test sync boundaries within the same blob
             let lower_bound = 10; // operation 10 (blob 2: 10/5 = 2)
             let upper_bound = 15; // Last operation 14 (blob 2: 14/5 = 2)
-            let mut journal = Journal::<_, u64>::init_sync(
-                context.child("storage"),
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                || context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
