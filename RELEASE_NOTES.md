@@ -22,15 +22,13 @@ To retain a path back to v2026.7.1:
 **When rolling back:**
 
 1. Sync storage and stop all processes using its directory.
-2. For each prunable archive, remove the partition named by its v2026.9.0
-   `metadata_partition` configuration. Keep the key and value partitions. The
-   previous release cannot maintain the validation markers, so the next upgrade
-   must recreate them by validating all retained values ([#4610]). For marshal's
-   epoch caches, remove
+2. For each prunable archive, remove only the partition named by its v2026.9.0
+   `metadata_partition` configuration. The previous release cannot maintain
+   these validation markers, so the next upgrade must recreate them by
+   validating all retained values ([#4610]). For marshal's epoch caches, remove
    `{partition_prefix}-cache-{epoch}-{name}-metadata` for each epoch and each of
-   `verified`, `notarized`, `certified`, `notarizations`, and `finalizations`.
-   Keep the cache manager's `{partition_prefix}-metadata` and all other metadata
-   partitions ([#4610]).
+   `verified`, `notarized`, `certified`, `notarizations`, and `finalizations`
+   ([#4610]).
 3. Restart with v2026.7.1.
 
 </details>
