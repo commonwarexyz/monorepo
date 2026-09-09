@@ -134,6 +134,9 @@ pub struct VoterLimits {
     pub retry_initial: Duration,
     /// Maximum publication retry backoff.
     pub retry_ceiling: Duration,
+    /// Recent peer activity window for early leader timeouts; `None` disables the policy.
+    /// Must exceed the view timeout and publication retry ceiling.
+    pub skip_timeout: Option<Duration>,
     /// Interval between Relay refreshes, periodic metrics, and producer-stall checks.
     pub heartbeat: Duration,
     /// Acknowledged journal events between checkpoint snapshots.

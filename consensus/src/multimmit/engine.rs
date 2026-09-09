@@ -137,6 +137,7 @@ fn voter_limits<H: Hasher, V: Variant>(
         retry_initial: (view_timeout / 8).max(Duration::from_nanos(1)),
         retry_ceiling: view_timeout.saturating_mul(2),
         heartbeat: view_timeout.saturating_mul(5),
+        skip_timeout: view_timeout.checked_mul(5),
         // One Base per full journal section: compaction prunes whole blobs on their natural
         // boundary instead of churning a fresh blob every few dozen events, and replaying a
         // worst-case suffix of this size costs low tens of milliseconds.
@@ -626,6 +627,7 @@ where
     context: ContextCell<E>,
     config: Config<H, P, V, A, R, F, T, C, B>,
     checkpoint_interval: NonZeroU64,
+    skip_timeout: Option<Duration>,
 }
 
 impl<E, H, P, V, A, R, F, T, C, B> Engine<E, H, P, V, A, R, F, T, C, B>
@@ -685,9 +687,40 @@ where
         }
         Self {
             context: ContextCell::new(context),
+            skip_timeout: config.profile.timers().view_timeout().checked_mul(5),
             config,
             checkpoint_interval: CHECKPOINT_INTERVAL,
         }
+    }
+
+    /// Sets the recent-activity window for early timeouts of remote leaders.
+    ///
+    /// At view entry, an inactive leader may be timed out early when a view quorum is
+    /// recently active, counting this validator itself. Authenticated senders of admitted
+    /// protocol traffic establish activity; startup and recovery begin with no peer history.
+    /// A valid buffered proposal and the machine's vote/nullification rules take precedence.
+    /// The default is five view timeouts, or disabled if that duration overflows. `None`
+    /// disables early timeouts. The ordinary view timeout remains unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the window does not exceed twice the view timeout, the publication retry
+    /// ceiling. It must also cover the deployment's expected message and scheduling delays.
+    pub fn with_skip_timeout(mut self, skip_timeout: Option<Duration>) -> Self {
+        if let Some(timeout) = skip_timeout {
+            assert!(
+                timeout
+                    > self
+                        .config
+                        .profile
+                        .timers()
+                        .view_timeout()
+                        .saturating_mul(2),
+                "skip timeout must exceed the publication retry ceiling"
+            );
+        }
+        self.skip_timeout = skip_timeout;
+        self
     }
 
     /// Overrides checkpoint cadence for bounded recovery tests.
@@ -722,7 +755,8 @@ where
         let (ready_sender, ready_receiver) = oneshot::channel();
         let config = self.config;
         let checkpoint_interval = self.checkpoint_interval;
-        let voter_limits = voter_limits(&config.profile, checkpoint_interval);
+        let mut voter_limits = voter_limits(&config.profile, checkpoint_interval);
+        voter_limits.skip_timeout = self.skip_timeout;
 
         // Gated startup: open and recover stores before any actor accepts ingress.
         let stores = open_stores(
@@ -1030,6 +1064,32 @@ mod tests {
     }
 
     #[test]
+    fn skip_timeout_defaults_and_overrides() {
+        DeterministicRunner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(944, 6, Limits::new(2, 1).unwrap());
+            let config = config(&context, &committee, 0, "skip-timeout");
+            let engine = Engine::new(context.child("engine"), config);
+            assert_eq!(engine.skip_timeout, Some(Duration::from_millis(2500)));
+            let engine = engine.with_skip_timeout(Some(Duration::from_secs(3)));
+            assert_eq!(engine.skip_timeout, Some(Duration::from_secs(3)));
+            assert_eq!(engine.with_skip_timeout(None).skip_timeout, None);
+        });
+    }
+
+    #[rstest]
+    #[case(Duration::ZERO)]
+    #[case(Duration::from_millis(500))]
+    #[case(Duration::from_secs(1))]
+    #[should_panic(expected = "skip timeout must exceed the publication retry ceiling")]
+    fn skip_timeout_rejects_windows_below_the_retry_ceiling(#[case] window: Duration) {
+        DeterministicRunner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(944, 6, Limits::new(2, 1).unwrap());
+            let config = config(&context, &committee, 0, "skip-timeout");
+            Engine::new(context.child("engine"), config).with_skip_timeout(Some(window));
+        });
+    }
+
+    #[test]
     fn voter_limits_are_nonzero_and_overflow_safe() {
         let committee = Committee::<MinPk>::new(77, 6, Limits::new(2, 1).unwrap());
         for view_timeout in [Duration::from_nanos(1), Duration::MAX] {
@@ -1048,6 +1108,7 @@ mod tests {
             assert!(!limits.retry_initial.is_zero());
             assert!(limits.retry_initial <= limits.retry_ceiling);
             assert!(limits.retry_ceiling <= limits.heartbeat);
+            assert_eq!(limits.skip_timeout, view_timeout.checked_mul(5));
         }
     }
 

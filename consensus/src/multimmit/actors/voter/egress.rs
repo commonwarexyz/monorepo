@@ -479,6 +479,7 @@ mod tests {
             retry_ceiling: Duration::from_millis(2),
             heartbeat: Duration::from_secs(1),
             checkpoint_interval: NonZeroU64::MIN,
+            skip_timeout: None,
         }
     }
 

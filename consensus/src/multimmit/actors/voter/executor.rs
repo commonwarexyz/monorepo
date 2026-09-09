@@ -448,8 +448,14 @@ where
         match capability {
             LeaderCapability::ArmTimer(timer) => {
                 debug!(view = timer.round().view().get(), "view timer armed");
-                let deadline = self.context.current().saturating_add_ext(timer.delay());
-                self.view_timer = Some((timer, deadline));
+                let now = self.context.current();
+                let (deadline, reason) =
+                    if self.is_active(self.leaders.leader(timer.round().view())) {
+                        (now.saturating_add_ext(timer.delay()), "deadline")
+                    } else {
+                        (now, "inactive_leader")
+                    };
+                self.view_timer = Some((timer, deadline, reason));
             }
             LeaderCapability::RecoverNullification(job) => {
                 let round = job

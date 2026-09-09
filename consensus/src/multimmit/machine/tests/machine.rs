@@ -13225,49 +13225,60 @@ fn pending_proposal_parent_counts_against_recovery_capacity() {
 }
 
 #[test]
-fn timeout_cutoff_rejects_a_proposal_verified_behind_an_unrelated_barrier() {
-    let profile = profile_for(Role::Validator(Participant::new(5)), 6, 2);
-    let (mut machine, started) = start_profile(profile);
-    let timer = started
-        .capabilities()
-        .iter()
-        .find_map(|effect| match effect {
-            Capability::Leader(LeaderCapability::ArmTimer(timer)) => Some(*timer),
-            _ => None,
-        })
-        .unwrap();
-    let filler = Arc::new(leader_artifact(&machine, 2));
-    let pending = machine
-        .reserve_test_effect(DurableEffect::Broadcast(filler))
-        .unwrap();
-
-    let elapsed = machine.step(Input::TimerFired(timer)).unwrap();
-    assert!(elapsed.capabilities().iter().all(|effect| !matches!(
-        effect,
-        Capability::Durability(DurabilityCapability::Persist(_))
-    )));
-
-    let proposed = leader(&machine, 1);
-    let proposal = observe(
-        &mut machine,
-        Artifact::LeaderBlock(SignedLeaderBlock::new(proposed, attestation(0))),
-    );
-    complete(&mut machine, &proposal, true);
-
-    let released = persist(&mut machine, &persist_job(&pending));
-    let timeout = persist_job(&released);
-    assert!(timeout.events().iter().all(|event| {
-        !matches!(event.change(), Change::OutboxQueued { effect, .. }
-            if matches!(effect.as_ref(),
-                DurableEffect::Sign(SignRequest::Vote(_) | SignRequest::LeaderBlock(_))))
-    }));
-    assert!(matches!(
-        timeout.events()[0].change(),
-        Change::OutboxQueued { effect, .. }
-            if matches!(effect.as_ref(), DurableEffect::SignBatch(requests)
-                if matches!(requests.as_ref(),
-                    [SignRequest::NoVote { .. }, SignRequest::Nullify { .. }]))
-    ));
+fn timeout_cutoff_respects_verified_proposal_order() {
+    for proposal_first in [false, true] {
+        let profile = profile_for(Role::Validator(Participant::new(5)), 6, 2);
+        let (mut machine, started) = start_profile(profile);
+        let timer = started
+            .capabilities()
+            .iter()
+            .find_map(|effect| match effect {
+                Capability::Leader(LeaderCapability::ArmTimer(timer)) => Some(*timer),
+                _ => None,
+            })
+            .unwrap();
+        let filler = Arc::new(leader_artifact(&machine, 2));
+        let pending = machine
+            .reserve_test_effect(DurableEffect::Broadcast(filler))
+            .unwrap();
+        if !proposal_first {
+            let elapsed = machine.step(Input::TimerFired(timer)).unwrap();
+            assert!(elapsed.capabilities().is_empty());
+        }
+        let proposed = leader(&machine, 1);
+        let signer = machine.profile().protocol().leader(View::new(1));
+        let proposal = observe(
+            &mut machine,
+            Artifact::LeaderBlock(SignedLeaderBlock::new(proposed, attestation(signer.get()))),
+        );
+        complete_raw(&mut machine, &proposal, true);
+        if proposal_first {
+            let elapsed = machine.step(Input::TimerFired(timer)).unwrap();
+            assert!(elapsed.capabilities().is_empty());
+        }
+        assert_eq!(machine.progress().timeout_cutoff_vote, proposal_first);
+        assert_eq!(machine.progress().timeout_cutoff_timeout, !proposal_first);
+        let released = persist(&mut machine, &persist_job(&pending));
+        let choice = persist_job(&released);
+        let Change::OutboxQueued { effect, .. } = choice.events()[0].change() else {
+            panic!("timeout choice must queue signing");
+        };
+        match effect.as_ref() {
+            DurableEffect::Sign(SignRequest::Vote(_)) => assert!(proposal_first),
+            DurableEffect::SignBatch(requests) => {
+                assert!(!proposal_first);
+                assert!(matches!(
+                    requests.as_ref(),
+                    [SignRequest::NoVote { .. }, SignRequest::Nullify { .. }]
+                ));
+            }
+            other => panic!("unexpected timeout choice: {other:?}"),
+        }
+        assert!(choice.events().iter().all(|event| {
+            !matches!(event.change(), Change::OutboxQueued { effect, .. }
+                if matches!(effect.as_ref(), DurableEffect::Sign(SignRequest::LeaderBlock(_))))
+        }));
+    }
 }
 
 #[test]

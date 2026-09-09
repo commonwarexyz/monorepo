@@ -56,7 +56,7 @@ use commonware_runtime::{
 use commonware_storage::Context as StorageContext;
 #[cfg(test)]
 use commonware_utils::sync::Mutex;
-use commonware_utils::{SystemTimeExt as _, channel::oneshot, futures::Pool};
+use commonware_utils::{SystemTimeExt as _, channel::oneshot, futures::Pool, ordered::Quorum as _};
 use futures::FutureExt as _;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -765,12 +765,15 @@ where
         context: E,
         config: Config<E, H, P, V, A, R, F, T, C>,
     ) -> (Self, Mailbox<V, H::Digest>) {
-        let chain_count = match &config.startup {
-            Startup::Fresh { core, .. } => core.profile().protocol().codec_config().chains(),
-            Startup::Recovered(recovered) => {
-                recovered.core.profile().protocol().codec_config().chains()
-            }
+        let profile = match &config.startup {
+            Startup::Fresh { core, .. } => core.profile(),
+            Startup::Recovered(recovered) => recovered.core.profile(),
         };
+        if let Some(timeout) = config.limits.skip_timeout {
+            assert!(timeout > profile.timers().view_timeout());
+            assert!(timeout > config.limits.retry_ceiling);
+        }
+        let chain_count = profile.protocol().codec_config().chains();
         let metrics = ActorMetrics::new(&context, chain_count);
         let (sender, receiver) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let (query_sender, query_receiver) =
@@ -943,6 +946,7 @@ where
             protocol_epoch: epoch,
             leaders,
             participant,
+            last_activity: vec![None; config.scheme.participants().len()],
             scheme: Arc::new(config.scheme),
             strategy: config.strategy,
             critical_strategy: config.critical_strategy,
@@ -1181,6 +1185,7 @@ pub(super) fn round_timeout_span(parent: &Span, round: Round) -> Span {
     info_span!(
         parent: parent,
         "multimmit.voter.round.timeout",
+        reason = tracing::field::Empty,
         epoch = round.epoch().get().traced(),
         view = round.view().get().traced()
     )
@@ -1288,6 +1293,8 @@ where
     protocol_epoch: Epoch,
     leaders: LeaderSchedule,
     participant: Option<Participant>,
+    /// Last admitted observation from each authenticated committee peer; empty on restart.
+    last_activity: Vec<Option<SystemTime>>,
     scheme: Arc<Scheme<P, V>>,
     strategy: T,
     critical_strategy: C,
@@ -1329,7 +1336,7 @@ where
     pending_inspection: Option<(Query<H::Digest>, bool)>,
     /// Runtime cancellation signals keyed by Core's exact local build identity.
     active_custody: BTreeMap<BuildId, Option<oneshot::Sender<()>>>,
-    view_timer: Option<(Timer, SystemTime)>,
+    view_timer: Option<(Timer, SystemTime, &'static str)>,
     production_timer: Option<(ProductionTimer<H::Digest>, SystemTime, TraceContext)>,
     /// When periodic metrics and producer-stall checks next run.
     ///
@@ -1504,7 +1511,7 @@ where
                 &self.context,
                 admission
                     .allows(ReadinessCursor::TIMER, None)
-                    .then(|| self.view_timer.as_ref().map(|(_, at)| *at))
+                    .then(|| self.view_timer.as_ref().map(|(_, at, _)| *at))
                     .flatten(),
             ) => (ReadinessCursor::TIMER, RuntimeEvent::ViewTimer),
             () = wait_until(
@@ -1642,7 +1649,11 @@ where
                     for inner in 0..2 {
                         let source = (readiness.timer_cursor + inner) % 2;
                         timer = match source {
-                            0 if self.view_timer.as_ref().is_some_and(|(_, at)| *at <= now) => {
+                            0 if self
+                                .view_timer
+                                .as_ref()
+                                .is_some_and(|(_, at, _)| *at <= now) =>
+                            {
                                 Some(RuntimeEvent::ViewTimer)
                             }
                             1 if self
@@ -1783,8 +1794,8 @@ where
                 }
                 RuntimeEvent::DaTask(update) => root.in_scope(|| self.da_task_update(update))?,
                 RuntimeEvent::ViewTimer => {
-                    let (timer, _) = self.view_timer.take().expect("armed timer fired");
-                    self.submit_view_timeout(timer)?;
+                    let (timer, _, reason) = self.view_timer.take().expect("armed timer fired");
+                    self.submit_view_timeout(timer, reason)?;
                 }
                 RuntimeEvent::ProductionTimer => {
                     let (timer, _, producer_span) =
@@ -2070,12 +2081,33 @@ where
         Ok(())
     }
 
-    fn submit_view_timeout(&mut self, timer: Timer) -> Result<(), Fatal> {
+    /// Returns true for local or recently observed participants, or without an active quorum.
+    fn is_active(&self, participant: Participant) -> bool {
+        let Some(timeout) = self.limits.skip_timeout else {
+            return true;
+        };
+        if self.participant == Some(participant) {
+            return true;
+        }
+        let min_time = self
+            .context
+            .current()
+            .checked_sub(timeout)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let recent = |activity: &Option<SystemTime>| activity.is_some_and(|at| at >= min_time);
+        let active = self.last_activity.iter().filter(|at| recent(at)).count()
+            + usize::from(self.participant.is_some());
+        active < self.scheme.codec_config().view_quorum()
+            || recent(&self.last_activity[usize::from(participant)])
+    }
+
+    fn submit_view_timeout(&mut self, timer: Timer, reason: &'static str) -> Result<(), Fatal> {
         let round = timer.round();
         let view = round.view();
-        debug!(view = view.get(), "view timer fired");
+        debug!(view = view.get(), reason, "view timer fired");
         self.metrics.view_timeouts.inc();
         let span = round_timeout_span(&self.round_span, round);
+        span.record("reason", reason);
         span.in_scope(|| {
             self.track_transition(
                 |core| core.leader_timer_fired(timer),
@@ -2783,9 +2815,17 @@ where
             forwarded_at,
             bytes,
         } = batch;
+        let now = self.context.current();
         self.metrics
             .observation_wait
-            .observe_between(forwarded_at, self.context.current());
+            .observe_between(forwarded_at, now);
+        for (source, _) in &artifacts {
+            if let Some(participant) = self.scheme.participants().index(source)
+                && Some(participant) != self.participant
+            {
+                self.last_activity[usize::from(participant)] = Some(now);
+            }
+        }
         let (sources, artifacts) = artifacts.into_iter().unzip();
         let observe = debug_span!(
             parent: &self.round_span,
