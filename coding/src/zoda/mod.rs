@@ -390,7 +390,7 @@ impl<D: Digest> CheckingData<D> {
         root: D,
         checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let mut transcript = Transcript::new(NAMESPACE, Version::V1);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
@@ -488,6 +488,8 @@ pub enum Error {
     InvalidWeakShard,
     #[error("invalid index {0}")]
     InvalidIndex(u16),
+    #[error("no secure topology exists for this configuration and data size")]
+    InvalidConfig,
     #[error("insufficient shards {0} < {1}")]
     InsufficientShards(usize, usize),
     #[error("insufficient unique rows {0} < {1}")]
@@ -532,7 +534,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
-        let topology = Topology::reckon(config, data_bytes);
+        let topology = Topology::reckon(config, data_bytes)?;
         let data = Matrix::init(
             topology.data_rows,
             topology.data_cols,
