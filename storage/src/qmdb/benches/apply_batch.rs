@@ -53,6 +53,7 @@ async fn open_db(ctx: &Context) -> Db {
     Db::init(
         ctx.child("storage"),
         any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+        None,
     )
     .await
     .unwrap()
@@ -79,6 +80,7 @@ async fn open_ord_db(ctx: &Context) -> ODb {
     ODb::init(
         ctx.child("storage"),
         any_fix_cfg_full(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1)),
+        None,
     )
     .await
     .unwrap()
