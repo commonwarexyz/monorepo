@@ -4,6 +4,8 @@ use commonware_math::fields::goldilocks::F;
 use commonware_utils::BigRationalExt as _;
 use num_rational::BigRational;
 
+// Target security for row and column sampling. Using 126 bits requires two
+// Goldilocks checksum elements; F::bits_to_elements counts 63 bits per element.
 const SECURITY_BITS: usize = 126;
 // Fractional precision (in binary digits) for the fixed-precision log2 bound
 // in `required_samples`. We use the next power of 2 above SECURITY_BITS
