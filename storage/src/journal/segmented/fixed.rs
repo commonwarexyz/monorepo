@@ -1108,7 +1108,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
-        buffer::paged::{CacheRef, Writer, corrupt_page},
+        buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
@@ -1124,29 +1124,6 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(44);
-    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
-
-    fn test_digest(value: u64) -> Digest {
-        Sha256::hash(&[&value.to_be_bytes()])
-    }
-
-    fn test_cfg(pooler: &impl BufferPooler) -> Config {
-        Config {
-            partition: "test-partition".into(),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
-            write_buffer: NZUsize!(2048),
-        }
-    }
-
-    fn aligned_cfg(pooler: &impl BufferPooler) -> Config {
-        Config {
-            partition: "segmented-fixed-aligned".into(),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
-            write_buffer: NZUsize!(128),
-        }
-    }
 
     impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         pub(in super::super) async fn test_reopen_at_most(
@@ -1189,6 +1166,29 @@ mod tests {
 
         pub(in super::super) fn test_configuration(&self) -> (E, String, AppendFactory) {
             self.0.manager.test_configuration()
+        }
+    }
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(44);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
+
+    fn test_digest(value: u64) -> Digest {
+        Sha256::hash(&[&value.to_be_bytes()])
+    }
+
+    fn test_cfg(pooler: &impl BufferPooler) -> Config {
+        Config {
+            partition: "test-partition".into(),
+            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: NZUsize!(2048),
+        }
+    }
+
+    fn aligned_cfg(pooler: &impl BufferPooler) -> Config {
+        Config {
+            partition: "segmented-fixed-aligned".into(),
+            page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
+            write_buffer: NZUsize!(128),
         }
     }
 
@@ -1241,6 +1241,181 @@ mod tests {
             }
         }
         journal.sync_all().await.expect("failed to sync");
+    }
+
+    #[test]
+    fn test_segmented_capped_init_bounds_torn_suffix_reads() {
+        deterministic::Runner::default().start(|context| async move {
+            for source_section in [0, 1] {
+                for cap in [0, 8] {
+                    let mut counts = Vec::new();
+                    for pages in [16, 4096] {
+                        let partition = format!("torn-cap-{source_section}-{cap}-{pages}");
+                        let page: Vec<u8> = (0..9u64).flat_map(u64::to_be_bytes).collect();
+                        assert_eq!(page.len(), 72);
+                        super::super::manager::tests::seed_torn_suffix(
+                            &context,
+                            &partition,
+                            source_section,
+                            &page,
+                            pages,
+                        )
+                        .await;
+                        let cfg = Config {
+                            partition,
+                            page_cache: CacheRef::from_pooler(&context, NZU16!(72), NZUsize!(4)),
+                            write_buffer: NZUsize!(144),
+                        };
+                        let (recorded, recordings) = RecordingContext::new(context.child("cap"));
+                        let mut journal =
+                            Journal::<_, u64>::init_at_most(recorded, cfg.clone(), 0, cap)
+                                .await
+                                .unwrap();
+                        let retained = if source_section == 0 { cap } else { 0 };
+                        assert_eq!(journal.size(0).unwrap(), retained);
+                        counts.push(recordings.snapshot().reads.len());
+                        (journal, _) = journal.append(0, &999).await.unwrap();
+                        drop(journal.sync_all().await.unwrap());
+                        let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                            .await
+                            .unwrap();
+                        let mut replay = journal
+                            .replay(0, 0, NZUsize!(144), ReadOptions::default())
+                            .await
+                            .unwrap();
+                        let mut actual = Vec::new();
+                        while let Some(item) = replay.next().await {
+                            actual.push(item.unwrap().2);
+                        }
+                        replay.finish().unwrap();
+                        let expected = if retained == 0 {
+                            vec![999]
+                        } else {
+                            vec![0, 999]
+                        };
+                        assert_eq!(actual, expected);
+                    }
+                    assert_eq!(
+                        counts[0], counts[1],
+                        "discarded suffix reads grew: {counts:?}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_bounded_initialization_bounds_scan() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut counts = Vec::new();
+            for count in [128, 65536] {
+                let cfg = Config {
+                    partition: format!("fixed-cap-scan-{count}"),
+                    page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4)),
+                    write_buffer: NZUsize!(65536),
+                };
+                let mut journal = Journal::<_, u64>::init(
+                    context.child(if count == 128 {
+                        "seed_small"
+                    } else {
+                        "seed_large"
+                    }),
+                    cfg.clone(),
+                )
+                .await
+                .unwrap();
+                for value in 0..count {
+                    (journal, _) = journal.append(0, &value).await.unwrap();
+                }
+                _ = journal.sync_all().await.unwrap();
+                let (recorded, recordings) =
+                    RecordingContext::new(context.child(if count == 128 {
+                        "cap_small"
+                    } else {
+                        "cap_large"
+                    }));
+                let journal = Journal::<_, u64>::init_at_most(recorded, cfg, 0, 8)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.section_len(0).unwrap(), 1);
+                counts.push(recordings.snapshot().reads.len());
+            }
+            assert_eq!(
+                counts[0], counts[1],
+                "same one-item cap: small/large suffix read counts {counts:?}"
+            );
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(30)]
+    #[case(31)]
+    #[case(32)]
+    fn test_bounded_initialization_recovers_torn_page(#[case] tail: u64) {
+        deterministic::Runner::default().start(|context| async move {
+            for cap in [0, 8, 16, 20, 24, 28, 29, 30, 31, 32, u64::MAX] {
+                let cfg = Config {
+                    partition: format!("capped-torn-{cap}"),
+                    page_cache: CacheRef::from_pooler(&context, NZU16!(5), NZUsize!(4)),
+                    write_buffer: NZUsize!(256),
+                };
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for value in 0..4 {
+                    (journal, _) = journal.append(0, &value).await.unwrap();
+                }
+                (journal, _) = journal.append(1, &100).await.unwrap();
+                _ = journal.sync_all().await.unwrap();
+
+                // A valid page prefix may end inside the last item after an interrupted append.
+                let (blob, size) = context
+                    .open(&cfg.partition, &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let mut partial = commonware_runtime::buffer::paged::Recovery::open(
+                    blob,
+                    size,
+                    cfg.write_buffer.get(),
+                    cfg.page_cache.clone(),
+                )
+                .await
+                .unwrap();
+                partial.truncate(tail).await.unwrap();
+                drop(partial);
+
+                // A valid later page survives after the torn page in section zero.
+                corrupt_page(&context, &cfg.partition, &0u64.to_be_bytes(), 4, 5).await;
+                let journal =
+                    Journal::<_, u64>::init_at_most(context.child("cap"), cfg.clone(), 0, cap)
+                        .await
+                        .unwrap();
+                let expected_bytes = cap.min(16) / 8 * 8;
+                assert_eq!(journal.size(0).unwrap(), expected_bytes, "cap {cap}");
+                assert_eq!(journal.newest_section(), Some(0));
+                drop(journal);
+                let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                    .await
+                    .unwrap();
+                let mut replay = journal
+                    .replay(0, 0, NZUsize!(256), ReadOptions::default())
+                    .await
+                    .unwrap();
+                let mut count = 0;
+                while let Some(item) = replay.next().await {
+                    let item = item.unwrap();
+                    assert_eq!(item.0, 0);
+                    assert_eq!(item.2, count);
+                    count += 1;
+                }
+                assert_eq!(count, expected_bytes / 8);
+                let mut journal = replay.finish().unwrap();
+                let position;
+                (journal, position) = journal.append(0, &99).await.unwrap();
+                assert_eq!(position, expected_bytes / 8);
+                journal.destroy().await.unwrap();
+            }
+        });
     }
 
     #[test_traced]
@@ -2463,10 +2638,15 @@ mod tests {
                 .open(&cfg.partition, &SECTION.to_be_bytes())
                 .await
                 .unwrap();
-            let mut writer = Writer::new(blob, size, 128, cfg.page_cache.clone())
-                .await
-                .unwrap();
-            writer.resize(30).await.unwrap();
+            let mut writer = commonware_runtime::buffer::paged::Recovery::open(
+                blob,
+                size,
+                128,
+                cfg.page_cache.clone(),
+            )
+            .await
+            .unwrap();
+            writer.truncate(30).await.unwrap();
             writer.sync().await.unwrap();
             drop(writer);
 
@@ -2477,7 +2657,7 @@ mod tests {
             // items: [0......8) [8.......16) [16......24) [24..30 tail)
             //
             // Backward sizing stops at valid page 5 and reports 30 logical bytes. Item alignment
-            // alone selects 24, inside torn page 4, which `Writer::resize` cannot preserve.
+            // alone selects 24, inside torn page 4, which `Recovery::truncate` cannot preserve.
             // Forward page validation finds 20 contiguous bytes and selects safe item boundary 16.
             corrupt_page(
                 &context,
