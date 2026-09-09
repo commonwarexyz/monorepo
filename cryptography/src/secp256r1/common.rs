@@ -46,8 +46,15 @@ impl Eq for PrivateKeyInner {}
 
 impl PrivateKeyInner {
     pub fn new(key: SigningKey) -> Self {
+        let bytes = Zeroizing::new(key.to_bytes());
+        let mut raw = Zeroizing::new([0u8; PRIVATE_KEY_LENGTH]);
+        raw.copy_from_slice(bytes.as_slice());
+        Self::from_parts(raw, key)
+    }
+
+    /// Wraps a key together with its canonical encoding.
+    fn from_parts(raw: Zeroizing<[u8; PRIVATE_KEY_LENGTH]>, key: SigningKey) -> Self {
         let public = *key.verifying_key();
-        let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::from(key.to_bytes()));
         Self {
             inner: Secret::new(SigningValue { raw, key }),
             public,
@@ -99,7 +106,7 @@ impl Read for PrivateKeyInner {
         #[cfg(not(feature = "std"))]
         let key =
             key.map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        Ok(Self::new(key))
+        Ok(Self::from_parts(raw, key))
     }
 }
 

@@ -594,6 +594,7 @@ impl Scalar {
             blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
+        sc.b.zeroize();
         Self(ret)
     }
 
@@ -628,12 +629,13 @@ impl Scalar {
 
         // Transform expanded bytes with modular reduction
         let mut fr = blst_fr::default();
+        let mut scalar = blst_scalar::default();
         // SAFETY: uniform_bytes is a valid 48-byte buffer.
         unsafe {
-            let mut scalar = blst_scalar::default();
             blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
             blst_fr_from_scalar(&mut fr, &scalar);
         }
+        scalar.b.zeroize();
 
         Self(fr)
     }
@@ -660,12 +662,13 @@ impl Scalar {
     /// Encodes the scalar into a byte array.
     pub(crate) fn as_slice(&self) -> Zeroizing<[u8; Self::SIZE]> {
         let mut slice = Zeroizing::new([0u8; Self::SIZE]);
+        let mut scalar = blst_scalar::default();
         // SAFETY: All pointers valid; blst_bendian_from_scalar writes exactly 32 bytes.
         unsafe {
-            let mut scalar = blst_scalar::default();
             blst_scalar_from_fr(&mut scalar, &self.0);
             blst_bendian_from_scalar(slice.as_mut_ptr(), &scalar);
         }
+        scalar.b.zeroize();
         slice
     }
 
@@ -775,19 +778,24 @@ impl Read for Scalar {
     fn read_cfg(buf: &mut impl Buf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
+        let mut scalar = blst_scalar::default();
         // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates in-range.
         //
         // For private key material, callers pass `RejectZero` to preserve the
         // IETF BLS non-zero secret-key requirement:
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
-        unsafe {
-            let mut scalar = blst_scalar::default();
+        let valid = unsafe {
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_scalar_fr_check(&scalar) {
-                return Err(Invalid("Scalar", "Invalid"));
+            let valid = blst_scalar_fr_check(&scalar);
+            if valid {
+                blst_fr_from_scalar(&mut ret, &scalar);
             }
-            blst_fr_from_scalar(&mut ret, &scalar);
+            valid
+        };
+        scalar.b.zeroize();
+        if !valid {
+            return Err(Invalid("Scalar", "Invalid"));
         }
         let out = Self(ret);
         if *cfg == ScalarReadCfg::RejectZero && out == Self::zero() {
@@ -1422,6 +1430,7 @@ impl<'a> MulAssign<&'a Scalar> for G1 {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
             blst_p1_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
+        scalar.b.zeroize();
     }
 }
 
@@ -1457,14 +1466,16 @@ impl<'a> Mul<&'a SmallScalar> for G1 {
 impl Space<Scalar> for G1 {
     fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
-        Self::msm_inner(
+        let mut scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let result = Self::msm_inner(
             points
                 .iter()
                 .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
             SCALAR_BITS,
             strategy,
-        )
+        );
+        scalar_bytes.iter_mut().for_each(|s| s.b.zeroize());
+        result
     }
 }
 
@@ -1845,6 +1856,7 @@ impl<'a> MulAssign<&'a Scalar> for G2 {
             blst_scalar_from_fr(&mut scalar, &rhs.0);
             blst_p2_mult(ptr, ptr, scalar.b.as_ptr(), SCALAR_BITS);
         }
+        scalar.b.zeroize();
     }
 }
 
@@ -1880,14 +1892,16 @@ impl<'a> Mul<&'a SmallScalar> for G2 {
 impl Space<Scalar> for G2 {
     fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
-        Self::msm_inner(
+        let mut scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
+        let result = Self::msm_inner(
             points
                 .iter()
                 .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
             SCALAR_BITS,
             strategy,
-        )
+        );
+        scalar_bytes.iter_mut().for_each(|s| s.b.zeroize());
+        result
     }
 }
 

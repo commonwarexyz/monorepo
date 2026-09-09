@@ -4,6 +4,7 @@ use core::convert::TryFrom;
 use curve25519_dalek::{constants, scalar::Scalar};
 use rand_core::{CryptoRng, Rng};
 use sha2::{Digest, Sha512, digest::Update};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// The private seed, scalar, and nonce prefix of an Ed25519 signing key.
 #[derive(Clone)]
@@ -41,7 +42,7 @@ impl SigningKey {
     }
 
     /// Separates the private material from its matching cached public key.
-    pub const fn into_parts(self) -> (SigningSecret, VerificationKey) {
+    pub fn into_parts(self) -> (SigningSecret, VerificationKey) {
         (self.secret, self.vk)
     }
 }
@@ -97,17 +98,18 @@ impl TryFrom<&[u8]> for SigningKey {
 impl From<[u8; 32]> for SigningKey {
     #[allow(non_snake_case)]
     fn from(seed: [u8; 32]) -> Self {
-        // Expand the seed to a 64-byte array with SHA512.
-        let h = Sha512::digest(&seed[..]);
+        // Expand the seed to a 64-byte array with SHA512. The digest and the
+        // clamped scalar bytes are secret, so they are erased when dropped.
+        let h = Zeroizing::new(Sha512::digest(&seed[..]));
 
         // Scalar-scalar arithmetic in `sign` requires the reduced representation.
         let s = {
-            let mut scalar_bytes = [0u8; 32];
+            let mut scalar_bytes = Zeroizing::new([0u8; 32]);
             scalar_bytes[..].copy_from_slice(&h.as_slice()[0..32]);
             scalar_bytes[0] &= 248;
             scalar_bytes[31] &= 127;
             scalar_bytes[31] |= 64;
-            Scalar::from_bytes_mod_order(scalar_bytes)
+            Scalar::from_bytes_mod_order(*scalar_bytes)
         };
 
         // Extract and cache the high half.
@@ -130,20 +132,34 @@ impl From<[u8; 32]> for SigningKey {
     }
 }
 
-impl zeroize::Zeroize for SigningKey {
+impl Zeroize for SigningSecret {
     fn zeroize(&mut self) {
-        self.secret.seed.zeroize();
-        self.secret.s.zeroize();
-        self.secret.prefix.zeroize()
+        self.seed.zeroize();
+        self.s.zeroize();
+        self.prefix.zeroize();
+    }
+}
+
+impl Drop for SigningSecret {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SigningSecret {}
+
+impl Zeroize for SigningKey {
+    fn zeroize(&mut self) {
+        self.secret.zeroize();
     }
 }
 
 impl SigningKey {
     /// Generate a new signing key.
     pub fn new<R: Rng + CryptoRng>(mut rng: R) -> Self {
-        let mut bytes = [0u8; 32];
+        let mut bytes = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(&mut bytes[..]);
-        bytes.into()
+        Self::from(*bytes)
     }
 
     /// Create a signature on `msg` using this key.
@@ -161,9 +177,12 @@ impl SigningSecret {
     /// Create a signature on `msg` using this key.
     #[allow(non_snake_case)]
     pub fn sign(&self, vk: &VerificationKey, msg: &[u8]) -> Signature {
-        let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
+        // A leaked nonce recovers the private scalar, so erase it on drop.
+        let r = Zeroizing::new(Scalar::from_hash(
+            Sha512::default().chain(&self.prefix[..]).chain(msg),
+        ));
 
-        let R_bytes = (&r * constants::ED25519_BASEPOINT_TABLE)
+        let R_bytes = (&*r * constants::ED25519_BASEPOINT_TABLE)
             .compress()
             .to_bytes();
 
@@ -174,7 +193,7 @@ impl SigningSecret {
                 .chain(msg),
         );
 
-        let s_bytes = (r + k * self.s).to_bytes();
+        let s_bytes = (*r + k * self.s).to_bytes();
 
         Signature { R_bytes, s_bytes }
     }
