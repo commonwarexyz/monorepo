@@ -102,7 +102,7 @@
 //!
 //! - The watermark only takes values the barrier has held (never an in-flight size).
 //! - The barrier advances only on an observed sync success.
-//! - Operations that move blob state backward (rewind, clear) durably lower the watermark
+//! - Operations that move blob state backward (truncate, clear) durably lower the watermark
 //!   before touching blob state (draining any in-flight watermark write that could exceed
 //!   the surviving data), then lower the barrier.
 //!
@@ -149,12 +149,12 @@ use bytes::Bytes;
 use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
-    buffer::paged::{CacheRef, Writer},
+    buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
 use commonware_utils::Cached;
 use futures::{FutureExt as _, Stream, future::try_join_all};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map::Entry},
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -322,16 +322,13 @@ enum BlobFill {
     Overfull { len: u64, capacity: u64 },
 }
 
-/// The recovered journal size, durability floor, and any pending tail repair derived from the
-/// reconciled pruning boundary and on-disk blob lengths.
+/// The recovered journal size and durability floor derived from the reconciled pruning boundary
+/// and on-disk blob lengths.
 struct RecoveredBounds {
     /// Size: one past the last recovered item.
     size: u64,
     /// Recovery watermark to persist (a floor on durable size).
     recovery_watermark: u64,
-    /// If set, the byte length to truncate the recovered tail blob to; every blob newer than the
-    /// tail must be removed.
-    repair: Option<u64>,
 }
 
 /// Configuration for `Journal` storage.
@@ -381,6 +378,454 @@ pub(super) struct Inner<E: Context, A> {
     barrier: Barrier,
 
     _phantom: PhantomData<A>,
+}
+
+/// Storage under recovery, before append or snapshot access is available.
+pub struct Recovery<E: Context, A> {
+    context: E,
+    cfg: Config,
+    checkpoint: Checkpoint<E>,
+    partition: Partition<E>,
+    pending: BTreeMap<u64, PagedRecovery<E::Blob>>,
+    discarded: Vec<u64>,
+    bounds: Range<u64>,
+    watermark: u64,
+    bounded: bool,
+    _marker: PhantomData<A>,
+}
+
+impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
+    /// Recover available items without sealing the retained blobs.
+    async fn open(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        max_size: Option<u64>,
+    ) -> Result<Self, Error> {
+        let ceiling = max_size.unwrap_or(u64::MAX);
+        let items_per_blob = cfg.items_per_blob.get();
+        if let Some(target) = checkpoint.clear_target() {
+            warn!(
+                clear_target = target,
+                "crash repair: completing interrupted clear"
+            );
+
+            // A persisted reset is authoritative even when an open requests another cap.
+            let new_partition = format!("{}-blobs", cfg.partition);
+            Partition::<E>::remove_all(&context, &cfg.partition).await?;
+            Partition::<E>::remove_all(&context, &new_partition).await?;
+            let partition = Partition::new(
+                context.child("blobs"),
+                new_partition,
+                cfg.page_cache.clone(),
+                cfg.write_buffer,
+            );
+            let tail = super::position_to_blob(target, items_per_blob);
+            let mut pending = BTreeMap::new();
+            pending.insert(tail, partition.open_recovery(tail).await?);
+            let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
+            if ceiling < target {
+                return Err(Error::ItemPruned(ceiling));
+            }
+            return Ok(Self {
+                context,
+                cfg,
+                checkpoint,
+                partition,
+                pending,
+                discarded: Vec::new(),
+                bounds: target..target,
+                watermark: target,
+                bounded: max_size.is_some(),
+                _marker: PhantomData,
+            });
+        }
+
+        let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            blob_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        let mut indices = Vec::with_capacity(names.len());
+        for name in names {
+            let bytes: [u8; 8] = name
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidBlobName(commonware_formatting::hex(&name)))?;
+            indices.push(u64::from_be_bytes(bytes));
+        }
+        indices.sort_unstable();
+        let pruning_boundary = Inner::<E, A>::recover_pruning_boundary(
+            checkpoint.boundary_hint(),
+            indices.first().copied(),
+            items_per_blob,
+        )?;
+        if ceiling < pruning_boundary {
+            return Err(Error::ItemPruned(ceiling));
+        }
+
+        // Whole discarded blobs need no valid pages or item encodings.
+        let mut pending = BTreeMap::new();
+        let mut discarded = Vec::new();
+        for blob in indices {
+            let first = first_in_blob(pruning_boundary, blob, items_per_blob)?;
+            if max_size.is_some() && first >= ceiling {
+                discarded.push(blob);
+            } else {
+                pending.insert(blob, partition.open_recovery(blob).await?);
+            }
+        }
+
+        // Check the two newest blobs for interior holes before any resize. Only they can hold
+        // non-durable data, and a crash during an in-flight fsync can lose an interior page while
+        // later pages survive. `PagedRecovery::open` sizes a blob by its last valid page, so it
+        // cannot see such a hole. An item-aligned resize can land within a page, which
+        // `Recovery::truncate` must read and validate before rewriting its partial tip. The scan
+        // starts at the watermark's in-blob prefix. Pages below it are covered by a completed
+        // fsync, so in-model holes are impossible there and any later damage surfaces lazily at
+        // read. Above the watermark, first move the target below any hole and round it down to
+        // whole items so `recover_bounds` sees only intact data.
+        let floor = checkpoint.watermark().unwrap_or(0).min(ceiling);
+        let floor_blob = super::position_to_blob(floor, items_per_blob);
+        let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
+        for blob in suspects {
+            if blob < floor_blob {
+                continue;
+            }
+
+            // Retain the watermark's in-blob prefix in its containing blob and nothing above.
+            let acknowledged = if blob == floor_blob {
+                Inner::<E, A>::items_to_bytes(floor.saturating_sub(first_in_blob(
+                    pruning_boundary,
+                    blob,
+                    items_per_blob,
+                )?))?
+            } else {
+                0
+            };
+            let writer = pending.get_mut(&blob).expect("suspect blob is present");
+            let required_items = ceiling
+                .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
+                .min(items_per_blob);
+            let limit = if max_size.is_some() {
+                required_items
+                    .saturating_mul(Inner::<E, A>::CHUNK_SIZE_U64)
+                    .min(writer.size())
+            } else {
+                writer.size()
+            };
+            let recoverable = writer
+                .recoverable_prefix_len_at_most(
+                    acknowledged,
+                    limit,
+                    cfg.replay_buffer,
+                    ReadOptions::default(),
+                )
+                .await?;
+            let valid_items = recoverable / Inner::<E, A>::CHUNK_SIZE_U64;
+            let valid = Inner::<E, A>::items_to_bytes(valid_items)?;
+            if valid == writer.size() || (max_size.is_some() && valid_items >= required_items) {
+                continue;
+            }
+
+            // Missing acknowledged pages surface as `valid < acknowledged`. The
+            // scan clamps to the pages physically present, so it can never exceed the size.
+            if valid < acknowledged {
+                return Err(Error::Corruption(format!(
+                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
+                     of size {}",
+                    writer.size()
+                )));
+            }
+            warn!(
+                blob,
+                valid,
+                size = writer.size(),
+                "truncating to recoverable item prefix"
+            );
+            writer.truncate(valid).await?;
+        }
+
+        let RecoveredBounds {
+            size,
+            recovery_watermark,
+        } = Inner::<E, A>::recover_bounds(
+            &pending,
+            items_per_blob,
+            pruning_boundary,
+            checkpoint
+                .watermark()
+                .map(|watermark| watermark.min(ceiling)),
+        )?;
+
+        Ok(Self {
+            context,
+            cfg,
+            checkpoint,
+            partition,
+            pending,
+            discarded,
+            bounds: pruning_boundary..size.min(ceiling),
+            watermark: recovery_watermark.min(ceiling),
+            bounded: max_size.is_some(),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Open offsets while completing any previously staged dependent reset.
+    pub(super) async fn init_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        max_size: Option<u64>,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        if checkpoint.clear_target().is_some() {
+            clear_dependents().await?;
+        }
+        Self::open(context, cfg, checkpoint, max_size).await
+    }
+
+    /// Exclusive recovered item end.
+    pub(super) const fn size(&self) -> u64 {
+        self.bounds.end
+    }
+
+    /// First retained item position.
+    pub(super) const fn pruning_boundary(&self) -> u64 {
+        self.bounds.start
+    }
+
+    /// Previously acknowledged item end, bounded by the recovery cap.
+    pub(super) const fn recovery_watermark(&self) -> u64 {
+        self.watermark
+    }
+
+    /// Read an item for recovery selection or validation.
+    pub(super) async fn item(&self, pos: u64) -> Result<A, Error> {
+        if pos < self.bounds.start {
+            return Err(Error::ItemPruned(pos));
+        }
+        if pos >= self.bounds.end {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+        let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
+        let first = first_in_blob(self.bounds.start, blob, self.cfg.items_per_blob.get())?;
+        let offset = Inner::<E, A>::items_to_bytes(pos - first)?;
+        let writer = self
+            .pending
+            .get(&blob)
+            .ok_or_else(|| Error::Corruption(format!("missing recovery blob {blob}")))?;
+        Ok(A::decode(
+            writer.read_at(offset, A::SIZE).await?.coalesce(),
+        )?)
+    }
+
+    /// Append derived entries while initialization exclusively owns them.
+    ///
+    /// The first append must follow a successful truncate or reset.
+    pub(crate) async fn append(mut self: Box<Self>, item: &A) -> Result<Box<Self>, Error> {
+        let pos = self.bounds.end;
+        let end = pos.checked_add(1).ok_or(Error::SizeOverflow)?;
+        let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
+        if !self.pending.contains_key(&blob) {
+            self.pending
+                .insert(blob, self.partition.open_recovery(blob).await?);
+        }
+        let writer = self.pending.get_mut(&blob).expect("opened recovery blob");
+        let mut bytes = Vec::with_capacity(A::SIZE);
+        item.write(&mut bytes);
+        writer.append(&bytes).await?;
+        self.bounds.end = end;
+        Ok(self)
+    }
+
+    /// Persist a selected prefix before rebuilding derived entries.
+    pub(crate) async fn truncate(mut self: Box<Self>, max_size: u64) -> Result<Box<Self>, Error> {
+        *self = self.repair_to(max_size).await?;
+        Ok(self)
+    }
+
+    async fn repair_to(mut self, max_size: u64) -> Result<Self, Error> {
+        let size = self.bounds.end.min(max_size);
+        if size < self.bounds.start {
+            return Err(Error::ItemPruned(size));
+        }
+        let items_per_blob = self.cfg.items_per_blob.get();
+        let tail_blob = super::position_to_blob(size, items_per_blob);
+        let bytes = Inner::<E, A>::items_to_bytes(
+            size - first_in_blob(self.bounds.start, tail_blob, items_per_blob)?,
+        )?;
+        self.watermark = self.watermark.min(size);
+        let boundary_hint =
+            (!self.bounds.start.is_multiple_of(items_per_blob)).then_some(self.bounds.start);
+        if self.checkpoint.watermark() != Some(self.watermark)
+            || self.checkpoint.boundary_hint() != boundary_hint
+        {
+            self.checkpoint = self
+                .checkpoint
+                .persist(items_per_blob, self.bounds.start, self.watermark)
+                .await?;
+        }
+        if size == self.bounds.start
+            && (!self.discarded.is_empty() || self.pending.keys().any(|&blob| blob > tail_blob))
+        {
+            // Keep a durable tail at the retained boundary before removing its last backing
+            // blob. Derived-offset repair must not stage a reset of dependent data.
+            if let Entry::Vacant(entry) = self.pending.entry(tail_blob) {
+                let mut writer = self.partition.open_recovery(tail_blob).await?;
+                writer.sync().await?;
+                entry.insert(writer);
+            }
+            self.discarded.retain(|&blob| blob != tail_blob);
+        }
+
+        // Make the target newest before changing its partial-page checksum.
+        while let Some(blob) = self.discarded.pop() {
+            self.partition.remove(blob).await?;
+        }
+        while let Some((&blob, _)) = self.pending.last_key_value() {
+            if blob <= tail_blob {
+                break;
+            }
+            let writer = self.pending.remove(&blob);
+            self.partition.remove(blob).await?;
+            drop(writer);
+        }
+        if let Some(writer) = self.pending.get_mut(&tail_blob) {
+            if bytes < writer.size() {
+                writer.truncate(bytes).await?;
+            } else {
+                writer.sync().await?;
+            }
+        }
+        self.bounds.end = size;
+        Ok(self)
+    }
+
+    /// Flush recovery data. The owner of dependent data authorizes this watermark.
+    pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        for writer in self.pending.values_mut() {
+            writer.sync().await?;
+        }
+        self.watermark = self.bounds.end;
+        self.checkpoint = self
+            .checkpoint
+            .persist(
+                self.cfg.items_per_blob.get(),
+                self.bounds.start,
+                self.watermark,
+            )
+            .await?;
+        Ok(self)
+    }
+
+    /// Reconcile a pruning boundary recovered from dependent storage.
+    pub(crate) async fn prune(
+        mut self: Box<Self>,
+        position: u64,
+    ) -> Result<(Box<Self>, bool), Error> {
+        let per_blob = self.cfg.items_per_blob.get();
+        let blob = super::position_to_blob(position.min(self.bounds.end), per_blob);
+        let boundary = super::blob_first_position(blob, per_blob)?;
+        if boundary <= self.bounds.start {
+            return Ok((self, false));
+        }
+
+        // Preserve the retained position before removing its last backing blob. A bounded
+        // recovery may have discarded the empty tail that ordinarily records this boundary.
+        if let Entry::Vacant(entry) = self.pending.entry(blob) {
+            entry.insert(self.partition.open_recovery(blob).await?);
+        }
+        for writer in self.pending.values_mut() {
+            writer.sync().await?;
+        }
+        while let Some((&oldest, _)) = self.pending.first_key_value() {
+            if oldest >= blob {
+                break;
+            }
+            drop(self.pending.remove(&oldest));
+            self.partition.remove(oldest).await?;
+        }
+        self.bounds.start = boundary;
+        Ok((self, true))
+    }
+
+    /// Complete a reset required by recovery of dependent storage.
+    pub(crate) async fn clear_to_size(self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        self.clear_to_size_cleared(size, || async { Ok(()) }).await
+    }
+
+    /// Reset the journal and dependent partitions under one durable reset intent. Recovery may
+    /// preserve an exhausted journal at `u64::MAX`. Explicit resets reject it.
+    pub(super) async fn clear_to_size_cleared<F, Fut>(
+        mut self: Box<Self>,
+        size: u64,
+        clear_dependents: F,
+    ) -> Result<Box<Self>, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        self.checkpoint = self.checkpoint.stage_clear(size).await?;
+        clear_dependents().await?;
+        for writer in self.pending.values_mut() {
+            writer.wait_for_sync().await?;
+        }
+        self.pending.clear();
+        Partition::<E>::remove_all(&self.context, &self.cfg.partition).await?;
+        Partition::<E>::remove_all(&self.context, &format!("{}-blobs", self.cfg.partition)).await?;
+        self.partition = Partition::new(
+            self.context.child("blobs"),
+            format!("{}-blobs", self.cfg.partition),
+            self.cfg.page_cache.clone(),
+            self.cfg.write_buffer,
+        );
+        let blob = super::position_to_blob(size, self.cfg.items_per_blob.get());
+        self.pending
+            .insert(blob, self.partition.open_recovery(blob).await?);
+        self.discarded.clear();
+        self.bounds = size..size;
+        self.watermark = size;
+        self.checkpoint = self
+            .checkpoint
+            .finish_clear(self.cfg.items_per_blob.get(), size)
+            .await?;
+        Ok(self)
+    }
+
+    /// Select a retained prefix and finish it before creating a live journal.
+    pub(super) async fn publish(mut self, max_size: u64) -> Result<Inner<E, A>, Error> {
+        self = self.repair_to(max_size).await?;
+        let size = self.bounds.end;
+        let items_per_blob = self.cfg.items_per_blob.get();
+        let tail_blob = super::position_to_blob(size, items_per_blob);
+        let blobs = Writable::recover(self.partition, self.pending, tail_blob).await?;
+        if self.bounded && self.checkpoint.watermark() != Some(size) {
+            self.checkpoint = self
+                .checkpoint
+                .persist(items_per_blob, self.bounds.start, size)
+                .await?;
+        }
+        let metrics = Metrics::new(self.context);
+        metrics.update(size, self.bounds.start, items_per_blob);
+        Ok(Inner::from_blobs(
+            blobs,
+            self.checkpoint,
+            self.bounds.start..size,
+            self.cfg.items_per_blob,
+            metrics,
+        ))
+    }
 }
 
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
@@ -436,191 +881,24 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         cfg: Config,
         checkpoint: Checkpoint<E>,
     ) -> Result<Self, Error> {
-        // A staged clear intent means all old blob data is about to be discarded. Honor it before
-        // scanning or opening blobs so corrupt stale blobs cannot block recovery of the reset.
-        if let Some(clear_target) = checkpoint.clear_target() {
-            return Self::complete_staged_clear(context, cfg, checkpoint, clear_target).await;
-        }
-
-        // Open every blob in the active partition as a writer, then reconcile the pruning
-        // boundary: the checkpoint's hint and the oldest blob on disk can disagree after a
-        // crash mid-prune, and a mid-blob hint is honored only while it matches the oldest
-        // retained blob.
-        let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
-        let partition = Partition::new(
-            context.child("blobs"),
-            blob_partition,
-            cfg.page_cache,
-            cfg.write_buffer,
-        );
-        let mut pending = partition.open_many(names).await?;
-        let items_per_blob = cfg.items_per_blob.get();
-        let pruning_boundary = Self::recover_pruning_boundary(
-            checkpoint.boundary_hint(),
-            pending.keys().next().copied(),
-            items_per_blob,
-        )?;
-
-        // Check the two newest blobs for interior holes before any resize. Only they can hold
-        // non-durable data, and a crash during an in-flight fsync can lose an interior page while
-        // later pages survive. `Writer::new` sizes a blob by its last valid page, so it cannot see
-        // such a hole. An item-aligned resize can land within a page, which `Writer::resize` must
-        // read and validate before rewriting its partial tip. The scan starts at the watermark's
-        // in-blob prefix: pages below it are covered by a completed fsync, so in-model holes are
-        // impossible there and any later damage surfaces lazily at read. Above the watermark,
-        // first move the target below any hole and round it down to whole items so
-        // `recover_bounds` sees only intact data.
-        let floor = checkpoint.watermark().unwrap_or(0);
-        let floor_blob = super::position_to_blob(floor, items_per_blob);
-        let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
-        for blob in suspects {
-            if blob < floor_blob {
-                continue;
-            }
-
-            // Bytes this blob must retain: the watermark's in-blob prefix in the blob
-            // containing it, and nothing above.
-            let acknowledged = if blob == floor_blob {
-                Self::items_to_bytes(floor.saturating_sub(first_in_blob(
-                    pruning_boundary,
-                    blob,
-                    items_per_blob,
-                )?))?
-            } else {
-                0
-            };
-            let writer = pending.get_mut(&blob).expect("suspect blob is present");
-            let recoverable = writer
-                .recoverable_prefix_len(acknowledged, cfg.replay_buffer, ReadOptions::default())
-                .await?;
-            let valid = Self::items_to_bytes(recoverable / Self::CHUNK_SIZE_U64)?;
-            if valid == writer.size() {
-                continue;
-            }
-
-            // Acknowledged pages that do not exist surface as `valid < acknowledged`: the
-            // scan clamps to the pages physically present, so it can never exceed the size.
-            if valid < acknowledged {
-                return Err(Error::Corruption(format!(
-                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
-                     of size {}",
-                    writer.size()
-                )));
-            }
-            warn!(
-                blob,
-                valid,
-                size = writer.size(),
-                "truncating to recoverable item prefix"
-            );
-            writer.resize(valid).await?;
-            writer.sync().await?;
-        }
-
-        let RecoveredBounds {
-            size,
-            recovery_watermark,
-            repair,
-        } = Self::recover_bounds(
-            &pending,
-            items_per_blob,
-            pruning_boundary,
-            checkpoint.watermark(),
-        )?;
-
-        // Persist any lowered checkpoint before applying blob repairs that move recovered state
-        // backward.
-        let checkpoint = checkpoint
-            .persist(
-                cfg.items_per_blob.get(),
-                pruning_boundary,
-                recovery_watermark,
-            )
-            .await?;
-
-        // Apply repair (if any). The short blob becomes the new tail; blobs strictly newer
-        // than it are removed (newest-first) and the truncation is synced, so the repair is
-        // durable before sealing.
-        let tail_blob = super::position_to_blob(size, cfg.items_per_blob.get());
-        if let Some(truncate_to) = repair {
-            while let Some((&newest, _)) = pending.last_key_value() {
-                if newest <= tail_blob {
-                    break;
-                }
-                drop(pending.remove(&newest));
-                partition.remove(newest).await?;
-            }
-            if let Some(writer) = pending.get_mut(&tail_blob)
-                && truncate_to < writer.size()
-            {
-                writer.resize(truncate_to).await?;
-                writer.sync().await?;
-            }
-        }
-
-        // Seal every blob below the tail and assemble the blobs.
-        let blobs = Writable::recover(partition, pending, tail_blob).await?;
-
-        let metrics = Metrics::new(context);
-        metrics.update(size, pruning_boundary, cfg.items_per_blob.get());
-
-        Ok(Self::from_blobs(
-            blobs,
-            checkpoint,
-            pruning_boundary..size,
-            cfg.items_per_blob,
-            metrics,
-        ))
-    }
-
-    /// Complete an interrupted clear: discard all blob partitions and start fresh at
-    /// `clear_target`, then finalize the checkpoint the crashed clear left staged.
-    async fn complete_staged_clear(
-        context: E,
-        cfg: Config,
-        checkpoint: Checkpoint<E>,
-        clear_target: u64,
-    ) -> Result<Self, Error> {
-        warn!(clear_target, "crash repair: completing interrupted clear");
-        let new_partition = format!("{}-blobs", cfg.partition);
-        Partition::<E>::remove_all(&context, &cfg.partition).await?;
-        Partition::<E>::remove_all(&context, &new_partition).await?;
-        let partition = Partition::new(
-            context.child("blobs"),
-            new_partition,
-            cfg.page_cache,
-            cfg.write_buffer,
-        );
-        let tail_blob = super::position_to_blob(clear_target, cfg.items_per_blob.get());
-        let blobs = Writable::recover(partition, BTreeMap::new(), tail_blob).await?;
-        let checkpoint = checkpoint
-            .finish_clear(cfg.items_per_blob.get(), clear_target)
-            .await?;
-
-        let metrics = Metrics::new(context);
-        metrics.update(clear_target, clear_target, cfg.items_per_blob.get());
-        Ok(Self::from_blobs(
-            blobs,
-            checkpoint,
-            clear_target..clear_target,
-            cfg.items_per_blob,
-            metrics,
-        ))
+        Recovery::<E, A>::open(context, cfg, checkpoint, None)
+            .await?
+            .publish(u64::MAX)
+            .await
     }
 
     /// Recover the journal bounds and any tail repair from the reconciled pruning boundary and
     /// blob state.
     ///
     /// Blob lengths recover the contiguous size from the supplied boundary. A watermark beyond
-    /// that size is corruption. The caller persists the checkpoint before applying the returned
-    /// repair (see comment at the call site).
+    /// that size is corruption. The caller persists the checkpoint before repairing the suffix.
     fn recover_bounds(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, PagedRecovery<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
         watermark_hint: Option<u64>,
     ) -> Result<RecoveredBounds, Error> {
-        let (size, repair) =
+        let (size, has_gap) =
             Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary)?;
 
         let recovery_watermark = match watermark_hint {
@@ -633,7 +911,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 )));
             }
             Some(watermark) => watermark,
-            None if repair.is_some() => {
+            None if has_gap => {
                 // A legacy journal with a short non-tail blob violates the old rollover-sync
                 // invariant (each blob was fsynced before the next received writes).
                 return Err(Error::Corruption(
@@ -652,7 +930,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok(RecoveredBounds {
             size,
             recovery_watermark,
-            repair,
         })
     }
 
@@ -710,7 +987,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Classify a blob's untrusted on-disk length against its capacity. A missing blob counts
     /// as zero length, surfacing as a gap.
     fn classify_fill(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, PagedRecovery<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
         blob: u64,
@@ -737,15 +1014,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// lengths are untrusted disk state. The returned size is chunk-exact and the retained
     /// prefix is contiguous.
     fn recover_by_walking_lengths(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, PagedRecovery<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
-    ) -> Result<(u64, Option<u64>), Error> {
+    ) -> Result<(u64, bool), Error> {
         let oldest = pending.keys().next().copied();
         let newest = pending.keys().next_back().copied();
 
         let (Some(oldest), Some(newest)) = (oldest, newest) else {
-            return Ok((pruning_boundary, None));
+            return Ok((pruning_boundary, false));
         };
 
         let mut size = pruning_boundary;
@@ -759,13 +1036,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 // The newest blob is the append frontier; short is normal.
                 BlobFill::Short { len } if blob == newest => {
                     size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
-                    return Ok((size, None));
+                    return Ok((size, false));
                 }
                 // A short or missing interior blob is a gap in durable data: everything newer
                 // is unreachable. Truncate here.
                 BlobFill::Short { len } => {
                     size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
-                    return Ok((size, Some(Self::items_to_bytes(len)?)));
+                    return Ok((size, true));
                 }
                 BlobFill::Overfull { len, capacity } => {
                     return Err(Error::Corruption(format!(
@@ -775,7 +1052,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             }
         }
 
-        Ok((size, None))
+        Ok((size, false))
     }
 
     /// See [Journal::init_at_size].
@@ -791,7 +1068,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ///
     /// Callers that key dependent state off this journal use this to discard that state atomically
     /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
-    /// [Self::init_cleared]) finishes.
+    /// [Recovery::init_cleared]) finishes.
     #[commonware_macros::stability(ALPHA)]
     pub(in crate::journal::contiguous) async fn init_at_size_cleared<F, Fut>(
         context: E,
@@ -814,28 +1091,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         let checkpoint = checkpoint.stage_clear(size).await?;
         clear_dependents().await?;
-        Self::init_with_checkpoint(context, cfg, checkpoint).await
-    }
-
-    /// Like [Self::init], but awaits `clear_dependents` before completing a staged clear.
-    ///
-    /// If a prior (possibly crashed) [Self::init_at_size_cleared] or
-    /// [Self::stage_clear_intent] staged a reset, `clear_dependents` runs before recovery so
-    /// callers can discard dependent state that the staged clear must reconcile against. With no
-    /// staged reset this behaves exactly like [Self::init].
-    pub(in crate::journal::contiguous) async fn init_cleared<F, Fut>(
-        context: E,
-        cfg: Config,
-        clear_dependents: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(), Error>>,
-    {
-        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        if checkpoint.clear_target().is_some() {
-            clear_dependents().await?;
-        }
         Self::init_with_checkpoint(context, cfg, checkpoint).await
     }
 
@@ -917,13 +1172,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
         }
-    }
-
-    /// Return the recovery watermark.
-    pub(super) fn recovery_watermark(&self) -> u64 {
-        self.checkpoint
-            .watermark()
-            .expect("recovery watermark must exist after init")
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
@@ -1135,6 +1383,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ///
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(
         mut self: Box<Self>,
         new_size: u64,
@@ -1220,6 +1469,18 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// iterate over all items in the `Journal`.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Open a retained prefix containing at most `max_size` items, including pruned positions.
+    ///
+    /// A cap above the recovered end preserves that end. A cap below the retained start returns
+    /// [Error::ItemPruned]. Successful initialization durably discards the suffix. Subsequent
+    /// appends may exceed the cap. All previous storage-dependent handles must be dropped before
+    /// opening these partitions again.
+    pub async fn init_at_most(context: E, cfg: Config, max_size: u64) -> Result<Self, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        let recovery = Recovery::<E, A>::open(context, cfg, checkpoint, Some(max_size)).await?;
+        Ok(Self(Box::new(recovery.publish(max_size).await?)))
     }
 
     /// Initialize a `Journal` in a fully-pruned state at `size`: existing data is cleared and the
@@ -1727,6 +1988,16 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 }
 
 #[cfg(test)]
+impl<E: crate::Context, A: CodecFixedShared> Inner<E, A> {
+    /// Return the recovery watermark.
+    pub(super) fn recovery_watermark(&self) -> u64 {
+        self.checkpoint
+            .watermark()
+            .expect("recovery watermark must exist after init")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{journal::contiguous::Contiguous as _, utils::codec::View};
@@ -1767,6 +2038,94 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test]
+    fn test_fixed_bounded_recovery_read_count() {
+        for count in [257u64, 4097] {
+            for capacity in [10_000, u64::MAX] {
+                deterministic::Runner::default().start(|context| async move {
+                    let (context, recordings) = RecordingContext::new(context);
+                    let mut cfg = test_cfg(&context, capacity.try_into().unwrap());
+                    cfg.page_cache = CacheRef::from_pooler(&context, NZU16!(256), NZUsize!(3));
+                    cfg.replay_buffer = NZUsize!(1);
+                    let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    for value in 0..count {
+                        (journal, _) = journal.append(&value).await.unwrap();
+                    }
+                    drop(journal.sync().await.unwrap());
+                    for cap in [
+                        None,
+                        Some(33),
+                        Some(32),
+                        Some(count),
+                        Some(count + 1),
+                        Some(u64::MAX),
+                    ] {
+                        let checkpoint =
+                            Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                                .await
+                                .unwrap();
+                        assert_eq!(checkpoint.watermark(), Some(count));
+                        recordings.clear();
+                        let recovery = Recovery::<_, u64>::open(
+                            context.child("recovery"),
+                            cfg.clone(),
+                            checkpoint,
+                            cap,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(recovery.size(), count.min(cap.unwrap_or(count)));
+                        assert_eq!(recovery.pending.get(&0).unwrap().size(), count * 8);
+                        let expected = if cap == Some(32) { 1 } else { 2 };
+                        assert_eq!(
+                            recordings.snapshot().reads.len(),
+                            expected,
+                            "count={count}, capacity={capacity}, cap={cap:?}"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixed_recovery_large_capacity() {
+        for count in [0, 1] {
+            for cap in [
+                None,
+                Some(0),
+                Some(1),
+                Some(u64::MAX / 8 + 1),
+                Some(u64::MAX),
+            ] {
+                deterministic::Runner::default().start(|context| async move {
+                    let cfg = test_cfg(&context, NZU64!(u64::MAX));
+                    let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    for value in 0..count {
+                        (journal, _) = journal.append(&value).await.unwrap();
+                    }
+                    drop(journal.sync().await.unwrap());
+                    let journal = match cap {
+                        None => Journal::<_, u64>::init(context.child("reopen"), cfg).await,
+                        Some(cap) => {
+                            Journal::<_, u64>::init_at_most(context.child("reopen"), cfg, cap).await
+                        }
+                    }
+                    .unwrap();
+                    let retained = count.min(cap.unwrap_or(u64::MAX));
+                    assert_eq!(journal.bounds(), 0..retained);
+                    if retained != 0 {
+                        assert_eq!(journal.read(0).await.unwrap(), 0);
+                    }
+                });
+            }
+        }
     }
 
     #[test_traced]
@@ -2272,42 +2631,6 @@ mod tests {
         ) -> Result<(), Error> {
             Inner::<E, A>::test_stage_clear(context, partition, target).await
         }
-    }
-
-    #[test_traced]
-    fn test_fixed_commit_syncs_recovered_tail_past_recovery_watermark() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut cfg = test_cfg(&context, NZU64!(10));
-            cfg.partition = "init-adopted-fixed".into();
-
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            (journal, _) = journal.append(&1).await.unwrap();
-            (journal, _) = journal.append(&2).await.unwrap();
-            let journal = journal.sync().await.unwrap();
-            // Simulate the state left by a crash after item 2 became visible to recovery, but
-            // before the persisted recovery watermark advanced past item 1.
-            let journal = journal.test_set_recovery_watermark(1).await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.size(), 2);
-
-            // Regression: commit() must force a data sync before callers can rely on recovered
-            // bytes beyond the persisted recovery watermark.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(probability!(1.0)),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit() must sync recovered data beyond the persisted recovery watermark"
-            );
-        });
     }
 
     async fn scan_partition(context: &Context, partition: &str) -> Vec<Vec<u8>> {
@@ -3491,50 +3814,6 @@ mod tests {
         });
     }
 
-    /// Regression: legacy upgrade (no recovery watermark) must sync the recovered tail before
-    /// callers can advance the watermark. Without this, init could install a durable watermark for
-    /// data that was only in the OS page cache.
-    #[test_traced]
-    fn test_fixed_journal_legacy_upgrade_syncs_recovered_tail() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..7u64 {
-                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
-            }
-            let mut journal = journal.sync().await.unwrap();
-
-            // Remove the watermark to simulate a legacy journal.
-            {
-                journal.0.checkpoint.set_watermark(None);
-                journal.0.checkpoint = journal.0.checkpoint.sync().await.unwrap();
-            }
-            drop(journal);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.size(), 7);
-            // Watermark at tail blob start (blob 1 = position 5).
-            assert_eq!(journal.0.recovery_watermark(), 5);
-
-            // Inject sync faults. If commit skipped the recovered tail sync, it would succeed
-            // despite the fault.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(probability!(1.0)),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit must sync recovered data before the watermark can advance"
-            );
-        });
-    }
-
     #[test_traced]
     fn test_fixed_journal_commit_does_not_advance_recovery_watermark() {
         let executor = deterministic::Runner::default();
@@ -3806,7 +4085,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewind_commit_reopen() {
+    fn test_fixed_journal_init_at_most_commit_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -3822,7 +4101,11 @@ mod tests {
             }
             let journal = journal.sync().await.expect("failed to sync journal");
 
-            let journal = journal.rewind(7).await.expect("failed to rewind journal");
+            let journal = {
+                _ = journal.sync().await.unwrap();
+                Journal::<_, Digest>::init_at_most(context.child("cap"), cfg.clone(), 7).await
+            }
+            .expect("failed to initialize journal prefix");
             journal.commit().await.expect("failed to commit journal");
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
