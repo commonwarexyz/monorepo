@@ -1721,7 +1721,7 @@ where
         unresolved: Vec<PendingRead<'_, U::Key>>,
         db: &Db<F, E, C, I, H, U, N, S>,
         results: &mut [Option<U::Value>],
-        map: impl Fn(&U, Location<F>) -> T + Send + Sync,
+        map: impl Fn(U, Location<F>) -> T + Send + Sync,
         mut apply: impl FnMut(usize, T) -> U::Value,
     ) -> Result<(), crate::qmdb::Error<F>>
     where
@@ -1787,7 +1787,7 @@ where
             unresolved,
             db,
             &mut results,
-            |data, _| data.value().clone(),
+            |data, _| data.into_value(),
             |_, value| value,
         )
         .await?;
@@ -1880,7 +1880,10 @@ where
             unresolved,
             db,
             &mut results,
-            |data, loc| (data.value().clone(), loc, data.cached()),
+            |data, loc| {
+                let payload = data.cached();
+                (data.into_value(), loc, payload)
+            },
             |slot, (value, loc, payload)| {
                 resolutions[slot] = Some((StagedLoc::Committed(loc), payload));
                 value
