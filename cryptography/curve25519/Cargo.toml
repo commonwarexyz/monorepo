@@ -54,6 +54,7 @@ arbitrary = [
 	"commonware-math/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
+	"std",
 ]
 fuzz = [
 	"arbitrary",

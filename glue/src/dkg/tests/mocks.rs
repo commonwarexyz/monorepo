@@ -671,7 +671,7 @@ pub(crate) async fn closed_marshal_mailbox(
         marshal::Config {
             provider: TestProvider::new(scheme),
             epocher: FixedEpocher::new(blocks_per_epoch),
-            start: MarshalStart::Genesis(genesis_block(signer.public_key())),
+            start: MarshalStart::Genesis(genesis_block(signer.public_key()).into()),
             partition_prefix: format!("{partition_prefix}-marshal"),
             mailbox_size: NZUsize!(16),
             view_retention: ViewDelta::new(8),

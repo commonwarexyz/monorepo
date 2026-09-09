@@ -20,7 +20,9 @@
 use crate::curve::{F, montgomery};
 use bytes::{Buf, BufMut};
 use commonware_codec::{FixedSize, Read, Write};
+use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use core::fmt::{self, Debug, Display};
 use subtle::ConstantTimeEq;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
@@ -68,8 +70,8 @@ impl SecretKey {
     /// Performs a key exchange with the other party's public key, consuming this key.
     ///
     /// This returns `None` when the other party's key is a low-order point, which would force
-    /// the result to a value everybody can compute. An honestly generated public key fails
-    /// with negligible probability, so a failure means the other party misbehaved.
+    /// the result to a value everybody can compute. Keys produced by [`Self::public_key`] never
+    /// cause this failure.
     pub fn exchange(self, other: &PublicKey) -> Option<SharedSecret> {
         SharedSecret::from_x25519(montgomery::x25519(&self.bytes, &other.bytes))
     }
@@ -79,6 +81,7 @@ impl SecretKey {
 ///
 /// Equality compares decoded u-coordinates. Distinct encodings that X25519 processes as the same
 /// field element therefore compare equal, while serialization preserves the original bytes.
+/// Protocol transcripts should bind the transmitted bytes available through [`AsRef`].
 #[derive(Clone)]
 pub struct PublicKey {
     /// The little-endian u-coordinate of a point on the Montgomery form of the curve.
@@ -95,6 +98,18 @@ impl PartialEq for PublicKey {
 }
 
 impl Eq for PublicKey {}
+
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
@@ -201,7 +216,7 @@ mod tests {
                 bytes: canonical_bytes,
             };
             let alias = PublicKey { bytes: alias_bytes };
-            assert!(canonical == alias);
+            assert_eq!(canonical, alias);
             assert_ne!(canonical.as_ref(), alias.as_ref());
 
             let canonical_shared = SecretKey { bytes: [42; 32] }.exchange(&canonical);
@@ -215,7 +230,7 @@ mod tests {
             }
         }
 
-        assert!(PublicKey { bytes: [0; 32] } != PublicKey { bytes: one });
+        assert_ne!(PublicKey { bytes: [0; 32] }, PublicKey { bytes: one });
     }
 
     #[test]
@@ -223,13 +238,13 @@ mod tests {
         // Every low-order point on the curve and its twist, plus the non-canonical encodings
         // of the first two, forces the exchange output to zero.
         let low_order = [
-            // The identity, u = 0.
+            // u = 0, the point (0, 0) of order 2.
             hex!("0x0000000000000000000000000000000000000000000000000000000000000000"),
             // u = 1, of order 4.
             hex!("0x0100000000000000000000000000000000000000000000000000000000000000"),
             // A point of order 8 on the curve.
             hex!("0xe0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
-            // A point of order 8 on the twist.
+            // Another point of order 8 on the curve.
             hex!("0x5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
             // u = p - 1, of order 4 on the twist.
             hex!("0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),

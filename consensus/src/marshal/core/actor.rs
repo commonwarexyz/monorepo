@@ -7,6 +7,7 @@ use super::{
     durability::{DispatchGate, Durable as _},
     floor::{Floor, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
+    staged::Staged,
     stream::Stream,
     subscriptions::{Key as SubscriptionKey, KeyFor as SubscriptionKeyFor, Subscriptions},
     variant::NoBuffer,
@@ -55,7 +56,7 @@ use futures::{
     try_join,
 };
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{Instrument as _, Span, debug, info_span, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -146,6 +147,9 @@ where
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
+    // Finalized blocks awaiting dispatch, capped at twice the pending-ack
+    // capacity to absorb finalization bursts while earlier blocks are processed
+    staged: Staged<V::Block>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -268,6 +272,7 @@ where
                 block_subscriptions: Subscriptions::new(),
                 certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
+                staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
                 cache,
                 finalizations_by_height,
                 finalized_blocks,
@@ -315,7 +320,7 @@ where
                 }
 
                 finalized_blocks = finalized_blocks
-                    .put(anchor.into())
+                    .put(&anchor.into())
                     .await
                     .expect("failed to store startup anchor")
                     .sync()
@@ -382,7 +387,7 @@ where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         // Create a local pool for waiter futures.
-        let mut waiters = AbortablePool::<Result<Arc<V::Block>, SubscriptionKeyFor<V>>>::default();
+        let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
         // Observe durable syncs that no consensus caller awaits (the
         // notarization and finalization paths). A flush failure inside
@@ -606,7 +611,7 @@ where
         mut self: Box<Self>,
         message: Message<P::Scheme, V>,
         resolver: &mut R,
-        waiters: &mut AbortablePool<'_, Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
+        waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         syncs: &mut Pool<'_, PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -682,7 +687,7 @@ where
                 // storage tolerates multiple candidates per round (see
                 // [Mailbox::get_verified]), and the propose paths skip or
                 // reuse a recovered block on restart.
-                buffer.send(round, Arc::clone(&block), recipients);
+                buffer.send(round, block.clone(), recipients);
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
@@ -698,7 +703,7 @@ where
                 round, block, ack, ..
             } => {
                 (self, _) = self
-                    .ingest(Arc::clone(&block), buffer, application, resolver)
+                    .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 let digest = block.digest();
 
@@ -714,10 +719,8 @@ where
                     debug!(?round, "certified block covered by verified write");
                     (self.cache, block_sync) = self.cache.start_sync_verified(round).await;
                 } else {
-                    (self.cache, block_sync) = self
-                        .cache
-                        .put_notarized(round, digest, Arc::unwrap_or_clone(block).into())
-                        .await;
+                    (self.cache, block_sync) =
+                        self.cache.put_notarized(round, digest, &block).await;
                 }
 
                 // Hold the certify barrier until the round's notarization
@@ -758,7 +761,7 @@ where
                 let handle;
                 (self.cache, handle) = self
                     .cache
-                    .put_notarization(round, digest, notarization)
+                    .put_notarization(round, digest, &notarization)
                     .await;
                 syncs.push(async move {
                     handle.durable(round, "notarization").await;
@@ -770,16 +773,14 @@ where
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     (self, _) = self
-                        .ingest(Arc::clone(&block), buffer, application, resolver)
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if self.cache.has_verified(round, &digest).await {
                         debug!(?round, "notarized block covered by verified write");
                     } else {
                         let handle;
-                        (self.cache, handle) = self
-                            .cache
-                            .put_notarized(round, digest, Arc::unwrap_or_clone(block).into())
-                            .await;
+                        (self.cache, handle) =
+                            self.cache.put_notarized(round, digest, &block).await;
                         syncs.push(async move {
                             handle.durable(round, "notarized").await;
                             PooledSync::Observed
@@ -797,7 +798,7 @@ where
                 // Cache finalization by round.
                 self.cache = self
                     .cache
-                    .put_finalization(round, digest, finalization.clone())
+                    .put_finalization(round, digest, &finalization)
                     .await;
 
                 // Search for the finalized block locally, otherwise fetch it remotely.
@@ -806,7 +807,7 @@ where
                     // advances floors, prunes below them, and resumes dispatch.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(Arc::clone(&block), buffer, application, resolver)
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if anchored {
                         return self;
@@ -817,15 +818,11 @@ where
                     (self, stored) = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
-                        .store_finalization(
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block),
-                            Some(finalization),
-                            application,
-                        )
+                        .store_finalization(height, digest, &block, Some(finalization), application)
                         .await;
                     if stored {
+                        self.staged.insert(height, block);
+
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
                         (self, _) = self.try_repair_gaps(buffer, resolver, application).await;
@@ -850,10 +847,7 @@ where
                 ..
             } => match identifier {
                 BlockID::Digest(digest) => {
-                    let result = self
-                        .find_block_by_digest(buffer, digest)
-                        .await
-                        .map(Arc::unwrap_or_clone);
+                    let result = self.find_block_by_digest(buffer, digest).await;
                     response.send_lossy(result);
                 }
                 BlockID::Height(height) => {
@@ -864,8 +858,7 @@ where
                     let block = match self.get_latest().await {
                         Some((_, digest, _)) => self.find_block_by_digest(buffer, digest).await,
                         None => None,
-                    }
-                    .map(Arc::unwrap_or_clone);
+                    };
                     response.send_lossy(block);
                 }
             },
@@ -1077,7 +1070,7 @@ where
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
-                response.send_lossy((finalization, V::into_inner(block)).encode());
+                response.send_lossy((finalization, V::into_shared(block)).encode());
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
@@ -1101,9 +1094,9 @@ where
         span: Span,
         fallback: CommitmentFallback,
         key: SubscriptionKeyFor<V>,
-        response: oneshot::Sender<Arc<V::Block>>,
+        response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-        waiters: &mut AbortablePool<'_, Result<Arc<V::Block>, SubscriptionKeyFor<V>>>,
+        waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
         let digest = match key {
@@ -1226,7 +1219,7 @@ where
         let digest = V::commitment_to_inner(commitment);
         self.cache = self
             .cache
-            .put_finalization(round, digest, finalization.clone())
+            .put_finalization(round, digest, &finalization)
             .await;
 
         // A pending anchor at the same or a newer floor already blocks
@@ -1266,21 +1259,18 @@ where
     async fn persist_verified<Buf: Buffer<V>>(
         mut self: Box<Self>,
         round: Round,
-        block: Arc<V::Block>,
+        block: V::Block,
         ack: oneshot::Sender<Handle<()>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         (self, _) = self
-            .ingest(Arc::clone(&block), buffer, application, resolver)
+            .ingest(block.clone(), buffer, application, resolver)
             .await;
         let digest = block.digest();
         let handle;
-        (self.cache, handle) = self
-            .cache
-            .put_verified(round, digest, Arc::unwrap_or_clone(block).into())
-            .await;
+        (self.cache, handle) = self.cache.put_verified(round, digest, &block).await;
         ack.send_lossy(handle);
         self
     }
@@ -1300,12 +1290,12 @@ where
     /// Returns true if the block was consumed as the floor anchor.
     async fn ingest<Buf: Buffer<V>>(
         mut self: Box<Self>,
-        block: Arc<V::Block>,
+        block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
-        self.block_subscriptions.notify(Arc::clone(&block));
+        self.block_subscriptions.notify(block.clone());
 
         if !self.floor.matches_pending_anchor(V::commitment(&block)) {
             return (self, false);
@@ -1324,7 +1314,7 @@ where
     /// Panics if no pending floor anchor is installed.
     async fn apply_pending_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
-        block: Arc<V::Block>,
+        block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -1381,12 +1371,11 @@ where
             .take_pending_anchor()
             .expect("pending floor anchor missing");
         let round = finalization.round();
+        let stored: V::StoredBlock = block.into();
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
-            self.finalized_blocks
-                .put(Arc::unwrap_or_clone(block).into())
-                .map_err(BoxedError::from),
+            self.finalized_blocks.put(&stored).map_err(BoxedError::from),
             self.finalizations_by_height
-                .put(height, digest, finalization)
+                .put(height, digest, &finalization)
                 .map_err(BoxedError::from),
         )
         .expect("failed to store floor anchor");
@@ -1405,6 +1394,12 @@ where
             .previous()
             .expect("floor anchor above processed height must have predecessor");
         self.update_processed_height(dispatch_floor, resolver);
+
+        // Release staged blocks skipped by the floor transition
+        self.staged.retain(height);
+
+        // Advance the round floor and persist the dispatch floor before
+        // pruning finalized data
         self = self
             .update_processed_round_floor(dispatch_floor, round, buffer, application, resolver)
             .await;
@@ -1501,10 +1496,9 @@ where
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
-                let block = Arc::new(block);
                 let anchored;
                 (self, anchored) = self
-                    .ingest(Arc::clone(&block), buffer, application, resolver)
+                    .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 if anchored {
                     response.send_lossy(true);
@@ -1545,13 +1539,7 @@ where
                         .any(|annotation| matches!(annotation, Annotation::Finalized(_)))
                 {
                     (self, _) = self
-                        .store_finalization(
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block),
-                            finalization,
-                            application,
-                        )
+                        .store_finalization(height, digest, &block, finalization, application)
                         .await;
                 } else if annotations.iter().any(|annotation| {
                     matches!(
@@ -1564,12 +1552,7 @@ where
                 {
                     self.cache = self
                         .cache
-                        .put_certified(
-                            bounds.epoch(),
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block).into(),
-                        )
+                        .put_certified(bounds.epoch(), height, digest, &block)
                         .await;
                 }
                 debug!(?digest, %height, "received block");
@@ -1762,10 +1745,7 @@ where
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
-                    let block = Arc::new(V::from_application_block(
-                        block,
-                        finalization.proposal.payload,
-                    ));
+                    let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
                     let digest = block.digest();
@@ -1775,7 +1755,7 @@ where
                     // and moves the lower bound past it.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(Arc::clone(&block), buffer, application, resolver)
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if anchored {
                         continue;
@@ -1784,13 +1764,7 @@ where
                     (self, _) = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
-                        .store_finalization(
-                            height,
-                            digest,
-                            Arc::unwrap_or_clone(block),
-                            Some(finalization),
-                            application,
-                        )
+                        .store_finalization(height, digest, &block, Some(finalization), application)
                         .await;
                 }
                 PendingVerification::Notarized {
@@ -1810,16 +1784,13 @@ where
                     // durable (or the runtime is shutting down) so the repair
                     // bookkeeping below never runs ahead of storage.
                     let height = block.height();
-                    let block = Arc::new(block);
                     let block_sync;
-                    (self.cache, block_sync) = self
-                        .cache
-                        .put_notarized(round, digest, block.as_ref().clone().into())
-                        .await;
+                    (self.cache, block_sync) =
+                        self.cache.put_notarized(round, digest, &block).await;
                     let notarization_sync;
                     (self.cache, notarization_sync) = self
                         .cache
-                        .put_notarization(round, digest, notarization)
+                        .put_notarization(round, digest, &notarization)
                         .await;
                     join(
                         block_sync.durable(round, "notarized"),
@@ -1831,7 +1802,7 @@ where
                     // after the finalization is cached.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(Arc::clone(&block), buffer, application, resolver)
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if anchored {
                         continue;
@@ -1858,7 +1829,7 @@ where
                             .store_finalization(
                                 height,
                                 digest,
-                                Arc::unwrap_or_clone(block),
+                                &block,
                                 Some(finalization),
                                 application,
                             )
@@ -1935,23 +1906,27 @@ where
             if barrier.is_some_and(|lowest| next_height >= lowest) {
                 return self;
             }
-            let Some(block) = self.get_finalized_block(next_height).await else {
-                return self;
-            };
-            assert_eq!(
-                block.height(),
-                next_height,
-                "finalized block height mismatch"
-            );
 
-            let (height, commitment) = (block.height(), V::commitment(&block));
+            // Prefer the staged block and fall back to the archive
+            let block = match self.staged.remove(next_height) {
+                Some(block) => block,
+                None => match self.get_finalized_block(next_height).await {
+                    Some(block) => block,
+                    None => return self,
+                },
+            };
+            let height = block.height();
+            let commitment = V::commitment(&block);
+            assert_eq!(height, next_height, "finalized block height mismatch");
+
             let (ack, ack_waiter) = A::handle();
-            application.report(Update::Block(V::owned_into_inner_shared(block), ack));
+            application.report(Update::Block(V::into_shared(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
                 receiver: ack_waiter,
             });
+            self.staged.retain(height.next());
         }
         self
     }
@@ -2115,7 +2090,7 @@ where
         mut self: Box<Self>,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
+        block: &V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
@@ -2133,19 +2108,19 @@ where
         }
 
         // Convert block to storage format
-        let stored: V::StoredBlock = block.into();
+        let stored: V::StoredBlock = block.clone().into();
         let round = finalization.as_ref().map(|f| f.round());
 
         // In parallel, update the finalized blocks and finalizations archives
         let finalizations_by_height = self.finalizations_by_height;
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             // Update the finalized blocks archive
-            self.finalized_blocks.put(stored).map_err(BoxedError::from),
+            self.finalized_blocks.put(&stored).map_err(BoxedError::from),
             // Update the finalizations archive (if provided)
             async {
                 let store = if let Some(finalization) = finalization {
                     finalizations_by_height
-                        .put(height, digest, finalization)
+                        .put(height, digest, &finalization)
                         .await
                         .map_err(BoxedError::from)?
                 } else {
@@ -2245,11 +2220,11 @@ where
         &self,
         buffer: &Buf,
         digest: <V::Block as Digestible>::Digest,
-    ) -> Option<Arc<V::Block>> {
+    ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_digest(digest).await {
             return Some(block);
         }
-        self.find_block_in_storage(digest).await.map(Arc::new)
+        self.find_block_in_storage(digest).await
     }
 
     /// Looks for a block anywhere in local storage using the full commitment.
@@ -2260,13 +2235,11 @@ where
         &self,
         buffer: &Buf,
         commitment: V::Commitment,
-    ) -> Option<Arc<V::Block>> {
+    ) -> Option<V::Block> {
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
-        self.find_block_in_storage_by_commitment(commitment)
-            .await
-            .map(Arc::new)
+        self.find_block_in_storage_by_commitment(commitment).await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
@@ -2318,7 +2291,7 @@ where
                         .store_finalization(
                             last_finalized,
                             digest,
-                            Arc::unwrap_or_clone(block),
+                            &block,
                             Some(finalization),
                             application,
                         )
@@ -2373,7 +2346,7 @@ where
                         .store_finalization(
                             next.0,
                             parent_digest,
-                            Arc::unwrap_or_clone(block),
+                            &block,
                             finalization,
                             application,
                         )

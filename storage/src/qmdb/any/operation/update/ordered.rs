@@ -64,6 +64,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
         &self.value
     }
 
+    fn into_value(self) -> V::Value {
+        self.value
+    }
+
     fn cached(&self) -> K {
         self.next_key.clone()
     }
