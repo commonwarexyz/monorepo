@@ -406,8 +406,4 @@ pub enum Error<F: Family> {
     /// Bit offset is out of bounds.
     #[error("bit offset {0} out of bounds (size: {1})")]
     BitOutOfBounds(u64, u64),
-
-    /// Rewind was attempted but no prior committed state is available.
-    #[error("rewind beyond history")]
-    RewindBeyondHistory,
 }

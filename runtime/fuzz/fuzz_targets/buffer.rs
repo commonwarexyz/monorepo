@@ -82,7 +82,7 @@ enum FuzzOperation {
     AppendData {
         data: Vec<u8>,
     },
-    AppendResize {
+    AppendReopenAtMost {
         new_size: u16,
     },
     AppendSync,
@@ -131,7 +131,7 @@ fn fuzz(input: FuzzInput) {
 
         let mut read_buffer = None;
         let mut write_buffer = None;
-        let mut append_buffer = None;
+        let mut append_buffer: Option<Writer<<deterministic::Context as Storage>::Blob>> = None;
         let mut cache_ref = None;
         let mut cache_page_size_ref = None;
 
@@ -191,6 +191,12 @@ fn fuzz(input: FuzzInput) {
                     cache_page_size,
                     cache_capacity,
                 } => {
+                    if let Some(mut previous) = append_buffer.take() {
+                        if previous.sync().await.is_err() {
+                            return;
+                        }
+                        drop(previous);
+                    }
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
                     let cache_page_size = cache_page_size.max(1);
                     // Cache slots come from the storage pool, so each slot occupies
@@ -289,21 +295,47 @@ fn fuzz(input: FuzzInput) {
                             data
                         };
                         let current_size = append.size();
-                        if current_size.checked_add(data.len() as u64).is_some() {
-                            let _ = append.append(&data).await;
+                        if current_size.checked_add(data.len() as u64).is_some()
+                            && append.append(&data).await.is_err()
+                        {
+                            return;
                         }
                     }
                 }
 
-                FuzzOperation::AppendResize { new_size } => {
-                    if let Some(append) = append_buffer.as_mut() {
-                        let _ = append.resize(new_size as u64).await;
+                FuzzOperation::AppendReopenAtMost { new_size } => {
+                    if let Some(mut append) = append_buffer.take() {
+                        if append.sync().await.is_err() {
+                            return;
+                        }
+                        drop(append);
+                        let (blob, size) = context
+                            .open("test_partition", b"append_blob")
+                            .await
+                            .unwrap();
+                        let mut recovery = match commonware_runtime::buffer::paged::Recovery::open(
+                            blob,
+                            size,
+                            MAX_SIZE,
+                            cache_ref.as_ref().unwrap().clone(),
+                        )
+                        .await
+                        {
+                            Ok(recovery) => recovery,
+                            Err(_) => return,
+                        };
+                        if recovery.truncate(new_size as u64).await.is_err() {
+                            return;
+                        }
+                        append_buffer = Some(recovery.into());
                     }
                 }
 
                 FuzzOperation::AppendSync => {
-                    if let Some(append) = append_buffer.as_mut() {
-                        let _ = append.sync().await;
+                    if let Some(append) = append_buffer.as_mut()
+                        && append.sync().await.is_err()
+                    {
+                        return;
                     }
                 }
 

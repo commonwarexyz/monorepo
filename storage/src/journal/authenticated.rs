@@ -572,19 +572,6 @@ where
         Ok(self)
     }
 
-    /// Rewind the journal and Merkle structure.
-    #[boxed]
-    pub async fn rewind(mut self, size: u64) -> Result<Self, Error<F>> {
-        self.journal = self.journal.rewind(size).await?;
-
-        let leaves = *self.merkle.leaves();
-        if leaves > size {
-            self.merkle = self.merkle.rewind((leaves - size) as usize).await?;
-        }
-
-        Ok(self)
-    }
-
     /// Prune both the Merkle structure and journal to the given location.
     ///
     /// # Returns
@@ -810,6 +797,21 @@ where
     H: Hasher,
     S: Strategy,
 {
+    /// Range selected for publication.
+    pub(crate) fn bounds(&self) -> Range<u64> {
+        self.journal.bounds().start..self.selected_end
+    }
+
+    /// Whether storage was empty before commit selection.
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.journal.bounds() == (0..0)
+    }
+
+    /// Read an operation to validate its recovery requirements.
+    pub(crate) async fn read(&self, pos: u64) -> Result<C::Item, JournalError> {
+        self.journal.read(pos).await
+    }
+
     /// Persist the selected operations before the Merkle state acknowledging them.
     pub(crate) async fn finish(self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
         let journal = self.journal.finish(self.selected_end).await?;
@@ -1122,10 +1124,6 @@ where
         Ok((journal, pruned))
     }
 
-    async fn rewind(self, size: u64) -> Result<Self, JournalError> {
-        Self::rewind(self, size).await.map_err(Self::map_error)
-    }
-
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
         Self::start_sync(self).await.map_err(Self::map_error)
     }
@@ -1218,14 +1216,6 @@ pub trait Backing<E: Context>: Mutable {
 
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send;
-
-    /// Initialize the journal from its configuration.
-    fn init(
-        context: E,
-        cfg: Self::Config,
-    ) -> impl core::future::Future<Output = Result<Self, JournalError>> + Send
-    where
-        Self: Sized;
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
@@ -1984,293 +1974,6 @@ mod tests {
     fn test_initialization_selection_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_initialization_selection_inner::<mmb::Family>);
-    }
-
-    async fn test_rewind_inner<F: Family + PartialEq>(context: Context) {
-        // Test 1: Matching operation is kept
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_match"),
-                journal_config("rewind-match", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations where operation 3 is a commit
-            for i in 0..3 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap();
-            for i in 4..7 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind to last commit
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 4);
-            assert_eq!(journal.size(), 4);
-
-            // Verify the commit operation is still there
-            let op = journal.read(3).await.unwrap();
-            assert!(op.is_commit());
-        }
-
-        // Test 2: Last matching operation is chosen when multiple match
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_multiple"),
-                journal_config("rewind-multiple", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add multiple commits
-            (journal, _) = journal.append(&create_operation::<F>(0)).await.unwrap();
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 1
-            (journal, _) = journal.append(&create_operation::<F>(2)).await.unwrap();
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(1)))
-                .await
-                .unwrap(); // pos 3
-            (journal, _) = journal.append(&create_operation::<F>(4)).await.unwrap();
-
-            // Should rewind to last commit (pos 3)
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 4);
-
-            // Verify the last commit is still there
-            let op = journal.read(3).await.unwrap();
-            assert!(op.is_commit());
-
-            // Verify we can't read pos 4
-            assert!(journal.read(4).await.is_err());
-        }
-
-        // Test 3: Rewind to pruning boundary when no match
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_no_match"),
-                journal_config("rewind-no-match", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations with no commits
-            for i in 0..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind should go to pruning boundary (0 for unpruned)
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 0, "Should rewind to pruning boundary (0)");
-            assert_eq!(journal.size(), 0);
-        }
-
-        // Test 4: Rewind with existing pruning boundary
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_with_pruning"),
-                journal_config("rewind-with-pruning", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations and a commit at position 10 (past first section boundary of 7)
-            for i in 0..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 10
-            for i in 11..15 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            journal = journal.sync().await.unwrap();
-
-            // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
-            (journal, _) = journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
-
-            // Add more uncommitted operations
-            for i in 15..20 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind should keep the commit at position 10
-            let final_size;
-            (journal, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 11);
-
-            // Verify commit is still there
-            let op = journal.read(10).await.unwrap();
-            assert!(op.is_commit());
-        }
-
-        // Test 5: Rewind with no matches after pruning boundary
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_no_match_pruned"),
-                journal_config("rewind-no-match-pruned", &context),
-            )
-            .await
-            .unwrap();
-
-            // Add operations with a commit at position 5 (in section 0: 0-6)
-            for i in 0..5 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 5
-            for i in 6..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            journal = journal.sync().await.unwrap();
-
-            // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
-            // Pruning boundary will be at position 7 (start of section 1)
-            (journal, _) = journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
-
-            // Add uncommitted operations with no commits (in section 1: 7-13)
-            for i in 10..14 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-
-            // Rewind with no matching commits after the pruning boundary
-            // Should rewind to the pruning boundary at position 7
-            let (_, final_size) = journal.rewind_to(|op| op.is_commit()).await.unwrap();
-            assert_eq!(final_size, 7);
-        }
-
-        // Test 6: Empty journal
-        {
-            let mut journal = ContiguousJournal::init(
-                context.child("rewind_empty"),
-                journal_config("rewind-empty", &context),
-            )
-            .await
-            .unwrap();
-
-            // Rewind empty journal should be no-op
-            let final_size;
-            (journal, final_size) = journal
-                .rewind_to(|op: &TestOp<F>| op.is_commit())
-                .await
-                .unwrap();
-            assert_eq!(final_size, 0);
-            assert_eq!(journal.size(), 0);
-        }
-
-        // Test 7: Position based authenticated journal rewind.
-        {
-            let merkle_cfg = merkle_config("rewind", &context);
-            let journal_cfg = journal_config("rewind", &context);
-            let mut journal = TestJournal::<F>::new(
-                context.child("rewind"),
-                merkle_cfg,
-                journal_cfg,
-                |op| op.is_commit(),
-                ForwardFold,
-            )
-            .await
-            .unwrap();
-
-            // Add operations with a commit at position 5 (in section 0: 0-6)
-            for i in 0..5 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal
-                .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
-                .await
-                .unwrap(); // pos 5
-            for i in 6..10 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            assert_eq!(journal.size(), 10);
-
-            journal = journal.rewind(2).await.unwrap();
-            assert_eq!(journal.size(), 2);
-            assert_eq!(journal.merkle.leaves(), 2);
-            assert_eq!(journal.merkle.size(), 3);
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 0);
-            assert!(!bounds.is_empty());
-
-            journal = journal.rewind(0).await.unwrap();
-            assert_eq!(journal.size(), 0);
-            assert_eq!(journal.merkle.leaves(), 0);
-            assert_eq!(journal.merkle.size(), 0);
-            let bounds = journal.bounds();
-            assert_eq!(bounds.start, 0);
-            assert!(bounds.is_empty());
-
-            // Test rewinding after pruning.
-            for i in 0..255 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            (journal, _) = journal.prune(Location::<F>::new(100)).await.unwrap();
-            assert_eq!(journal.bounds().start, 98);
-            journal = journal.rewind(98).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 98);
-            assert_eq!(journal.merkle.leaves(), 98);
-            assert_eq!(bounds.start, 98);
-            assert!(bounds.is_empty());
-
-            // Rewinding into the pruned region fails.
-            let res = journal.rewind(97).await;
-            assert!(matches!(
-                res,
-                Err(Error::Journal(JournalError::ItemPruned(97)))
-            ));
-        }
-
-        // Test 8: Rewind target beyond current size fails.
-        {
-            let merkle_cfg = merkle_config("rewind-invalid", &context);
-            let journal_cfg = journal_config("rewind-invalid", &context);
-            let mut journal = TestJournal::<F>::new(
-                context,
-                merkle_cfg,
-                journal_cfg,
-                |op| op.is_commit(),
-                ForwardFold,
-            )
-            .await
-            .unwrap();
-
-            for i in 0..2 {
-                (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
-            }
-            assert!(matches!(
-                journal.rewind(3).await,
-                Err(Error::Journal(JournalError::InvalidRewind(_)))
-            ));
-        }
-    }
-
-    #[test_traced("INFO")]
-    fn test_rewind_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_rewind_inner::<mmr::Family>);
-    }
-
-    #[test_traced("INFO")]
-    fn test_rewind_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_rewind_inner::<mmb::Family>);
     }
 
     /// Verify that append() increments the operation count, returns correct locations, and

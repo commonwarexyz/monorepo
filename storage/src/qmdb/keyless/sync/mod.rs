@@ -46,8 +46,8 @@ where
     ///   a fresh Merkle structure from the provided `pinned_nodes`
     /// - If the Merkle journal has data but is incomplete (has length < range end), missing
     ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
-    ///   target
+    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
+    ///   sync target
     ///
     /// # Returns
     ///

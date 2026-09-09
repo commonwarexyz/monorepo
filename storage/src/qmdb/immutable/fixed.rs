@@ -5,13 +5,10 @@
 use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
     Context,
-    journal::{
-        authenticated,
-        contiguous::fixed::{self, Config as JournalConfig},
-    },
+    journal::contiguous::fixed::{self, Config as JournalConfig},
     merkle::Family,
     qmdb::{
-        Error, ROOT_BAGGING,
+        Error,
         any::{FixedValue, value::FixedEncoding},
     },
     translator::Translator,
@@ -30,9 +27,6 @@ pub type Db<F, E, K, V, H, T, S> =
 /// Type alias for the fixed-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
 
-type Journal<F, E, K, V, H, S> =
-    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H, S>;
-
 /// Configuration for a fixed-size immutable authenticated db.
 pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 
@@ -44,13 +38,19 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
 {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, K, V, H, S> = Journal::new(
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: Config<T, S>,
+        max_size: Option<crate::merkle::Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        let journal = crate::qmdb::init_journal::<F, E, _, H, S>(
             context.child("journal"),
             cfg.merkle_config,
             cfg.log,
-            Operation::<F, K, V>::is_commit,
-            ROOT_BAGGING,
+            max_size,
+            true,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
@@ -61,9 +61,15 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
     CompactDb<F, E, K, V, H, S>
 {
     /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
+    /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: CompactConfig<S>,
+        max_size: Option<crate::merkle::Location<F>>,
+    ) -> Result<Self, Error<F>> {
         let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
+        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, (), max_size).await
     }
 }
 
@@ -121,7 +127,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
@@ -140,7 +146,7 @@ mod tests {
             },
             commit_codec_config: (),
         };
-        CompactDb::init(context, cfg).await.unwrap()
+        CompactDb::init(context, cfg, None).await.unwrap()
     }
 
     /// An immutable db over a delayed-sync storage backend.
@@ -178,6 +184,7 @@ mod tests {
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -354,37 +361,6 @@ mod tests {
         });
     }
 
-    /// Rewinding drains the in-flight sync before mutating storage.
-    #[test_traced]
-    fn test_fixed_start_sync_rewind_waits() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-rewind", &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
-            db = drive_pending_syncs(&pending, db.commit()).await.unwrap();
-            let committed_root = db.root();
-            let committed_size = db.bounds().end;
-            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(0)).await;
-
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-
-            let db = {
-                let mut rewind = std::pin::pin!(db.rewind(committed_size));
-                assert!(
-                    rewind.as_mut().now_or_never().is_none(),
-                    "rewind proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                rewind.await.unwrap()
-            };
-            handle.await.unwrap();
-            assert_eq!(db.root(), committed_root);
-            db.destroy().await.unwrap();
-        });
-    }
-
     #[test_traced("INFO")]
     fn test_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -455,6 +431,26 @@ mod tests {
         Box::pin(open_db::<F>(ctx))
     }
 
+    #[allow(clippy::type_complexity)]
+    fn open_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<crate::merkle::Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
+    }
+
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -467,14 +463,6 @@ mod tests {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_rewind_is_send(
-        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
-        loc: crate::merkle::mmr::Location,
-    ) {
-        is_send(db.rewind(loc));
     }
 
     fn small_sections_config(
@@ -490,7 +478,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = small_sections_config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -512,6 +500,26 @@ mod tests {
         >,
     > {
         Box::pin(open_small_sections_db::<F>(ctx))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn open_small_sections_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<crate::merkle::Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = small_sections_config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
     }
 
     immutable_tests! {
@@ -545,28 +553,35 @@ mod tests {
         test_fixed_stale_batch_child_applied_before_parent => run_stale_batch_child_applied_before_parent, open;
         test_fixed_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, open;
         test_fixed_to_batch => run_to_batch, open;
-        test_fixed_rewind_recovery => run_rewind_recovery, open;
-        test_fixed_rewind_pruned_target_errors => run_rewind_pruned_target_errors, open_small_sections;
+        test_fixed_bounded_initialization_recovery => run_bounded_initialization_recovery, open_with_max;
+        test_fixed_bounded_initialization_pruned_target_errors =>
+            run_bounded_initialization_pruned_target_errors, open_small_sections_with_max;
         test_fixed_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
         test_fixed_floor_monotonicity => run_floor_monotonicity, open;
         test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
         test_fixed_floor_beyond_size => run_floor_beyond_size, open;
         test_fixed_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
         test_fixed_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
-        test_fixed_rewind_restores_floor => run_rewind_restores_floor, open;
+        test_fixed_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
         test_fixed_single_commit_live_set => run_single_commit_live_set, open;
-        test_fixed_rewind_after_reopen_with_floor_change => run_rewind_after_reopen_with_floor_change, open;
-        test_fixed_rewind_after_reopen_partial_floor_gap => run_rewind_after_reopen_partial_floor_gap, open;
+        test_fixed_bounded_initialization_after_reopen_with_floor_change =>
+            run_bounded_initialization_after_reopen_with_floor_change, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_partial_floor_gap =>
+            run_bounded_initialization_after_reopen_partial_floor_gap, open_with_max;
         test_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, open;
         test_fixed_prune_after_uncommitted_apply_batch_recovery => run_prune_after_uncommitted_apply_batch_recovery, open;
-        test_fixed_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
+        test_fixed_bounded_initialization_preserves_collision_bucket =>
+            run_bounded_initialization_preserves_collision_bucket, open_with_max;
         test_fixed_get_many => run_get_many, open;
         test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
-        test_fixed_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
-        test_fixed_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
-        test_fixed_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
-        test_fixed_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
+        test_fixed_bounded_initialization_after_reopen_repeated_key_gap =>
+            run_bounded_initialization_after_reopen_repeated_key_gap, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_mixed_gap_retained =>
+            run_bounded_initialization_after_reopen_mixed_gap_retained, open_with_max;
+        test_fixed_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_repeated_key_retained =>
+            run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
     }
 
     #[boxed]

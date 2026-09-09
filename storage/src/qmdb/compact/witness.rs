@@ -1,22 +1,25 @@
 //! Shared machinery for the compact-db witness journal.
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
-//! [`Witness`] is a complete snapshot of one applied state: the encoded commit operation, the
-//! committed size, and the pinned nodes one operation below it. The commit's inclusion proof is
-//! not stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open
-//! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes,
-//! and a structurally invalid entry fails with [`Error::DataCorrupted`].
+//! [`Witness`] is a complete snapshot of one applied state. It contains the encoded commit,
+//! committed size, and pinned nodes one operation below it. The commit's inclusion proof is not
+//! stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open,
+//! the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes, and a
+//! structurally invalid entry fails with [`Error::DataCorrupted`].
 //!
-//! Entries are strictly increasing in committed size, so a size uniquely identifies
-//! a rewind or prune target. An appended entry becomes durable when the journal `commit` or
+//! Entries are strictly increasing in committed size, so a size uniquely identifies an
+//! initialization or prune target. An appended entry becomes durable when the journal `commit` or
 //! `sync` completes. For [`Store::start_sync`] it becomes durable when the returned handle
-//! completes. Before that point, the entry is not guaranteed durable and recovery may fall back
-//! to the previous commit. [`Store::prune`] bounds how far back [`Store::rewind`] can reach.
-//! The tip entry is never pruned.
+//! completes. Before that point, the entry is not guaranteed durable and recovery may fall back to
+//! the previous commit. [`Store::prune`] bounds how far back bounded initialization can reach. The
+//! tip entry is never pruned.
 
 use crate::{
     Context, SyncCompletion,
-    journal::contiguous::{Contiguous, variable},
+    journal::{
+        authenticated::{Backing as _, Recovery},
+        contiguous::{Contiguous, variable},
+    },
     merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{
         self, Error,
@@ -451,41 +454,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok((self, Some(verified)))
     }
 
-    /// Rewind the journal so the entry committing exactly `target` leaves becomes the tip, then
-    /// rebuild and re-verify the Merkle and cache from it. Returns the decoded commit operation
-    /// of the restored tip.
-    ///
-    /// Rewinding to a pruned size, or one no entry commits, returns
-    /// [`merkle::Error::RewindBeyondHistory`]. The target entry is derived before the journal
-    /// is truncated, so a corrupt entry fails the rewind with the journal intact. The rewind is
-    /// made durable before returning.
-    pub(crate) async fn rewind<H, S, Op>(
-        mut self,
-        merkle: &compact::Merkle<F, D, S>,
-        target: Location<F>,
-        commit_codec_config: &Op::Cfg,
-    ) -> Result<(Self, Op), Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-        Op: Read + Floored<F>,
-    {
-        self.check_import_applied()?;
-
-        let (pos, entry) = self
-            .position_of(target)
-            .await?
-            .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
-        let (witness, op) = rebuild::<F, D, H, S, Op>(entry, merkle, commit_codec_config)?;
-        self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
-        self.pending_sync = None;
-        self.uncommitted = false;
-        self.replace(witness);
-        Ok((self, op))
-    }
-
     /// Drop all entries committing fewer than `pruning_boundary` leaves, bounding how far back
-    /// [`Self::rewind`] can reach. The tip entry always survives. Some entries
+    /// bounded initialization can reach. The tip entry always survives. Some entries
     /// below the boundary may survive.
     pub(crate) async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
         self.check_import_applied()?;
@@ -505,11 +475,6 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok(self)
     }
 
-    /// Whether the current cached state is not covered by a durability operation.
-    pub(crate) fn has_uncommitted_state(&self) -> bool {
-        self.import_pending.load(Ordering::Relaxed) || self.uncommitted
-    }
-
     /// Reject operations on a journal whose contents an unapplied compact-sync import is
     /// about to replace.
     fn check_import_applied(&self) -> Result<(), Error<F>> {
@@ -517,20 +482,6 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Err(Error::DataCorrupted("compact-sync import not applied"));
         }
         Ok(())
-    }
-
-    /// Find the journal position and entry committing exactly `target` leaves, or `None` if
-    /// no retained entry does.
-    async fn position_of(
-        &self,
-        target: Location<F>,
-    ) -> Result<Option<(u64, Witness<F, D>)>, Error<F>> {
-        let pos = Self::first_at_or_above(&self.journal, target).await?;
-        if pos >= self.journal.bounds().end {
-            return Ok(None);
-        }
-        let entry = self.journal.read(pos).await?;
-        Ok((entry.size == target).then_some((pos, entry)))
     }
 
     /// Binary search for the first retained position whose entry commits at least `size`
@@ -692,10 +643,12 @@ where
 /// last-commit operation.
 ///
 /// A new db starts with one committed operation, the initial commit: it is inserted into the
-/// compact Merkle and persisted as the first witness entry, so reopen and rewind never see an
-/// empty journal. An existing db reloads and re-verifies its tip witness.
+/// compact Merkle and persisted as the first witness entry, so initialization never sees an empty
+/// journal. An existing db reloads and re-verifies its tip witness.
 pub(crate) async fn init<E, F, H, S, Op>(
-    mut journal: Journal<E, F, H::Digest>,
+    context: E,
+    config: variable::Config<()>,
+    max_size: Option<Location<F>>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
     initial_commit_op_bytes: Vec<u8>,
@@ -707,11 +660,42 @@ where
     S: Strategy,
     Op: Read + Floored<F>,
 {
-    if journal.size() == 0 {
-        journal = bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
-            .await?;
+    crate::qmdb::validate_initialization_bound(max_size)?;
+    let pending = Journal::<E, F, H::Digest>::recover(context, config, None).await?;
+    let bounds = pending.bounds();
+    if bounds.is_empty() {
+        if bounds.start != 0 {
+            return Err(crate::journal::Error::ItemPruned(bounds.start - 1).into());
+        }
+        let journal = Recovery::finish(pending, 0).await?;
+        let journal =
+            bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
+                .await?;
+        let (witness, op) =
+            load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
+        return Ok((Store::new(journal, witness), op));
     }
-    let (witness, op) = load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
+    let mut end = bounds.end;
+    if let Some(cap) = max_size {
+        // Witness positions count commits, while their sizes count database operations.
+        let mut start = bounds.start;
+        while start < end {
+            let mid = start + (end - start) / 2;
+            let entry = Recovery::read(&pending, mid).await?;
+            if entry.size <= cap {
+                start = mid + 1;
+            } else {
+                end = mid;
+            }
+        }
+        if end == bounds.start {
+            return Err(Error::HistoricalFloorPruned(cap));
+        }
+    }
+    let entry = Recovery::read(&pending, end - 1).await?;
+    // Verify the selected witness before discarding any newer entry.
+    let (witness, op) = rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config)?;
+    let journal = Recovery::finish(pending, end).await?;
     Ok((Store::new(journal, witness), op))
 }
 
@@ -776,7 +760,7 @@ pub(crate) mod tests {
             }
         }
         f(&mut entries[0]);
-        let mut journal = journal.rewind(pos).await.unwrap();
+        let mut journal = journal.test_truncate(pos).await.unwrap();
         for entry in &entries {
             (journal, _) = journal.append(entry).await.unwrap();
         }
@@ -831,7 +815,7 @@ pub(crate) mod tests {
         D: Digest,
     {
         let entries = journal.size();
-        let journal = journal.rewind(entries - 1).await.unwrap();
+        let journal = journal.test_truncate(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
                 op_bytes: op_bytes.into(),

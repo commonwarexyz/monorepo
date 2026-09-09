@@ -308,13 +308,13 @@ fn generate(
         let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1));
         match index {
             IndexKind::Ordered => {
-                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 populate(db, keyspace, num_updates, zipf_exponent).await
             }
             IndexKind::Unordered => {
-                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 populate(db, keyspace, num_updates, zipf_exponent).await
@@ -392,7 +392,7 @@ fn get_bench(
         match index {
             IndexKind::Ordered => {
                 let db = Arc::new(
-                    AnyOFixP3Db::<Mmr>::init(ctx.child("db"), config)
+                    AnyOFixP3Db::<Mmr>::init(ctx.child("db"), config, None)
                         .await
                         .unwrap(),
                 );
@@ -409,7 +409,7 @@ fn get_bench(
             }
             IndexKind::Unordered => {
                 let db = Arc::new(
-                    AnyUFixP64kDb::<Mmr>::init(ctx.child("db"), config)
+                    AnyUFixP64kDb::<Mmr>::init(ctx.child("db"), config, None)
                         .await
                         .unwrap(),
                 );
@@ -578,13 +578,13 @@ fn time_init(
         let start = Instant::now();
         match index {
             IndexKind::Ordered => {
-                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 measure(&db, start)
             }
             IndexKind::Unordered => {
-                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 measure(&db, start)

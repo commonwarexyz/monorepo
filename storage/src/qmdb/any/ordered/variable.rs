@@ -52,11 +52,14 @@ where
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
     pub async fn init(
         context: E,
         cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<crate::merkle::Location<F>>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -123,11 +126,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: Option<crate::merkle::Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -217,7 +223,7 @@ pub(crate) mod test {
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed, &context, ());
-        AnyTest::init(context, config).await.unwrap()
+        AnyTest::init(context, config, None).await.unwrap()
     }
 
     /// Serial-vs-parallel init equivalence for the variable-value partitioned db. The parallel
@@ -250,7 +256,7 @@ pub(crate) mod test {
 
             // Commit 1: insert every key.
             let cfg = create_test_config(77, &context, NZUsize!(1));
-            let db = PartDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = PartDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -289,7 +295,7 @@ pub(crate) mod test {
                 let ctx = context
                     .child("reopen")
                     .with_attribute("concurrency", concurrency);
-                let db = PartDb::<Sequential>::init(ctx, cfg).await.unwrap();
+                let db = PartDb::<Sequential>::init(ctx, cfg, None).await.unwrap();
                 assert_eq!(
                     db.root(),
                     root,
@@ -382,7 +388,7 @@ pub(crate) mod test {
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
         let cfg = variable_db_config("fixed-bytes-var-partition", &context);
-        VariableDb::init(context, cfg).await.unwrap()
+        VariableDb::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("WARN")]

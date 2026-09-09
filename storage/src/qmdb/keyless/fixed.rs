@@ -4,16 +4,12 @@
 
 use crate::{
     Context,
-    journal::{
-        authenticated,
-        contiguous::fixed::{self, Config as JournalConfig},
-    },
+    journal::contiguous::fixed::{self, Config as JournalConfig},
     merkle::Family,
     qmdb::{
-        Error, ROOT_BAGGING,
+        Error,
         any::value::{FixedEncoding, FixedValue},
         keyless::operation::Operation as BaseOperation,
-        operation::Committable,
     },
 };
 use commonware_cryptography::Hasher;
@@ -29,9 +25,6 @@ pub type Db<F, E, V, H, S> =
 /// A compact keyless authenticated db for fixed-size data.
 pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, (), S>;
 
-type Journal<F, E, V, H, S> =
-    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, V>>, H, S>;
-
 /// Configuration for a fixed-size [keyless](super) authenticated db.
 pub type Config<S> = super::Config<JournalConfig, S>;
 
@@ -41,13 +34,19 @@ pub type CompactConfig<S> = super::CompactConfig<(), S>;
 impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> Db<F, E, V, H, S> {
     /// Returns a [Db] initialized from `cfg`. Any uncommitted operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, V, H, S> = Journal::new(
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: Config<S>,
+        max_size: Option<crate::merkle::Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        let journal = crate::qmdb::init_journal::<F, E, _, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
-            Operation::<F, V>::is_commit,
-            ROOT_BAGGING,
+            max_size,
+            false,
         )
         .await?;
         Self::init_from_journal(journal, context).await
@@ -56,9 +55,15 @@ impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> Db<F, E, V, H
 
 impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> CompactDb<F, E, V, H, S> {
     /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
+    /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: CompactConfig<S>,
+        max_size: Option<crate::merkle::Location<F>>,
+    ) -> Result<Self, Error<F>> {
         let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
+        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, (), max_size).await
     }
 }
 
@@ -125,13 +130,13 @@ mod tests {
         context: deterministic::Context,
     ) -> TestDb<F> {
         let cfg = db_config(suffix, &context, Sequential);
-        TestDb::init(context, cfg).await.unwrap()
+        TestDb::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
         let strategy = context.strategy(NZUsize!(2));
         let cfg = db_config("rayon", &context, strategy);
-        TestRayonDb::init(context, cfg).await.unwrap()
+        TestRayonDb::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: crate::merkle::Family>(
@@ -150,7 +155,163 @@ mod tests {
             },
             commit_codec_config: (),
         };
-        TestCompactDb::init(context, cfg).await.unwrap()
+        TestCompactDb::init(context, cfg, None).await.unwrap()
+    }
+
+    async fn bounded_standard<F: Family>(context: deterministic::Context) {
+        for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
+            let cfg = db_config(&format!("caps-{cap}"), &context, Sequential);
+            let mut db = TestDb::<F>::init(context.child("create"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let mut commits = vec![(db.bounds().end, db.root())];
+            for count in [1, 3, 5] {
+                let mut batch = db.new_batch();
+                for value in 0..count {
+                    batch = batch.append(U64::new(value));
+                }
+                let batch = batch.merkleize(&db, None, Location::new(0)).await;
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                commits.push((db.bounds().end, db.root()));
+            }
+            db = db.sync().await.unwrap();
+            let tip = *commits.last().unwrap();
+            drop(db);
+            let opened =
+                TestDb::<F>::init(context.child("cap"), cfg.clone(), Some(Location::new(cap)))
+                    .await;
+            if cap == 0 {
+                assert!(matches!(opened, Err(Error::InvalidInitializationBound)));
+                let db = TestDb::<F>::init(context.child("unchanged"), cfg, None)
+                    .await
+                    .unwrap();
+                assert_eq!((db.bounds().end, db.root()), tip);
+                continue;
+            }
+            let expected = *commits
+                .iter()
+                .rev()
+                .find(|(size, _)| **size <= cap)
+                .unwrap();
+            let db = opened.unwrap();
+            assert_eq!((db.bounds().end, db.root()), expected);
+            drop(db);
+            let mut db = TestDb::<F>::init(context.child("restart"), cfg.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!((db.bounds().end, db.root()), expected);
+            let batch = db
+                .new_batch()
+                .append(U64::new(999))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            let appended = (db.bounds().end, db.root());
+            drop(db);
+            let db = TestDb::<F>::init(context.child("appended"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!((db.bounds().end, db.root()), appended);
+        }
+    }
+    #[test_traced]
+    fn test_standard_bounded_initialization_mmr() {
+        deterministic::Runner::default().start(bounded_standard::<mmr::Family>);
+    }
+    #[test_traced]
+    fn test_standard_bounded_initialization_mmb() {
+        deterministic::Runner::default().start(bounded_standard::<mmb::Family>);
+    }
+
+    async fn bounded_compact<F: Family>(context: deterministic::Context) {
+        for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
+            let cfg = CompactConfig {
+                strategy: Sequential,
+                witness: crate::journal::contiguous::variable::Config {
+                    partition: format!("caps-{cap}"),
+                    items_per_section: NZU64!(3),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+                commit_codec_config: (),
+            };
+            let mut db = TestCompactDb::<F>::init(context.child("create"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let mut commits = vec![(db.size(), db.root())];
+            for count in [1, 3, 5] {
+                let mut batch = db.new_batch();
+                for value in 0..count {
+                    batch = batch.append(U64::new(value));
+                }
+                let batch = batch.merkleize(&db, None, Location::new(0)).await;
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                commits.push((db.size(), db.root()));
+            }
+            db = db.sync().await.unwrap();
+            let tip = *commits.last().unwrap();
+            drop(db);
+            let opened = TestCompactDb::<F>::init(
+                context.child("cap"),
+                cfg.clone(),
+                Some(Location::new(cap)),
+            )
+            .await;
+            if cap == 0 {
+                assert!(matches!(opened, Err(Error::InvalidInitializationBound)));
+                let db = TestCompactDb::<F>::init(context.child("unchanged"), cfg, None)
+                    .await
+                    .unwrap();
+                assert_eq!((db.size(), db.root()), tip);
+                continue;
+            }
+            let expected = *commits
+                .iter()
+                .rev()
+                .find(|(size, _)| **size <= cap)
+                .unwrap();
+            let db = opened.unwrap();
+            assert_eq!((db.size(), db.root()), expected);
+            drop(db);
+            let mut db = TestCompactDb::<F>::init(context.child("restart"), cfg.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!((db.size(), db.root()), expected);
+            let batch = db
+                .new_batch()
+                .append(U64::new(999))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            let appended = (db.size(), db.root());
+            drop(db);
+            let db = TestCompactDb::<F>::init(context.child("appended"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!((db.size(), db.root()), appended);
+        }
+    }
+    #[test_traced]
+    fn test_compact_bounded_initialization_mmr() {
+        deterministic::Runner::default().start(bounded_compact::<mmr::Family>);
+    }
+    #[test_traced]
+    fn test_compact_bounded_initialization_mmb() {
+        deterministic::Runner::default().start(bounded_compact::<mmb::Family>);
+    }
+
+    fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
+        Box::new(|ctx, cap| {
+            Box::pin(async move {
+                let cfg = db_config("partition", &ctx, Sequential);
+                TestDb::init(ctx, cfg, Some(cap)).await
+            })
+        })
     }
 
     fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
@@ -185,6 +346,7 @@ mod tests {
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -361,37 +523,6 @@ mod tests {
         });
     }
 
-    /// Rewinding drains the in-flight sync before mutating storage.
-    #[test_traced]
-    fn test_keyless_fixed_start_sync_rewind_waits() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-rewind", &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            (db, _) = apply_append(db, U64::new(1), Location::new(0)).await;
-            db = drive_pending_syncs(&pending, db.commit()).await.unwrap();
-            let committed_root = db.root();
-            let committed_size = db.bounds().end;
-            (db, _) = apply_append(db, U64::new(2), Location::new(0)).await;
-
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-
-            let db = {
-                let mut rewind = std::pin::pin!(db.rewind(committed_size));
-                assert!(
-                    rewind.as_mut().now_or_never().is_none(),
-                    "rewind proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                rewind.await.unwrap()
-            };
-            handle.await.unwrap();
-            assert_eq!(db.root(), committed_root);
-            db.destroy().await.unwrap();
-        });
-    }
-
     #[test_traced("INFO")]
     fn test_keyless_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -473,14 +604,17 @@ mod tests {
         test_keyless_fixed_stale_batch_child_before_parent => run_stale_batch_child_before_parent, db;
         test_keyless_fixed_to_batch => run_to_batch, db;
         test_keyless_fixed_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, db;
-        test_keyless_fixed_rewind_recovery => run_rewind_recovery, reopen;
-        test_keyless_fixed_rewind_pruned_target_errors => run_rewind_pruned_target_errors, reopen;
+        test_keyless_fixed_bounded_initialization_recovery => run_bounded_initialization_recovery, bounded;
+        test_keyless_fixed_bounded_initialization_pruned_target_errors =>
+            run_bounded_initialization_pruned_target_errors, bounded;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
-        test_keyless_fixed_rewind_restores_floor => run_rewind_restores_floor, db;
+        test_keyless_fixed_bounded_initialization_restores_floor =>
+            run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_fixed_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
-        test_keyless_fixed_rewind_after_reopen_with_floor => run_rewind_after_reopen_with_floor, reopen_indexed;
+        test_keyless_fixed_bounded_initialization_after_reopen_with_floor =>
+            run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
         test_keyless_fixed_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
         test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
         test_keyless_fixed_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
@@ -588,9 +722,10 @@ mod tests {
 
         deterministic::Runner::default().start(|ctx| async move {
             let target_config = db_config("sync-target", &ctx, Sequential);
-            let target_db: TestDb<mmr::Family> = TestDb::init(ctx.child("target"), target_config)
-                .await
-                .unwrap();
+            let target_db: TestDb<mmr::Family> =
+                TestDb::init(ctx.child("target"), target_config, None)
+                    .await
+                    .unwrap();
 
             let mut batch = target_db.new_batch();
             for i in 0..20u64 {

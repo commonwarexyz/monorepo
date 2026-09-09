@@ -1,15 +1,22 @@
 use commonware_codec::ReadExt;
+use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     Blob, ReadOptions, Runner, Storage, Supervisor, WriteOptions,
     buffer::paged::{CacheRef, Writer, corrupt_page},
     deterministic,
 };
-use commonware_storage::journal::{
-    authenticated::Backing,
-    contiguous::{Contiguous, fixed, variable},
-    segmented::oversized::{Config as OversizedConfig, Oversized},
+use commonware_storage::{
+    journal::{
+        authenticated::Backing,
+        contiguous::{Contiguous, fixed, variable},
+        segmented::oversized::{Config as OversizedConfig, Oversized},
+    },
+    merkle::{Location, mmr::Family},
+    qmdb::{keyless, sync},
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, probability};
+use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability};
+use std::sync::Arc;
 
 fn cfg(
     context: &deterministic::Context,
@@ -92,6 +99,71 @@ fn test_sync_rejects_missing_acknowledged_data() {
         assert!(
             matches!(error, commonware_storage::journal::Error::Corruption(_)),
             "must reject missing data instead of authorizing a reset: {error}"
+        );
+    });
+}
+
+#[test]
+fn test_keyless_synced_range_reopens() {
+    type Db = keyless::fixed::Db<Family, deterministic::Context, u64, Sha256, Sequential>;
+    deterministic::Runner::default().start(|context| async move {
+        let make_config = |suffix: &str| {
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            keyless::fixed::Config {
+                merkle: commonware_storage::merkle::full::Config {
+                    journal_partition: format!("{suffix}-merkle"),
+                    metadata_partition: format!("{suffix}-metadata"),
+                    items_per_blob: NZU64!(11),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    page_cache: cache.clone(),
+                },
+                log: fixed::Config {
+                    partition: format!("{suffix}-log"),
+                    items_per_blob: NZU64!(1),
+                    page_cache: cache,
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+            }
+        };
+        let source = Db::init(context.child("source"), make_config("source"), None)
+            .await
+            .unwrap();
+        let mut batch = source.new_batch();
+        for value in 0..10 {
+            batch = batch.append(value);
+        }
+        let batch = batch.merkleize(&source, None, Location::new(0)).await;
+        let (source, _) = source.apply_batch(batch).await.unwrap();
+        let source = Arc::new(source.sync().await.unwrap());
+        let config = make_config("client");
+        let client: Db = sync::sync(sync::engine::Config {
+            context: context.child("client"),
+            db_config: config.clone(),
+            target: sync::Target {
+                root: source.root(),
+                range: non_empty_range!(Location::new(5), source.bounds().end),
+            },
+            source: source.clone(),
+            apply_batch_size: NZU64!(10),
+            fetch_batch_size: NZU64!(5),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
+        .await
+        .unwrap();
+        assert_eq!(*client.bounds().start, 5);
+        assert_eq!(*client.inactivity_floor_loc(), 0);
+        _ = client.sync().await.unwrap();
+        let reopened = Db::init(context.child("reopened"), config, None).await;
+        assert!(
+            reopened.is_ok(),
+            "valid synced Keyless must reopen: {reopened:?}"
         );
     });
 }
