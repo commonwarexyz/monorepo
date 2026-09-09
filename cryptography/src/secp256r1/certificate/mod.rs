@@ -14,7 +14,9 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
+use commonware_codec::{
+    EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write, types::lazy::Lazy,
+};
 use commonware_utils::{
     Participant,
     iter::NonEmpty,
@@ -257,6 +259,14 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         false
     }
 
+    /// Returns the maximum encoded certificate size for this participant set.
+    pub fn certificate_max_size(&self) -> Option<usize> {
+        crate::certificate::max_individual_certificate_size(
+            self.participants.len(),
+            Secp256r1Signature::SIZE,
+        )
+    }
+
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
         self.participants.len()
     }
@@ -468,6 +478,10 @@ macro_rules! impl_certificate_secp256r1 {
 
             fn is_batchable() -> bool {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
+            }
+
+            fn certificate_max_size(&self) -> Option<usize> {
+                self.generic.certificate_max_size()
             }
 
             fn certificate_codec_config(

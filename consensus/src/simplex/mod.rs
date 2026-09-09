@@ -359,6 +359,23 @@
 //! delivered notarization completes its fetch on arrival, because certification judges evidence
 //! already in hand. Matching evidence or finalization retires pending work.
 //!
+//! ### Message Sizes
+//!
+//! Applications must configure P2P limits to fit every fully encoded [`Vote`](types::Vote) and
+//! [`Certificate`](types::Certificate) for the deployed scheme and participant set. Missing
+//! certificate recovery sends an encoded `Certificate` inside a resolver response, adding up to
+//! [`MAX_RESPONSE_OVERHEAD`](commonware_resolver::p2p::MAX_RESPONSE_OVERHEAD) bytes. These messages
+//! are not fragmented, and authenticated P2P panics on oversized sends.
+//!
+//! [`Verifier::certificate_max_size`](commonware_cryptography::certificate::Verifier::certificate_max_size)
+//! bounds the underlying scheme certificate. The full Simplex certificate also includes its
+//! proposal or round fields and a variant tag. Size for every accepted signer count across the
+//! committees and epochs being served; a certificate containing only a quorum may be smaller.
+//!
+//! Application block dissemination and recovery must also fit their P2P limits. When using
+//! Marshal, follow its [Message Sizes](crate::marshal#message-sizes) requirements and use
+//! [`max_recovery_overhead`](crate::marshal::max_recovery_overhead) to budget for block recovery.
+//!
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via

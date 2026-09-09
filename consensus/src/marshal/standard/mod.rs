@@ -18,6 +18,8 @@
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
 //! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
 //! Blocks are broadcast through [`commonware_broadcast::buffered`].
+//! Configure block and P2P bounds for the [complete recovery response](crate::marshal#message-sizes),
+//! including its certificate and resolver envelope.
 //!
 //! # When to Use
 //!

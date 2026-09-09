@@ -1,6 +1,15 @@
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{BufsMut, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{
+    BufsMut, EncodeSize, Error, FixedSize, Read, ReadExt, Write, varint::MAX_U32_VARINT_SIZE,
+};
 use commonware_utils::Span;
+
+/// Maximum number of bytes added to a produced value in a P2P resolver response.
+///
+/// Includes an 8-byte request ID, a 1-byte response tag, and a value-length varint of at most
+/// 5 bytes. This overhead counts toward the underlying P2P application's message size limit;
+/// it excludes P2P framing and encryption overhead.
+pub const MAX_RESPONSE_OVERHEAD: u32 = (u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE) as u32;
 
 /// Represents a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +205,29 @@ mod tests {
         let encoded = original.encode();
         let decoded = Message::decode(encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_max_response_overhead() {
+        for size in [0, 127, 128, 16_383, 16_384] {
+            let message = Message::<u8> {
+                id: u64::MAX,
+                payload: Payload::Response(Bytes::from(vec![0; size])),
+            };
+            assert!(message.encode().len() - size <= MAX_RESPONSE_OVERHEAD as usize);
+        }
+
+        // Combine the encoded envelope with the largest supported length prefix without
+        // allocating a maximum-size response value.
+        let message = Message::<u8> {
+            id: u64::MAX,
+            payload: Payload::Response(Bytes::new()),
+        };
+        let envelope_size = message.encode().len() - Bytes::new().encode_size();
+        assert_eq!(
+            envelope_size + (u32::MAX as usize).encode_size(),
+            MAX_RESPONSE_OVERHEAD as usize,
+        );
     }
 
     #[test]

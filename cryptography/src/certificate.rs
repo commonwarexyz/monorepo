@@ -72,7 +72,8 @@ use crate::{Digest, PublicKey};
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write, types::lazy::Lazy,
+    Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    types::lazy::Lazy, varint::UInt,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
@@ -329,6 +330,13 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// return `false`, indicating that eager per-signature verification is preferred.
     fn is_batchable() -> bool;
 
+    /// Returns an upper bound on the encoded size of a certificate accepted by
+    /// [`Self::certificate_codec_config`].
+    ///
+    /// The bound covers every accepted signer count for this verifier's configuration.
+    /// Returns `None` if a bound cannot be represented as a `usize` or is unavailable.
+    fn certificate_max_size(&self) -> Option<usize>;
+
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;
 
@@ -495,6 +503,10 @@ impl<S: Scheme> Verifier for Scoped<S> {
         S::is_batchable()
     }
 
+    fn certificate_max_size(&self) -> Option<usize> {
+        self.scheme.certificate_max_size()
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
         self.scheme.certificate_codec_config()
     }
@@ -541,6 +553,11 @@ pub struct Signers {
 }
 
 impl Signers {
+    /// Bounds the encoded bitmap for a participant count without allocating it.
+    pub(crate) const fn max_size(participants: usize) -> usize {
+        u64::SIZE + participants.div_ceil(8)
+    }
+
     /// Builds [`Signers`] from an iterator of signer indices.
     ///
     /// Indices need not be sorted: some signing schemes aggregate commutatively, so ordering
@@ -591,6 +608,17 @@ impl Signers {
             .ones_iter()
             .map(|index| Participant::from_usize(index as usize))
     }
+}
+
+/// Bounds certificates containing one fixed-size signature per signer.
+pub(crate) fn max_individual_certificate_size(
+    participants: usize,
+    signature_size: usize,
+) -> Option<usize> {
+    let count = u32::try_from(participants).ok()?;
+    Signers::max_size(participants)
+        .checked_add(UInt(count).encode_size())?
+        .checked_add(participants.checked_mul(signature_size)?)
 }
 
 /// Builds [`Signers`] using the participant set as the valid signer-index range.
@@ -684,12 +712,44 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Signer as _, ed25519::PrivateKey, sha256::Digest as Sha256Digest};
+    use crate::{
+        Signer as _,
+        ed25519::{PrivateKey, Signature},
+        sha256::Digest as Sha256Digest,
+    };
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{TryCollect, non_empty, ordered::Set, test_rng};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
+
+    #[test]
+    fn test_max_individual_certificate_size() {
+        for n in [0, 1, 7, 8, 9, 127, 128] {
+            let signers = Signers::new(n, (0..n).map(Participant::new)).unwrap();
+            let signatures = vec![[0u8; Signature::SIZE]; n as usize];
+            assert_eq!(Signers::max_size(n as usize), signers.encode().len());
+            assert_eq!(
+                max_individual_certificate_size(n as usize, Signature::SIZE),
+                Some(signers.encode().len() + signatures.encode().len()),
+            );
+        }
+
+        let n = u32::MAX;
+        let expected = u64::SIZE as u64
+            + u64::from(n).div_ceil(8)
+            + UInt(n).encode_size() as u64
+            + u64::from(n) * Signature::SIZE as u64;
+        assert_eq!(
+            max_individual_certificate_size(n as usize, Signature::SIZE),
+            usize::try_from(expected).ok(),
+        );
+        assert_eq!(max_individual_certificate_size(2, usize::MAX), None);
+        assert_eq!(max_individual_certificate_size(1, usize::MAX), None);
+        if let Some(n) = (u32::MAX as usize).checked_add(1) {
+            assert_eq!(max_individual_certificate_size(n, Signature::SIZE), None);
+        }
+    }
 
     #[test]
     fn test_new_signers() {
@@ -954,6 +1014,14 @@ mod tests {
         assert_eq!(
             as_verifier.certificate_codec_config(),
             schemes[0].certificate_codec_config(),
+        );
+        assert_eq!(
+            as_verifier.certificate_max_size(),
+            schemes[0].certificate_max_size()
+        );
+        assert_eq!(
+            as_scheme.certificate_max_size(),
+            schemes[0].certificate_max_size()
         );
         let _ = <Scoped<Ed25519Scheme> as Verifier>::certificate_codec_config_unbounded();
 

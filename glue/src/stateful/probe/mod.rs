@@ -377,6 +377,10 @@ mod test {
             Scheme::is_batchable()
         }
 
+        fn certificate_max_size(&self) -> Option<usize> {
+            self.inner.certificate_max_size()
+        }
+
         fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
             self.inner.certificate_codec_config()
         }
