@@ -3,6 +3,7 @@
 //! This module contains impl blocks that are generic over `ValueEncoding`, allowing them to be
 //! used by both fixed and variable ordered QMDB implementations.
 
+use super::proof::constant::{ExclusionProof, KeyValueProof};
 use crate::{
     Context,
     index::Ordered as OrderedIndex,
@@ -14,68 +15,13 @@ use crate::{
             ValueEncoding,
             ordered::{Operation, Update},
         },
-        current::proof::OperationProof,
         operation::Key,
     },
 };
-use bytes::BufMut;
-use commonware_codec::{Buf, Codec, EncodeSize, Read, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_codec::Codec;
+use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use futures::stream::Stream;
-
-/// Proof information for verifying a key has a particular value in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize> {
-    pub proof: OperationProof<F, D, N>,
-    pub next_key: K,
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.proof.write(buf);
-        self.next_key.write(buf);
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> EncodeSize
-    for KeyValueProof<F, K, D, N>
-{
-    fn encode_size(&self) -> usize {
-        self.proof.encode_size() + self.next_key.encode_size()
-    }
-}
-
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Read for KeyValueProof<F, K, D, N> {
-    /// `(max_digests, key_cfg)`: the Merkle digest cap forwarded to the embedded operation
-    /// proof and the read configuration for the key type.
-    type Cfg = (usize, <K as Read>::Cfg);
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_digests, key_cfg): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let proof = OperationProof::<F, D, N>::read_cfg(buf, max_digests)?;
-        let next_key = K::read_cfg(buf, key_cfg)?;
-        Ok(Self { proof, next_key })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> arbitrary::Arbitrary<'_>
-    for KeyValueProof<F, K, D, N>
-where
-    K: for<'a> arbitrary::Arbitrary<'a>,
-    D: for<'a> arbitrary::Arbitrary<'a>,
-    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            proof: u.arbitrary()?,
-            next_key: u.arbitrary()?,
-        })
-    }
-}
 
 /// The generic Db type for ordered Current QMDB variants.
 ///
@@ -104,23 +50,6 @@ where
         self.any.get(key).await
     }
 
-    /// Return true if the proof authenticates that `key` currently has value `value` in the db with
-    /// the provided `root`.
-    pub fn verify_key_value_proof(
-        key: K,
-        value: V::Value,
-        proof: &KeyValueProof<F, K, H::Digest, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let op = Operation::Update(Update {
-            key,
-            value,
-            next_key: proof.next_key.clone(),
-        });
-
-        proof.proof.verify::<H, _>(op, root)
-    }
-
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
     pub async fn get_span(&self, key: &K) -> Result<Option<(Location<F>, Update<K, V>)>, Error<F>> {
@@ -137,46 +66,6 @@ where
         V: 'a,
     {
         self.any.stream_range(start).await
-    }
-
-    /// Return true if the proof authenticates that `key` does _not_ exist in the db with the
-    /// provided `root`.
-    pub fn verify_exclusion_proof(
-        key: &K,
-        proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
-        root: &H::Digest,
-    ) -> bool {
-        let (op_proof, op) = match proof {
-            super::ExclusionProof::KeyValue(op_proof, data) => {
-                if data.key == *key {
-                    // The provided `key` is in the DB if it matches the start of the span.
-                    return false;
-                }
-                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>, N, S>::span_contains(
-                    &data.key,
-                    &data.next_key,
-                    key,
-                ) {
-                    // If the key is not within the span, then this proof cannot prove its
-                    // exclusion.
-                    return false;
-                }
-
-                (op_proof, Operation::Update(data.clone()))
-            }
-            super::ExclusionProof::Commit(op_proof, metadata) => {
-                // Handle the case where the proof shows the db is empty, hence any key is proven
-                // excluded. For the db to be empty, the floor must equal the commit operation's
-                // location.
-                let floor_loc = op_proof.loc;
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), floor_loc),
-                )
-            }
-        };
-
-        op_proof.verify::<H, _>(op, root)
     }
 }
 
@@ -225,7 +114,7 @@ where
     pub async fn exclusion_proof(
         &self,
         key: &K,
-    ) -> Result<super::ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
+    ) -> Result<ExclusionProof<F, K, V, H::Digest, N>, Error<F>> {
         match self.any.get_span(key).await? {
             Some((loc, key_data)) => {
                 if key_data.key == *key {
@@ -233,7 +122,7 @@ where
                     return Err(Error::<F>::KeyExists);
                 }
                 let op_proof = self.operation_proof(loc).await?;
-                Ok(super::ExclusionProof::KeyValue(op_proof, key_data))
+                Ok(ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
                 // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
@@ -250,7 +139,7 @@ where
                     last_commit_loc, floor
                 );
                 let op_proof = self.operation_proof(last_commit_loc).await?;
-                Ok(super::ExclusionProof::Commit(op_proof, value))
+                Ok(ExclusionProof::Commit(op_proof, value))
             }
         }
     }

@@ -13,9 +13,10 @@ use core::fmt::Display;
 pub(crate) mod fixed;
 pub(crate) mod variable;
 
-// Context byte prefixes for identifying the operation type.
-const COMMIT_CONTEXT: u8 = 0;
-const APPEND_CONTEXT: u8 = 1;
+/// Wire tag for [Operation::Commit].
+pub const COMMIT_CONTEXT: u8 = 0;
+/// Wire tag for [Operation::Append].
+pub const APPEND_CONTEXT: u8 = 1;
 
 /// Delegates Operation-level codec (Write, Read) to the value encoding.
 ///

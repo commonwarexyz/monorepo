@@ -12,9 +12,12 @@ pub(crate) mod update;
 pub(crate) mod variable;
 pub use update::Update;
 
-pub(crate) const DELETE_CONTEXT: u8 = 0xD1;
-pub(crate) const UPDATE_CONTEXT: u8 = 0xD2;
-pub(crate) const COMMIT_CONTEXT: u8 = 0xD3;
+/// Wire tag for [Operation::Delete].
+pub const DELETE_CONTEXT: u8 = 0xD1;
+/// Wire tag for [Operation::Update].
+pub const UPDATE_CONTEXT: u8 = 0xD2;
+/// Wire tag for [Operation::CommitFloor].
+pub const COMMIT_CONTEXT: u8 = 0xD3;
 
 pub type Ordered<F, K, V> = Operation<F, update::Ordered<K, V>>;
 pub type Unordered<F, K, V> = Operation<F, update::Unordered<K, V>>;
