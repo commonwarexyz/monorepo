@@ -5,8 +5,9 @@
 //! Rewrite, overwrite, and remove write paths are crossed with three crash kinds: a failed
 //! write, an unsynced write parked at the delayed durability barrier, and an acked sync that
 //! completes the barrier first. The oracle pins that recovery yields the baseline or the
-//! complete candidate, never a mixture, and that a crash after an acknowledged sync
-//! preserves the acked state exactly.
+//! complete candidate, never a mixture, that a crash after an acknowledged sync preserves
+//! the acked state exactly, and that the first sync after a repair survives reopen on the
+//! repaired copy.
 
 use arbitrary::Arbitrary;
 use commonware_codec::Read;
@@ -236,10 +237,10 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             );
         }
 
-        // Prove the repaired store remains writable and that the selected state survives a clean
-        // sync and reopen. Shrink first: a stale tail left behind by an unrepaired mirror would
-        // survive the larger sentinel rewrite, so the first write must be smaller than any
-        // reachable crash image.
+        // Shrink first. When init repaired a torn copy, the first sync lands on it, and the shrunk
+        // state is never larger than the image that copy held before the crash, so any stale tail
+        // left by an incomplete repair fails its checksum at reopen. Reopen before the next sync
+        // rotates the newest state to the other copy.
         let mut expected = recovered;
         metadata.remove(&U64::new(0));
         expected.remove(&0);
@@ -247,6 +248,17 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             .sync()
             .await
             .expect("post-recovery shrink sync failed");
+        drop(metadata);
+        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("shrunk"), config())
+            .await
+            .expect("post-shrink reopen failed");
+        assert_eq!(
+            snapshot(&metadata),
+            expected,
+            "reopen lost the post-recovery shrink"
+        );
+
+        // Prove the store remains writable and that a further sync survives a clean reopen.
         let sentinel = vec![0xEF; 32];
         metadata.put(U64::new(SENTINEL_KEY), sentinel.clone());
         expected.insert(SENTINEL_KEY, sentinel);
