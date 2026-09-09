@@ -11,7 +11,10 @@ use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
         Application, ExecutionError, Input, Proposed,
-        db::{DatabaseSet, Merkleized as _, MerkleizedOf, Unmerkleized as _, UnmerkleizedOf},
+        db::{
+            DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Unmerkleized as _,
+            UnmerkleizedOf,
+        },
     },
 };
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
@@ -53,6 +56,7 @@ where
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ReshareInput<(), MinSig, ed25519::PrivateKey>;
 
@@ -109,8 +113,26 @@ where
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
-        Self::execute(block.height(), batches).await
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
+        Self::execute(block.height(), batches).await.map(Some)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &MerkleizedOf<Self::Databases, E>,
+        _readers: ReadersOf<Self::Databases, E>,
+    ) {
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: ReadersOf<Self::Databases, E>,
+    ) {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {

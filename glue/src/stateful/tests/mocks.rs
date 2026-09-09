@@ -1,7 +1,7 @@
 use crate::stateful::{
     Application, ExecutionError, Input, Proposed,
     db::{
-        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, Single, Unmerkleized,
+        DatabaseSet, ManagedDb, Merkleized, MerkleizedOf, Reader, ReadersOf, Single, Unmerkleized,
         UnmerkleizedOf, Writer,
     },
 };
@@ -327,8 +327,22 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct TestApp;
+#[derive(Clone, Default)]
+pub(crate) struct TestApp {
+    finalization_hooks: Option<Arc<AtomicUsize>>,
+}
+
+impl TestApp {
+    pub(crate) fn observe_finalization() -> (Self, Arc<AtomicUsize>) {
+        let hooks: Arc<AtomicUsize> = Arc::default();
+        (
+            Self {
+                finalization_hooks: Some(hooks.clone()),
+            },
+            hooks,
+        )
+    }
+}
 
 impl<
     E: rand_core::Rng
@@ -343,6 +357,7 @@ impl<
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -378,8 +393,32 @@ impl<
         _context: (E, Self::Context),
         _block: &Self::Block,
         _batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
-        Ok(TestMerkleized)
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
+        Ok(Some(TestMerkleized))
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &MerkleizedOf<Self::Databases, E>,
+        _readers: ReadersOf<Self::Databases, E>,
+    ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: ReadersOf<Self::Databases, E>,
+    ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 

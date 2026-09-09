@@ -29,13 +29,16 @@ use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
-use commonware_utils::NZUsize;
+use commonware_utils::{Cached, NZUsize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
+
+// Reusable scratch for [`Inner::try_get_sync`], sized to one item.
+commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -427,8 +430,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut buf = vec![0u8; Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(&mut buf, offset) {
+        let mut scratch =
+            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        if scratch.len() < Self::CHUNK_SIZE {
+            scratch.resize(Self::CHUNK_SIZE, 0);
+        }
+        let buf = &mut scratch[..Self::CHUNK_SIZE];
+        if !blob.try_read_sync_into(buf, offset) {
             return None;
         }
         A::decode(&buf[..]).ok()
@@ -1319,6 +1327,23 @@ mod tests {
                 .await
                 .expect("failed to reopen");
             journal.append(1, &test_digest(1)).await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must be replayed before append")]
+    fn test_segmented_fixed_gates_older_section_after_reopen() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            seed(&context, &cfg, 1..=3).await;
+
+            // Every nonempty retained section is append-locked, not only the oldest or the
+            // newest.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .expect("failed to reopen");
+            journal.append(2, &2).await.unwrap();
         });
     }
 

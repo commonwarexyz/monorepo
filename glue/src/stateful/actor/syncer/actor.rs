@@ -334,6 +334,7 @@ mod tests {
         type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
         type Block = TestBlock;
         type Databases = WedgeSet;
+        type Captured = ();
         type Provider = ();
         type Input = ();
 
@@ -370,7 +371,27 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
             _batches: TestUnmerkleized,
-        ) -> Result<TestMerkleized, ExecutionError> {
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
+            unreachable!("WedgeApp only serves the syncer harness")
+        }
+
+        async fn capture(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _batches: &TestMerkleized,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+            unreachable!("WedgeApp only serves the syncer harness")
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            _captured: Self::Captured,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
             unreachable!("WedgeApp only serves the syncer harness")
         }
     }

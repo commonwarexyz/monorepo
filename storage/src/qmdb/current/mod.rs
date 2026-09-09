@@ -40,7 +40,7 @@
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
 //!   8` bits each). `N` must be a power of two.
 //!
-//!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though a
+//!   One exception by convention: the *current* last commit carries bit = 1 even though a
 //!   CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
 //!   0. Maintaining this makes the chunk containing the latest commit deterministic across init and
 //!   `apply_batch`.

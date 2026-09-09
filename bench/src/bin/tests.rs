@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
     path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 const FIXTURE: &str = r#"{"module_path":"qmdb_gungraun::qmdb_merkleize::bench_merkleize","id":"any_unordered_fixed_mmr","profiles":[{"tool":"Callgrind","summaries":{"total":{"summary":{"Callgrind":{"Ir":{"metrics":{"Both":[{"Int":1000000},{"Int":900000}]}},"L1hits":{"metrics":{"Both":[{"Int":850000},{"Int":800000}]}},"LLhits":{"metrics":{"Both":[{"Int":120000},{"Int":110000}]}},"RamHits":{"metrics":{"Both":[{"Int":30000},{"Int":25000}]}},"TotalRW":{"metrics":{"Both":[{"Int":300000},{"Int":280000}]}},"EstimatedCycles":{"metrics":{"Both":[{"Int":1450000},{"Int":1300000}]}}}}}}}]}
@@ -431,14 +432,28 @@ fn custom_metric_benchmark() -> Benchmark {
 }
 
 fn unique_temp_dir() -> PathBuf {
+    // Tests run as separate processes at the same instant, so the timestamp
+    // alone can collide and one test would remove another's directory.
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let mut path = env::temp_dir();
     path.push(format!(
-        "benchmark-tracker-{}",
+        "benchmark-tracker-{}-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+#[test]
+fn unique_temp_dir_never_repeats() {
+    let first = unique_temp_dir();
+    let second = unique_temp_dir();
+    assert_ne!(first, second);
+    fs::remove_dir_all(first).unwrap();
+    fs::remove_dir_all(second).unwrap();
 }

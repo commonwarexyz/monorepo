@@ -8,8 +8,8 @@ use crate::{
         Application, Config as StatefulConfig, ExecutionError, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, Single, SnapshotsOf, SyncEngineConfig,
-            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single, SnapshotsOf,
+            SyncEngineConfig, Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
         },
         probe::{Config as ProbeConfig, Probe},
     },
@@ -282,6 +282,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -347,8 +348,26 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<MerkleizedOf<Self::Databases, E>, ExecutionError> {
-        Self::execute(block.height(), batches).await
+    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
+        Self::execute(block.height(), batches).await.map(Some)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &MerkleizedOf<Self::Databases, E>,
+        _readers: ReadersOf<Self::Databases, E>,
+    ) {
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: ReadersOf<Self::Databases, E>,
+    ) {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {

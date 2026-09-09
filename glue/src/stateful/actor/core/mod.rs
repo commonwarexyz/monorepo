@@ -361,7 +361,7 @@ mod tests {
             let (stateful, _mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
-                    application: TestApp,
+                    application: TestApp::default(),
                     db_config: (),
                     provider: (),
                     marshal: (marshal.mailbox, marshal.floor),
@@ -412,7 +412,7 @@ mod tests {
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
-                    application: TestApp,
+                    application: TestApp::default(),
                     db_config: (),
                     provider: (),
                     marshal: (marshal.mailbox, marshal.floor),
@@ -473,7 +473,7 @@ mod tests {
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
-                    application: TestApp,
+                    application: TestApp::default(),
                     db_config: (),
                     provider: (),
                     marshal: (marshal.mailbox.clone(), marshal.floor),

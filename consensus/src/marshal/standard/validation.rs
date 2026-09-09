@@ -90,7 +90,8 @@ where
 
     // Re-proposals are signaled by `digest == context.parent.1`.
     // They skip normal parent/height checks because:
-    // 1. The block was already verified when originally proposed.
+    // 1. Consensus settles the block's validity when certifying the view that
+    //    first carried it, before it certifies the re-proposal.
     // 2. Parent-child checks would fail by construction when parent == block.
     if digest == context.parent.1 {
         if !is_valid_reproposal_at_verify(epocher, block.height(), context.epoch()) {

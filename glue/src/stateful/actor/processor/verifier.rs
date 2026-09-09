@@ -129,6 +129,7 @@ where
         };
         let block_digest = block.digest();
 
+        // Only skip verification for blocks the application built or verified.
         if self.execution.pending_verified(&block_digest) {
             timer.observe(context);
             return VerificationResult::Decided(true);

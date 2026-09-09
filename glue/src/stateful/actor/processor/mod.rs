@@ -731,7 +731,10 @@ where
                     )
                     .await
                 {
-                    Ok(batch) => batch,
+                    Ok(Some(batch)) => batch,
+                    // A finalized block was certified by a quorum whose honest voters
+                    // verified it, so it always executes.
+                    Ok(None) => panic!("finalize replay could not execute a finalized block"),
                     // Impossible on a correct node, since the batches were just forked
                     // from applied state, mutation authority is unique, and
                     // there is no caller to answer with a refusal.
@@ -745,6 +748,15 @@ where
             }
         };
 
+        let captured = self
+            .app
+            .capture(
+                (context.child("capture"), block.context()),
+                block,
+                &batch,
+                self.execution.readers.clone(),
+            )
+            .await;
         self.databases = self.databases.apply(batch).await;
         let (snapshots, barrier) = if start_sync {
             let (snapshots, barrier);
@@ -753,7 +765,14 @@ where
         } else {
             (None, None)
         };
-        self.notify_finalized(context, block).await;
+        self.app
+            .finalized(
+                (context.child("finalized"), block.context()),
+                block,
+                captured,
+                self.execution.readers.clone(),
+            )
+            .await;
         let prune = self
             .pruning
             .as_mut()
@@ -773,25 +792,6 @@ where
                 prune,
             }),
         )
-    }
-
-    /// Notify the application that marshal delivered a finalized block already
-    /// reflected in the database set.
-    pub(super) fn notify_finalized(
-        &self,
-        context: &E,
-        block: &A::Block,
-    ) -> impl Future<Output = ()> + Send {
-        let mut app = self.app.clone();
-        let readers = self.execution.readers.clone();
-        async move {
-            app.finalized(
-                (context.child("finalized"), block.context()),
-                block,
-                readers,
-            )
-            .await;
-        }
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -978,8 +978,8 @@ where
     ) -> bool {
         let mut state = self.state.lock();
         if let Some(existing) = state.pending.get_mut(&digest) {
-            debug_assert_eq!(existing.parent, parent, "pending parent changed for digest");
-            debug_assert_eq!(existing.round, round, "pending round changed for digest");
+            assert_eq!(existing.parent, parent, "pending parent changed for digest");
+            assert_eq!(existing.round, round, "pending round changed for digest");
             // A real verification verdict promotes speculative replay state, so
             // a later certification of this digest fast-answers honestly.
             // `Applied` never demotes an entry that already verified.
@@ -1086,10 +1086,11 @@ where
         }
     }
 
-    /// Replays one certified block and caches its commitment-matching state.
+    /// Replays one block and caches its commitment-matching state.
     ///
-    /// Cancellation caches nothing. A commitment mismatch, or state that the
-    /// applied anchor has already moved past, makes the ancestry invalid.
+    /// Cancellation caches nothing. A block that cannot be executed, a
+    /// commitment mismatch, or state that the applied anchor has already moved
+    /// past, makes the ancestry invalid.
     async fn replay_block<C>(
         &self,
         app: &mut A,
@@ -1120,7 +1121,11 @@ where
             return Err(PrepareBatchesError::Cancelled);
         };
         let merkleized = match applied {
-            Ok(merkleized) => merkleized,
+            Ok(Some(merkleized)) => merkleized,
+            Ok(None) => {
+                warn!(?target_digest, block = ?digest, "rebuild replay could not execute block");
+                return Err(PrepareBatchesError::Invalid);
+            }
             // A block finalized while this replay executed. The requester
             // re-checks canonical state, so this replay never panics on it.
             Err(ExecutionError::Stale) => return Err(PrepareBatchesError::Stale),
@@ -1685,6 +1690,10 @@ mod tests {
             }
         }
 
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
         async fn call(&self, digest: Digest) {
             if digest != self.target {
                 return;
@@ -1711,10 +1720,25 @@ mod tests {
         )
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct Captured {
+        prior_counter: Option<u64>,
+        batch_counter: u64,
+        batch_view: u64,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct FinalizedObservation {
+        captured: Captured,
+        post_counter: u64,
+        post_view: u64,
+    }
+
     #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
-        finalized_observer: Option<Arc<Mutex<Vec<u64>>>>,
+        finalized_observer: Option<Arc<Mutex<Vec<FinalizedObservation>>>>,
+        apply_probe: Option<ApplicationProbe>,
         finalized_probe: Option<ApplicationProbe>,
     }
 
@@ -1723,19 +1747,21 @@ mod tests {
             Self {
                 genesis: Block::genesis(),
                 finalized_observer: None,
+                apply_probe: None,
                 finalized_probe: None,
             }
         }
 
-        fn with_finalized_observer() -> (Self, Arc<Mutex<Vec<u64>>>) {
-            let finalized_values = Arc::new(Mutex::new(Vec::new()));
+        fn with_finalized_observer() -> (Self, Arc<Mutex<Vec<FinalizedObservation>>>) {
+            let observations = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     genesis: Block::genesis(),
-                    finalized_observer: Some(finalized_values.clone()),
+                    finalized_observer: Some(observations.clone()),
+                    apply_probe: None,
                     finalized_probe: None,
                 },
-                finalized_values,
+                observations,
             )
         }
 
@@ -1762,6 +1788,7 @@ mod tests {
         type Context = TestContext;
         type Block = Block;
         type Databases = DbSet<deterministic::Context>;
+        type Captured = Captured;
         type Provider = ();
         type Input = ();
 
@@ -1821,14 +1848,55 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
             batches: UnmerkleizedOf<Self::Databases, deterministic::Context>,
-        ) -> Result<MerkleizedOf<Self::Databases, deterministic::Context>, ExecutionError> {
-            Self::execute(block.height(), block.context.round.view(), batches).await
+        ) -> Result<Option<MerkleizedOf<Self::Databases, deterministic::Context>>, ExecutionError>
+        {
+            if let Some(probe) = &self.apply_probe {
+                probe.call(block.digest()).await;
+            }
+            Self::execute(block.height(), block.context.round.view(), batches)
+                .await
+                .map(Some)
+        }
+
+        async fn capture(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            batches: &TestMerkleized,
+            readers: ReadersOf<Self::Databases, deterministic::Context>,
+        ) -> Self::Captured {
+            let prior_counter = readers
+                .read()
+                .await
+                .get(&counter_key())
+                .await
+                .expect("database read should succeed")
+                .map(|value| digest_to_u64(&value));
+            let pending = batches.new_batch();
+            let batch_counter = pending
+                .get(&counter_key())
+                .await
+                .expect("batch read should succeed")
+                .map(|value| digest_to_u64(&value))
+                .expect("winning batch should contain a counter");
+            let batch_view = pending
+                .get(&height_key(block.height()))
+                .await
+                .expect("batch read should succeed")
+                .map(|value| digest_to_u64(&value))
+                .expect("winning batch should contain its view");
+            Captured {
+                prior_counter,
+                batch_counter,
+                batch_view,
+            }
         }
 
         async fn finalized(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
+            captured: Self::Captured,
             readers: ReadersOf<Self::Databases, deterministic::Context>,
         ) {
             if let Some(probe) = &self.finalized_probe {
@@ -1837,14 +1905,26 @@ mod tests {
             let Some(observer) = &self.finalized_observer else {
                 return;
             };
-            let value = readers
-                .read()
-                .await
+            let db = readers.read().await;
+            let post_view = db
                 .get(&height_key(block.height()))
                 .await
                 .expect("database read should succeed")
-                .expect("finalized height should be reflected in the database set");
-            observer.lock().push(digest_to_u64(&value));
+                .map(|value| digest_to_u64(&value))
+                .expect("finalized view should be reflected in the database set");
+            let post_counter = db
+                .get(&counter_key())
+                .await
+                .expect("database read should succeed")
+                .map(|value| digest_to_u64(&value))
+                .expect("finalized counter should be reflected in the database set");
+            drop(db);
+            let observation = FinalizedObservation {
+                captured,
+                post_counter,
+                post_view,
+            };
+            observer.lock().push(observation);
         }
 
         fn sync_targets(
@@ -1944,13 +2024,13 @@ mod tests {
 
         async fn new_with_finalized_observer(
             context: deterministic::Context,
-        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
+        ) -> (Self, Arc<Mutex<Vec<FinalizedObservation>>>) {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
-            let (app, finalized_values) = ExecutionApp::with_finalized_observer();
+            let (app, observations) = ExecutionApp::with_finalized_observer();
             (
                 Self::with_app(context, provider, config, app).await,
-                finalized_values,
+                observations,
             )
         }
 
@@ -2070,7 +2150,7 @@ mod tests {
             (self, prune)
         }
 
-        async fn height_value(&self, height: Height) -> Option<u64> {
+        async fn view_at_height(&self, height: Height) -> Option<u64> {
             self.processor
                 .readers()
                 .read()
@@ -2092,7 +2172,7 @@ mod tests {
                 .map(|value| digest_to_u64(&value))
         }
 
-        async fn reopen_height_value(
+        async fn reopen_view_at_height(
             &self,
             context: deterministic::Context,
             height: Height,
@@ -2390,7 +2470,7 @@ mod tests {
                 "losing fork at finalized round should be pruned",
             );
             assert_eq!(harness.processor.last_processed().digest, winner.digest());
-            assert_eq!(harness.height_value(Height::new(2)).await, Some(3));
+            assert_eq!(harness.view_at_height(Height::new(2)).await, Some(3));
         });
     }
 
@@ -3016,7 +3096,7 @@ mod tests {
             assert_eq!(harness.counter_value().await, Some(1));
             assert_eq!(
                 harness
-                    .reopen_height_value(context.child("reopen"), Height::new(1))
+                    .reopen_view_at_height(context.child("reopen"), Height::new(1))
                     .await,
                 Some(1),
                 "height state should survive reopen after finalization",
@@ -3025,49 +3105,77 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalized_hook_runs_for_each_applied_block() {
+    fn execution_finalized_handoff_preserves_cached_and_reconstructed_captures() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut harness, finalized_values) =
+            let (mut harness, observations) =
                 Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block1 = harness.stage_pending_child(&genesis, View::new(7)).await;
+            let block2 = harness.stage_pending_child(&block1, View::new(11)).await;
 
+            let cached_probe = ApplicationProbe::new(block1.digest(), []);
+            harness.processor.app.apply_probe = Some(cached_probe.clone());
             let applied;
             (harness, applied) = harness.finalize(block1).await;
             assert!(applied);
+            assert_eq!(
+                cached_probe.calls(),
+                0,
+                "block1 should use its cached merkleized batch",
+            );
+            harness.processor.clear_pending();
+            let reconstructed_probe = ApplicationProbe::new(block2.digest(), []);
+            harness.processor.app.apply_probe = Some(reconstructed_probe.clone());
             let (_, applied) = harness.finalize(block2).await;
             assert!(applied);
             assert_eq!(
-                finalized_values.lock().clone(),
-                vec![1, 2],
-                "finalized hook should observe every applied block",
+                reconstructed_probe.calls(),
+                1,
+                "block2 should be reconstructed through Application::apply",
+            );
+
+            assert_eq!(
+                observations.lock().as_slice(),
+                [
+                    FinalizedObservation {
+                        captured: Captured {
+                            prior_counter: None,
+                            batch_counter: 1,
+                            batch_view: 7,
+                        },
+                        post_counter: 1,
+                        post_view: 7,
+                    },
+                    FinalizedObservation {
+                        captured: Captured {
+                            prior_counter: Some(1),
+                            batch_counter: 2,
+                            batch_view: 11,
+                        },
+                        post_counter: 2,
+                        post_view: 11,
+                    },
+                ],
+                "capture should see pre-apply state and finalized should receive the captured value after apply",
             );
         });
     }
 
     #[test]
-    fn execution_finalized_hook_runs_for_already_reflected_block() {
+    fn execution_duplicate_finalization_skips_hooks() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut harness, finalized_values) =
-                Harness::new_with_finalized_observer(context).await;
+            let (mut harness, observations) = Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let block = harness.stage_pending_child(&genesis, View::new(1)).await;
 
             let applied;
-            (harness, applied) = harness.finalize(block1.clone()).await;
+            (harness, applied) = harness.finalize(block.clone()).await;
             assert!(applied);
+            observations.lock().clear();
+            let (_, applied) = harness.finalize(block).await;
+            assert!(!applied);
 
-            finalized_values.lock().clear();
-            harness
-                .processor
-                .notify_finalized(harness.context_cell.as_present(), &block1)
-                .await;
-            assert_eq!(
-                finalized_values.lock().clone(),
-                vec![1],
-                "finalized hook should run for blocks already reflected in the database set",
-            );
+            assert!(observations.lock().is_empty());
         });
     }
 
