@@ -746,6 +746,7 @@ mod tests {
             let source = FullFixedDb::init(
                 context.child("source"),
                 full_fixed_config(&context, "source"),
+                None,
             )
             .await
             .unwrap();
