@@ -1377,7 +1377,7 @@ mod compact_variable_mmr {
             assert_eq!(client.inactivity_floor_loc(), floor);
             drop(client);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -1542,7 +1542,7 @@ mod compact_variable_mmr {
             assert_eq!(synced.get_metadata(), Some(vec![7]));
             drop(synced);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -1657,11 +1657,11 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_source_reopen_rewind_regrow_and_stale_target() {
+    fn test_compact_source_reopen_bounded_initialization_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"), &context);
-            let source = ClientDb::init(context.child("source_init"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_init"), source_cfg.clone(), None)
                 .await
                 .unwrap();
 
@@ -1677,7 +1677,7 @@ mod compact_variable_mmr {
             let target1 = source.target();
             drop(source);
 
-            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -1695,7 +1695,7 @@ mod compact_variable_mmr {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
@@ -1710,7 +1710,14 @@ mod compact_variable_mmr {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.size).await.unwrap();
+            drop(source);
+            let source = ClientDb::init(
+                context.child("cap_source"),
+                source_cfg.clone(),
+                Some(target1.size),
+            )
+            .await
+            .unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::sync(compact_engine_config(
@@ -1726,7 +1733,7 @@ mod compact_variable_mmr {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -1757,7 +1764,7 @@ mod compact_variable_mmr {
             served3.destroy().await.unwrap();
 
             let source = Arc::new(
-                ClientDb::init(context.child("source_stale"), source_cfg.clone())
+                ClientDb::init(context.child("source_stale"), source_cfg.clone(), None)
                     .await
                     .unwrap(),
             );
@@ -1807,7 +1814,7 @@ mod compact_variable_mmr {
             // Seed the client partition with several commits, then prune its witness journal.
             let mut client_cfg = client_config(&suffix, &context);
             client_cfg.witness.items_per_section = NZU64!(1);
-            let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+            let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
                 .await
                 .unwrap();
             let mut first_size = None;
@@ -1825,11 +1832,15 @@ mod compact_variable_mmr {
             let boundary = seeded.size();
             let seeded = seeded.prune(boundary).await.unwrap();
             // The prune moved the journal's pruning boundary: the first commit is unreachable.
+            drop(seeded);
             assert!(matches!(
-                seeded.rewind(first_size.unwrap()).await,
-                Err(crate::qmdb::Error::Merkle(
-                    crate::merkle::Error::RewindBeyondHistory
-                ))
+                ClientDb::init(
+                    context.child("cap_pruned"),
+                    client_cfg.clone(),
+                    Some(first_size.unwrap())
+                )
+                .await,
+                Err(crate::qmdb::Error::HistoricalFloorPruned(_))
             ));
 
             // Sync different state into the same partition.
@@ -1865,7 +1876,7 @@ mod compact_variable_mmr {
             assert_eq!(synced.root(), target.root);
             drop(synced);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -1882,7 +1893,7 @@ mod compact_variable_mmr {
 
             // Seed the client partition with committed state A.
             let client_cfg = client_config(&suffix, &context);
-            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
                 .await
                 .unwrap();
             let batch = seeded
@@ -1944,9 +1955,8 @@ mod compact_variable_mmr {
             .unwrap();
             assert_eq!(imported.target(), target_b);
 
-            // Rewind is rejected until the import is persisted, even to the imported leaf
-            // count itself: the fast path must not report unpersisted state as durable.
-            assert!(imported.rewind(target_b.size).await.is_err());
+            // Drop the unpersisted import. It must not replace the previous durable witness.
+            drop(imported);
 
             // Prune is likewise rejected while the import is pending; rebuild the import.
             let response = fetch_compact_state(&source, target_b.clone())
@@ -1976,7 +1986,7 @@ mod compact_variable_mmr {
             assert!(imported.prune(target_b.size).await.is_err());
 
             // The dropped imports never touched the journal: state A is still there.
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), target_a);
@@ -2124,7 +2134,7 @@ mod compact_variable_mmb {
             assert_eq!(client.inactivity_floor_loc(), floor);
             drop(client);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -2292,7 +2302,7 @@ mod compact_variable_mmb {
             assert_eq!(synced.get_metadata(), Some(vec![7]));
             drop(synced);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -2410,11 +2420,11 @@ mod compact_variable_mmb {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_source_reopen_rewind_regrow_and_stale_target() {
+    fn test_compact_source_reopen_bounded_initialization_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-immutable-mmb-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"), &context);
-            let source = ClientDb::init(context.child("source_init"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_init"), source_cfg.clone(), None)
                 .await
                 .unwrap();
 
@@ -2430,7 +2440,7 @@ mod compact_variable_mmb {
             let target1 = source.target();
             drop(source);
 
-            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -2448,7 +2458,7 @@ mod compact_variable_mmb {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
@@ -2463,7 +2473,14 @@ mod compact_variable_mmb {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.size).await.unwrap();
+            drop(source);
+            let source = ClientDb::init(
+                context.child("cap_source"),
+                source_cfg.clone(),
+                Some(target1.size),
+            )
+            .await
+            .unwrap();
             assert_eq!(source.target(), target1);
 
             let served2: ClientDb = sync::sync(compact_engine_config(
@@ -2479,7 +2496,7 @@ mod compact_variable_mmb {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -2510,7 +2527,7 @@ mod compact_variable_mmb {
             served3.destroy().await.unwrap();
 
             let source = Arc::new(
-                ClientDb::init(context.child("source_stale"), source_cfg.clone())
+                ClientDb::init(context.child("source_stale"), source_cfg.clone(), None)
                     .await
                     .unwrap(),
             );
