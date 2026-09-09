@@ -554,12 +554,12 @@ mod tests {
     }
 
     macro_rules! db_conformance {
-        ($name:ident, $db:ty, $cfg_fn:expr $(, init_arg: $init_arg:expr)?, |$d:ident, $s:ident| $body:expr) => {
+        ($name:ident, $db:ty, $cfg_fn:expr, |$d:ident, $s:ident| $body:expr) => {
             struct $name;
             impl Conformance for $name {
                 async fn commit($s: u64) -> Vec<u8> {
                     deterministic::Runner::seeded($s).start(|ctx| async move {
-                        let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx) $(, $init_arg)?)
+                        let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx), None)
                             .await
                             .unwrap();
                         let root = $body;
@@ -572,8 +572,8 @@ mod tests {
     }
 
     macro_rules! keyed_conformance {
-        ($name:ident, $db:ty, $cfg_fn:expr $(, init_arg: $init_arg:expr)? $(,)?) => {
-            db_conformance!($name, $db, $cfg_fn $(, init_arg: $init_arg)?, |db, seed| {
+        ($name:ident, $db:ty, $cfg_fn:expr) => {
+            db_conformance!($name, $db, $cfg_fn, |db, seed| {
                 let (d, root) = keyed_root(db, seed).await;
                 db = d;
                 root
@@ -582,13 +582,13 @@ mod tests {
     }
 
     macro_rules! immutable_conformance {
-        ($name:ident, $db:ty, $cfg_fn:expr $(, init_arg: $init_arg:expr)? $(,)?) => {
-            db_conformance!($name, $db, $cfg_fn $(, init_arg: $init_arg)?, |db, seed| immutable_root!(db, seed));
+        ($name:ident, $db:ty, $cfg_fn:expr) => {
+            db_conformance!($name, $db, $cfg_fn, |db, seed| immutable_root!(db, seed));
         };
     }
 
     macro_rules! storage_audit_conformance {
-        ($name:ident, $family:ty, $db:ty, $cfg_fn:expr $(, init_arg: $init_arg:expr)?, |$d:ident, $s:ident| $body:expr) => {
+        ($name:ident, $family:ty, $db:ty, $cfg_fn:expr, |$d:ident, $s:ident| $body:expr) => {
             struct $name;
 
             impl StorageWorkload for $name {
@@ -597,7 +597,8 @@ mod tests {
                 async fn run(context: Ctx, $s: u64) -> Result<(), Self::Error> {
                     let suffix = format!("{}-{}", stringify!($name), $s);
                     let mut $d =
-                        <$db>::init(context.child("db"), ($cfg_fn)(&suffix, &context) $(, $init_arg)?).await?;
+                        <$db>::init(context.child("db"), ($cfg_fn)(&suffix, &context), None)
+                            .await?;
                     let _root = $body;
                     $d.sync().await?;
                     Ok(())
@@ -607,8 +608,8 @@ mod tests {
     }
 
     macro_rules! keyed_storage_audit {
-        ($name:ident, $family:ty, $db:ty, $cfg_fn:expr $(, init_arg: $init_arg:expr)? $(,)?) => {
-            storage_audit_conformance!($name, $family, $db, $cfg_fn $(, init_arg: $init_arg)?, |db, seed| {
+        ($name:ident, $family:ty, $db:ty, $cfg_fn:expr) => {
+            storage_audit_conformance!($name, $family, $db, $cfg_fn, |db, seed| {
                 let (d, root) = keyed_root(db, seed).await;
                 db = d;
                 root
@@ -617,8 +618,8 @@ mod tests {
     }
 
     macro_rules! immutable_storage_audit {
-        ($name:ident, $family:ty, $db:ty, $cfg_fn:expr $(, init_arg: $init_arg:expr)? $(,)?) => {
-            storage_audit_conformance!($name, $family, $db, $cfg_fn $(, init_arg: $init_arg)?, |db, seed| {
+        ($name:ident, $family:ty, $db:ty, $cfg_fn:expr) => {
+            storage_audit_conformance!($name, $family, $db, $cfg_fn, |db, seed| {
                 immutable_root!(db, seed)
             });
         };
@@ -700,108 +701,92 @@ mod tests {
     immutable_conformance!(
         ImmutableMmrFixedConf,
         ImmutableMmrFixed,
-        immutable_fixed_config,
-        init_arg: None
+        immutable_fixed_config
     );
     immutable_conformance!(
         ImmutableMmbFixedConf,
         ImmutableMmbFixed,
-        immutable_fixed_config,
-        init_arg: None
+        immutable_fixed_config
     );
     immutable_conformance!(
         ImmutableMmrVariableConf,
         ImmutableMmrVariable,
-        immutable_variable_config,
-        init_arg: None
+        immutable_variable_config
     );
     immutable_conformance!(
         ImmutableMmbVariableConf,
         ImmutableMmbVariable,
-        immutable_variable_config,
-        init_arg: None
+        immutable_variable_config
     );
 
     db_conformance!(
         KeylessMmrFixedConf,
         KeylessMmrFixed,
         keyless_fixed_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     db_conformance!(
         KeylessMmbFixedConf,
         KeylessMmbFixed,
         keyless_fixed_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     db_conformance!(
         KeylessMmrVariableConf,
         KeylessMmrVariable,
         keyless_variable_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
     db_conformance!(
         KeylessMmbVariableConf,
         KeylessMmbVariable,
         keyless_variable_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
 
     immutable_conformance!(
         ImmutableMmrCompactFixedConf,
         ImmutableMmrCompactFixed,
-        immutable_fixed_compact_config,
-        init_arg: None
+        immutable_fixed_compact_config
     );
     immutable_conformance!(
         ImmutableMmbCompactFixedConf,
         ImmutableMmbCompactFixed,
-        immutable_fixed_compact_config,
-        init_arg: None
+        immutable_fixed_compact_config
     );
     immutable_conformance!(
         ImmutableMmrCompactVariableConf,
         ImmutableMmrCompactVariable,
-        immutable_variable_compact_config,
-        init_arg: None
+        immutable_variable_compact_config
     );
     immutable_conformance!(
         ImmutableMmbCompactVariableConf,
         ImmutableMmbCompactVariable,
-        immutable_variable_compact_config,
-        init_arg: None
+        immutable_variable_compact_config
     );
 
     db_conformance!(
         KeylessMmrCompactFixedConf,
         KeylessMmrCompactFixed,
         keyless_fixed_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     db_conformance!(
         KeylessMmbCompactFixedConf,
         KeylessMmbCompactFixed,
         keyless_fixed_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     db_conformance!(
         KeylessMmrCompactVariableConf,
         KeylessMmrCompactVariable,
         keyless_variable_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
     db_conformance!(
         KeylessMmbCompactVariableConf,
         KeylessMmbCompactVariable,
         keyless_variable_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
 
@@ -906,29 +891,25 @@ mod tests {
         ImmutableMmrFixedStorage,
         mmr::Family,
         ImmutableMmrFixed,
-        immutable_fixed_config,
-        init_arg: None
+        immutable_fixed_config
     );
     immutable_storage_audit!(
         ImmutableMmbFixedStorage,
         mmb::Family,
         ImmutableMmbFixed,
-        immutable_fixed_config,
-        init_arg: None
+        immutable_fixed_config
     );
     immutable_storage_audit!(
         ImmutableMmrVariableStorage,
         mmr::Family,
         ImmutableMmrVariable,
-        immutable_variable_config,
-        init_arg: None
+        immutable_variable_config
     );
     immutable_storage_audit!(
         ImmutableMmbVariableStorage,
         mmb::Family,
         ImmutableMmbVariable,
-        immutable_variable_config,
-        init_arg: None
+        immutable_variable_config
     );
 
     storage_audit_conformance!(
@@ -936,7 +917,6 @@ mod tests {
         mmr::Family,
         KeylessMmrFixed,
         keyless_fixed_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     storage_audit_conformance!(
@@ -944,7 +924,6 @@ mod tests {
         mmb::Family,
         KeylessMmbFixed,
         keyless_fixed_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     storage_audit_conformance!(
@@ -952,7 +931,6 @@ mod tests {
         mmr::Family,
         KeylessMmrVariable,
         keyless_variable_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
     storage_audit_conformance!(
@@ -960,7 +938,6 @@ mod tests {
         mmb::Family,
         KeylessMmbVariable,
         keyless_variable_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
 
@@ -968,29 +945,25 @@ mod tests {
         ImmutableMmrCompactFixedStorage,
         mmr::Family,
         ImmutableMmrCompactFixed,
-        immutable_fixed_compact_config,
-        init_arg: None
+        immutable_fixed_compact_config
     );
     immutable_storage_audit!(
         ImmutableMmbCompactFixedStorage,
         mmb::Family,
         ImmutableMmbCompactFixed,
-        immutable_fixed_compact_config,
-        init_arg: None
+        immutable_fixed_compact_config
     );
     immutable_storage_audit!(
         ImmutableMmrCompactVariableStorage,
         mmr::Family,
         ImmutableMmrCompactVariable,
-        immutable_variable_compact_config,
-        init_arg: None
+        immutable_variable_compact_config
     );
     immutable_storage_audit!(
         ImmutableMmbCompactVariableStorage,
         mmb::Family,
         ImmutableMmbCompactVariable,
-        immutable_variable_compact_config,
-        init_arg: None
+        immutable_variable_compact_config
     );
 
     storage_audit_conformance!(
@@ -998,7 +971,6 @@ mod tests {
         mmr::Family,
         KeylessMmrCompactFixed,
         keyless_fixed_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     storage_audit_conformance!(
@@ -1006,7 +978,6 @@ mod tests {
         mmb::Family,
         KeylessMmbCompactFixed,
         keyless_fixed_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     storage_audit_conformance!(
@@ -1014,7 +985,6 @@ mod tests {
         mmr::Family,
         KeylessMmrCompactVariable,
         keyless_variable_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
     storage_audit_conformance!(
@@ -1022,7 +992,6 @@ mod tests {
         mmb::Family,
         KeylessMmbCompactVariable,
         keyless_variable_compact_config,
-        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
 
@@ -1197,14 +1166,14 @@ macro_rules! assert_immutable_order_independent {
 }
 
 macro_rules! order_test {
-    ($name:ident, $db:ty, $cfg_fn:expr $(, init_arg: $init_arg:expr)?, |$fwd:ident, $rev:ident| $body:expr) => {
+    ($name:ident, $db:ty, $cfg_fn:expr, |$fwd:ident, $rev:ident| $body:expr) => {
         #[test]
         fn $name() {
             deterministic::Runner::default().start(|ctx| async move {
-                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd", &ctx) $(, $init_arg)?)
+                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd", &ctx), None)
                     .await
                     .unwrap();
-                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev", &ctx) $(, $init_arg)?)
+                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev", &ctx), None)
                     .await
                     .unwrap();
                 $body;
@@ -1347,55 +1316,47 @@ order_test!(
     test_order_immutable_mmr_fixed,
     ImmutableMmrFixed,
     immutable_fixed_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmr_variable,
     ImmutableMmrVariable,
     immutable_variable_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmb_fixed,
     ImmutableMmbFixed,
     immutable_fixed_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmb_variable,
     ImmutableMmbVariable,
     immutable_variable_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmr_compact_fixed,
     ImmutableMmrCompactFixed,
     immutable_fixed_compact_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmb_compact_fixed,
     ImmutableMmbCompactFixed,
     immutable_fixed_compact_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmr_compact_variable,
     ImmutableMmrCompactVariable,
     immutable_variable_compact_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmb_compact_variable,
     ImmutableMmbCompactVariable,
     immutable_variable_compact_config,
-    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );

@@ -434,6 +434,7 @@ mod test {
             let _batch = db.new_batch().write(d1, Some(d2));
             // Don't merkleize/apply -- simulates uncommitted write
         }
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.root(), root);
 
@@ -588,6 +589,7 @@ mod test {
         let db = db.commit().await.unwrap();
         let op_count = db.bounds().end;
         let root = db.root();
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
@@ -646,6 +648,7 @@ mod test {
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.bounds().end;
         let root = db.root();
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
 
         assert_eq!(db.root(), root);
@@ -747,7 +750,7 @@ mod test {
                     type TestDb = $db;
 
                     let config = $config("neighbors", &context);
-                    let mut db = TestDb::init(context.child("db"), config.clone())
+                    let mut db = TestDb::init(context.child("db"), config.clone(), None)
                         .await
                         .unwrap();
                     let mut active = BTreeSet::new();
@@ -893,7 +896,7 @@ mod test {
                             format_args!("phase {phase}, pruned")
                         );
                         drop(db);
-                        db = TestDb::init(context.child("reopen"), config.clone())
+                        db = TestDb::init(context.child("reopen"), config.clone(), None)
                             .await
                             .unwrap();
                         assert_neighbors!(
@@ -974,7 +977,9 @@ mod test {
                     type TestDb = $db;
 
                     let config = $config("layered-neighbors", &context);
-                    let db = TestDb::init(context.child("db"), config).await.unwrap();
+                    let db = TestDb::init(context.child("db"), config, None)
+                        .await
+                        .unwrap();
                     let value = Sha256::fill(1);
                     let empty_active: BTreeSet<Digest> = BTreeSet::new();
                     let empty_queries =
@@ -1246,7 +1251,7 @@ mod test {
                 init_buffer: config.init_buffer,
                 init_concurrency: config.init_concurrency,
             };
-            let mut db = TestDb::init(context.child("db"), config.clone())
+            let mut db = TestDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
 
@@ -1277,7 +1282,7 @@ mod test {
                 if recovered {
                     db = db.commit().await.unwrap();
                     drop(db);
-                    db = TestDb::init(context.child("reopen"), config.clone())
+                    db = TestDb::init(context.child("reopen"), config.clone(), None)
                         .await
                         .unwrap();
                 }

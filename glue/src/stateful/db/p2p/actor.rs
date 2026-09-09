@@ -499,7 +499,7 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context))
+        let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
             .await
             .expect("db init should succeed");
         Shared::new("test", db)
