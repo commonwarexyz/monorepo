@@ -18,6 +18,7 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
+        compact,
         immutable::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
@@ -45,7 +46,7 @@ where
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
     db: Shared<CompactDb<F, E, K, V, H, C, S>>,
     metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
+    inactivity_floor: Location<F>,
 }
 
 impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
@@ -87,7 +88,7 @@ where
 
     /// Set the inactivity floor included in the next merkleization.
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+        self.inactivity_floor = floor;
         self
     }
 
@@ -174,11 +175,7 @@ where
         let db = self.db.read().await;
         let merkleized = self
             .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
+            .merkleize(&db, self.metadata, self.inactivity_floor)
             .await?;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
@@ -211,7 +208,7 @@ where
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inner.bounds().inactivity_floor,
         }
     }
 }
@@ -231,6 +228,7 @@ where
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
+    type Snapshot = compact::Snapshot<F, Operation<F, K, FixedEncoding<V>>, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -249,7 +247,7 @@ where
             batch: database.new_batch(),
             db: shared,
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: database.inactivity_floor_loc(),
         }
     }
 
@@ -262,8 +260,15 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, handle) = self.start_sync().await?;
+        let snapshot = Self::snapshot(&db);
+        Ok((db, snapshot, handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let snapshot = Self::snapshot(&self);
+        Ok((self, snapshot))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -302,6 +307,7 @@ where
     type Error = Error<F>;
     type Config = variable::CompactConfig<C, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
+    type Snapshot = compact::Snapshot<F, Operation<F, K, VariableEncoding<V>>, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
         <Self>::init(context, config).await
@@ -320,7 +326,7 @@ where
             batch: database.new_batch(),
             db: shared,
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: database.inactivity_floor_loc(),
         }
     }
 
@@ -333,8 +339,15 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        let (db, handle) = self.start_sync().await?;
+        let snapshot = Self::snapshot(&db);
+        Ok((db, snapshot, handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let snapshot = Self::snapshot(&self);
+        Ok((self, snapshot))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -592,7 +605,8 @@ mod tests {
                 let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
                 sync.await.expect("database sync failed");
             }
@@ -644,7 +658,8 @@ mod tests {
             let database = <FixedDb as ManagedDb<_>>::apply(database, second)
                 .await
                 .unwrap();
-            let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+            let (database, _snapshot, sync) =
+                <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
             sync.await.expect("database sync failed");
             slot.put(database);
             drop(db);
