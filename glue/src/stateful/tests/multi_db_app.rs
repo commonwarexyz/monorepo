@@ -91,6 +91,7 @@ pub(super) fn qmdb_config(
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             items_per_blob: NZU64!(11),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -99,6 +100,7 @@ pub(super) fn qmdb_config(
             items_per_blob: NZU64!(7),
             page_cache: page_cache.clone(),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(1024)),
@@ -116,6 +118,7 @@ pub(super) fn qmdb_config(
             codec_config: (),
             page_cache,
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         commit_codec_config: (),
     };
@@ -283,6 +286,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -340,8 +344,26 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(Self::execute(block.height(), batches).await)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
@@ -482,7 +504,6 @@ impl EngineDefinition for MultiDbEngine {
             peer_provider: oracle.manager(),
             blocker: oracle.control(public_key.clone()),
             mailbox_size: NZUsize!(100),
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -592,7 +613,6 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
                     max_serve_ops: NZU64!(16),
@@ -611,7 +631,6 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
                     max_serve_ops: NZU64!(16),

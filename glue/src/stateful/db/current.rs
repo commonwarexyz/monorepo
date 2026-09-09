@@ -390,7 +390,7 @@ where
 mod tests {
     use super::*;
     use crate::stateful::db::{
-        ManagedDb, Unmerkleized as _,
+        DatabaseSet, ManagedDb, StateSyncDb, Unmerkleized as _,
         tests::configs::current::{fixed_config, variable_config},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -398,7 +398,10 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_storage::{
         merkle::mmr,
-        qmdb::current::ordered::{fixed as ordered_fixed, variable as ordered_variable},
+        qmdb::current::{
+            ordered::{fixed as ordered_fixed, variable as ordered_variable},
+            unordered::variable,
+        },
         translator::TwoCap,
     };
 
@@ -422,6 +425,35 @@ mod tests {
         64,
         Sequential,
     >;
+
+    /// The unordered variable wrapper accepts variable-length keys.
+    type VariableDb = variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        Vec<u8>,
+        Digest,
+        Sha256,
+        TwoCap,
+        64,
+        Sequential,
+    >;
+
+    fn assert_managed_db<T: ManagedDb<deterministic::Context>>() {}
+
+    fn assert_state_sync_db<T, R>()
+    where
+        T: StateSyncDb<deterministic::Context, R>,
+    {
+    }
+
+    fn assert_database_set<T: DatabaseSet<deterministic::Context>>() {}
+
+    #[test]
+    fn variable_current_db_trait_impls_compile() {
+        assert_managed_db::<VariableDb>();
+        assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
+        assert_database_set::<Shared<VariableDb>>();
+    }
 
     #[test]
     fn ordered_fixed_managed_db_applies_batch_and_proves_exclusion() {

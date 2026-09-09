@@ -159,24 +159,26 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
-    /// A notification that a block has been verified by the application.
+    /// A notification that a block reached the verify stage. Persisting it
+    /// does not imply application validity.
     Verified {
         /// The span carried with this request.
         span: Span,
-        /// The round in which the block was verified.
+        /// The round of the verify request.
         round: Round,
-        /// The verified block.
+        /// The block.
         block: Arc<V::Block>,
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
-    /// A notification that a block has been certified by the application.
+    /// A notification that a block reached the certify stage. Persisting it
+    /// does not imply application validity.
     Certified {
         /// The span carried with this request.
         span: Span,
-        /// The round in which the block was certified.
+        /// The round of the certify request.
         round: Round,
-        /// The certified block.
+        /// The block.
         block: Arc<V::Block>,
         /// A channel sent once the block and notarization syncs have started; the
         /// handle covers both.
@@ -219,6 +221,13 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         span: Span,
         /// The finalization.
         finalization: Finalization<S, V::Commitment>,
+    },
+    /// A certification from the consensus engine.
+    Certification {
+        /// The span carried with this request.
+        span: Span,
+        /// The certified notarization.
+        notarization: Notarization<S, V::Commitment>,
     },
 }
 
@@ -293,6 +302,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Certified { span, .. }
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
+            | Self::Certification { span, .. }
             | Self::GetProcessedHeight { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
@@ -321,6 +331,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::Prune { .. } => "prune",
             Self::Notarization { .. } => "notarization",
             Self::Finalization { .. } => "finalization",
+            Self::Certification { .. } => "certification",
         }
     }
 
@@ -358,7 +369,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 
@@ -381,7 +393,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
-            | Self::Finalization { .. } => false,
+            | Self::Finalization { .. }
+            | Self::Certification { .. } => false,
         }
     }
 }
@@ -573,6 +586,8 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     }
 }
 
+/// Coalesces `HintFinalized`, `SetFloor`, and `Prune`. Other overflowed messages
+/// retain FIFO order.
 impl<S: Scheme, V: Variant> Policy for Message<S, V> {
     type Overflow = Pending<S, V>;
 
@@ -598,7 +613,6 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             Self::Prune { span, height } => {
                 overflow.prune(span, height);
             }
-            // Queue if the new message is still useful
             message => {
                 if message.stale(overflow.height()) {
                     return;
@@ -911,7 +925,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         });
     }
 
-    /// Notifies the actor that a block has been verified.
+    /// Notifies the actor that a block reached the verify stage.
     ///
     /// Returns after the block is durably persisted. Mirrors [Self::certified]: the
     /// durable sync is awaited on the caller's task (off the actor), so the actor
@@ -926,7 +940,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         handle.durable(round, "verified").await
     }
 
-    /// Notifies the actor that a block has been certified.
+    /// Notifies the actor that a block reached the certify stage.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
@@ -999,6 +1013,10 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
             Activity::Finalization(finalization) => Message::Finalization {
                 span: info_span!("marshal.mailbox.finalization", round = %finalization.round()),
                 finalization,
+            },
+            Activity::Certification(notarization) => Message::Certification {
+                span: info_span!("marshal.mailbox.certification", round = %notarization.round()),
+                notarization,
             },
             _ => return Feedback::Ok,
         };
@@ -1172,6 +1190,14 @@ mod tests {
             span: Span::none(),
             height: Height::new(height),
             targets: NonEmptyVec::new(target),
+        }
+    }
+
+    fn hint_notarized(height: u64) -> TestMessage {
+        TestMessage::HintNotarized {
+            span: Span::none(),
+            round: round(height),
+            commitment: commitment(height),
         }
     }
 
@@ -1454,33 +1480,38 @@ mod tests {
     }
 
     #[test]
-    fn policy_keeps_coalesced_hints_in_fifo_position() {
+    fn policy_drains_fifo() {
         let mut overflow = pending();
         let first = public_key(1);
         let second = public_key(2);
-        let (get_block_9, _get_block_9_rx) = get_block(9);
-        let (get_info_11, _get_info_11_rx) = get_info(11);
+        let (response, _subscribe_rx) = oneshot::channel();
+        let subscribe = TestMessage::SubscribeByDigest {
+            span: Span::none(),
+            digest: block(1).digest(),
+            fallback: DigestFallback::Wait,
+            response,
+        };
+        let (response, _processed_rx) = oneshot::channel();
+        let processed = TestMessage::GetProcessedHeight {
+            span: Span::none(),
+            response,
+        };
 
-        <TestMessage as Policy>::handle(&mut overflow, get_block_9);
+        <TestMessage as Policy>::handle(&mut overflow, subscribe);
         <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, first.clone()));
-        <TestMessage as Policy>::handle(&mut overflow, get_info_11);
+        <TestMessage as Policy>::handle(&mut overflow, hint_notarized(1));
         <TestMessage as Policy>::handle(&mut overflow, hint_finalized(10, second.clone()));
+        <TestMessage as Policy>::handle(&mut overflow, processed);
 
         let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 3);
+        assert_eq!(drained.len(), 4);
         assert!(matches!(
             &drained[0],
-            TestMessage::GetBlock {
-                identifier: Identifier::Height(height),
+            TestMessage::SubscribeByDigest {
+                digest,
+                fallback: DigestFallback::Wait,
                 ..
-            } if *height == Height::new(9)
-        ));
-        assert!(matches!(
-            &drained[2],
-            TestMessage::GetInfo {
-                identifier: Identifier::Height(height),
-                ..
-            } if *height == Height::new(11)
+            } if *digest == block(1).digest()
         ));
         let TestMessage::HintFinalized {
             height, targets, ..
@@ -1492,6 +1523,14 @@ mod tests {
         assert_eq!(targets.len().get(), 2);
         assert!(targets.contains(&first));
         assert!(targets.contains(&second));
+        assert!(matches!(
+            &drained[2],
+            TestMessage::HintNotarized { round: hinted, .. } if *hinted == round(1)
+        ));
+        assert!(matches!(
+            &drained[3],
+            TestMessage::GetProcessedHeight { .. }
+        ));
     }
 
     #[test]

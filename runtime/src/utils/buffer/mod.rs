@@ -58,6 +58,11 @@ enum SyncState {
 }
 
 impl SyncState {
+    /// Whether no mutation still needs a sync.
+    const fn is_clean(&self) -> bool {
+        matches!(self, Self::Clean)
+    }
+
     /// Mark a new unsynced mutation.
     fn mark_dirty(&mut self) {
         assert!(

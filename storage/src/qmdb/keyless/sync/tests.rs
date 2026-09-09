@@ -948,6 +948,7 @@ pub(crate) mod harnesses {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -958,6 +959,7 @@ pub(crate) mod harnesses {
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         }
     }
@@ -985,7 +987,7 @@ pub(crate) mod harnesses {
             .iter()
             .filter(|op| matches!(op, Operation::Append(_)))
             .count() as u64;
-        let new_commit = Location::new(db.last_commit_loc().as_u64() + 1 + appends);
+        let new_commit = db.bounds().end + appends;
         let mut batch = db.new_batch();
         for op in ops {
             match op {
@@ -1290,6 +1292,7 @@ mod compact_variable_mmr {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1300,6 +1303,7 @@ mod compact_variable_mmr {
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         }
     }
@@ -1317,6 +1321,7 @@ mod compact_variable_mmr {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000).into(), ()),
         }
@@ -2222,6 +2227,7 @@ mod compact_variable_mmb {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -2232,6 +2238,7 @@ mod compact_variable_mmb {
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         }
     }
@@ -2249,6 +2256,7 @@ mod compact_variable_mmb {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000).into(), ()),
         }

@@ -102,9 +102,6 @@ where
     /// Cached canonical operations root.
     root: H::Digest,
 
-    /// The location of the last commit, if any.
-    last_commit_loc: Location<F>,
-
     /// The inactivity floor declared by the last committed batch. Operations at locations below
     /// this value are considered inactive by the application and may be pruned.
     inactivity_floor_loc: Location<F>,
@@ -182,14 +179,12 @@ where
         let inactivity_floor_loc = find_inactivity_floor_at(&journal, size)
             .await?
             .ok_or(Error::UnexpectedData(size - 1))?;
-        let last_commit_loc = size - 1;
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
             journal,
             root,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };
@@ -249,11 +244,6 @@ where
         Ok(result)
     }
 
-    /// Returns the location of the last commit.
-    pub const fn last_commit_loc(&self) -> Location<F> {
-        self.last_commit_loc
-    }
-
     /// Returns the inactivity floor declared by the last committed batch.
     pub const fn inactivity_floor_loc(&self) -> Location<F> {
         self.inactivity_floor_loc
@@ -273,7 +263,7 @@ where
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
-            *self.last_commit_loc,
+            bounds.end - 1,
         );
     }
 
@@ -286,7 +276,8 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
-        let op = self.journal.read(*self.last_commit_loc).await?;
+        // The journal always ends with a commit operation.
+        let op = self.journal.read(*self.journal.size() - 1).await?;
         let Operation::Commit(metadata, _floor) = op else {
             return Ok(None);
         };
@@ -427,7 +418,7 @@ where
     #[boxed]
     pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
         let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
+        let current_size = *self.journal.size();
         if rewind_size == current_size {
             return Ok(self);
         }
@@ -437,15 +428,13 @@ where
             )));
         }
 
-        let rewind_last_loc = Location::new(rewind_size - 1);
         let rewind_floor = find_inactivity_floor_at(&self.journal, size)
             .await?
             .ok_or(Error::UnexpectedData(size - 1))?;
 
-        // Journal rewind happens before in-memory commit-location updates. If a later step fails,
+        // Journal rewind happens before the in-memory floor and root updates. If a later step fails,
         // this handle may be internally diverged and must be dropped by the caller.
         self.journal = self.journal.rewind(rewind_size).await?;
-        self.last_commit_loc = rewind_last_loc;
         self.inactivity_floor_loc = rewind_floor;
         let inactive_peaks = F::inactive_peaks(size, rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
@@ -499,7 +488,7 @@ where
 
     /// The [`Commitment`](batch_chain::Commitment) for the database's current state.
     pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root)
+        batch_chain::Commitment::new(self.journal.size(), self.root)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -564,11 +553,10 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
-        let start_loc = self.last_commit_loc + 1;
+        let start_loc = self.journal.size();
 
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
         let end_loc = batch.bounds.tip.size;
@@ -616,7 +604,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::qmdb::{
         sync::{MerkleizedBatch as _, Target},
-        verify_proof,
+        verify_proof, verify_proof_and_pinned_nodes,
     };
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
@@ -700,7 +688,7 @@ pub(crate) mod tests {
         assert_eq!(bounds.end, 1); // initial commit should exist
         assert_eq!(bounds.start, Location::new(0));
         assert_eq!(db.get_metadata().await.unwrap(), None);
-        assert_eq!(db.last_commit_loc(), Location::new(0));
+        assert_eq!(db.bounds().end - 1, Location::new(0));
 
         // Make sure closing/reopening gets us back to the same state, even after adding an uncommitted op.
         let root = db.root();
@@ -736,7 +724,145 @@ pub(crate) mod tests {
         assert_eq!(db.bounds().end, 2); // commit op should remain after re-open.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), Location::new(1));
+        assert_eq!(db.bounds().end - 1, Location::new(1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, for a db-based
+    /// batch and for a chained batch applied after its ancestor.
+    #[boxed]
+    pub(crate) async fn run_operations_match_applied_log<F: Family, V, C, H, S: Strategy>(
+        db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared + PartialEq + core::fmt::Debug,
+    {
+        let seed = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .append(V::Value::make(2))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (seed_start, seed_ops) = seed.operations();
+        let seed_root = seed.root();
+        let seed_proof = seed.proof(&db).unwrap();
+        let seed_pins = seed.pinned_nodes(&db).unwrap();
+        let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+        assert_eq!(seed_start, seed_range.start);
+        assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+        // A chained batch's operations are its own suffix only.
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let child = parent
+            .new_batch::<H>()
+            .append(V::Value::make(4))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (parent_start, parent_ops) = parent.operations();
+        let (child_start, child_ops) = child.operations();
+        let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_pins, child_pins) = (
+            parent.pinned_nodes(&db).unwrap(),
+            child.pinned_nodes(&db).unwrap(),
+        );
+        let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+        let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(parent_start, parent_range.start);
+        assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+        assert_eq!(child_start, child_range.start);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+        // A write-free batch still captures its commit-only suffix.
+        let empty = db
+            .new_batch()
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (empty_start, empty_ops) = empty.operations();
+        let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let empty_pins = empty.pinned_nodes(&db).unwrap();
+        let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+        assert_eq!(empty_start, empty_range.start);
+        assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root with and without the pins.
+        for (start, ops, proof, pins, root) in [
+            (seed_start, seed_ops, seed_proof, seed_pins, seed_root),
+            (
+                parent_start,
+                parent_ops,
+                parent_proof,
+                parent_pins,
+                parent_root,
+            ),
+            (child_start, child_ops, child_proof, child_pins, child_root),
+            (empty_start, empty_ops, empty_proof, empty_pins, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<H, _, _>(&proof, start, &ops, &root));
+            assert!(verify_proof_and_pinned_nodes::<H, _, _>(
+                &proof, start, &ops, &pins, &root
+            ));
+        }
+
+        // Flushing the applied batch prunes the store to its peaks. The late batch's base is
+        // mid-mountain, so its artifacts are refused rather than returned unverifiable.
+        let late = db
+            .new_batch()
+            .append(V::Value::make(5))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        assert!(matches!(
+            late.proof(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+        assert!(matches!(
+            late.pinned_nodes(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+
+        // A batch built on the flushed store reads every node below it from the pinned peaks.
+        let flushed = db
+            .new_batch()
+            .append(V::Value::make(6))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (flushed_start, flushed_ops) = flushed.operations();
+        let flushed_root = flushed.root();
+        let flushed_proof = flushed.proof(&db).unwrap();
+        let flushed_pins = flushed.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<H, _, _>(
+            &flushed_proof,
+            flushed_start,
+            &flushed_ops,
+            &flushed_pins,
+            &flushed_root
+        ));
+        let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+        assert_eq!(flushed_start, flushed_range.start);
+        assert_eq!(
+            *flushed_start + flushed_ops.len() as u64,
+            *flushed_range.end
+        );
 
         db.destroy().await.unwrap();
     }
@@ -1009,7 +1135,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, first_commit_loc)
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.last_commit_loc(), first_commit_loc);
+        assert_eq!(db.bounds().end - 1, first_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), first_commit_loc);
 
         // Append one more, advancing the floor with it.
@@ -1093,7 +1219,7 @@ pub(crate) mod tests {
         let mut db = reopen(context.child("db").with_attribute("index", 5)).await;
         assert_eq!(db.bounds().end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), Location::new(0));
+        assert_eq!(db.bounds().end - 1, Location::new(0));
 
         // Apply the ops one last time but fully commit them this time, then clean up.
         {
@@ -1152,7 +1278,7 @@ pub(crate) mod tests {
         );
         assert_eq!(db.root(), committed_root, "Root should match last commit");
         assert_eq!(
-            db.last_commit_loc(),
+            db.bounds().end - 1,
             committed_size - 1,
             "Last commit location should be correct"
         );
@@ -1200,7 +1326,7 @@ pub(crate) mod tests {
             "Root should match last commit after multiple appends"
         );
         assert_eq!(
-            db.last_commit_loc(),
+            db.bounds().end - 1,
             new_committed_size - 1,
             "Last commit location should be correct after multiple appends"
         );
@@ -1321,7 +1447,7 @@ pub(crate) mod tests {
         let (db, _) = db.apply_batch(batch_a).await.unwrap();
         let db = db.commit().await.unwrap();
         let root = db.root();
-        let last_commit_loc = db.last_commit_loc();
+        let last_commit_loc = db.bounds().end - 1;
 
         let result = db.apply_batch(batch_b).await;
         assert!(matches!(result, Err(Error::StaleBatch)));
@@ -1329,7 +1455,7 @@ pub(crate) mod tests {
         // The rejection mutated nothing: reopening recovers the committed state.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), last_commit_loc);
+        assert_eq!(db.bounds().end - 1, last_commit_loc);
         db.destroy().await.unwrap();
     }
 
@@ -1458,7 +1584,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
+            let new_commit = db.bounds().end + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await;
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1470,7 +1596,7 @@ pub(crate) mod tests {
         let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), op_count - 1);
+        assert_eq!(db.bounds().end - 1, op_count - 1);
         drop(db);
 
         // Insert many operations without commit, then simulate failure.
@@ -1490,7 +1616,7 @@ pub(crate) mod tests {
 
         // Repeat after pruning to the last commit.
         let db = reopen(context.child("db").with_attribute("index", 3)).await;
-        let last_commit = db.last_commit_loc();
+        let last_commit = db.bounds().end - 1;
         let db = db.prune(last_commit).await.unwrap();
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
@@ -1524,7 +1650,6 @@ pub(crate) mod tests {
         let bounds = db.bounds();
         assert!(bounds.end > op_count);
         assert_ne!(db.root(), root);
-        assert_eq!(db.last_commit_loc(), bounds.end - 1);
 
         db.destroy().await.unwrap();
     }
@@ -1615,7 +1740,7 @@ pub(crate) mod tests {
             for i in 0u64..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
+            let new_commit = db.bounds().end + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await;
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -1625,7 +1750,7 @@ pub(crate) mod tests {
             for i in ELEMENTS..ELEMENTS * 2 {
                 batch = batch.append(V::Value::make(i));
             }
-            let new_commit = db.last_commit_loc() + 1 + ELEMENTS;
+            let new_commit = db.bounds().end + ELEMENTS;
             let merkleized = batch.merkleize(&db, None, new_commit).await;
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
@@ -2188,7 +2313,7 @@ pub(crate) mod tests {
         // Tests that don't specifically exercise floor behavior advance the floor to the new
         // commit location, so pruning up to the last commit works analogously to the pre-floor
         // semantics.
-        let base_size = *db.last_commit_loc() + 1;
+        let base_size = *db.bounds().end;
         let appends_iter: Vec<_> = values.into_iter().collect();
         let new_commit_loc = Location::new(base_size + appends_iter.len() as u64);
         let mut batch = db.new_batch();
@@ -2227,7 +2352,7 @@ pub(crate) mod tests {
 
         let root_before = db.root();
         let size_before = db.bounds().end;
-        let commit_before = db.last_commit_loc();
+        let commit_before = db.bounds().end - 1;
         assert_eq!(size_before, first_range.end);
 
         let value_c = V::Value::make(4);
@@ -2241,7 +2366,7 @@ pub(crate) mod tests {
         let db = db.rewind(size_before).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc(), commit_before);
+        assert_eq!(db.bounds().end - 1, commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
         assert_eq!(
             db.get(Location::new(1)).await.unwrap(),
@@ -2263,7 +2388,7 @@ pub(crate) mod tests {
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc(), commit_before);
+        assert_eq!(db.bounds().end - 1, commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(
             db.get(Location::new(1)).await.unwrap(),
@@ -2346,7 +2471,7 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         let (db, _) = commit_appends(db, (0..2).map(V::Value::make), None).await;
-        let size = db.last_commit_loc() + 1;
+        let size = db.bounds().end;
 
         // The operation at `size - 2` is an append, not a commit.
         let Err(err) = db.rewind(size - 1).await else {
@@ -2381,7 +2506,7 @@ pub(crate) mod tests {
 
             (db, _) =
                 commit_appends(db, (0..16).map(|i| V::Value::make(round * 100 + i)), None).await;
-            let last_commit = db.last_commit_loc();
+            let last_commit = db.bounds().end - 1;
             db = db.prune(last_commit).await.unwrap();
 
             if db.bounds().start > first_range.start {
@@ -2486,7 +2611,7 @@ pub(crate) mod tests {
         let db = db.commit().await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc();
+        let last_commit_before = db.bounds().end - 1;
 
         // Try to commit with a lower floor; apply_batch rejects.
         let merkleized = db
@@ -2505,7 +2630,7 @@ pub(crate) mod tests {
         // Reopen the partition and verify the rejected batch persisted nothing.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
-        assert_eq!(db.last_commit_loc(), last_commit_before);
+        assert_eq!(db.bounds().end - 1, last_commit_before);
         assert_eq!(db.root(), root_before);
 
         db.destroy().await.unwrap();
@@ -2526,7 +2651,7 @@ pub(crate) mod tests {
         // A floor > 3 (the commit location) is invalid — even floor == 4 (one past the commit)
         // is rejected so a subsequent prune cannot remove the last readable commit.
         let floor = db.inactivity_floor_loc();
-        let last_commit_loc = db.last_commit_loc();
+        let last_commit_loc = db.bounds().end - 1;
         let root = db.root();
         let merkleized = db
             .new_batch()
@@ -2545,7 +2670,7 @@ pub(crate) mod tests {
         // Reopen and confirm nothing persisted.
         let db = reopen(context.child("reopen_boundary")).await;
         assert_eq!(db.inactivity_floor_loc(), floor);
-        assert_eq!(db.last_commit_loc(), last_commit_loc);
+        assert_eq!(db.bounds().end - 1, last_commit_loc);
         assert_eq!(db.root(), root);
 
         // Boundary: floor == total_size (= commit_loc + 1) is also rejected.
@@ -2583,7 +2708,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = db.last_commit_loc() + 1;
+        let rewind_target = db.bounds().end;
 
         // Second commit: floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -2695,7 +2820,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        let rewind_target = db.last_commit_loc() + 1;
+        let rewind_target = db.bounds().end;
 
         // Second commit: 2 appends + commit, floor advances to 6.
         let floor_b = Location::<F>::new(6);
@@ -2715,7 +2840,7 @@ pub(crate) mod tests {
         // Rewind to the first commit; floor should restore to floor_a.
         let db = db.rewind(rewind_target).await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), floor_a);
-        assert_eq!(db.last_commit_loc(), Location::new(3));
+        assert_eq!(db.bounds().end - 1, Location::new(3));
 
         // Commit the rewind so it's durable, then reopen and confirm the floor again.
         db.commit().await.unwrap();
@@ -2755,7 +2880,7 @@ pub(crate) mod tests {
             .await;
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc();
+        let last_commit_before = db.bounds().end - 1;
         let floor_before = db.inactivity_floor_loc();
 
         let Err(err) = db.apply_batch(child).await else {
@@ -2769,7 +2894,7 @@ pub(crate) mod tests {
         // Reopen the partition and verify the rejected chain persisted nothing.
         let db = reopen(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc(), last_commit_before);
+        assert_eq!(db.bounds().end - 1, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
@@ -2840,7 +2965,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.bounds().end - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
@@ -2859,7 +2984,7 @@ pub(crate) mod tests {
         // The commit op remains readable; its metadata is intact.
         assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata.clone()));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
-        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.bounds().end - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         // Prune does not affect the root (documented invariant on `prune`).
         assert_eq!(db.root(), root_after_commit);
@@ -2877,7 +3002,7 @@ pub(crate) mod tests {
         let db = reopen(context.child("reopened")).await;
         let reopened_bounds = db.bounds();
         assert_eq!(reopened_bounds.end, commit_loc + 1);
-        assert_eq!(db.last_commit_loc(), commit_loc);
+        assert_eq!(db.bounds().end - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
@@ -2896,7 +3021,7 @@ pub(crate) mod tests {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc(), next_commit_loc);
+        assert_eq!(db.bounds().end - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
         // New appends readable; the original commit op is also still in the live set (not
@@ -2941,7 +3066,7 @@ pub(crate) mod tests {
         let (db, _) = db.apply_batch(grandchild).await.unwrap();
 
         // Grandchild's commit is the last op; tip's floor is the live floor.
-        assert_eq!(db.last_commit_loc(), Location::new(6));
+        assert_eq!(db.bounds().end - 1, Location::new(6));
         assert_eq!(db.inactivity_floor_loc(), Location::new(5));
 
         db.destroy().await.unwrap();

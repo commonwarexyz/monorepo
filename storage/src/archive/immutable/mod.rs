@@ -82,7 +82,8 @@ pub use storage::Archive;
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The partition to use for the archive's metadata.
+    /// The partition to use for the archive's commit records: the freezer checkpoint and
+    /// ordinal bitmaps that recovery uses to keep both stores consistent.
     pub metadata_partition: String,
 
     /// The partition to use for the archive's freezer table.

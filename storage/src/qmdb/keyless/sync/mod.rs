@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    journal::{authenticated, contiguous::Contiguous as _},
+    journal::authenticated,
     merkle::{
         Family, Location,
         full::{self, Merkle},
@@ -81,29 +81,17 @@ where
         )
         .await?;
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.bounds();
-            let loc = bounds
-                .end
-                .checked_sub(1)
-                .ok_or(qmdb::Error::HistoricalFloorPruned(Location::new(
-                    bounds.end,
-                )))?;
-            let floor = qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end))
-                .await?
-                .ok_or(qmdb::Error::HistoricalFloorPruned(Location::new(
-                    bounds.end,
-                )))?;
-            (Location::new(loc), floor)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let size = journal.size();
+        let inactivity_floor_loc = qmdb::find_inactivity_floor_at::<F, _>(&journal, size)
+            .await?
+            .ok_or(qmdb::Error::HistoricalFloorPruned(size))?;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
         let db = Self {
             journal,
             root,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };

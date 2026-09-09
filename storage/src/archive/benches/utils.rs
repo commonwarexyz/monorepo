@@ -84,6 +84,7 @@ impl Archive {
             Variant::Prunable => {
                 let cfg = prunable::Config {
                     translator: TwoCap,
+                    metadata_partition: "archive-bench-metadata".into(),
                     key_partition: "archive-bench-key".into(),
                     key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                     value_partition: "archive-bench-value".into(),

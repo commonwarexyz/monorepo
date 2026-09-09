@@ -46,7 +46,7 @@
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
 //!   8` bits each). `N` must be a power of two.
 //!
-//!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though a
+//!   One exception by convention: the *current* last commit carries bit = 1 even though a
 //!   CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
 //!   0. Maintaining this makes the chunk containing the latest commit deterministic across init and
 //!   `apply_batch`.
@@ -762,6 +762,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -770,6 +771,7 @@ pub mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
@@ -801,6 +803,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -811,6 +814,7 @@ pub mod tests {
                 codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
@@ -1720,6 +1724,7 @@ pub mod tests {
                     metadata_partition: "forged-exclusion-metadata".to_string(),
                     items_per_blob: NZU64!(11),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
@@ -1730,6 +1735,7 @@ pub mod tests {
                     codec_config: (((0..=8).into(), ()), ((0..=8).into(), ())),
                     page_cache,
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                 },
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,

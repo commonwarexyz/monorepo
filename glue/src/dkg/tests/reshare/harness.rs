@@ -375,6 +375,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ReshareInput<(), MinPk, ed25519::PrivateKey, TestDirectory>;
 
@@ -423,14 +424,24 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(Self::execute(block.height(), batches).await)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
     }
 
     async fn finalized(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
+        _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
@@ -835,7 +846,6 @@ impl EngineDefinition for ReshareEngine {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -1005,6 +1015,7 @@ impl EngineDefinition for ReshareEngine {
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 items_per_blob: NZU64!(11),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1013,6 +1024,7 @@ impl EngineDefinition for ReshareEngine {
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
@@ -1028,7 +1040,6 @@ impl EngineDefinition for ReshareEngine {
                 database: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 max_serve_ops: NZU64!(16),
@@ -1328,6 +1339,7 @@ fn archive_config<C>(
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_partition: format!("{prefix}-{name}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),
