@@ -97,6 +97,9 @@ where
     /// Maximum number of blocks dispatched to the application that have not
     /// yet been acknowledged. Increasing this value allows the application
     /// to buffer work while marshal continues dispatching, hiding ack latency.
+    ///
+    /// Marshal also retains up to twice this many finalized blocks in memory
+    /// so dispatch can reuse them without an archive read.
     pub max_pending_acks: NonZeroUsize,
 
     /// Strategy for parallel operations.

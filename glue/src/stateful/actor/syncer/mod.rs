@@ -323,7 +323,7 @@ where
     let block = if let Some(height) = floor.height()
         && floor.round() >= finalization.round()
     {
-        V::into_inner(processed_anchor(marshal, height).await)
+        V::into_shared(processed_anchor(marshal, height).await)
     } else {
         // Marshal's configured startup floor fetches its anchor when needed. This local-only
         // subscription observes that result without starting a separate fetch.
@@ -332,7 +332,7 @@ where
                 .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
                 .await
                 .expect("marshal must yield floor block");
-            V::into_inner(block)
+            V::into_shared(block)
         };
 
         // Marshal does not redeliver acknowledged blocks. A newly installed floor is the
@@ -340,7 +340,7 @@ where
         // dispatched once.
         match marshal.get_processed_height().await {
             Some(height) if height > selected.height() => {
-                V::into_inner(processed_anchor(marshal, height).await)
+                V::into_shared(processed_anchor(marshal, height).await)
             }
             _ => selected,
         }
@@ -404,9 +404,9 @@ where
         .max()
         .unwrap_or_else(Height::zero);
     let floor_block = if processed_height == Some(marshal_floor) {
-        V::into_inner(processed_anchor(marshal, marshal_floor).await)
+        V::into_shared(processed_anchor(marshal, marshal_floor).await)
     } else {
-        V::into_inner(
+        V::into_shared(
             marshal
                 .get_block(Identifier::Height(marshal_floor))
                 .await

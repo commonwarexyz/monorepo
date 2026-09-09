@@ -6,7 +6,7 @@
 //! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
 //! return any of the associated values.
 
-use commonware_codec::Codec;
+use commonware_codec::CodecShared;
 use commonware_runtime::Handle;
 use commonware_utils::Array;
 use std::future::Future;
@@ -60,7 +60,7 @@ pub trait Archive: Send + Sized {
     type Key: Array;
 
     /// The type of the value.
-    type Value: Codec + Send + Sync;
+    type Value: CodecShared;
 
     /// Store an item in [Archive].
     ///

@@ -559,7 +559,7 @@ where
             return None;
         }
 
-        let block = V::into_inner(block);
+        let block = V::into_shared(block);
         let Some(Payload::EpochInfo(info)) = block.payload() else {
             return None;
         };

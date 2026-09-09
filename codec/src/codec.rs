@@ -193,15 +193,6 @@ impl<T: Write + ?Sized> Write for Arc<T> {
     }
 }
 
-impl<T: Read> Read for Arc<T> {
-    type Cfg = T::Cfg;
-
-    #[inline]
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        T::read_cfg(buf, cfg).map(Self::new)
-    }
-}
-
 /// Trait for types that can be read (decoded) from a byte buffer.
 pub trait Read: Sized {
     /// The `Cfg` type parameter allows passing configuration during the read process. This is
@@ -260,6 +251,15 @@ pub trait Read: Sized {
         Ok(Self::read_vec(buf, N, cfg)?
             .try_into()
             .unwrap_or_else(|_| unreachable!("array length should match capacity")))
+    }
+}
+
+impl<T: Read> Read for Arc<T> {
+    type Cfg = T::Cfg;
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        T::read_cfg(buf, cfg).map(Self::new)
     }
 }
 
@@ -473,7 +473,10 @@ mod tests {
         );
 
         // Shared decoding enforces the inner type's bounds and rejects truncation
-        assert!(Arc::<Vec<u8>>::decode_cfg(encoded.clone(), &((..=2).into(), ())).is_err());
+        assert!(matches!(
+            Arc::<Vec<u8>>::decode_cfg(encoded.clone(), &((..=2).into(), ())),
+            Err(Error::InvalidLength(3))
+        ));
         assert!(matches!(
             Arc::<Vec<u8>>::decode_cfg(&encoded[..encoded.len() - 1], &cfg),
             Err(Error::EndOfBuffer)

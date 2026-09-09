@@ -11,6 +11,7 @@ pub(super) struct Staged<B> {
 }
 
 impl<B> Staged<B> {
+    /// Creates empty staging that holds at most `max` blocks.
     pub(super) const fn new(max: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -40,7 +41,11 @@ impl<B> Staged<B> {
             return;
         }
         self.min = min;
-        self.entries = self.entries.split_off(&min);
+        while let Some(entry) = self.entries.first_entry()
+            && *entry.key() < min
+        {
+            entry.remove();
+        }
     }
 }
 
@@ -48,6 +53,23 @@ impl<B> Staged<B> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn insert_keeps_first_block_and_rejects_overflow() {
+        let mut staged = Staged::new(2);
+        let first = Arc::new(());
+        staged.insert(Height::new(5), Arc::clone(&first));
+        staged.insert(Height::new(5), Arc::new(()));
+        staged.insert(Height::new(6), Arc::new(()));
+        staged.insert(Height::new(7), Arc::new(()));
+        assert!(staged.remove(Height::new(7)).is_none());
+        assert!(
+            staged
+                .remove(Height::new(5))
+                .is_some_and(|block| Arc::ptr_eq(&block, &first))
+        );
+        assert!(staged.remove(Height::new(6)).is_some());
+    }
 
     #[test]
     fn retained_minimum_never_decreases() {

@@ -857,7 +857,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver.await.ok().map(|block| {
-            let block = V::into_inner(block);
+            let block = V::into_shared(block);
             self.ancestor_stream(clock, [block], fetch_duration)
         })
     }

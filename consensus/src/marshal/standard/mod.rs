@@ -8651,127 +8651,131 @@ mod tests {
     }
 
     /// Staging retains at most twice the ack capacity until dispatch or a floor skips the blocks.
-    #[test_traced("WARN")]
-    fn test_standard_staged_blocks_bounded() {
+    fn staged_blocks_bounded(skip_to_floor: bool) {
         const PARTITION_PREFIX: &str = "staged-bounded";
         const ANCHOR_HEIGHT: u64 = 5;
-        for skip_to_floor in [false, true] {
-            let runner = deterministic::Runner::timed(Duration::from_secs(30));
-            runner.start(|mut context| async move {
-                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let (finalizations_by_height, finalized_blocks) =
-                    prunable_finalized_stores(&context, PARTITION_PREFIX).await;
-                let finalized_blocks =
-                    Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
-                let ops = finalized_blocks.ops();
-                let (actor, mut mailbox, _) = Actor::init(
-                    context.child("actor"),
-                    finalizations_by_height,
-                    finalized_blocks,
-                    test_config(
-                        &context,
-                        PARTITION_PREFIX,
-                        ConstantProvider::new(schemes[0].clone()),
-                        NZUsize!(1),
-                    ),
-                )
-                .await;
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-                let application = Application::<B>::manual_ack();
-                let buffer = RecordingBuffer::default();
-                let _actor_handle =
-                    actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations_by_height, finalized_blocks) =
+                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
+            let finalized_blocks =
+                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let ops = finalized_blocks.ops();
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                test_config(
+                    &context,
+                    PARTITION_PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let buffer = RecordingBuffer::default();
+            let _actor_handle =
+                actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
 
-                // Hold the genesis acknowledgement so nothing else can dispatch
-                while application.pending_ack_heights() != vec![Height::zero()] {
+            // Hold the genesis acknowledgement so nothing else can dispatch
+            while application.pending_ack_heights() != vec![Height::zero()] {
+                reschedule().await;
+            }
+
+            // Build a chain whose tip is the floor anchor
+            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+            let mut chain = Vec::new();
+            for i in 1..=ANCHOR_HEIGHT {
+                let block = make_raw_block(parent, Height::new(i), i);
+                parent = block.digest();
+                chain.push(block);
+            }
+
+            // Two blocks fit in staging. A third must not displace either.
+            let mut handed = Vec::new();
+            for block in &chain[..3] {
+                let height = block.height();
+                let round = Round::new(Epoch::zero(), View::new(height.get()));
+                buffer.insert(block.clone());
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(round, View::new(height.get() - 1), block.digest()),
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+                // A served read proves the preceding finalization arm has run
+                assert!(mailbox.get_block(height).await.is_some());
+                handed.push(
+                    buffer
+                        .last_handed()
+                        .expect("buffer must have served the finalized block"),
+                );
+            }
+            assert!(
+                handed[..2].iter().all(|block| block.upgrade().is_some()),
+                "staging must retain two blocks without evicting either on overflow"
+            );
+            assert!(
+                handed[2].upgrade().is_none(),
+                "staging must stop at twice the pending-ack capacity"
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::zero()]);
+
+            if skip_to_floor {
+                // A floor anchor releases the blocks it skips
+                let anchor = chain.last().unwrap();
+                let anchor_round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
+                buffer.insert(anchor.clone());
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(anchor_round, View::new(ANCHOR_HEIGHT - 1), anchor.digest()),
+                    &schemes,
+                    QUORUM,
+                );
+                mailbox.set_floor(finalization);
+                while !application
+                    .blocks()
+                    .contains_key(&Height::new(ANCHOR_HEIGHT))
+                {
                     reschedule().await;
                 }
-
-                // Build a chain whose tip is the floor anchor
-                let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
-                let mut chain = Vec::new();
-                for i in 1..=ANCHOR_HEIGHT {
-                    let block = make_raw_block(parent, Height::new(i), i);
-                    parent = block.digest();
-                    chain.push(block);
-                }
-
-                // Two blocks fit in staging; a third must not displace either
-                let mut handed = Vec::new();
+                assert!(
+                    handed.iter().all(|block| block.upgrade().is_none()),
+                    "floor transition must release skipped staged blocks"
+                );
                 for block in &chain[..3] {
-                    let height = block.height();
-                    let round = Round::new(Epoch::zero(), View::new(height.get()));
-                    buffer.insert(block.clone());
-                    let finalization = StandardHarness::make_finalization(
-                        Proposal::new(round, View::new(height.get() - 1), block.digest()),
-                        &schemes,
-                        QUORUM,
-                    );
-                    StandardHarness::report_finalization(&mut mailbox, finalization).await;
-
-                    // A served read proves the preceding finalization arm has run
-                    assert!(mailbox.get_block(height).await.is_some());
-                    handed.push(
-                        buffer
-                            .last_handed()
-                            .expect("buffer must have served the finalized block"),
-                    );
+                    assert!(!application.blocks().contains_key(&block.height()));
                 }
-                assert!(
-                    handed[..2].iter().all(|block| block.upgrade().is_some()),
-                    "staging must retain two blocks without evicting either on overflow"
-                );
-                assert!(
-                    handed[2].upgrade().is_none(),
-                    "staging must stop at twice the pending-ack capacity"
-                );
-                assert_eq!(application.pending_ack_heights(), vec![Height::zero()]);
-
-                if skip_to_floor {
-                    // A floor anchor releases the blocks it skips
-                    let anchor = chain.last().unwrap();
-                    let anchor_round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
-                    buffer.insert(anchor.clone());
-                    let finalization = StandardHarness::make_finalization(
-                        Proposal::new(anchor_round, View::new(ANCHOR_HEIGHT - 1), anchor.digest()),
-                        &schemes,
-                        QUORUM,
-                    );
-                    mailbox.set_floor(finalization);
-                    while !application
-                        .blocks()
-                        .contains_key(&Height::new(ANCHOR_HEIGHT))
-                    {
-                        reschedule().await;
-                    }
-                    assert!(
-                        handed.iter().all(|block| block.upgrade().is_none()),
-                        "floor transition must release skipped staged blocks"
-                    );
-                    for block in &chain[..3] {
-                        assert!(!application.blocks().contains_key(&block.height()));
-                    }
-                } else {
-                    // Drain the backlog: only the overflow block needs an archive read
-                    ops.lock().clear();
-                    for height in 0..=3 {
-                        assert_eq!(application.acknowledged().await, Height::new(height));
-                    }
-                    let ops = ops.lock();
-                    for height in 1..=3 {
-                        let reads = ops
-                            .iter()
-                            .filter(|op| **op == Op::Get(Some(Height::new(height))))
-                            .count();
-                        assert_eq!(reads, usize::from(height == 3), "archive reads at {height}");
-                    }
+            } else {
+                // Drain the backlog: only the overflow block needs an archive read
+                ops.lock().clear();
+                for height in 0..=3 {
+                    assert_eq!(application.acknowledged().await, Height::new(height));
                 }
-            });
-        }
+                let ops = ops.lock();
+                for height in 1..=3 {
+                    let reads = ops
+                        .iter()
+                        .filter(|op| **op == Op::Get(Some(Height::new(height))))
+                        .count();
+                    assert_eq!(reads, usize::from(height == 3), "archive reads at {height}");
+                }
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_staged_blocks_bounded_drain() {
+        staged_blocks_bounded(false);
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_staged_blocks_bounded_floor() {
+        staged_blocks_bounded(true);
     }
 
     /// Repeated finalization of an in-flight block must not consume staging capacity.

@@ -147,8 +147,8 @@ where
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
-    // Finalized blocks awaiting durable dispatch, capped at twice the pending-ack capacity
-    // to absorb bursts of finalizations while the application processes earlier blocks
+    // Finalized blocks awaiting dispatch, capped at twice the pending-ack
+    // capacity to absorb finalization bursts while earlier blocks are processed
     staged: Staged<V::Block>,
 
     // ---------- Storage ----------
@@ -822,6 +822,7 @@ where
                         .await;
                     if stored {
                         self.staged.insert(height, block);
+
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
                         (self, _) = self.try_repair_gaps(buffer, resolver, application).await;
@@ -1069,7 +1070,7 @@ where
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
-                response.send_lossy((finalization, V::into_inner(block)).encode());
+                response.send_lossy((finalization, V::into_shared(block)).encode());
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
@@ -1397,7 +1398,8 @@ where
         // Release staged blocks skipped by the floor transition
         self.staged.retain(height);
 
-        // Advance the round floor and persist the dispatch floor before pruning finalized data
+        // Advance the round floor and persist the dispatch floor before
+        // pruning finalized data
         self = self
             .update_processed_round_floor(dispatch_floor, round, buffer, application, resolver)
             .await;
@@ -1905,7 +1907,7 @@ where
                 return self;
             }
 
-            // Reuse the staged object or recover an unstaged block from the archive
+            // Prefer the staged block and fall back to the archive
             let block = match self.staged.remove(next_height) {
                 Some(block) => block,
                 None => match self.get_finalized_block(next_height).await {
@@ -1918,7 +1920,7 @@ where
             assert_eq!(height, next_height, "finalized block height mismatch");
 
             let (ack, ack_waiter) = A::handle();
-            application.report(Update::Block(V::into_inner(block), ack));
+            application.report(Update::Block(V::into_shared(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 commitment,
@@ -2109,26 +2111,25 @@ where
         let stored: V::StoredBlock = block.clone().into();
         let round = finalization.as_ref().map(|f| f.round());
 
-        // Update the finalized blocks archive
-        let blocks = self.finalized_blocks.put(&stored).map_err(BoxedError::from);
-
-        // Update the finalizations archive (if provided)
+        // In parallel, update the finalized blocks and finalizations archives
         let finalizations_by_height = self.finalizations_by_height;
-        let finalizations = async {
-            let store = if let Some(finalization) = finalization {
-                finalizations_by_height
-                    .put(height, digest, &finalization)
-                    .await
-                    .map_err(BoxedError::from)?
-            } else {
-                finalizations_by_height
-            };
-            Ok::<_, BoxedError>(store)
-        };
-
-        // Update both archives in parallel
-        (self.finalized_blocks, self.finalizations_by_height) =
-            try_join!(blocks, finalizations).unwrap_or_else(|e| panic!("failed to finalize: {e}"));
+        (self.finalized_blocks, self.finalizations_by_height) = try_join!(
+            // Update the finalized blocks archive
+            self.finalized_blocks.put(&stored).map_err(BoxedError::from),
+            // Update the finalizations archive (if provided)
+            async {
+                let store = if let Some(finalization) = finalization {
+                    finalizations_by_height
+                        .put(height, digest, &finalization)
+                        .await
+                        .map_err(BoxedError::from)?
+                } else {
+                    finalizations_by_height
+                };
+                Ok::<_, BoxedError>(store)
+            }
+        )
+        .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
 
         // The write above is buffered and readable before it is durable, so
         // hold dispatch at or above it until a sync covers it.
