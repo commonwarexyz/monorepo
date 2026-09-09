@@ -80,12 +80,14 @@
 
 use crate::secret::{HardenError, InlineSecret};
 use commonware_utils::sync::Mutex;
-use core::{
-    fmt::{Debug, Formatter},
+use std::{
+    io,
     mem::{ManuallyDrop, MaybeUninit, align_of, size_of},
+    process,
     ptr::{self, NonNull},
+    slice,
+    sync::Arc,
 };
-use std::{io, process, sync::Arc};
 use zeroize::Zeroize;
 
 /// Handle to one shared protected allocation.
@@ -104,23 +106,28 @@ impl<T> HardenedSecret<T> {
     /// remains its sole owner and is unchanged.
     pub(crate) unsafe fn try_from_inline(value: &mut InlineSecret<T>) -> Result<Self, HardenError> {
         let (mapping, destination) = Mapping::allocate::<T>()?;
+
         // Allocate metadata and prepare the reader mutex before transferring ownership.
         let mut inner = Arc::<ProtectedAllocation<T>>::new_uninit();
         let slot = Arc::get_mut(&mut inner).unwrap();
         let readers = Mutex::new(0);
+
         value.access(|source| {
             // SAFETY: The destination is writable, aligned, and disjoint from the
             // initialized source. This is only a raw copy. Until sealing succeeds,
             // Mapping owns cleanup and never accesses or destroys it as T.
             unsafe { ptr::copy_nonoverlapping(source, destination.as_ptr(), 1) };
         });
+
         mapping.protect(libc::PROT_NONE)?;
+
         // No fallible or panicking operations may follow the ownership transfer.
         slot.write(ProtectedAllocation {
             mapping,
             value: destination,
             readers,
         });
+
         Ok(Self {
             // SAFETY: The Arc's unique slot was initialized above. The caller
             // retires the inline source as required by this function's contract.
@@ -155,27 +162,6 @@ impl<T> Clone for HardenedSecret<T> {
     }
 }
 
-impl<T> Debug for HardenedSecret<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        f.write_str("HardenedSecret([REDACTED])")
-    }
-}
-
-/// Captures errno immediately after a failed memory operation.
-fn system(operation: &'static str) -> HardenError {
-    HardenError::System {
-        operation,
-        source: io::Error::last_os_error(),
-    }
-}
-
-/// Handles cleanup syscalls whose failure cannot be returned to the caller.
-fn abort_on_error(result: libc::c_int) {
-    if result != 0 {
-        process::abort();
-    }
-}
-
 /// Owns the raw pages independently of `T`'s initialization and destruction.
 ///
 /// Only the data region is locked or changes permissions. The bytes are never
@@ -204,21 +190,25 @@ impl Mapping {
             .ok()
             .filter(|page| page.is_power_of_two())
             .ok_or(HardenError::Layout)?;
+
         if align_of::<T>() > page {
             return Err(HardenError::Layout);
         }
+
         // Keep a data page even for zero-sized values, then round up to pages.
         let data_len = size_of::<T>()
             .max(1)
             .checked_add(page - 1)
             .map(|size| size & !(page - 1))
             .ok_or(HardenError::Layout)?;
+
         // Include both guards in Rust's maximum pointer-offset bound.
         let total_len = page
             .checked_mul(2)
             .and_then(|guards| data_len.checked_add(guards))
             .filter(|size| *size <= isize::MAX as usize)
             .ok_or(HardenError::Layout)?;
+
         // SAFETY: A null hint requests a new mapping. Length is checked above.
         let base = unsafe {
             libc::mmap(
@@ -230,17 +220,26 @@ impl Mapping {
                 0,
             )
         };
+
         if base == libc::MAP_FAILED {
-            return Err(system("mmap"));
+            return Err(HardenError::System {
+                operation: "mmap",
+                source: io::Error::last_os_error(),
+            });
         }
+
         // A mapping at address zero cannot be represented as a Rust allocation.
         let Some(base) = NonNull::new(base.cast::<u8>()) else {
             // SAFETY: mmap returned this mapping and length, which we own exclusively.
-            unsafe { abort_on_error(libc::munmap(base, total_len)) };
+            if unsafe { libc::munmap(base, total_len) } != 0 {
+                process::abort();
+            }
             return Err(HardenError::Layout);
         };
+
         // SAFETY: The data region follows the first guard within the mapping.
         let data = unsafe { NonNull::new_unchecked(base.as_ptr().add(page)) };
+
         // Cleanup erases through write access, so the data region becomes
         // writable before Drop takes over.
         // SAFETY: The page-aligned data region lies entirely inside our mapping.
@@ -252,37 +251,57 @@ impl Mapping {
             )
         } != 0
         {
-            let error = system("mprotect");
+            let error = HardenError::System {
+                operation: "mprotect",
+                source: io::Error::last_os_error(),
+            };
             // SAFETY: Nothing was written. Release the mapping we own exclusively.
-            unsafe { abort_on_error(libc::munmap(base.as_ptr().cast(), total_len)) };
+            if unsafe { libc::munmap(base.as_ptr().cast(), total_len) } != 0 {
+                process::abort();
+            }
             return Err(error);
         }
+
         let mapping = Self {
             base,
             total_len,
             data,
             data_len,
         };
+
         // Establish all protections before writing secret bytes into the mapping.
         // SAFETY: The page-aligned data region lies entirely inside our mapping.
         if unsafe { libc::madvise(data.as_ptr().cast(), data_len, libc::MADV_DONTDUMP) } != 0 {
-            return Err(system("madvise(MADV_DONTDUMP)"));
+            return Err(HardenError::System {
+                operation: "madvise(MADV_DONTDUMP)",
+                source: io::Error::last_os_error(),
+            });
         }
+
         // SAFETY: The page-aligned region is private anonymous memory, as required
         // by WIPEONFORK.
         if unsafe { libc::madvise(data.as_ptr().cast(), data_len, libc::MADV_WIPEONFORK) } != 0 {
-            return Err(system("madvise(MADV_WIPEONFORK)"));
+            return Err(HardenError::System {
+                operation: "madvise(MADV_WIPEONFORK)",
+                source: io::Error::last_os_error(),
+            });
         }
+
         // SAFETY: The data region is a valid, writable mapping of data_len bytes.
         if unsafe { libc::mlock(data.as_ptr().cast(), data_len) } != 0 {
-            return Err(system("mlock"));
+            return Err(HardenError::System {
+                operation: "mlock",
+                source: io::Error::last_os_error(),
+            });
         }
+
         // The size of T is a multiple of its alignment, which divides the page
         // size. Placing its end at the trailing guard therefore aligns its start
         // and leaves no gap between T and the guard.
         // SAFETY: data_len covers T, and alignment was checked, including for a ZST.
         let value =
             unsafe { NonNull::new_unchecked(data.as_ptr().add(data_len - size_of::<T>()).cast()) };
+
         Ok((mapping, value))
     }
 
@@ -295,8 +314,12 @@ impl Mapping {
     fn protect(&self, protection: libc::c_int) -> Result<(), HardenError> {
         // SAFETY: The data pointer and length describe our page-aligned mapping.
         if unsafe { libc::mprotect(self.data.as_ptr().cast(), self.data_len, protection) } != 0 {
-            return Err(system("mprotect"));
+            return Err(HardenError::System {
+                operation: "mprotect",
+                source: io::Error::last_os_error(),
+            });
         }
+
         Ok(())
     }
 
@@ -313,21 +336,22 @@ impl Mapping {
 impl Drop for Mapping {
     fn drop(&mut self) {
         self.make_writable();
+
         // SAFETY: We exclusively own the writable data region. Any T has
         // already been destroyed, moved out, or was never initialized.
         // MaybeUninit permits erasing padding without reading uninitialized bytes.
         unsafe {
-            core::slice::from_raw_parts_mut(
-                self.data.as_ptr().cast::<MaybeUninit<u8>>(),
-                self.data_len,
-            )
-            .zeroize();
+            slice::from_raw_parts_mut(self.data.as_ptr().cast::<MaybeUninit<u8>>(), self.data_len)
+                .zeroize();
         }
+
         // Unmapping also releases the memory lock. Keep the pages locked until
         // after erasure instead of unlocking them in a separate step.
         // SAFETY: This mapping belongs to this process, including a fork child's
         // private inherited copy.
-        unsafe { abort_on_error(libc::munmap(self.base.as_ptr().cast(), self.total_len)) };
+        if unsafe { libc::munmap(self.base.as_ptr().cast(), self.total_len) } != 0 {
+            process::abort();
+        }
     }
 }
 
@@ -366,10 +390,13 @@ impl<T> ProtectedAllocation<T> {
             if *readers == 0 && self.mapping.protect(libc::PROT_READ).is_err() {
                 process::abort();
             }
+
             // Wrapping to zero would allow revoking access while readers exist.
             *readers = readers.checked_add(1).unwrap_or_else(|| process::abort());
         }
+
         let _guard = ReadGuard(self);
+
         // SAFETY: The read guard keeps the initialized T readable
         // through this closure, including overlapping and nested calls.
         f(unsafe { self.value.as_ref() })
@@ -380,6 +407,7 @@ impl<T> ProtectedAllocation<T> {
         self.mapping.make_writable();
         let mut owner = ManuallyDrop::new(self);
         let allocation = &mut *owner;
+
         // SAFETY: Exclusive ownership rules out active readers. The value is
         // initialized and readable. ManuallyDrop prevents destroying the moved-out T.
         // Explicitly drop both owning fields to erase and release the source and
@@ -396,9 +424,11 @@ impl<T> ProtectedAllocation<T> {
 impl<T> Drop for ProtectedAllocation<T> {
     fn drop(&mut self) {
         self.mapping.make_writable();
+
         // SAFETY: The last owner has exclusive access, permissions allow
         // destruction, and this owner is only constructed after initializing T.
         unsafe { ptr::drop_in_place(self.value.as_ptr()) };
+
         // Mapping::drop wipes the data region even if a destructor unwinds.
     }
 }
@@ -410,6 +440,7 @@ impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
         let mut readers = self.0.readers.lock();
         *readers -= 1;
+
         if *readers == 0 && self.0.mapping.protect(libc::PROT_NONE).is_err() {
             process::abort();
         }
@@ -441,7 +472,7 @@ mod tests {
         unsafe {
             match HardenedSecret::try_from_inline(&mut value) {
                 Ok(hardened) => {
-                    core::slice::from_raw_parts_mut(
+                    slice::from_raw_parts_mut(
                         (&raw mut *value).cast::<MaybeUninit<u8>>(),
                         size_of::<InlineSecret<T>>(),
                     )
@@ -595,7 +626,7 @@ mod tests {
         );
         secret.access(|value| assert_eq!(value, &[37; N]));
         let data = mapping.data.as_ptr();
-        assert_eq!(secret.try_extract().unwrap(), [37; N]);
+        assert_eq!(secret.try_extract().ok().unwrap(), [37; N]);
         assert_unmapped(data);
     }
 
@@ -739,7 +770,7 @@ mod tests {
         }))
         .unwrap();
         let data = secret.inner.mapping.data.as_ptr();
-        let value = secret.try_extract().unwrap();
+        let value = secret.try_extract().ok().unwrap();
         assert_unmapped(data);
         assert_eq!(value.bytes, [42; 32]);
         assert_eq!(drops.load(Ordering::Relaxed), 0);

@@ -238,7 +238,10 @@ enum Storage<T> {
 impl<T> Secret<T> {
     /// Stores `value` inline.
     ///
-    /// The location `value` is moved in from is not erased.
+    /// The location `value` is moved in from is not erased. An optimizing build
+    /// usually inlines this and constructs `value` in place, but that is best
+    /// effort.
+    #[inline]
     pub const fn new(value: T) -> Self {
         Self {
             storage: Storage::Inline(InlineSecret::new(value)),
