@@ -4019,12 +4019,13 @@ mod tests {
         });
     }
 
-    /// A follower requests a missing parent certificate from the term-start
-    /// proposer. Targeting one peer limits retries if the certificate never forms.
+    /// A follower requests a missing term-start parent certificate from any
+    /// validator because the pipelined proposer may not hold it yet.
     #[test_traced]
-    fn test_pipelined_handoff_parent_repair_targets_proposer() {
+    fn test_pipelined_handoff_parent_repair_is_untargeted() {
         let n = 5;
-        let namespace = b"pipelined_handoff_parent_repair_targets_proposer".to_vec();
+        let quorum = quorum(n);
+        let namespace = b"pipelined_handoff_parent_repair_is_untargeted".to_vec();
         let epoch = Epoch::new(333);
         let term_length = TermLength::new(NZU32!(2));
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -4083,7 +4084,7 @@ mod tests {
             let proposal_3 = Proposal::new(
                 Round::new(epoch, View::new(3)),
                 View::new(2),
-                Sha256::hash(&[b"targeted_repair_view_3"]),
+                Sha256::hash(&[b"parent_repair_view_3"]),
             );
             relay.broadcast(
                 &incoming,
@@ -4110,15 +4111,38 @@ mod tests {
                         assert_eq!(proposal, View::new(3));
                         assert_eq!(view, View::new(2));
                         assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
-                        assert_eq!(
-                            target.as_ref(),
-                            Some(&incoming),
-                            "raw term-start parent repair must target its proposer"
+                        assert!(
+                            target.is_none(),
+                            "term-start parent repair must allow any peer to respond"
                         );
                         break;
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("voter never requested the outgoing parent certificate");
+                    }
+                }
+            }
+
+            // Deliver the parent as an unrestricted resolver response. The
+            // follower must certify it, verify the buffered child, and vote
+            // before the term-start view times out.
+            let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization_2));
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == View::new(3) => break,
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(3) =>
+                        {
+                            panic!("term-start view timed out before parent repair completed");
+                        }
+                        batcher::Message::Update { .. }
+                        | batcher::Message::Constructed(_) => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("follower did not vote after parent repair");
                     }
                 }
             }
