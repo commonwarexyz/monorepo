@@ -192,6 +192,11 @@ pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
+    /// Number of leaves available before operation replay.
+    pub(crate) fn leaves(&self) -> Location<F> {
+        self.mem.leaves()
+    }
+
     /// Finalize a validated prefix and publish its Merkle handle.
     pub(crate) async fn finish(mut self) -> Result<Merkle<F, E, D, S>, Error<F>> {
         self.journal = self.journal.truncate(*self.retained_size).await?;
