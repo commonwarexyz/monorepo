@@ -1,4 +1,4 @@
-use super::{dynamic, fixed, tests::current_range_proof_fixture};
+use super::{constant, dynamic, tests::current_range_proof_fixture};
 use crate::{
     merkle::{Graftable, Location},
     mmb, mmr,
@@ -42,7 +42,7 @@ async fn check_dynamic_proofs<F: Graftable, const N: usize>() {
         for loc in [start, Location::new(leaves - 1)] {
             let (_, range_proof, operations, chunks, root, _) =
                 current_range_proof_fixture::<F, N>(leaves, loc..loc + 1).await;
-            let native = fixed::OperationProof::<F, Digest, N> {
+            let native = constant::OperationProof::<F, Digest, N> {
                 loc,
                 chunk: chunks[0],
                 range_proof,
@@ -179,7 +179,7 @@ async fn check_dynamic_operation_codec_rejections<F: Graftable>() {
     let loc = Location::<F>::new(14);
     let (_, range_proof, operations, chunks, root, _) =
         current_range_proof_fixture::<F, N>(18, loc..loc + 1).await;
-    let native = fixed::OperationProof::<F, Digest, N> {
+    let native = constant::OperationProof::<F, Digest, N> {
         loc,
         chunk: chunks[0],
         range_proof,

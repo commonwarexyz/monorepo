@@ -23,7 +23,7 @@ use crate::{
         current::{
             batch::BitmapBatch,
             grafting,
-            proof::{OpsRootWitness, RangeProof, RangeProofSpec, fixed::OperationProof},
+            proof::{OpsRootWitness, RangeProof, RangeProofSpec, constant::OperationProof},
         },
         operation::Floored as _,
     },

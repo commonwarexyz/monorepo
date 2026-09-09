@@ -17,7 +17,7 @@ use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 
 /// Proofs with fixed-size bitmap chunks.
-pub mod fixed {
+pub mod constant {
     /// Proof information for verifying a key has a particular value in the database.
     pub type KeyValueProof<F, K, D, const N: usize> = super::KeyValueProof<F, K, D, [u8; N]>;
 

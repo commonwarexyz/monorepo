@@ -1,7 +1,7 @@
 //! _Ordered_ variants of a [crate::qmdb::current] authenticated database.
 //!
 //! These variants maintain the lexicographic-next active key for each active key, enabling
-//! exclusion proofs via [ExclusionProof](proof::fixed::ExclusionProof). This adds overhead
+//! exclusion proofs via [ExclusionProof](proof::constant::ExclusionProof). This adds overhead
 //! compared to [super::unordered] variants.
 //!
 //! Variants:
@@ -15,10 +15,10 @@ pub mod proof;
 mod test_trait_impls;
 pub mod variable;
 
-/// Wire tag for [proof::fixed::ExclusionProof::KeyValue].
+/// Wire tag for [proof::constant::ExclusionProof::KeyValue].
 pub const KEY_VALUE_CONTEXT: u8 = 0;
 
-/// Wire tag for [proof::fixed::ExclusionProof::Commit].
+/// Wire tag for [proof::constant::ExclusionProof::Commit].
 pub const COMMIT_CONTEXT: u8 = 1;
 
 #[cfg(test)]
@@ -27,7 +27,7 @@ pub mod tests {
 
     use super::{
         db,
-        proof::{dynamic, fixed},
+        proof::{constant, dynamic},
     };
     use crate::{
         index::ordered::Index,
@@ -44,7 +44,7 @@ pub mod tests {
             },
             current::{
                 BitmapPrunedBits,
-                proof::{RangeProof, fixed::OperationProof},
+                proof::{RangeProof, constant::OperationProof},
                 tests::apply_random_ops,
             },
             store::tests::{TestKey, TestValue},
@@ -242,8 +242,8 @@ pub mod tests {
             // Create a proof of the now-inactive update operation assigning v1 to k against the
             // current root.
             let (p, _, chunks) = db.range_proof(op_loc, NZU64!(1)).await.unwrap();
-            let proof_inactive = fixed::KeyValueProof {
-                proof: crate::qmdb::current::proof::fixed::OperationProof {
+            let proof_inactive = constant::KeyValueProof {
+                proof: crate::qmdb::current::proof::constant::OperationProof {
                     loc: op_loc,
                     chunk: chunks[0],
                     range_proof: p,
@@ -510,7 +510,7 @@ pub mod tests {
     }
 
     fn dynamic_exclusion_proof<F, V>(
-        proof: fixed::ExclusionProof<F, Digest, V, Digest, 32>,
+        proof: constant::ExclusionProof<F, Digest, V, Digest, 32>,
     ) -> dynamic::ExclusionProof<F, Digest, V, Digest>
     where
         F: Graftable,
@@ -519,9 +519,8 @@ pub mod tests {
         <Update<Digest, V> as Read>::Cfg: Default,
     {
         let max_digests = match &proof {
-            fixed::ExclusionProof::KeyValue(proof, _) | fixed::ExclusionProof::Commit(proof, _) => {
-                proof.range_proof.proof.digests.len()
-            }
+            constant::ExclusionProof::KeyValue(proof, _)
+            | constant::ExclusionProof::Commit(proof, _) => proof.range_proof.proof.digests.len(),
         };
         let encoded = proof.encode();
         let dynamic = dynamic::ExclusionProof::<F, Digest, V, Digest>::decode_cfg(
@@ -689,8 +688,8 @@ pub mod tests {
     }
 
     type CodecExclusionProof =
-        fixed::ExclusionProof<mmb::Family, Digest, FixedEncoding<Digest>, Digest, 32>;
-    type CodecKeyValueProof = fixed::KeyValueProof<mmb::Family, Digest, Digest, 32>;
+        constant::ExclusionProof<mmb::Family, Digest, FixedEncoding<Digest>, Digest, 32>;
+    type CodecKeyValueProof = constant::KeyValueProof<mmb::Family, Digest, Digest, 32>;
     const MAX_DIGESTS: usize = 64;
 
     #[test]
@@ -797,7 +796,7 @@ pub mod tests {
     }
 
     fn check_dynamic_ordered_codecs<F: Graftable>() {
-        let proof = fixed::KeyValueProof::<F, Digest, Digest, 32> {
+        let proof = constant::KeyValueProof::<F, Digest, Digest, 32> {
             proof: sample_op_proof(),
             next_key: Sha256::hash(&[b"next-key"]),
         };
@@ -812,7 +811,7 @@ pub mod tests {
         );
 
         let cases = [
-            fixed::ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, 32>::KeyValue(
+            constant::ExclusionProof::<F, Digest, FixedEncoding<Digest>, Digest, 32>::KeyValue(
                 sample_op_proof(),
                 Update {
                     key: Sha256::hash(&[b"key"]),
@@ -820,8 +819,8 @@ pub mod tests {
                     next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
-            fixed::ExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
-            fixed::ExclusionProof::Commit(sample_op_proof(), None),
+            constant::ExclusionProof::Commit(sample_op_proof(), Some(Sha256::hash(&[b"metadata"]))),
+            constant::ExclusionProof::Commit(sample_op_proof(), None),
         ];
         for proof in cases {
             check_dynamic_codec::<dynamic::ExclusionProof<F, Digest, FixedEncoding<Digest>, Digest>>(
@@ -850,7 +849,7 @@ pub mod tests {
         let value_cfg = ((..=3).into(), ());
         let update_cfg = ((), value_cfg);
         let cases = [
-            fixed::ExclusionProof::<F, Digest, VariableEncoding<Vec<u8>>, Digest, 32>::KeyValue(
+            constant::ExclusionProof::<F, Digest, VariableEncoding<Vec<u8>>, Digest, 32>::KeyValue(
                 sample_op_proof(),
                 Update {
                     key: Sha256::hash(&[b"key"]),
@@ -858,7 +857,7 @@ pub mod tests {
                     next_key: Sha256::hash(&[b"next-key"]),
                 },
             ),
-            fixed::ExclusionProof::Commit(sample_op_proof(), Some(vec![1, 2, 3])),
+            constant::ExclusionProof::Commit(sample_op_proof(), Some(vec![1, 2, 3])),
         ];
         for proof in cases {
             check_dynamic_codec::<
@@ -891,7 +890,7 @@ pub mod tests {
             merkle::{mmb, mmr},
             qmdb::{
                 any::value::{FixedEncoding, VariableEncoding},
-                current::ordered::proof::{dynamic, fixed},
+                current::ordered::proof::{constant, dynamic},
             },
         };
         use commonware_codec::conformance::CodecConformance;
@@ -899,12 +898,12 @@ pub mod tests {
         use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<fixed::KeyValueProof<mmr::Family, U64, Sha256Digest, 32>>,
-            CodecConformance<fixed::KeyValueProof<mmb::Family, U64, Sha256Digest, 32>>,
-            CodecConformance<fixed::ExclusionProof<mmr::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
-            CodecConformance<fixed::ExclusionProof<mmr::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
-            CodecConformance<fixed::ExclusionProof<mmb::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
-            CodecConformance<fixed::ExclusionProof<mmb::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
+            CodecConformance<constant::KeyValueProof<mmr::Family, U64, Sha256Digest, 32>>,
+            CodecConformance<constant::KeyValueProof<mmb::Family, U64, Sha256Digest, 32>>,
+            CodecConformance<constant::ExclusionProof<mmr::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
+            CodecConformance<constant::ExclusionProof<mmr::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
+            CodecConformance<constant::ExclusionProof<mmb::Family, U64, FixedEncoding<U64>, Sha256Digest, 32>>,
+            CodecConformance<constant::ExclusionProof<mmb::Family, U64, VariableEncoding<Vec<u8>>, Sha256Digest, 32>>,
             CodecConformance<dynamic::KeyValueProof<mmr::Family, U64, Sha256Digest>>,
             CodecConformance<dynamic::KeyValueProof<mmb::Family, U64, Sha256Digest>>,
             CodecConformance<dynamic::ExclusionProof<mmr::Family, U64, FixedEncoding<U64>, Sha256Digest>>,

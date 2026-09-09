@@ -3,7 +3,7 @@
 //! This module provides:
 //! - [OpsRootWitness]: Authenticates an ops root against a canonical `current` root.
 //! - [RangeProof]: Proves a range of operations exist in the database.
-//! - [fixed::OperationProof]: Proves a specific operation is active, with a fixed-size bitmap chunk.
+//! - [constant::OperationProof]: Proves a specific operation is active, with a fixed-size bitmap chunk.
 //! - [dynamic::OperationProof]: Uses a bitmap chunk size supplied when decoding.
 //!
 //! # Canonical root structure
@@ -69,7 +69,7 @@ pub(super) fn chunk_bits(chunk_size: usize) -> Result<u64, commonware_codec::Err
         ))
 }
 
-/// Bitmap chunk indices read by [RangeProof::new] or [fixed::OperationProof::new].
+/// Bitmap chunk indices read by [RangeProof::new] or [constant::OperationProof::new].
 ///
 /// Pass `None` for a range proof or the queried operation location for an operation proof.
 /// The returned indices are unique and increasing. At most three chunks are needed: the
@@ -633,7 +633,7 @@ where
 }
 
 /// Proofs with fixed-size bitmap chunks.
-pub mod fixed {
+pub mod constant {
     /// A proof that a specific operation is active, with a fixed-size bitmap chunk.
     pub type OperationProof<F, D, const N: usize> = super::operation::Proof<F, D, [u8; N]>;
 }
@@ -645,7 +645,7 @@ pub mod dynamic {
     /// Decoding takes `(chunk_size, max_digests)` as configuration. The chunk size must match
     /// the source database and satisfy [super::RangeProof::verify_with_chunk_size]'s size
     /// requirements. The bitmap chunk has no length prefix, so its wire encoding matches
-    /// [super::fixed::OperationProof].
+    /// [super::constant::OperationProof].
     /// The operation supplied to verification must use the source database's key and value codecs.
     ///
     /// # Examples
@@ -859,7 +859,7 @@ mod tests {
 
         let chunk: [u8; N] = core::array::from_fn(|i| i as u8);
 
-        let proof = fixed::OperationProof::<F, sha256::Digest, N> {
+        let proof = constant::OperationProof::<F, sha256::Digest, N> {
             loc: mmb::Location::new(5),
             chunk,
             range_proof,
@@ -868,7 +868,7 @@ mod tests {
         let encoded = proof.encode();
         assert_eq!(encoded.len(), proof.encode_size());
         let decoded =
-            fixed::OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &MAX_DIGESTS)
+            constant::OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &MAX_DIGESTS)
                 .unwrap();
         assert_eq!(decoded, proof);
     }
@@ -889,21 +889,21 @@ mod tests {
             ops_root: Sha256::hash(&[b"ops"]),
         };
         let total_digests = range_proof_digest_count(&range_proof);
-        let proof = fixed::OperationProof::<F, sha256::Digest, N> {
+        let proof = constant::OperationProof::<F, sha256::Digest, N> {
             loc: mmb::Location::new(5),
             chunk: core::array::from_fn(|i| i as u8),
             range_proof,
         };
 
         let encoded = proof.encode();
-        let decoded = fixed::OperationProof::<F, sha256::Digest, N>::decode_cfg(
+        let decoded = constant::OperationProof::<F, sha256::Digest, N>::decode_cfg(
             encoded.clone(),
             &total_digests,
         )
         .unwrap();
         assert_eq!(decoded, proof);
         assert!(
-            fixed::OperationProof::<F, sha256::Digest, N>::decode_cfg(
+            constant::OperationProof::<F, sha256::Digest, N>::decode_cfg(
                 encoded,
                 &(total_digests - 1)
             )
@@ -2179,7 +2179,7 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::super::{OpsRootWitness, RangeProof, dynamic, fixed};
+        use super::super::{OpsRootWitness, RangeProof, constant, dynamic};
         use crate::merkle::{mmb, mmr};
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
@@ -2189,8 +2189,8 @@ mod tests {
             CodecConformance<OpsRootWitness<mmb::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmr::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmb::Family, Sha256Digest>>,
-            CodecConformance<fixed::OperationProof<mmr::Family, Sha256Digest, 32>>,
-            CodecConformance<fixed::OperationProof<mmb::Family, Sha256Digest, 32>>,
+            CodecConformance<constant::OperationProof<mmr::Family, Sha256Digest, 32>>,
+            CodecConformance<constant::OperationProof<mmb::Family, Sha256Digest, 32>>,
             CodecConformance<dynamic::OperationProof<mmr::Family, Sha256Digest>>,
             CodecConformance<dynamic::OperationProof<mmb::Family, Sha256Digest>>,
         }

@@ -3,7 +3,7 @@
 //! This module contains impl blocks that are generic over `ValueEncoding`, allowing them to be
 //! used by both fixed and variable ordered QMDB implementations.
 
-use super::proof::fixed::{ExclusionProof, KeyValueProof};
+use super::proof::constant::{ExclusionProof, KeyValueProof};
 use crate::{
     Context,
     index::Ordered as OrderedIndex,

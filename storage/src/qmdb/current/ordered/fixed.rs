@@ -6,7 +6,7 @@
 //! exclusion proofs are not needed.
 //!
 //! See [Db] for the main database type and
-//! [ExclusionProof](super::proof::fixed::ExclusionProof) for proving key inactivity.
+//! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
 use crate::{
     Context,
