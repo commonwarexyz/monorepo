@@ -106,7 +106,7 @@ impl Admissions {
         }));
         let index = id.0.index;
         if let Some(tail) = self.tail {
-            let AdmissionState::Queued { next, .. } = &mut self.entries[tail].state else {
+            let AdmissionState::Queued { next, .. } = &mut self.entry_mut(tail).state else {
                 unreachable!("admission tail is not queued");
             };
             *next = Some(index);
@@ -126,24 +126,25 @@ impl Admissions {
     /// A stale identity returns the incoming waker untouched. Neither path
     /// destroys a waker while the worker is borrowed.
     pub fn refresh(&mut self, id: AdmissionId, waker: Waker) -> Result<Option<Waker>, Waker> {
-        if !self.contains(id) {
+        let Some(entry) = self.entries.get_mut(id.0) else {
             return Err(waker);
-        }
-        Ok(self.entries[id.0.index].waker.replace(waker))
+        };
+        Ok(entry.waker.replace(waker))
     }
 
     /// Whether a live registration owns reserved waiter capacity.
     pub fn is_granted(&self, id: AdmissionId) -> bool {
-        self.contains(id) && matches!(self.entries[id.0.index].state, AdmissionState::Granted)
+        self.entries
+            .get(id.0)
+            .is_some_and(|entry| matches!(entry.state, AdmissionState::Granted))
     }
 
     /// Whether a live registration already holds an equivalent observer.
     pub fn will_wake(&self, id: AdmissionId, waker: &Waker) -> bool {
-        self.contains(id)
-            && self.entries[id.0.index]
-                .waker
-                .as_ref()
-                .is_some_and(|registered| registered.will_wake(waker))
+        self.entries
+            .get(id.0)
+            .and_then(|entry| entry.waker.as_ref())
+            .is_some_and(|registered| registered.will_wake(waker))
     }
 
     /// Consume a reserved grant and detach any refreshed waker.
@@ -152,11 +153,10 @@ impl Admissions {
     /// must insert the request into a free waiter before releasing its borrow,
     /// then reconcile using the updated free waiter count.
     pub fn take_grant(&mut self, id: AdmissionId) -> Result<Option<Waker>, ()> {
-        if !self.contains(id) || !matches!(self.entries[id.0.index].state, AdmissionState::Granted)
-        {
+        if !self.is_granted(id) {
             return Err(());
         }
-        let waker = self.remove(id.0.index);
+        let waker = self.remove(id.0);
         self.compact();
         Ok(waker)
     }
@@ -170,7 +170,7 @@ impl Admissions {
         if !self.contains(id) {
             return None;
         }
-        let waker = self.remove(id.0.index);
+        let waker = self.remove(id.0);
         self.compact();
         waker
     }
@@ -187,7 +187,7 @@ impl Admissions {
                 break;
             }
             let Reverse((_, id)) = self.deadlines.pop().unwrap();
-            if let Some(waker) = self.remove(id.0.index) {
+            if let Some(waker) = self.remove(id.0) {
                 wakes.push(waker);
             }
         }
@@ -195,12 +195,14 @@ impl Admissions {
             let Some(index) = self.head else {
                 break;
             };
-            self.unlink(index);
-            self.entries[index].state = AdmissionState::Granted;
+            let id = self.entries.id_at(index).expect("queued admission missing");
+            self.unlink(id);
+            let entry = self.entries.get_mut(id).unwrap();
+            entry.state = AdmissionState::Granted;
             self.reserved += 1;
             // Commit the reservation before detaching its wake. A reentrant
             // caller must observe this capacity as unavailable.
-            if let Some(waker) = self.entries[index].waker.take() {
+            if let Some(waker) = entry.waker.take() {
                 wakes.push(waker);
             }
         }
@@ -210,7 +212,11 @@ impl Admissions {
     /// Return the earliest live queued or granted deadline.
     pub fn next_deadline(&mut self) -> Option<Instant> {
         while let Some(&Reverse((deadline, id))) = self.deadlines.peek() {
-            if self.contains(id) && self.entries[id.0.index].deadline == Some(deadline) {
+            if self
+                .entries
+                .get(id.0)
+                .is_some_and(|entry| entry.deadline == Some(deadline))
+            {
                 return Some(deadline);
             }
             self.deadlines.pop();
@@ -224,9 +230,9 @@ impl Admissions {
     /// the borrow, under its normal cleanup panic isolation.
     pub fn clear(&mut self, drops: &mut Vec<Waker>) {
         drops.reserve(self.entries.len());
-        for index in 0..self.entries.slots_len() {
-            if self.entries.id_at(index).is_some()
-                && let Some(waker) = self.remove(index)
+        for index in 0..self.entries.slots() {
+            if let Some(id) = self.entries.id_at(index)
+                && let Some(waker) = self.remove(id)
             {
                 drops.push(waker);
             }
@@ -239,13 +245,19 @@ impl Admissions {
         self.entries.get(id.0).is_some()
     }
 
+    /// Resolve an internal FIFO link, whose target must still be live.
+    fn entry_mut(&mut self, index: usize) -> &mut Entry {
+        let id = self.entries.id_at(index).expect("linked admission missing");
+        self.entries.get_mut(id).unwrap()
+    }
+
     /// Unlink a queued node without touching its waker or deadline.
-    fn unlink(&mut self, index: usize) {
-        let AdmissionState::Queued { prev, next } = self.entries[index].state else {
+    fn unlink(&mut self, id: Id) {
+        let AdmissionState::Queued { prev, next } = self.entries.get(id).unwrap().state else {
             unreachable!("unlink requires a queued admission");
         };
         if let Some(prev) = prev {
-            let AdmissionState::Queued { next: link, .. } = &mut self.entries[prev].state else {
+            let AdmissionState::Queued { next: link, .. } = &mut self.entry_mut(prev).state else {
                 unreachable!("admission predecessor is not queued");
             };
             *link = next;
@@ -253,7 +265,7 @@ impl Admissions {
             self.head = next;
         }
         if let Some(next) = next {
-            let AdmissionState::Queued { prev: link, .. } = &mut self.entries[next].state else {
+            let AdmissionState::Queued { prev: link, .. } = &mut self.entry_mut(next).state else {
                 unreachable!("admission successor is not queued");
             };
             *link = prev;
@@ -263,15 +275,11 @@ impl Admissions {
     }
 
     /// Retire one live registration and return its owned waker.
-    fn remove(&mut self, index: usize) -> Option<Waker> {
-        match self.entries[index].state {
-            AdmissionState::Queued { .. } => self.unlink(index),
+    fn remove(&mut self, id: Id) -> Option<Waker> {
+        match self.entries.get(id).unwrap().state {
+            AdmissionState::Queued { .. } => self.unlink(id),
             AdmissionState::Granted => self.reserved -= 1,
         }
-        let id = self
-            .entries
-            .id_at(index)
-            .expect("removing a free admission");
         let entry = self.entries.remove(id).unwrap();
         if entry.deadline.is_some() {
             self.timed -= 1;
@@ -298,6 +306,7 @@ impl Admissions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iouring::slab::tests::set_generation;
     use std::{
         sync::{
             Arc,
@@ -375,12 +384,17 @@ mod tests {
         let middle = admissions.register(None, Waker::noop().clone());
         let last = admissions.register(None, Waker::noop().clone());
         assert!(admissions.cancel(middle).is_some());
+        let reused = admissions.register(None, Waker::noop().clone());
+        assert_eq!(middle.0.index, reused.0.index);
         admissions.reconcile(now, 1, &mut wakes);
         assert_eq!(admissions.reserved, 1);
         assert!(admissions.cancel(first).is_none());
         admissions.reconcile(now, 1, &mut wakes);
         assert_eq!(admissions.reserved, 1);
+        assert!(!admissions.is_granted(reused));
         assert!(admissions.take_grant(last).is_ok());
+        admissions.reconcile(now, 1, &mut wakes);
+        assert!(admissions.take_grant(reused).is_ok());
         assert_eq!(admissions.entries.len(), 0);
         assert!(admissions.head.is_none());
         assert!(admissions.tail.is_none());
@@ -420,14 +434,26 @@ mod tests {
         let mut admissions = Admissions::new();
         let old = admissions.register(None, Waker::noop().clone());
         drop(admissions.cancel(old));
-        let current = admissions.register(None, Waker::noop().clone());
+        let (_, current_waker) = waker();
+        let current = admissions.register(None, current_waker.clone());
         assert_eq!(old.0.index, current.0.index);
         assert_ne!(old.0.generation, current.0.generation);
         assert!(admissions.cancel(old).is_none());
         assert!(admissions.refresh(old, Waker::noop().clone()).is_err());
         assert!(admissions.contains(current));
+        assert!(admissions.will_wake(current, &current_waker));
+        assert!(!admissions.will_wake(old, &current_waker));
 
-        let exhausted = AdmissionId(admissions.entries.set_generation(current.0, u64::MAX));
+        let mut wakes = Vec::new();
+        admissions.reconcile(Instant::now(), 1, &mut wakes);
+        assert!(admissions.is_granted(current));
+        assert!(!admissions.is_granted(old));
+        assert!(admissions.take_grant(old).is_err());
+        assert_eq!(admissions.reserved, 1);
+        drop(admissions.take_grant(current).unwrap());
+
+        let current = admissions.register(None, Waker::noop().clone());
+        let exhausted = AdmissionId(set_generation(&mut admissions.entries, current.0, u64::MAX));
         drop(admissions.cancel(exhausted));
         let next = admissions.register(None, Waker::noop().clone());
         assert_ne!(exhausted.0.index, next.0.index);
@@ -444,7 +470,7 @@ mod tests {
             drop(admissions.cancel(id));
             assert!(admissions.deadlines.len() <= admissions.timed + 64);
         }
-        assert_eq!(admissions.entries.slots_len(), 2);
+        assert_eq!(admissions.entries.slots(), 2);
         assert_eq!(admissions.next_deadline(), Some(now));
         drop(admissions.cancel(oldest));
         assert_eq!(admissions.next_deadline(), None);

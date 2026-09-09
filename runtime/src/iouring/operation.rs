@@ -63,15 +63,9 @@ pub(super) struct Operations {
 }
 
 impl Operations {
-    /// Select the observer identity before pairing it with a driver waiter.
-    fn next_id(&self) -> OperationId {
-        OperationId(self.entries.next_id())
-    }
-
-    /// Install the waiter association before releasing the local borrow.
-    fn insert(&mut self, id: OperationId, waiter_id: WaiterId, waker: Waker) {
-        self.entries
-            .insert_at(id.0, EntryState::Pending { waiter_id, waker });
+    /// Install an entry built from its own identity.
+    fn insert(&mut self, make: impl FnOnce(OperationId) -> EntryState) -> OperationId {
+        OperationId(self.entries.insert_with(|id| make(OperationId(id))))
     }
 
     /// Inspect a live full-width identity without following stale waiter IDs.
@@ -288,13 +282,16 @@ impl Future for Operation {
                     .can_admit(local.driver.as_ref().unwrap().free_slots()),
             };
             if granted {
-                let id = local.operations.next_id();
-                let waiter = local
-                    .driver
-                    .as_mut()
-                    .unwrap()
-                    .admit(request, Observer::Ordinary(id));
-                local.operations.insert(id, waiter, incoming);
+                let Local {
+                    operations, driver, ..
+                } = &mut *local;
+                let id = operations.insert(|id| EntryState::Pending {
+                    waiter_id: driver
+                        .as_mut()
+                        .unwrap()
+                        .admit(request, Observer::Ordinary(id)),
+                    waker: incoming,
+                });
                 this.state = State::Waiting {
                     mailbox,
                     operation_id: id,
@@ -575,7 +572,7 @@ impl Local {
 
     /// Remove all ordinary observers, including futures retained outside workers.
     pub(super) fn close_operations(&mut self) {
-        for index in 0..self.operations.entries.slots_len() {
+        for index in 0..self.operations.entries.slots() {
             if let Some(id) = self.operations.entries.id_at(index) {
                 self.orphan_operation(OperationId(id));
             }
@@ -591,7 +588,7 @@ mod tests {
     };
     use crate::{
         Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _,
-        iouring::{Config, RingConfig, Runner},
+        iouring::{Config, RingConfig, Runner, slab::tests::set_generation},
         utils::{extract_panic_message, reschedule},
     };
     use futures::{FutureExt as _, poll};
@@ -1094,12 +1091,17 @@ mod tests {
         });
     }
 
+    fn pending(waiter_id: WaiterId) -> EntryState {
+        EntryState::Pending {
+            waiter_id,
+            waker: Waker::noop().clone(),
+        }
+    }
+
     #[test]
     fn retained_result_survives_waiter_reuse() {
         let mut operations = Operations::default();
-        let first = operations.next_id();
-        let waiter = WaiterId::new(0, 0);
-        operations.insert(first, waiter, Waker::noop().clone());
+        let first = operations.insert(|_| pending(WaiterId::new(0, 0)));
         let old = mem::replace(
             operations.get_mut(first).unwrap(),
             EntryState::Ready(RequestOutput::Send(Ok(()))),
@@ -1108,8 +1110,7 @@ mod tests {
 
         // The next operation can use the same bounded waiter while the earlier
         // output remains in its independent observer slot.
-        let second = operations.next_id();
-        operations.insert(second, WaiterId::new(0, 1), Waker::noop().clone());
+        let second = operations.insert(|_| pending(WaiterId::new(0, 1)));
         assert_ne!(first, second);
         assert!(matches!(
             operations.take(first),
@@ -1124,11 +1125,9 @@ mod tests {
     #[test]
     fn delayed_drop_cannot_alias_recycled_result_slot() {
         let mut operations = Operations::default();
-        let first = operations.next_id();
-        operations.insert(first, WaiterId::new(0, 0), Waker::noop().clone());
+        let first = operations.insert(|_| pending(WaiterId::new(0, 0)));
         drop(operations.take(first));
-        let second = operations.next_id();
-        operations.insert(second, WaiterId::new(0, 1), Waker::noop().clone());
+        let second = operations.insert(|_| pending(WaiterId::new(0, 1)));
         assert_eq!(first.0.index, second.0.index);
         assert_ne!(first.0.generation, second.0.generation);
         assert!(operations.take(first).is_none());
@@ -1138,10 +1137,10 @@ mod tests {
     #[test]
     fn exhausted_result_generation_retires_slot() {
         let mut operations = Operations::default();
-        let id = operations.next_id();
-        operations.insert(id, WaiterId::new(0, 0), Waker::noop().clone());
-        let exhausted = OperationId(operations.entries.set_generation(id.0, u64::MAX));
+        let id = operations.insert(|_| pending(WaiterId::new(0, 0)));
+        let exhausted = OperationId(set_generation(&mut operations.entries, id.0, u64::MAX));
         drop(operations.take(exhausted));
-        assert_ne!(operations.next_id().0.index, id.0.index);
+        let next = operations.insert(|_| pending(WaiterId::new(0, 1)));
+        assert_ne!(next.0.index, id.0.index);
     }
 }

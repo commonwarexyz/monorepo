@@ -294,7 +294,7 @@ impl Tasks {
     pub(super) fn clear(&mut self, retired: &mut Vec<Running>) {
         retired.reserve(self.entries.len());
         self.ready.clear();
-        for index in 0..self.entries.slots_len() {
+        for index in 0..self.entries.slots() {
             let Some(id) = self.entries.id_at(index) else {
                 continue;
             };
@@ -315,7 +315,7 @@ mod tests {
     use super::*;
     use crate::{
         Error, Runner as _, Spawner as _, Supervisor as _,
-        iouring::{Config, Runner},
+        iouring::{Config, Runner, slab::tests::set_generation},
     };
     use commonware_utils::channel::oneshot;
 
@@ -417,7 +417,7 @@ mod tests {
         let mut tasks = Tasks::default();
         let id = insert(&mut tasks);
         let task = tasks.take().unwrap();
-        let exhausted = TaskId(tasks.entries.set_generation(id.0, u64::MAX));
+        let exhausted = TaskId(set_generation(&mut tasks.entries, id.0, u64::MAX));
         tasks.complete(exhausted);
         drop(task);
         assert_ne!(insert(&mut tasks).0.index, id.0.index);

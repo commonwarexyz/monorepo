@@ -275,7 +275,7 @@ impl Timers {
     /// worker. The caller drops each detached waker after releasing Local.
     pub fn clear(&mut self, drops: &mut Vec<Waker>) {
         drops.reserve(self.entries.len());
-        for index in 0..self.entries.slots_len() {
+        for index in 0..self.entries.slots() {
             if self.entries.id_at(index).is_some() {
                 drops.push(self.remove(index));
             }
@@ -313,6 +313,7 @@ impl Timers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iouring::slab::tests::set_generation;
     use std::{
         sync::{
             Arc,
@@ -447,7 +448,7 @@ mod tests {
         let now = Instant::now();
         let mut timers = Timers::new();
         let id = timers.insert(now, Waker::noop().clone());
-        let exhausted = TimerId(timers.entries.set_generation(id.0, u64::MAX));
+        let exhausted = TimerId(set_generation(&mut timers.entries, id.0, u64::MAX));
         drop(timers.cancel(exhausted));
         let next = timers.insert(now, Waker::noop().clone());
         assert_ne!(exhausted.0.index, next.0.index);
@@ -464,7 +465,7 @@ mod tests {
             drop(timers.cancel(id));
             assert!(timers.deadlines.len() <= timers.entries.len() + 64);
         }
-        assert_eq!(timers.entries.slots_len(), 2);
+        assert_eq!(timers.entries.slots(), 2);
         assert_eq!(timers.next_deadline(), Some(now));
         drop(timers.cancel(oldest));
         assert_eq!(timers.next_deadline(), None);
