@@ -2251,7 +2251,7 @@ mod tests {
             height: Height,
         ) -> Option<u64> {
             let reopened: Qmdb<deterministic::Context> =
-                Qmdb::init(context.child("reopen_db"), self.db_config.clone())
+                Qmdb::init(context.child("reopen_db"), self.db_config.clone(), None)
                     .await
                     .expect("database reopen should succeed");
             reopened
