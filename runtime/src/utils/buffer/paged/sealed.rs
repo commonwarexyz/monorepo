@@ -170,7 +170,8 @@ impl<B: Blob> Sealed<B> {
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
-    /// is not async. Every underlying blob read performed by the returned replay uses
+    /// is not async. Replay reads the partial page from storage too; it does not use the
+    /// frozen partial-page copy used by [`Self::read_at`]. Every underlying blob read performed by the returned replay uses
     /// `read_options`, including refills after seeking.
     pub fn replay(
         &self,

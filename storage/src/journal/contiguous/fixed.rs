@@ -488,7 +488,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                     .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
                     .min(items_per_blob),
             )?;
-            if valid == writer.size() || valid >= required {
+            if valid == writer.size() || (max_size.is_some() && valid >= required) {
                 continue;
             }
 
@@ -626,18 +626,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         if size < self.bounds.start {
             return Err(Error::ItemPruned(size));
         }
-        if size != 0
-            && size == self.bounds.start
-            && (!self.discarded.is_empty()
-                || self.pending.len() > 1
-                || self.pending.values().any(|writer| writer.size() > 0))
-        {
-            // An empty retained prefix needs a reset intent: retry must know its boundary
-            // even if interrupted after removing the last blob and before creating the tail.
-            return Ok(*Box::new(self)
-                .clear_to_size_cleared(size, || async { Ok(()) })
-                .await?);
-        }
         let items_per_blob = self.cfg.items_per_blob.get();
         let tail_blob = super::position_to_blob(size, items_per_blob);
         let bytes = Inner::<E, A>::items_to_bytes(
@@ -653,6 +641,19 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 .checkpoint
                 .persist(items_per_blob, self.bounds.start, self.watermark)
                 .await?;
+        }
+        if size == self.bounds.start
+            && (!self.discarded.is_empty() || self.pending.keys().any(|&blob| blob > tail_blob))
+        {
+            // Keep a durable tail at the retained boundary before removing its last backing
+            // blob. Derived-offset repair must not stage a reset of dependent data.
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.pending.entry(tail_blob)
+            {
+                let mut writer = self.partition.open_recovery(tail_blob).await?;
+                writer.sync().await?;
+                entry.insert(writer);
+            }
+            self.discarded.retain(|&blob| blob != tail_blob);
         }
         // Make the target newest before changing its partial-page checksum.
         while let Some(blob) = self.discarded.pop() {
@@ -2091,7 +2092,7 @@ mod tests {
                 Recovery::<_, Digest>::open(context.child("cap"), cfg.clone(), checkpoint, Some(7))
                     .await
                     .unwrap();
-            // Interrupt initialization after repair and before publication creates its tail.
+            // Interrupt initialization after durable repair and before publication.
             drop(recovery.repair_to(7).await.unwrap());
             let journal = Journal::<_, Digest>::init(context.child("retry"), cfg)
                 .await
@@ -3678,7 +3679,7 @@ mod tests {
                 .expect("failed to sync recovery watermark");
             drop(journal);
 
-            // Shorten blob 2 to two items via Append::resize so the on-disk logical view
+            // Shorten blob 2 to two items through paged recovery so the on-disk logical view
             // matches the staged watermark of 12.
             {
                 let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);

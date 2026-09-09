@@ -291,7 +291,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         let (retained, value_end) = if items == 0 {
             (0, 0)
         } else {
-            self.find_last_valid_entry(section, items, self.values.size(section)?)
+            self.find_last_valid_entry(section, items, self.values.size(section)?, minimum_items)
                 .await?
         };
         if retained < minimum_items {
@@ -602,7 +602,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
             // Find last valid entry and target glob size
             let (valid_count, glob_target) = self
-                .find_last_valid_entry(section, entry_count, glob_size)
+                .find_last_valid_entry(section, entry_count, glob_size, 0)
                 .await?;
 
             // Truncate index if any entries are invalid
@@ -758,17 +758,23 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 
     /// Find the number of valid entries and the corresponding glob target size.
     ///
-    /// Scans backwards from the last entry until a valid one is found: an entry is valid
-    /// only if its byte range fits within the glob and its value's checksum verifies.
-    /// Returns `(valid_count, glob_target)` where `glob_target` is the end offset
-    /// of the last valid entry's value.
+    /// Scans backwards above `minimum_items`, checking byte ranges and value checksums.
+    /// If no valid uncommitted entry remains, retains the committed boundary without
+    /// checking its value checksum. Returns `(valid_count, glob_target)`, where
+    /// `glob_target` is the end offset of the last retained value.
     async fn find_last_valid_entry(
         &self,
         section: u64,
         entry_count: u64,
         glob_size: u64,
+        minimum_items: u64,
     ) -> Result<(u64, u64), Error> {
-        for pos in (0..entry_count).rev() {
+        if entry_count < minimum_items {
+            return Err(Error::Corruption(
+                "index ends below its committed floor".into(),
+            ));
+        }
+        for pos in (minimum_items..entry_count).rev() {
             match self.index.get(section, pos).await {
                 Ok(entry) => {
                     let (offset, size) = entry.value_location();
@@ -790,6 +796,18 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 }
                 Err(err) => return Err(err),
             }
+        }
+        if minimum_items > 0 {
+            // Preflight proves this committed boundary. Its values are checked lazily, just
+            // as in ordinary tracked recovery, even when the cap leaves no uncommitted suffix.
+            let entry = self.index.get(section, minimum_items - 1).await?;
+            let end = Self::boundary_value_end(section, &Some(entry))?;
+            if end > glob_size {
+                return Err(Error::Corruption(
+                    "committed value boundary is missing".into(),
+                ));
+            }
+            return Ok((minimum_items, end));
         }
         Ok((0, 0))
     }
@@ -1867,7 +1885,7 @@ mod tests {
             drop(index_blob);
 
             let cap_context = context.child("cap");
-            let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
                 &cap_context,
                 cfg.clone(),
                 "cap-corrupt-floor".into(),
@@ -1875,8 +1893,22 @@ mod tests {
                 1,
                 u64::MAX,
             )
-            .await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let journal = replay.finish_tracked().await.unwrap();
+            assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64 * 2);
+            let entry = journal.get(1, 1).await.unwrap();
+            let (value_offset, value_size) = entry.value_location();
+            assert!(
+                journal
+                    .get_value(1, value_offset, value_size)
+                    .await
+                    .is_err()
+            );
+            drop(journal);
             let (index_blob, retained_size) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await

@@ -1202,6 +1202,23 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         }
         let anchor = self.offsets.recovery_watermark().max(start);
         let mut blob = position_to_blob(anchor, per_blob);
+        // Bounds must not acknowledge missing blobs below the replay anchor.
+        let mut expected = position_to_blob(start, per_blob);
+        for (&retained, _) in self.pending.range(expected..blob) {
+            if retained != expected {
+                return Err(Error::Corruption(format!(
+                    "missing acknowledged data blob {expected}"
+                )));
+            }
+            expected += 1;
+        }
+        if expected != blob
+            || (anchor > blob_first_position(blob, per_blob)? && !self.pending.contains_key(&blob))
+        {
+            return Err(Error::Corruption(format!(
+                "missing acknowledged data blob {expected}"
+            )));
+        }
         let mut end = anchor;
         while let Some(writer) = self.pending.get_mut(&blob) {
             let first = blob_first_position(blob, per_blob)?.max(start);
@@ -1324,6 +1341,10 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             && let Some(scan) = self.recovered_scans.get(&blob)
         {
             return Ok(scan.valid_size);
+        }
+        if size < self.offsets.recovery_watermark() && size < self.offsets.size() {
+            // The acknowledged next entry already records the selected prefix's byte end.
+            return self.offsets.read(size).await;
         }
         let writer = self
             .pending
@@ -2825,6 +2846,38 @@ mod tests {
                 assert_eq!(syncs.starts(), *baseline.get_or_insert(syncs.starts()));
                 drop(journal);
             }
+        });
+    }
+
+    #[test]
+    fn test_selected_prefix_reuses_acknowledged_offset() {
+        deterministic::Runner::default().start(|context| async move {
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cfg = Config {
+                partition: "selected-offset".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: count.clone(),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..13 {
+                (journal, _) = journal.append(&Counted(value)).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            let mut pending = Recovery::<_, Counted>::open(context.child("recover"), cfg, Some(12))
+                .await
+                .unwrap();
+            count.store(0, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(pending.terminal_offset(7).await.unwrap(), 18);
+            assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 0);
+            let journal = Journal(Box::new(pending.finish(7).await.unwrap()));
+            assert_eq!(journal.bounds(), 0..7);
+            assert_eq!(journal.read(6).await.unwrap().0, 6);
         });
     }
 

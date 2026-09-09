@@ -296,14 +296,28 @@ impl<B: Blob> AppendBuffer<B> {
         buffer: NonZeroUsize,
         options: ReadOptions,
     ) -> Result<u64, RError> {
+        self.recoverable_prefix_len_at_most(proven, u64::MAX, buffer, options)
+            .await
+    }
+    /// Validate only the pages intersecting the selected prefix.
+    pub async fn recoverable_prefix_len_at_most(
+        &self,
+        proven: u64,
+        max_size: u64,
+        buffer: NonZeroUsize,
+        options: ReadOptions,
+    ) -> Result<u64, RError> {
         match self {
             Self::Pending(p) => {
                 p.as_ref()
                     .expect("pending section")
-                    .recoverable_prefix_len(proven, buffer, options)
+                    .recoverable_prefix_len_at_most(proven, max_size, buffer, options)
                     .await
             }
-            Self::Live(w) => w.recoverable_prefix_len(proven, buffer, options).await,
+            Self::Live(w) => {
+                w.recoverable_prefix_len_at_most(proven, max_size, buffer, options)
+                    .await
+            }
         }
     }
     /// Append to a published section.

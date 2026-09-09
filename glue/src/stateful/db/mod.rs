@@ -738,8 +738,17 @@ fn validate_initialization<E, T: ManagedDb<E>>(
     db: T,
     expected: T::SyncTarget,
     mismatch: T::Error,
-) -> Result<T, T::Error> {
-    if db.sync_target() != expected {
+) -> Result<T, T::Error>
+where
+    T::SyncTarget: Debug,
+{
+    let recovered = db.sync_target();
+    if recovered != expected {
+        tracing::error!(
+            ?expected,
+            ?recovered,
+            "database does not match initialization target"
+        );
         return Err(mismatch);
     }
     Ok(db)

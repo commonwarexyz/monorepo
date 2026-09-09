@@ -12,6 +12,8 @@
 //! recoverable.
 
 use super::Error;
+#[commonware_macros::stability(ALPHA)]
+use super::authenticated::Recovery as _;
 use commonware_runtime::{Handle, ReadOptions};
 use futures::{Stream, StreamExt as _, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
@@ -32,7 +34,6 @@ pub(crate) async fn init_sync<E: crate::Context, J: super::authenticated::Backin
     cfg: J::Config,
     range: Range<u64>,
 ) -> Result<J, Error> {
-    use super::authenticated::Recovery as _;
     assert!(!range.is_empty(), "range must not be empty");
     let pending = match J::recover(context.child("journal"), cfg.clone(), Some(range.end)).await {
         Ok(pending) => pending,

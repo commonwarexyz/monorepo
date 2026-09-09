@@ -787,8 +787,26 @@ impl<B: Blob, Phase: Send + Sync> Writer<B, Phase> {
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<u64, Error> {
+        self.recoverable_prefix_len_at_most(proven, u64::MAX, buffer_size, read_options)
+            .await
+    }
+
+    /// Like [`Self::recoverable_prefix_len`], but returns at most `max_size` logical bytes.
+    ///
+    /// Reads only pages intersecting the prefix below `max_size`. A cap inside a page requires
+    /// validating that entire page's checksum. Zero requires no reads; a cap above the stored
+    /// end does not extend the prefix. `proven` has the same meaning as in the unbounded scan.
+    #[commonware_macros::stability(BETA)]
+    pub async fn recoverable_prefix_len_at_most(
+        &self,
+        proven: u64,
+        max_size: u64,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<u64, Error> {
         let logical_page_size: u64 = self.cache_ref.page_size().widen();
-        let total_pages = self.current_page + u64::from(self.partial_page_state.is_some());
+        let total_pages = (self.current_page + u64::from(self.partial_page_state.is_some()))
+            .min(max_size.div_ceil(logical_page_size));
         let physical_page_size = logical_page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
@@ -800,7 +818,9 @@ impl<B: Blob, Phase: Send + Sync> Writer<B, Phase> {
         // Pages below the proof are accepted without reading. An overshooting proof clamps to
         // the full pages: a partial tail backs fewer logical bytes than a skipped page would
         // credit, so it must always be read.
-        let start_page = (proven / logical_page_size).min(self.current_page);
+        let start_page = (proven / logical_page_size)
+            .min(self.current_page)
+            .min(total_pages);
         let mut valid_len = start_page
             .checked_mul(logical_page_size)
             .ok_or(Error::OffsetOverflow)?;
@@ -827,19 +847,19 @@ impl<B: Blob, Phase: Send + Sync> Writer<B, Phase> {
             // The first invalid page terminates the only recoverable contiguous prefix.
             for physical_page in physical.as_ref().chunks_exact(physical_page_size_usize) {
                 let Some(checksum) = Checksum::validate_page(physical_page) else {
-                    return Ok(valid_len);
+                    return Ok(valid_len.min(max_size));
                 };
                 let len = u64::from(checksum.len);
                 valid_len = valid_len.checked_add(len).ok_or(Error::OffsetOverflow)?;
 
                 // A valid partial logical page ends the contiguous prefix wherever it appears.
                 if len < logical_page_size {
-                    return Ok(valid_len);
+                    return Ok(valid_len.min(max_size));
                 }
             }
             page = batch_end;
         }
-        Ok(valid_len)
+        Ok(valid_len.min(max_size))
     }
 
     /// Wait for any started sync to complete without starting a new sync.
@@ -1805,6 +1825,57 @@ mod tests {
                 total as u64
             );
             assert_eq!(recordings.snapshot().reads.len(), 3);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_recoverable_prefix_len_at_most() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let (blob, size) = context.open("bounded_prefix", b"blob").await.unwrap();
+            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache).await.unwrap();
+            let page = u64::from(PAGE_SIZE.get());
+            let total = page * 8 + 10;
+            writer.append(&vec![7; total as usize]).await.unwrap();
+            writer.sync().await.unwrap();
+
+            // One-page reads make touching any page beyond the cap observable.
+            for (cap, proven, expected_reads) in [
+                (0, 0, 0),
+                (1, 0, 1),
+                (page, 0, 1),
+                (page + 1, 0, 2),
+                (page * 3, page, 2),
+                (1, u64::MAX, 0),
+                (total - 1, 0, 9),
+                (total, 0, 9),
+                (total + 1, 0, 9),
+                (u64::MAX, 0, 9),
+                (u64::MAX, u64::MAX, 1),
+            ] {
+                recordings.clear();
+                assert_eq!(
+                    writer
+                        .recoverable_prefix_len_at_most(
+                            proven,
+                            cap,
+                            NZUsize!(1),
+                            ReadOptions::DONT_CACHE,
+                        )
+                        .await
+                        .unwrap(),
+                    cap.min(total),
+                    "cap {cap}, proven {proven}",
+                );
+                let reads = recordings.snapshot().reads;
+                assert_eq!(reads.len(), expected_reads, "cap {cap}, proven {proven}");
+                assert!(
+                    reads
+                        .iter()
+                        .all(|options| *options == ReadOptions::DONT_CACHE)
+                );
+            }
         });
     }
 

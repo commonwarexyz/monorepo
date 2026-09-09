@@ -130,6 +130,7 @@ fn validate_initialization_commit<F: Family>(
     size: u64,
     fresh: bool,
     commit: Option<&impl Floored<F>>,
+    replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>> {
     if size == 0 {
         return if fresh {
@@ -148,15 +149,17 @@ fn validate_initialization_commit<F: Family>(
             "inactivity floor exceeds commit location",
         ));
     }
-    if *floor < start {
+    if replay_from_floor && *floor < start {
         return Err(Error::HistoricalFloorPruned(Location::new(size)));
     }
     Ok(Some(floor))
 }
 
-/// Check the selected commit and its retained floor before recovery discards history.
+/// Check the selected commit before recovery discards history. Rebuilding a snapshot from
+/// its floor additionally requires retaining that floor; Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &crate::journal::authenticated::Initialization<F, E, C, H, S>,
+    replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -176,6 +179,7 @@ where
         bounds.end,
         pending.is_fresh(),
         commit.as_ref(),
+        replay_from_floor,
     )
 }
 
@@ -212,6 +216,7 @@ pub(crate) async fn init_journal<F, E, C, H, S>(
     merkle: crate::merkle::full::Config<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
+    replay_from_floor: bool,
 ) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
 where
     F: Family,
@@ -221,7 +226,7 @@ where
     S: commonware_parallel::Strategy,
 {
     let pending = prepare_initialization(context, merkle, journal, max_size).await?;
-    validate_initialization(&pending).await?;
+    validate_initialization(&pending, replay_from_floor).await?;
     Ok(pending.finish().await?)
 }
 

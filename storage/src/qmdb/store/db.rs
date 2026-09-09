@@ -416,6 +416,7 @@ where
             size,
             bounds == (0..0),
             commit.as_ref(),
+            true,
         )?;
         let mut log = crate::journal::authenticated::Recovery::finish(pending, size).await?;
         if size == 0 {

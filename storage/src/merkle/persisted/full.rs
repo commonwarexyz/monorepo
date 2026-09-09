@@ -1223,12 +1223,12 @@ mod tests {
         executor.start(full_prune_out_of_bounds_returns_error_inner::<mmb::Family>);
     }
 
-    async fn full_rewind_error_leaves_valid_state_inner<F: Family>(
+    async fn full_initialization_bounds_preserve_state_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
-        // Case 1: rewind partially succeeds, then returns ElementPruned.
+        // A cap below the pruning boundary fails without changing the retained tree.
         let element_pruned_context = context.child("element_pruned_case");
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned"),
@@ -1257,7 +1257,7 @@ mod tests {
             Err(Error::ElementPruned(_))
         ));
 
-        // The failed rewind mutated nothing durable; reopening recovers the synced state.
+        // Reopening after the rejected cap preserves the synced tree.
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned_reopen"),
             &hasher,
@@ -1268,50 +1268,58 @@ mod tests {
         assert_eq!(mmr.leaves(), leaves_before);
         mmr.destroy().await.unwrap();
 
-        // Case 2: rewind underflows and returns Empty without removing any leaves.
-        let empty_context = context.child("empty_case");
+        // An overshooting cap preserves the complete tree, including after another open.
+        let capped_context = context.child("overshooting_cap");
         let cfg = Config {
-            journal_partition: "empty-journal-partition".into(),
-            metadata_partition: "empty-metadata-partition".into(),
-            ..test_config(&empty_context)
+            journal_partition: "overshooting-journal-partition".into(),
+            metadata_partition: "overshooting-metadata-partition".into(),
+            ..test_config(&capped_context)
         };
-        let mut mmr =
-            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("open"), &hasher, cfg)
-                .await
-                .unwrap();
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+            capped_context.child("open"),
+            &hasher,
+            cfg.clone(),
+        )
+        .await
+        .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0u64..8 {
             batch = batch.add(&hasher, &i.to_be_bytes());
         }
         let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
         mmr = mmr.apply_batch(&batch).unwrap();
-        mmr = mmr.sync().await.unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
+        drop(mmr.sync().await.unwrap());
+        let mmr = Merkle::<F, _, Digest, Sequential>::init_at_most(
+            capped_context.child("cap"),
+            &hasher,
+            cfg.clone(),
+            Location::new(u64::MAX),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mmr.leaves(), Location::new(8));
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
         drop(mmr);
-
-        // Reopen: the underflowing rewind persisted nothing.
-        let cfg = Config {
-            journal_partition: "empty-journal-partition".into(),
-            metadata_partition: "empty-metadata-partition".into(),
-            ..test_config(&empty_context)
-        };
         let mmr =
-            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("reopen"), &hasher, cfg)
+            Merkle::<F, _, Digest, Sequential>::init(capped_context.child("reopen"), &hasher, cfg)
                 .await
                 .unwrap();
-        assert_eq!(mmr.leaves(), Location::<F>::new(8));
+        assert_eq!(mmr.leaves(), Location::new(8));
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
         mmr.destroy().await.unwrap();
     }
 
     #[test_traced]
-    fn test_full_rewind_error_leaves_valid_state_mmr() {
+    fn test_full_initialization_bounds_preserve_state_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(full_rewind_error_leaves_valid_state_inner::<mmr::Family>);
+        executor.start(full_initialization_bounds_preserve_state_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_full_rewind_error_leaves_valid_state_mmb() {
+    fn test_full_initialization_bounds_preserve_state_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(full_rewind_error_leaves_valid_state_inner::<mmb::Family>);
+        executor.start(full_initialization_bounds_preserve_state_inner::<mmb::Family>);
     }
 
     async fn full_basic_inner<F: Family>(context: deterministic::Context) {

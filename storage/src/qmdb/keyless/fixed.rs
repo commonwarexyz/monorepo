@@ -57,6 +57,7 @@ impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> Db<F, E, V, H
             cfg.merkle,
             cfg.log,
             max_size,
+            false,
         )
         .await?;
         Self::init_from_journal(journal, context).await

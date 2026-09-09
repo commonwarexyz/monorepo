@@ -61,6 +61,7 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
             cfg.merkle_config,
             cfg.log,
             max_size,
+            true,
         )
         .await?;
         Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await

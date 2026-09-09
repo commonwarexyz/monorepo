@@ -231,7 +231,7 @@ where
             bounds.end,
         )));
     }
-    let floor = crate::qmdb::validate_initialization(&pending).await?;
+    let floor = crate::qmdb::validate_initialization(&pending, true).await?;
     if let (Some(bitmap), Some(floor)) = (&bitmap, floor)
         && *floor < bitmap.pruned_bits()
     {
