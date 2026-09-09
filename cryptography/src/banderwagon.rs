@@ -6,7 +6,7 @@ use crate::{
 use alloc::vec::Vec;
 use blst::blst_fr;
 use bytes::BufMut;
-use commonware_codec::{Buf, Copying, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
     msm_naive,
@@ -698,10 +698,12 @@ impl Read for G {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let bytes = <[u8; 32]>::read(buf)?;
-        let mut bytes = Copying(&bytes);
-        let x = Scalar::read_cfg(&mut bytes, &ScalarReadCfg::AllowZero)
-            .map_err(|_| CodecError::Invalid("Banderwagon", "x not a canonical field element"))?;
+        let x = Scalar::read_cfg(buf, &ScalarReadCfg::AllowZero).map_err(|err| match err {
+            CodecError::Invalid(..) => {
+                CodecError::Invalid("Banderwagon", "x not a canonical field element")
+            }
+            err => err,
+        })?;
         Self::from_x(x).ok_or(CodecError::Invalid("Banderwagon", "point not in subgroup"))
     }
 }
@@ -1018,7 +1020,7 @@ impl G {
 mod tests {
     use super::*;
     use arbitrary::Unstructured;
-    use commonware_codec::{DecodeExt, Encode, EncodeFixed};
+    use commonware_codec::{Copying, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
 
     fn arbitrary_point(u: &mut Unstructured<'_>) -> arbitrary::Result<G> {
@@ -1264,6 +1266,32 @@ mod tests {
             assert_eq!(decoded, p);
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_read_boundaries() {
+        let point = G::generator();
+        let encoded = point.encode();
+        for len in 0..G::SIZE {
+            let mut input = encoded.slice(..len);
+            assert!(matches!(G::read(&mut input), Err(CodecError::EndOfBuffer)));
+            assert_eq!(input.len(), len);
+        }
+
+        let mut input = point.encode_mut();
+        input.put_u8(42);
+        assert_eq!(G::read(&mut input).unwrap(), point);
+        assert_eq!(input.as_ref(), &[42]);
+
+        let mut input = bytes::Bytes::from_static(&[0xff; 33]);
+        assert!(matches!(
+            G::read(&mut input),
+            Err(CodecError::Invalid(
+                "Banderwagon",
+                "x not a canonical field element"
+            ))
+        ));
+        assert_eq!(input.as_ref(), &[0xff]);
     }
 
     #[test]

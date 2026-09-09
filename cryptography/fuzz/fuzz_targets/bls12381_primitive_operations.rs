@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{Copying, Read, ReadExt, Write};
+use commonware_codec::{Copying, Encode, Read, ReadExt};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, ScalarReadCfg, Share},
     ops,
@@ -602,27 +602,21 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::SerializeScalar { scalar } => {
-            let mut encoded = Vec::new();
-            scalar.write(&mut encoded);
             if let Ok(decoded) =
-                Scalar::read_cfg(&mut Copying(&encoded), &ScalarReadCfg::RejectZero)
+                Scalar::read_cfg(&mut scalar.encode_mut(), &ScalarReadCfg::RejectZero)
             {
                 assert_eq!(scalar, decoded);
             }
         }
 
         FuzzOperation::SerializeG1 { point } => {
-            let mut encoded = Vec::new();
-            point.write(&mut encoded);
-            if let Ok(decoded) = G1::read(&mut Copying(&encoded)) {
+            if let Ok(decoded) = G1::read(&mut point.encode_mut()) {
                 assert_eq!(point, decoded);
             }
         }
 
         FuzzOperation::SerializeG2 { point } => {
-            let mut encoded = Vec::new();
-            point.write(&mut encoded);
-            if let Ok(decoded) = G2::read(&mut Copying(&encoded)) {
+            if let Ok(decoded) = G2::read(&mut point.encode_mut()) {
                 assert_eq!(point, decoded);
             }
         }

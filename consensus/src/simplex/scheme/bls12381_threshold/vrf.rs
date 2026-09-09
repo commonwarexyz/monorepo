@@ -1379,7 +1379,7 @@ mod tests {
             })
             .collect();
         let malformed_signer = votes[0].signer;
-        let mut malformed = commonware_codec::Copying(&[0]);
+        let mut malformed = bytes::Bytes::from_static(&[0]);
         votes[0].signature = Lazy::deferred(&mut malformed, ());
 
         assert_eq!(
