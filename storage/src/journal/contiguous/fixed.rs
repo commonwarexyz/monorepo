@@ -145,8 +145,8 @@ use crate::{
         durability::Barrier,
     },
 };
-use bytes::{Bytes, BytesMut};
-use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
+use bytes::Bytes;
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Writer},
@@ -163,10 +163,10 @@ use std::{
 };
 use tracing::warn;
 
-// Reusable scratch for the synchronous read paths, grown to the largest probe served on the
-// thread and reclaimed unless a decoded item retains a view of it. These paths are hot, where
-// a fresh zeroed allocation per call contends under the pool's fan-out.
-commonware_utils::thread_local_cache!(static PROBE_SCRATCH: BytesMut);
+// Reusable scratch for the synchronous read paths ([`Reader::try_read_sync`] and
+// [`Reader::probe_items`]), grown to the largest probe served on the thread. Both run on the
+// hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
+commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -1514,7 +1514,12 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         // are harmless: slots the cache cannot serve are reported as misses and never decoded.
         let items_per_blob = self.items_per_blob.get();
         let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(BytesMut::new()), |_| Ok(())).unwrap();
+            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        let need = valid.len() * A::SIZE;
+        if scratch.len() < need {
+            scratch.resize(need, 0);
+        }
+        let buf = &mut scratch[..need];
         let mut hits = 0u64;
         let mut group_base = start;
         for group in valid.chunk_by(|a, b| {
@@ -1529,38 +1534,22 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let Some(blob) = self.blobs.get(blob_num) else {
                 continue;
             };
-            let need = group.len() * A::SIZE;
-            scratch.resize(need, 0);
-            let misses = blob.try_read_many_sync_into(
-                &mut scratch[..need],
-                &blob_offsets,
-                Inner::<E, A>::CHUNK_SIZE,
-            );
-            // Split before freezing to preserve reusable allocation metadata
-            // Walk slots with one cursor instead of slicing and refcounting per item
-            let bytes = std::mem::take(&mut *scratch).split().freeze();
-            let mut cursor = bytes.clone();
+            let buf = &mut buf[..group.len() * A::SIZE];
+            let misses =
+                blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
             let mut misses = misses.into_iter().peekable();
-            for idx in 0..group.len() {
+            #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+            for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
                 if misses.peek() == Some(&idx) {
                     misses.next();
-                    cursor.advance(A::SIZE);
                     continue;
                 }
                 // A decode failure declines to a miss: the async completion re-reads the
                 // item and bubbles the failure as [Error::Codec], like every async read path.
-                let slot_end = cursor.remaining() - A::SIZE;
-                if let Ok(item) = A::decode((&mut cursor).take(A::SIZE)) {
+                if let Ok(item) = A::decode(Copying(slice)) {
                     out[base + idx] = Some(item);
                     hits += 1;
                 }
-                // A failed decode may stop short of the slot boundary
-                cursor.advance(cursor.remaining() - slot_end);
-            }
-            drop(cursor);
-            // Reclaim the scratch when no decoded fields retain it
-            if let Ok(reclaimed) = bytes.try_into_mut() {
-                *scratch = reclaimed;
             }
         }
         self.metrics.cache_hits.inc_by(hits);
@@ -1605,16 +1594,13 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
         let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(BytesMut::new()), |_| Ok(())).unwrap();
-        scratch.resize(A::SIZE, 0);
-        let item = if blob.try_read_sync_into(&mut scratch, offset) {
-            // Split before freezing to preserve reusable allocation metadata
-            let bytes = std::mem::take(&mut *scratch).split().freeze();
-            let item = A::decode(bytes.clone()).ok();
-            if let Ok(reclaimed) = bytes.try_into_mut() {
-                *scratch = reclaimed;
-            }
-            item
+            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        if scratch.len() < A::SIZE {
+            scratch.resize(A::SIZE, 0);
+        }
+        let buf = &mut scratch[..A::SIZE];
+        let item = if blob.try_read_sync_into(buf, offset) {
+            A::decode(Copying(&buf[..])).ok()
         } else {
             None
         };
@@ -1818,8 +1804,6 @@ mod tests {
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
             assert_eq!(next.bytes.as_ref(), &8u64.to_be_bytes());
-            decoded.assert_shared();
-            next.assert_shared();
         });
     }
 
@@ -1841,7 +1825,6 @@ mod tests {
             for (value, expected) in probed.iter().zip([0u64, 2, 3, 4]) {
                 let value = value.as_ref().expect("probe should hit after read_many");
                 assert_eq!(value.bytes.as_ref(), &expected.to_be_bytes());
-                value.assert_shared();
             }
         });
     }

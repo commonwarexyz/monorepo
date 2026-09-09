@@ -24,7 +24,6 @@ use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
-use bytes::BytesMut;
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
@@ -38,8 +37,8 @@ use std::{
 };
 use tracing::{trace, warn};
 
-// Reusable scratch for [`Inner::try_get_sync`], reclaimed unless decoded fields retain it
-commonware_utils::thread_local_cache!(static READ_SCRATCH: BytesMut);
+// Reusable scratch for [`Inner::try_get_sync`], sized to one item
+commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -432,18 +431,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             return None;
         }
         let mut scratch =
-            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(BytesMut::new()), |_| Ok(())).unwrap();
-        scratch.resize(Self::CHUNK_SIZE, 0);
-        if !blob.try_read_sync_into(&mut scratch, offset) {
+            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        if scratch.len() < Self::CHUNK_SIZE {
+            scratch.resize(Self::CHUNK_SIZE, 0);
+        }
+        let buf = &mut scratch[..Self::CHUNK_SIZE];
+        if !blob.try_read_sync_into(buf, offset) {
             return None;
         }
-        // Split before freezing to preserve reusable allocation metadata
-        let bytes = std::mem::take(&mut *scratch).split().freeze();
-        let item = A::decode(bytes.clone()).ok();
-        if let Ok(reclaimed) = bytes.try_into_mut() {
-            *scratch = reclaimed;
-        }
-        item
+        A::decode(Copying(&buf[..])).ok()
     }
 
     /// See [Journal::last].
@@ -1116,7 +1112,6 @@ mod tests {
             let decoded = journal.try_get_sync(1, 0).unwrap();
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
-            decoded.assert_shared();
         });
     }
 

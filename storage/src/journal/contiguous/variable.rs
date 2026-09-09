@@ -68,6 +68,17 @@ const DATA_SUFFIX: &str = "_data";
 /// Suffix appended to the base partition name for the offsets journal.
 const OFFSETS_SUFFIX: &str = "_offsets";
 
+/// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
+fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
+    // Splitting preserves reusable allocation metadata across freezing and reclamation
+    let bytes = std::mem::take(scratch).split().freeze();
+    let result = f(&bytes);
+    if let Ok(reclaimed) = bytes.try_into_mut() {
+        *scratch = reclaimed;
+    }
+    result
+}
+
 /// Decode one varint-framed item from `bytes`, which must hold exactly that frame (the span to
 /// the next frame's offset). Returns `None` on any mismatch or decode failure. The async read
 /// path reports such errors.
@@ -586,18 +597,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         if !blob.try_read_sync_into(buf, offset) {
             return None;
         }
-        // Split before freezing to preserve reusable allocation metadata
-        let bytes = std::mem::take(buf).split().freeze();
-        let item = decode_item::<V>(
-            bytes.slice(varint_len..),
-            &self.codec_config,
-            self.compressed,
-        )
-        .ok();
-        if let Ok(reclaimed) = bytes.try_into_mut() {
-            *buf = reclaimed;
-        }
-        item
+        with_bytes(buf, |bytes| {
+            decode_item::<V>(
+                bytes.slice(varint_len..),
+                &self.codec_config,
+                self.compressed,
+            )
+            .ok()
+        })
     }
 
     /// Build one replay state for each data blob touched by `[start_pos, bounds.end)`.
@@ -824,30 +831,25 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let total: usize = ranges.iter().map(|&(_, len)| len).sum();
             buf.resize(total, 0);
             let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
-            // Split before freezing to preserve reusable allocation metadata
-            let bytes = std::mem::take(&mut buf).split().freeze();
-            let mut missed = missed.into_iter().peekable();
-            let mut local = 0usize;
-            for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
-                let start = local;
-                local += len;
-                if missed.peek() == Some(&range_idx) {
-                    missed.next();
-                    continue;
+            with_bytes(&mut buf, |bytes| {
+                let mut missed = missed.into_iter().peekable();
+                let mut local = 0usize;
+                for (range_idx, &(idx, _, len)) in group.iter().enumerate() {
+                    let start = local;
+                    local += len;
+                    if missed.peek() == Some(&range_idx) {
+                        missed.next();
+                        continue;
+                    }
+                    let slot = bytes.slice(start..local);
+                    if let Some(item) =
+                        decode_frame_from_span(slot, &self.codec_config, self.compressed)
+                    {
+                        out[idx] = Some(item);
+                        hits += 1;
+                    }
                 }
-                let slot = bytes.slice(start..local);
-                if let Some(item) =
-                    decode_frame_from_span(slot, &self.codec_config, self.compressed)
-                {
-                    out[idx] = Some(item);
-                    hits += 1;
-                }
-            }
-
-            // Reclaim the scratch when no decoded fields retain it
-            if let Ok(reclaimed) = bytes.try_into_mut() {
-                buf = reclaimed;
-            }
+            });
         }
 
         // Per-frame path for frames whose extent is unknown.

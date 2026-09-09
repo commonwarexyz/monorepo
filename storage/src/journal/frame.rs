@@ -226,8 +226,9 @@ pub(super) fn encode_frame_into<V: Codec>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::codec::FixedByteView;
     use bytes::{BufMut, Bytes};
-    use commonware_codec::{Copying, Read, Write};
+    use commonware_codec::{Copying, Encode, Read, Write};
 
     /// Frame a single item and return the raw frame bytes.
     fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
@@ -398,55 +399,28 @@ mod tests {
     fn test_decode_item_view() {
         let value: Vec<Bytes> = (0..64).map(|_| Bytes::from(vec![7u8; 17])).collect();
         let cfg = ((..).into(), (..).into());
-        let buf = Bytes::from(frame(None, &value));
-        let (_, info) = find_frame(&mut buf.clone(), 0).unwrap();
-        let FrameInfo::Complete {
-            varint_len,
-            data_len,
-        } = info
-        else {
-            panic!("expected complete frame");
-        };
+        let buf = value.encode();
         let range = buf.as_ptr_range();
 
         // Decoding from the owned buffer hands out views of it
-        let decoded =
-            decode_item::<Vec<Bytes>>(buf.slice(varint_len..varint_len + data_len), &cfg, false)
-                .unwrap();
+        let decoded = decode_item::<Vec<Bytes>>(buf.clone(), &cfg, false).unwrap();
         assert_eq!(decoded, value);
         assert!(decoded.iter().all(|b| range.contains(&b.as_ptr())));
 
         // Decoding from a slice of it copies every field
-        let copied = decode_item::<Vec<Bytes>>(
-            Copying(&buf[varint_len..varint_len + data_len]),
-            &cfg,
-            false,
-        )
-        .unwrap();
+        let copied = decode_item::<Vec<Bytes>>(Copying(&buf), &cfg, false).unwrap();
         assert_eq!(copied, value);
         assert!(copied.iter().all(|b| !range.contains(&b.as_ptr())));
 
-        // A compressed item is decoded from the owned decompressed buffer, so its fields are
-        // views of one allocation: consecutive 17-byte fields sit 18 bytes apart (one length
-        // byte between them), a stride no two aligned allocations have
-        let buf = Bytes::from(frame(Some(3), &value));
-        let (_, info) = find_frame(&mut buf.clone(), 0).unwrap();
-        let FrameInfo::Complete {
-            varint_len,
-            data_len,
-        } = info
-        else {
-            panic!("expected complete frame");
-        };
-        let decoded =
-            decode_item::<Vec<Bytes>>(buf.slice(varint_len..varint_len + data_len), &cfg, true)
-                .unwrap();
-        assert_eq!(decoded, value);
-        assert!(
-            decoded
-                .windows(2)
-                .all(|w| (w[1].as_ptr() as usize).wrapping_sub(w[0].as_ptr() as usize) == 18)
-        );
+        // Decompressed fields share the decoder's input allocation
+        let value = vec![FixedByteView::new(1), FixedByteView::new(2)];
+        let buf = Bytes::from(compress(&value.encode(), 3).unwrap());
+        let decoded = decode_item::<Vec<FixedByteView>>(buf, &((..).into(), ()), true).unwrap();
+        assert_eq!(decoded.len(), value.len());
+        for (decoded, expected) in decoded.iter().zip(&value) {
+            assert_eq!(decoded.bytes, expected.bytes);
+            decoded.assert_shared();
+        }
     }
 
     #[test]

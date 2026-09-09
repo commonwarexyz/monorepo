@@ -1781,8 +1781,7 @@ mod tests {
 
     #[test_traced]
     fn test_bytes_values_reload() {
-        // A value with byte fields decodes as a view of the load buffer, so the mirror is copied
-        // on load and later overwritten in place.
+        // Retained byte fields remain independent of later mirror overwrites
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1799,8 +1798,7 @@ mod tests {
             metadata = metadata.sync().await.unwrap();
             drop(metadata);
 
-            // Reload, then overwrite an equal-size value twice: the first sync rebuilds the
-            // stale copy and the second writes into the copied mirror of the loaded one.
+            // Reload, then overwrite an equal-size value twice to exercise both mirrors
             let mut metadata =
                 Metadata::<_, U64, Bytes>::init(context.child("second"), cfg.clone())
                     .await
