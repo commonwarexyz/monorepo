@@ -1,0 +1,24 @@
+# Recipes for the consensus fuzz packages, run from this directory. Recipes not
+# defined here fall back to the root justfile, so `just lint` or
+# `just fuzz consensus/fuzz/simplex` keep working from here.
+
+set fallback := true
+
+env_nightly_version := env("NIGHTLY_VERSION", "nightly")
+nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
+features := ""
+feature_flags := if features != "" { "--no-default-features --features " + features } else { "" }
+
+# Build every fuzz target of the given packages (default: all) without running any.
+build *packages='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `features` replaces the default features of each package, as in the root
+    # `fuzz` recipe, so name only packages that define them: `just features=twins build simplex`.
+    packages="{{packages}}"
+    if [ -z "$packages" ]; then
+        packages=$(grep -ls 'cargo-fuzz = true' */Cargo.toml | xargs -n1 dirname)
+    fi
+    for package in $packages; do
+        cargo {{nightly_version}} fuzz build {{feature_flags}} --fuzz-dir $package
+    done

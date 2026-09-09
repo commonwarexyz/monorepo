@@ -136,7 +136,7 @@ jobs:
       run: just partition=${{ matrix.partition || '1/1' }} test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
 
   Fuzz:
-    name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"
+    name: "Fuzz (${{ matrix.fuzz_dir }}${{ matrix.features && format(', features: {0}', matrix.features) }}) (partition: ${{ matrix.partition || '1/1' }})"
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -149,9 +149,9 @@ jobs:
           - fuzz_dir: consensus/fuzz/aggregation
           - fuzz_dir: consensus/fuzz/marshal
           - fuzz_dir: consensus/fuzz/simplex
-            partition: "1/2"
+            features: twins
           - fuzz_dir: consensus/fuzz/simplex
-            partition: "2/2"
+            features: base
           - fuzz_dir: consensus/fuzz/structures
           - fuzz_dir: cryptography/fuzz
             partition: "1/2"
@@ -184,7 +184,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: ${{ matrix.fuzz_dir }}
+        additional-cache-key: ${{ matrix.fuzz_dir }}${{ matrix.features && format('-{0}', matrix.features) }}
         rust-cache-save: ${{ startsWith(matrix.partition || '1/1', '1/') }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
@@ -212,8 +212,9 @@ jobs:
       id: fuzz-corpus-cache-key
       run: |
         sanitized_fuzz_dir="$(echo "${{ matrix.fuzz_dir }}" | tr '/' '-')"
+        sanitized_features="$(echo "${{ matrix.features || '' }}" | tr ',' '-')"
         sanitized_partition="$(echo "${{ matrix.partition || '1/1' }}" | tr '/' '-')"
-        echo "prefix=${{ runner.os }}-fuzz-corpus-${sanitized_fuzz_dir}-${sanitized_partition}" >> "$GITHUB_OUTPUT"
+        echo "prefix=${{ runner.os }}-fuzz-corpus-${sanitized_fuzz_dir}${sanitized_features:+-$sanitized_features}-${sanitized_partition}" >> "$GITHUB_OUTPUT"
     - name: Restore fuzz corpus
       id: fuzz-corpus-restore
       uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -223,7 +224,7 @@ jobs:
         restore-keys: |
           ${{ steps.fuzz-corpus-cache-key.outputs.prefix }}-
     - name: Test all targets
-      run: just partition=${{ matrix.partition || '1/1' }} fuzz ${{ matrix.fuzz_dir }}
+      run: just partition=${{ matrix.partition || '1/1' }} features=${{ matrix.features || '' }} fuzz ${{ matrix.fuzz_dir }}
     - name: Save fuzz corpus
       if: success() && github.ref == 'refs/heads/main'
       uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4

@@ -4,6 +4,8 @@ env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
 rustfmt := env("RUSTFMT", "rustfmt")
 partition := "1/1"
+features := ""
+feature_flags := if features != "" { "--no-default-features --features " + features } else { "" }
 
 alias f := fix-fmt
 alias l := lint
@@ -150,19 +152,20 @@ dylint:
 # Run all fuzz tests in a given directory.
 #
 # `partition` is "N/M", run partition N of M, where targets are hash-distributed across M jobs.
+# `features` replaces the default features and limits the build and the run to targets they enable.
 fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     set -euo pipefail
-    targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
+    targets=$(python3 .github/scripts/fuzz_targets.py {{nightly_version}} {{fuzz_dir}} "{{features}}" | python3 .github/scripts/hash_partition.py {{partition}})
     if [ -z "$targets" ]; then
         exit 0
     fi
     # Build every target in one cargo invocation before fuzzing. Each target is
     # its own sanitizer-instrumented binary, so building inside the run loop
     # serializes the links against the fuzz sessions while most cores sit idle.
-    cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
+    cargo {{nightly_version}} fuzz build {{feature_flags}} --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
-        cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
+        cargo {{nightly_version}} fuzz run {{feature_flags}} $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
         rm -f {{fuzz_dir}}/target/*/release/$target
     done
 

@@ -44,6 +44,24 @@ defaulting to `nightly`:
 NIGHTLY_VERSION=<pinned> just fuzz consensus/fuzz/simplex 60
 ```
 
+The `simplex` package splits its targets into two build partitions, `twins` (every
+target with `twins` in its name) and `base` (everything else). Each is a feature that the targets list
+in `required-features`, so `features=<partition>` builds and runs only that group. CI runs
+one job per partition to keep each job from compiling binaries it never fuzzes:
+
+```bash
+NIGHTLY_VERSION=<pinned> just features=twins fuzz consensus/fuzz/simplex 60
+```
+
+To only build, the local [`justfile`](./justfile) compiles every target of the named
+packages, or of all of them. Any other recipe falls back to the root justfile:
+
+```bash
+cd consensus/fuzz
+NIGHTLY_VERSION=<pinned> just build
+NIGHTLY_VERSION=<pinned> just features=twins build simplex
+```
+
 Reproduce a failure from a crash file. Artifacts are written under the package that owns
 the target:
 
