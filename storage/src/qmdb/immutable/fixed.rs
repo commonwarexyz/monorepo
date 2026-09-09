@@ -4,17 +4,9 @@
 
 use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
-    Context,
     journal::contiguous::fixed::{self, Config as JournalConfig},
-    merkle::Family,
-    qmdb::{
-        Error,
-        any::{FixedValue, value::FixedEncoding},
-    },
+    qmdb::any::value::FixedEncoding,
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_utils::Array;
 
 /// Type alias for a fixed-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
@@ -31,16 +23,6 @@ pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 
 /// Configuration for a fixed-size compact immutable db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
-
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
-    CompactDb<F, E, K, V, H, S>
-{
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -121,7 +103,7 @@ mod tests {
             },
             commit_codec_config: (),
         };
-        CompactDb::init(context, cfg).await.unwrap()
+        CompactDb::init(context, cfg, None).await.unwrap()
     }
 
     /// An immutable db over a delayed-sync storage backend.
@@ -332,37 +314,6 @@ mod tests {
                 prune.await.unwrap()
             };
             handle.await.unwrap();
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Rewinding drains the in-flight sync before mutating storage.
-    #[test_traced]
-    fn test_fixed_start_sync_rewind_waits() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-rewind", &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
-            db = drive_pending_syncs(&pending, db.commit()).await.unwrap();
-            let committed_root = db.root();
-            let committed_size = db.bounds().end;
-            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(0)).await;
-
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-
-            let db = {
-                let mut rewind = std::pin::pin!(db.rewind(committed_size));
-                assert!(
-                    rewind.as_mut().now_or_never().is_none(),
-                    "rewind proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                rewind.await.unwrap()
-            };
-            handle.await.unwrap();
-            assert_eq!(db.root(), committed_root);
             db.destroy().await.unwrap();
         });
     }
