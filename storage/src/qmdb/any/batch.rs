@@ -788,7 +788,7 @@ where
             .collect();
 
         // Batch-read committed locations. Reader::read_many requires sorted, unique positions.
-        let committed: Vec<(usize, u64)> = locations
+        let mut committed: Vec<(usize, u64)> = locations
             .iter()
             .zip(results.iter())
             .enumerate()
@@ -801,22 +801,20 @@ where
         // Batches reaching here contain uncommitted locations or arrived unsorted, but the
         // committed subset is often still presorted (e.g. floor-raise candidates that cross
         // the committed boundary), so the sort is worth skipping when possible.
-        let mut positions: Vec<u64> = committed.iter().map(|(_, loc)| *loc).collect();
-        let presorted = positions.is_sorted_by(|a, b| a < b);
-        if !presorted {
-            positions.sort_unstable();
-            positions.dedup();
+        if !committed.is_sorted_by_key(|&(_, loc)| loc) {
+            committed.sort_unstable_by_key(|&(_, loc)| loc);
         }
+        let mut positions: Vec<u64> = committed.iter().map(|(_, loc)| *loc).collect();
+        positions.dedup();
         let read = reader.read_many(&positions).await?;
 
-        // Merge read results back in order.
-        for (idx, loc) in committed {
-            // `positions` is sorted and deduped, and `loc` came from it before deduping, so
-            // binary search must find the matching read_many result.
-            let result_idx = positions
-                .binary_search(&loc)
-                .expect("read result missing for requested location");
-            results[idx] = Some(read[result_idx].clone());
+        // Clone only for duplicate requests, moving each operation into its final slot.
+        for (group, op) in committed.chunk_by(|a, b| a.1 == b.1).zip(read) {
+            let (last, duplicates) = group.split_last().expect("nonempty group");
+            for &(idx, _) in duplicates {
+                results[idx] = Some(op.clone());
+            }
+            results[last.0] = Some(op);
         }
         Ok(results
             .into_iter()
@@ -4592,24 +4590,33 @@ mod tests {
 
             let key_db = colliding_digest(0x30, 0);
             let value_db = colliding_digest(0x30, 1);
+            let key_db_other = colliding_digest(0x30, 2);
+            let value_db_other = colliding_digest(0x30, 3);
             let key_parent = colliding_digest(0x31, 0);
             let value_parent = colliding_digest(0x31, 1);
             let key_current = colliding_digest(0x32, 0);
             let value_current = colliding_digest(0x32, 1);
 
-            // Commit one key to the DB so it's on disk.
+            // Commit two keys to the DB so they're on disk.
             let seed = db
                 .new_batch()
                 .write(key_db, Some(value_db))
+                .write(key_db_other, Some(value_db_other))
                 .merkleize(&db, None)
                 .await
+                .unwrap();
+            let committed_loc = lookup_sorted(seed.diff.as_slice(), &key_db)
+                .unwrap()
+                .loc()
+                .unwrap();
+            let other_committed_loc = lookup_sorted(seed.diff.as_slice(), &key_db_other)
+                .unwrap()
+                .loc()
                 .unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
-
-            // Create a parent batch with a second key (in-memory ancestor).
+            // Create a parent batch with another key (in-memory ancestor).
             let parent = db
                 .new_batch()
                 .write(key_parent, Some(value_parent))
@@ -4621,7 +4628,7 @@ mod tests {
                 .loc()
                 .unwrap();
 
-            // Create a child batch with a third key (current ops).
+            // Create a child batch with another key (current ops).
             let child = parent
                 .new_batch::<Sha256>()
                 .write(key_current, Some(value_current));
@@ -4637,7 +4644,13 @@ mod tests {
             // duplicates across the disk-backed subset.
             let ops = merkleizer
                 .read_ops(
-                    &[current_loc, committed_loc, parent_loc, committed_loc],
+                    &[
+                        current_loc,
+                        other_committed_loc,
+                        committed_loc,
+                        parent_loc,
+                        other_committed_loc,
+                    ],
                     &batch_ops,
                     &db.log,
                 )
@@ -4648,9 +4661,10 @@ mod tests {
                 ops,
                 vec![
                     Operation::Update(update::Unordered(key_current, value_current)),
+                    Operation::Update(update::Unordered(key_db_other, value_db_other)),
                     Operation::Update(update::Unordered(key_db, value_db)),
                     Operation::Update(update::Unordered(key_parent, value_parent)),
-                    Operation::Update(update::Unordered(key_db, value_db)),
+                    Operation::Update(update::Unordered(key_db_other, value_db_other)),
                 ]
             );
 
