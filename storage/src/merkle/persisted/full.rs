@@ -40,7 +40,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
-use tracing::{debug, error};
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 ///
@@ -250,65 +249,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.leaves()
     }
 
-    /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
-    /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
-    /// error otherwise.
-    async fn get_from_metadata_or_journal(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        pos: Position<F>,
-    ) -> Result<D, Error<F>> {
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
-            debug!(?pos, "read node from metadata");
-            let digest = D::decode(Copying(bytes));
-            let Ok(digest) = digest else {
-                error!(
-                    ?pos,
-                    err = %digest.expect_err("digest is Err in else branch"),
-                    "could not convert node from metadata bytes to digest"
-                );
-                return Err(Error::DataCorrupted(
-                    "could not read digest at requested pos",
-                ));
-            };
-            return Ok(digest);
-        }
-
-        // If a node isn't found in the metadata, it might still be in the journal.
-        debug!(?pos, "reading node from journal");
-        let node = journal.read(*pos).await;
-        match node {
-            Ok(node) => Ok(node),
-            Err(JError::ItemPruned(_)) => {
-                error!(?pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(pos))
-            }
-            Err(e) => Err(Error::Journal(e)),
-        }
-    }
-
     /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
     /// count.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.mem.leaves()
-    }
-
-    /// Adds the pinned nodes based on `prune_pos` to `mem`.
-    async fn add_extra_pinned_nodes(
-        mem: &mut Mem<F, D>,
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        prune_pos: Position<F>,
-    ) -> Result<(), Error<F>> {
-        let prune_loc = Location::try_from(prune_pos).expect("valid prune_pos");
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in F::nodes_to_pin(prune_loc) {
-            let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
-            pinned_nodes.insert(pos, digest);
-        }
-        mem.add_pinned_nodes(pinned_nodes);
-
-        Ok(())
     }
 
     /// Initialize a new `Merkle` instance.
@@ -959,75 +903,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub const fn strategy(&self) -> &S {
         &self.strategy
     }
-
-    /// Rewind the structure by the given number of leaves.
-    ///
-    /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply_batch`]), but removing
-    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to O(log
-    /// n) pinned nodes. A batch pop would expose new peaks that are not in memory, and `merkleize`
-    /// cannot load them because [`Readable::get_node`] is synchronous. `rewind` performs async
-    /// journal I/O to rebuild state at the target position.
-    pub(crate) async fn rewind(mut self, leaves_to_remove: usize) -> Result<Self, Error<F>> {
-        if leaves_to_remove == 0 {
-            return Ok(self);
-        }
-
-        let current_leaves = *self.leaves();
-        let destination_leaf = match current_leaves.checked_sub(leaves_to_remove as u64) {
-            Some(dest) => dest,
-            None => {
-                let pruned_to_pos = self.pruned_to_pos;
-                return Err(if pruned_to_pos == 0 {
-                    Error::Empty
-                } else {
-                    Error::ElementPruned(pruned_to_pos - 1)
-                });
-            }
-        };
-
-        let destination_loc = Location::new(destination_leaf);
-        let new_size = Position::try_from(destination_loc).expect("valid leaf");
-
-        if new_size < self.pruned_to_pos {
-            return Err(Error::ElementPruned(new_size));
-        }
-
-        // Rewind the journal if needed.
-        let journal_size = Position::<F>::new(self.journal.size());
-        if new_size < journal_size {
-            self.journal = self.journal.rewind(*new_size).await?.sync().await?;
-        }
-
-        // Truncate the in-memory structure to the target size.
-        // If the in-memory structure has been pruned past the target (e.g. after sync),
-        // rebuild from the journal/metadata instead.
-        if new_size >= Position::try_from(self.mem.bounds().start).expect("valid mem bounds start")
-        {
-            Arc::make_mut(&mut self.mem).truncate(new_size);
-        } else {
-            let mut pinned_nodes = Vec::new();
-            for pos in F::nodes_to_pin(destination_loc) {
-                pinned_nodes.push(
-                    Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
-                );
-            }
-            let mut mem = Mem::init(MemConfig {
-                nodes: vec![],
-                pruning_boundary: destination_loc,
-                pinned_nodes,
-            })?;
-            Self::add_extra_pinned_nodes(
-                &mut mem,
-                &self.metadata,
-                &self.journal,
-                self.pruned_to_pos,
-            )
-            .await?;
-            self.mem = Arc::new(mem);
-        }
-
-        Ok(self)
-    }
 }
 
 /// The [`Readable`] implementation for the full structure operates only on the in-memory
@@ -1271,7 +1146,7 @@ mod tests {
         assert_eq!(bounds.start, 0);
         mmr = mmr.prune(Location::<F>::new(0)).await.unwrap();
         mmr = mmr.sync().await.unwrap();
-        assert!(matches!(mmr.rewind(1).await, Err(Error::Empty)));
+        drop(mmr);
 
         // Reopen the same partitions.
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -1287,7 +1162,15 @@ mod tests {
         assert_eq!(mmr.size(), 1);
         mmr = mmr.sync().await.unwrap();
         assert!(mmr.get_node(Position::<F>::new(0)).await.is_ok());
-        mmr = mmr.rewind(1).await.unwrap();
+        drop(mmr);
+        mmr = Merkle::<F, _, Digest, Sequential>::init_at_most(
+            context.child("cap_empty"),
+            &hasher,
+            test_config(&context),
+            Location::new(0),
+        )
+        .await
+        .unwrap();
         assert_eq!(mmr.size(), 0);
         mmr.sync().await.unwrap();
 
@@ -1501,90 +1384,6 @@ mod tests {
     fn test_full_initialization_bounds_preserve_state_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_initialization_bounds_preserve_state_inner::<mmb::Family>);
-    }
-
-    async fn full_rewind_error_leaves_valid_state_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
-        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-
-        // Case 1: rewind partially succeeds, then returns ElementPruned.
-        let element_pruned_context = context.child("element_pruned_case");
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            element_pruned_context.child("element_pruned"),
-            &hasher,
-            test_config(&element_pruned_context),
-        )
-        .await
-        .unwrap();
-        let mut batch = mmr.new_batch();
-        for i in 0u64..32 {
-            batch = batch.add(&hasher, &i.to_be_bytes());
-        }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr = mmr.apply_batch(&batch).unwrap();
-        let mmr = mmr.prune(Location::<F>::new(8)).await.unwrap();
-        let leaves_before = mmr.leaves();
-        assert!(matches!(
-            mmr.rewind(128).await,
-            Err(Error::ElementPruned(_))
-        ));
-
-        // The failed rewind mutated nothing durable; reopening recovers the synced state.
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(
-            element_pruned_context.child("element_pruned_reopen"),
-            &hasher,
-            test_config(&element_pruned_context),
-        )
-        .await
-        .unwrap();
-        assert_eq!(mmr.leaves(), leaves_before);
-        mmr.destroy().await.unwrap();
-
-        // Case 2: rewind underflows and returns Empty without removing any leaves.
-        let empty_context = context.child("empty_case");
-        let cfg = Config {
-            journal_partition: "empty-journal-partition".into(),
-            metadata_partition: "empty-metadata-partition".into(),
-            ..test_config(&empty_context)
-        };
-        let mut mmr =
-            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("open"), &hasher, cfg)
-                .await
-                .unwrap();
-        let mut batch = mmr.new_batch();
-        for i in 0u64..8 {
-            batch = batch.add(&hasher, &i.to_be_bytes());
-        }
-        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
-        mmr = mmr.apply_batch(&batch).unwrap();
-        mmr = mmr.sync().await.unwrap();
-        assert!(matches!(mmr.rewind(9).await, Err(Error::Empty)));
-
-        // Reopen: the underflowing rewind persisted nothing.
-        let cfg = Config {
-            journal_partition: "empty-journal-partition".into(),
-            metadata_partition: "empty-metadata-partition".into(),
-            ..test_config(&empty_context)
-        };
-        let mmr =
-            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("reopen"), &hasher, cfg)
-                .await
-                .unwrap();
-        assert_eq!(mmr.leaves(), Location::<F>::new(8));
-        mmr.destroy().await.unwrap();
-    }
-
-    #[test_traced]
-    fn test_full_rewind_error_leaves_valid_state_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(full_rewind_error_leaves_valid_state_inner::<mmr::Family>);
-    }
-
-    #[test_traced]
-    fn test_full_rewind_error_leaves_valid_state_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(full_rewind_error_leaves_valid_state_inner::<mmb::Family>);
     }
 
     async fn full_basic_inner<F: Family>(context: deterministic::Context) {

@@ -559,7 +559,7 @@ mod tests {
             impl Conformance for $name {
                 async fn commit($s: u64) -> Vec<u8> {
                     deterministic::Runner::seeded($s).start(|ctx| async move {
-                        let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx))
+                        let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx), None)
                             .await
                             .unwrap();
                         let root = $body;
@@ -597,7 +597,8 @@ mod tests {
                 async fn run(context: Ctx, $s: u64) -> Result<(), Self::Error> {
                     let suffix = format!("{}-{}", stringify!($name), $s);
                     let mut $d =
-                        <$db>::init(context.child("db"), ($cfg_fn)(&suffix, &context)).await?;
+                        <$db>::init(context.child("db"), ($cfg_fn)(&suffix, &context), None)
+                            .await?;
                     let _root = $body;
                     $d.sync().await?;
                     Ok(())
@@ -1169,10 +1170,10 @@ macro_rules! order_test {
         #[test]
         fn $name() {
             deterministic::Runner::default().start(|ctx| async move {
-                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd", &ctx))
+                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd", &ctx), None)
                     .await
                     .unwrap();
-                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev", &ctx))
+                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev", &ctx), None)
                     .await
                     .unwrap();
                 $body;

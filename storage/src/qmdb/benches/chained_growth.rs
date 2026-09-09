@@ -139,7 +139,7 @@ macro_rules! with_current_db {
         macro_rules! init_db {
             ($DbType:ty) => {{
                 #[allow(unused_mut)]
-                let mut $db = <$DbType>::init($ctx.child("storage"), cur_fix_cfg(&$ctx))
+                let mut $db = <$DbType>::init($ctx.child("storage"), cur_fix_cfg(&$ctx), None)
                     .await
                     .unwrap();
                 $body

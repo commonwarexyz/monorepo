@@ -462,13 +462,6 @@ impl CacheRef {
     pub fn clear(&self) {
         self.cache.write().clear();
     }
-
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
-    /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
-    /// buffer (or future writes) now owns.
-    pub(super) fn invalidate_from(&self, blob_id: u64, start_page: u64) {
-        self.cache.write().invalidate_from(blob_id, start_page);
-    }
 }
 
 impl Cache {
@@ -559,12 +552,6 @@ impl Cache {
             return Some(page);
         }
         self.cache.get(&key)
-    }
-
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`.
-    fn invalidate_from(&mut self, blob_id: u64, start_page: u64) {
-        self.cache
-            .retain(|&(bid, page_num), _| bid != blob_id || page_num < start_page);
     }
 
     /// Drop all cached pages while retaining backing page buffers for reuse.
@@ -825,20 +812,18 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_invalidate_from_does_not_orphan_re_cached_page() {
-        // Invalidating pages, re-caching one, then forcing an eviction must keep every live page
-        // readable. Freed slots are reused cleanly, so an invalidated-then-re-cached page is never
-        // orphaned by a later eviction.
+    fn test_clear_does_not_orphan_recached_page() {
+        // Clearing the cache and reusing its slots must keep each newly cached page readable.
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
         let blob_id = 0u64;
         let page_size = PAGE_SIZE.get() as usize;
 
-        // Fill both slots, then invalidate them so both slots are freed for reuse.
+        // Fill both slots, then clear the cache so both slots are available for reuse.
         cache.cache(blob_id, &vec![0xAA; page_size], 0);
         cache.cache(blob_id, &vec![0xBB; page_size], 1);
-        cache.invalidate_from(blob_id, 0);
+        cache.clear();
 
         // Re-cache page 1 into a reused slot.
         cache.cache(blob_id, &vec![0xCC; page_size], 1);
@@ -1530,22 +1515,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_cached_many_invalidated_page_is_a_miss() {
-        // Invalidated pages free their slots but keep their keys. Their hints need no
-        // cleanup: a freed slot is not live, so the dropped page reads as a miss until
-        // re-cached.
+    fn test_read_cached_many_evicted_page_is_a_miss() {
         let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(1));
         let blob_id = cache_ref.next_id();
         let page_size = PAGE_SIZE.get() as usize;
-        {
-            let mut cache = cache_ref.cache.write();
-            for page in 0u64..4 {
-                cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
-            }
-        }
-        cache_ref.invalidate_from(blob_id, 2);
-
         let read_page = |page: u64| {
             let mut buf = vec![0u8; page_size];
             let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, page * PAGE_SIZE_U64)];
@@ -1554,17 +1528,19 @@ mod tests {
             drop(ranges);
             hit.then_some(buf)
         };
-        assert_eq!(read_page(0), Some(vec![1u8; page_size]));
-        assert_eq!(read_page(1), Some(vec![2u8; page_size]));
-        assert_eq!(read_page(2), None);
-        assert_eq!(read_page(3), None);
 
-        // Re-caching a dropped page restores it through the hint path.
-        {
-            let mut cache = cache_ref.cache.write();
-            cache.cache(blob_id, &vec![0xCC; page_size], 2);
-        }
-        assert_eq!(read_page(2), Some(vec![0xCC; page_size]));
+        cache_ref.cache(blob_id, &vec![1; page_size], 0);
+        assert_eq!(read_page(0), Some(vec![1; page_size]));
+
+        // The one-page cache must evict page zero when page one arrives.
+        cache_ref.cache(blob_id, &vec![2; page_size], PAGE_SIZE_U64);
+        assert_eq!(read_page(0), None);
+        assert_eq!(read_page(1), Some(vec![2; page_size]));
+
+        // A reused slot must expose the replacement bytes through the hint path.
+        cache_ref.cache(blob_id, &vec![0xCC; page_size], 0);
+        assert_eq!(read_page(0), Some(vec![0xCC; page_size]));
+        assert_eq!(read_page(1), None);
     }
 
     #[rstest]

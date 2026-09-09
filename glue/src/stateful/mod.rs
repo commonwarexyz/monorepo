@@ -48,9 +48,9 @@
 //!
 //! - **Marshal sync** (no floor attached): [`Stateful::start`] prepares the
 //!   databases before the actor is spawned. New nodes initialize from
-//!   genesis; restarted nodes reconcile the database set against the later of
-//!   marshal's processed anchor and the stored state sync height, rewinding if
-//!   needed. If marshal is behind that stored height, the actor acknowledges old
+//!   genesis. Restarted nodes open the database set at the later of
+//!   marshal's processed anchor and the stored state sync height.
+//!   If marshal is behind that stored height, the actor acknowledges old
 //!   finalized blocks without applying them again until marshal catches up. The
 //!   actor then starts directly in normal processing mode while marshal continues
 //!   backfilling blocks from the network.
@@ -67,8 +67,8 @@
 //!   that floor. The storage target is advanced to the block backing marshal's durable
 //!   processed position when necessary, because marshal cannot redeliver acknowledged blocks
 //!   below that position. Journal state that has pruned the resulting range start is discarded
-//!   and rebuilt. State extending beyond the target is rewound to the target end so its retained
-//!   prefix can be reused. A lagging floor sampled during restart cannot move the floor backward.
+//!   and rebuilt. Initialization removes state beyond the target and reuses the retained prefix.
+//!   A lagging floor sampled during restart cannot move the floor backward.
 //!   Subsequent restarts after completion take the marshal sync path to ensure a contiguous stream.
 //!
 //! # Lazy Recovery

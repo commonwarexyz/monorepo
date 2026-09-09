@@ -199,7 +199,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
     runner.start(|context| async move {
         let cfg = test_config(suffix, &context);
-        let db: Db<F> = Db::init(context.child("storage"), cfg)
+        let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init ordered any db");
 

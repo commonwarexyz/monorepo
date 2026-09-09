@@ -50,8 +50,14 @@ impl<
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
-    pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        config: Config<T, S>,
+        max_size: Option<crate::merkle::Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::current::init(context, config, max_size).await
     }
 }
 
@@ -93,11 +99,14 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
+            max_size: Option<crate::merkle::Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, max_size).await
         }
     }
 }
@@ -136,7 +145,7 @@ pub mod test {
         partition_prefix: String,
     ) -> CurrentTest<F> {
         let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::<F>::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
@@ -266,7 +275,7 @@ pub mod test {
         }
 
         let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
-        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
 
@@ -311,7 +320,7 @@ pub mod test {
             let ctx = context
                 .child("reopen")
                 .with_attribute("concurrency", concurrency);
-            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            let db = PartDb::<P, Sequential>::init(ctx, cfg, None).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,

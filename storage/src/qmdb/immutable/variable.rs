@@ -4,22 +4,9 @@
 
 use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
-    Context,
-    journal::{
-        authenticated,
-        contiguous::variable::{self, Config as JournalConfig},
-    },
-    merkle::Family,
-    qmdb::{
-        Error, ROOT_BAGGING,
-        any::{VariableValue, value::VariableEncoding},
-        operation::Key,
-    },
-    translator::Translator,
+    journal::contiguous::variable::{self, Config as JournalConfig},
+    qmdb::any::value::VariableEncoding,
 };
-use commonware_codec::Read;
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 
 /// Type alias for a variable-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
@@ -31,68 +18,22 @@ pub type Db<F, E, K, V, H, T, S> =
 /// Type alias for the variable-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, C, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
 
-type Journal<F, E, K, V, H, S> =
-    authenticated::Journal<F, E, variable::Journal<E, Operation<F, K, V>>, H, S>;
-
 /// Configuration for a variable-size immutable authenticated db.
 pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
 
 /// Configuration for a variable-size compact immutable db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
 
-impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
-{
-    /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(
-        context: E,
-        cfg: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
-    ) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, K, V, H, S> = Journal::new(
-            context.child("journal"),
-            cfg.merkle_config,
-            cfg.log,
-            Operation::<F, K, V>::is_commit,
-            ROOT_BAGGING,
-        )
-        .await?;
-        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
-    }
-}
-
-impl<
-    F: Family,
-    E: Context,
-    K: Key,
-    V: VariableValue,
-    H: Hasher,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-> CompactDb<F, E, K, V, H, C, S>
-where
-    Operation<F, K, V>: Read<Cfg = C>,
-{
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(
-            merkle,
-            context.child("witness"),
-            cfg.witness,
-            cfg.commit_codec_config,
-        )
-        .await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         journal::contiguous::variable::Config as JournalConfig,
-        merkle::{full::Config as MmrConfig, mmb, mmr},
-        qmdb::immutable::tests::{self, immutable_tests},
+        merkle::{Family, full::Config as MmrConfig, mmb, mmr},
+        qmdb::{
+            Error,
+            immutable::tests::{self, immutable_tests},
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -138,7 +79,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
@@ -157,7 +98,7 @@ mod tests {
             },
             commit_codec_config: ((), ()),
         };
-        CompactDb::init(context, cfg).await.unwrap()
+        CompactDb::init(context, cfg, None).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -181,6 +122,26 @@ mod tests {
         Box::pin(open_db::<F>(ctx))
     }
 
+    #[allow(clippy::type_complexity)]
+    fn open_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<crate::merkle::Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
+    }
+
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -193,14 +154,6 @@ mod tests {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_rewind_is_send(
-        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
-        loc: crate::merkle::mmr::Location,
-    ) {
-        is_send(db.rewind(loc));
     }
 
     fn small_sections_config(
@@ -216,7 +169,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = small_sections_config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -238,6 +191,26 @@ mod tests {
         >,
     > {
         Box::pin(open_small_sections_db::<F>(ctx))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn open_small_sections_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<crate::merkle::Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = small_sections_config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
     }
 
     immutable_tests! {
@@ -271,18 +244,21 @@ mod tests {
         test_variable_stale_batch_child_applied_before_parent => run_stale_batch_child_applied_before_parent, open;
         test_variable_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, open;
         test_variable_to_batch => run_to_batch, open;
-        test_variable_rewind_recovery => run_rewind_recovery, open;
-        test_variable_rewind_pruned_target_errors => run_rewind_pruned_target_errors, open_small_sections;
+        test_variable_bounded_initialization_recovery => run_bounded_initialization_recovery, open_with_max;
+        test_variable_bounded_initialization_pruned_target_errors =>
+            run_bounded_initialization_pruned_target_errors, open_small_sections_with_max;
         test_variable_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
         test_variable_floor_monotonicity => run_floor_monotonicity, open;
         test_variable_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
         test_variable_floor_beyond_size => run_floor_beyond_size, open;
         test_variable_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
         test_variable_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
-        test_variable_rewind_restores_floor => run_rewind_restores_floor, open;
+        test_variable_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
         test_variable_single_commit_live_set => run_single_commit_live_set, open;
-        test_variable_rewind_after_reopen_with_floor_change => run_rewind_after_reopen_with_floor_change, open;
-        test_variable_rewind_after_reopen_partial_floor_gap => run_rewind_after_reopen_partial_floor_gap, open;
+        test_variable_bounded_initialization_after_reopen_with_floor_change =>
+            run_bounded_initialization_after_reopen_with_floor_change, open_with_max;
+        test_variable_bounded_initialization_after_reopen_partial_floor_gap =>
+            run_bounded_initialization_after_reopen_partial_floor_gap, open_with_max;
         test_variable_commit_after_sync_recovery => run_commit_after_sync_recovery, open;
         test_variable_partial_ancestor_commit => run_partial_ancestor_commit, open;
         test_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
@@ -290,11 +266,15 @@ mod tests {
         test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
-        test_variable_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
-        test_variable_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
-        test_variable_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
-        test_variable_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
-        test_variable_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
+        test_variable_bounded_initialization_preserves_collision_bucket =>
+            run_bounded_initialization_preserves_collision_bucket, open_with_max;
+        test_variable_bounded_initialization_after_reopen_repeated_key_gap =>
+            run_bounded_initialization_after_reopen_repeated_key_gap, open_with_max;
+        test_variable_bounded_initialization_after_reopen_mixed_gap_retained =>
+            run_bounded_initialization_after_reopen_mixed_gap_retained, open_with_max;
+        test_variable_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
+        test_variable_bounded_initialization_after_reopen_repeated_key_retained =>
+            run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
     }
 
     #[boxed]

@@ -15,7 +15,6 @@ use super::Error;
 use commonware_runtime::{Handle, ReadOptions};
 use futures::{Stream, StreamExt as _, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
-use tracing::warn;
 
 mod blobs;
 mod checkpoint;
@@ -233,7 +232,7 @@ impl<T> Many<'_, T> {
     }
 }
 
-/// A [Contiguous] journal that supports appending, rewinding, and pruning.
+/// A [Contiguous] journal that supports appending and prefix pruning.
 pub trait Mutable: Contiguous + Sized {
     /// Append a new item to the journal, returning its position.
     ///
@@ -280,31 +279,6 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
-    /// Rewind the journal to the given size, discarding items from the end.
-    ///
-    /// After rewinding to size N, the journal will contain exactly N items (positions 0 to N-1),
-    /// and the next append will receive position N.
-    ///
-    /// # Behavior
-    ///
-    /// - If `size > bounds.end`, returns [Error::InvalidRewind]
-    /// - If `size == bounds.end`, this is a no-op
-    /// - If `size < bounds.start`, returns [Error::ItemPruned] (can't rewind to pruned data)
-    /// - This operation is not atomic, but implementations guarantee the journal is left in a
-    ///   recoverable state if a crash occurs during rewinding
-    ///
-    /// # Warnings
-    ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidRewind] if `size` is beyond the current size, or [Error::ItemPruned]
-    /// if it precedes the pruning boundary. Returns an error if the underlying storage operation
-    /// fails.
-    fn rewind(self, size: u64) -> impl std::future::Future<Output = Result<Self, Error>> + Send;
-
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
@@ -337,57 +311,4 @@ pub trait Mutable: Contiguous + Sized {
     /// reopening the same storage may observe partially removed state. Use a reset operation
     /// provided by the concrete type when the journal must remain recoverable.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-
-    /// Rewinds the journal to the last item matching `predicate`, returning the resulting
-    /// size. If no item matches, the journal is rewound to the pruning boundary, discarding
-    /// all unpruned items.
-    ///
-    /// # Warnings
-    ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
-    fn rewind_to<P>(
-        mut self,
-        predicate: P,
-    ) -> impl std::future::Future<Output = Result<(Self, u64), Error>> + Send
-    where
-        P: FnMut(&Self::Item) -> bool + Send,
-    {
-        async move {
-            let rewind_size = scan_rewind_size(&self, predicate).await?;
-            if rewind_size != self.bounds().end {
-                self = self.rewind(rewind_size).await?;
-            }
-
-            Ok((self, rewind_size))
-        }
-    }
-}
-
-/// Scan backwards from the end of `journal` to the last item matching `predicate`, returning
-/// the size the journal must rewind to (and warning if that drops any items).
-async fn scan_rewind_size<C, P>(journal: &C, mut predicate: P) -> Result<u64, Error>
-where
-    C: Contiguous,
-    P: FnMut(&C::Item) -> bool + Send,
-{
-    let bounds = journal.bounds();
-    let mut rewind_size = bounds.end;
-    while rewind_size > bounds.start {
-        let item = journal.read(rewind_size - 1).await?;
-        if predicate(&item) {
-            break;
-        }
-        rewind_size -= 1;
-    }
-
-    if rewind_size != bounds.end {
-        let rewound_items = bounds.end - rewind_size;
-        warn!(
-            journal_size = bounds.end,
-            rewound_items, "rewinding journal items"
-        );
-    }
-
-    Ok(rewind_size)
 }

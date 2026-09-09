@@ -166,7 +166,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             init_concurrency: (),
         };
 
-        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
+        let mut db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to initialize Current database");
 

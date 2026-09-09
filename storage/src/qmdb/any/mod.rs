@@ -72,11 +72,9 @@ use crate::{
     },
     merkle::{Family, Location, full::Config as MerkleConfig},
     qmdb::{
-        ROOT_BAGGING,
         any::operation::{Operation, Update},
         bitmap::Shared,
         metrics::Metrics,
-        operation::Committable,
         single_operation_root,
     },
     translator::Translator,
@@ -150,9 +148,15 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
+/// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+/// `None` selects the latest retained state.
+///
+/// The selected state is durable before return. Zero is invalid because the initial commit
+/// requires one operation. Subsequent appends may exceed this initialization bound.
 pub async fn init<F, E, U, H, I, J, S>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    max_size: Option<Location<F>>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -164,7 +168,8 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None).await
+    init_with_bitmap::<F, E, U, H, I, J, S, BITMAP_CHUNK_BYTES>(context, cfg, None, max_size, None)
+        .await
 }
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
@@ -174,6 +179,8 @@ pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
+    max_size: Option<Location<F>>,
+    pair_absorption_threshold: Option<u64>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -185,14 +192,36 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    let mut log = authenticated::Journal::<F, E, J, H, S>::new(
+    let pending = crate::qmdb::prepare_initialization::<F, E, J, H, S>(
         context.child("log"),
         cfg.merkle_config,
         cfg.journal_config,
-        Operation::is_commit,
-        ROOT_BAGGING,
+        max_size,
     )
     .await?;
+    let size = pending.bounds().end;
+    if bitmap
+        .as_ref()
+        .is_some_and(|bitmap| size < bitmap.pruned_bits())
+    {
+        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
+            size,
+        )));
+    }
+    let floor = crate::qmdb::validate_initialization(&pending, true).await?;
+    if let (Some(bitmap), Some(floor)) = (&bitmap, floor)
+        && *floor < bitmap.pruned_bits()
+    {
+        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
+            size,
+        )));
+    }
+    if pair_absorption_threshold.is_some_and(|minimum| size < minimum) {
+        return Err(crate::qmdb::Error::HistoricalFloorPruned(Location::new(
+            size,
+        )));
+    }
+    let mut log = pending.finish().await?;
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
@@ -362,38 +391,12 @@ pub(crate) mod test {
     }
 
     use crate::{
-        index::Unordered as UnorderedIndex,
-        journal::contiguous::Mutable,
         merkle::mmr,
-        qmdb::any::{
-            db::Db as AnyDb,
-            operation::{Operation as AnyOperation, update::Update as UpdateTrait},
-            traits::{DbAny, Provable, UnmerkleizedBatch as _},
-        },
+        qmdb::any::traits::{DbAny, Provable, UnmerkleizedBatch as _},
     };
 
     type Error = crate::qmdb::Error<mmr::Family>;
     type Location = mmr::Location;
-
-    pub(crate) trait RewindableDb: Sized {
-        fn rewind_to_size(self, size: Location)
-        -> impl Future<Output = Result<Self, Error>> + Send;
-    }
-
-    impl<E, C, I, H, U, const N: usize, S> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U, N, S>
-    where
-        E: crate::Context,
-        C: Mutable<Item = AnyOperation<mmr::Family, U>>,
-        I: UnorderedIndex<Value = Location>,
-        H: Hasher,
-        U: UpdateTrait,
-        S: Strategy,
-        AnyOperation<mmr::Family, U>: Codec,
-    {
-        async fn rewind_to_size(self, size: Location) -> Result<Self, Error> {
-            self.rewind(size).await
-        }
-    }
 
     /// Test recovery on non-empty db.
     pub(crate) async fn test_any_db_non_empty_recovery<F: Family, D, V: Clone + CodecShared>(
@@ -710,14 +713,15 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Test rewinding to a prior committed state and recovering that state after reopen.
-    pub(crate) async fn test_any_db_rewind_recovery<D, V>(
+    /// Open a prior committed state at a bound and recover it on ordinary reopen.
+    pub(crate) async fn test_any_db_bounded_initialization_recovery<D, V>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        bounded_db: impl Fn(Context, Location) -> Pin<Box<dyn Future<Output = Result<D, Error>> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + RewindableDb,
+        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -727,13 +731,16 @@ pub(crate) mod test {
         let initial_size = db.size();
         let initial_floor = db.inactivity_floor_loc();
 
-        // Empty-batch rewind on an otherwise empty DB should apply no snapshot undos.
+        // Selecting the earlier empty commit must rebuild an empty snapshot.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let (db, empty_range) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(empty_range.start, initial_size);
         assert_eq!(db.size(), empty_range.end);
-        let db = db.rewind_to_size(initial_size).await.unwrap();
+        drop(db);
+        let db = bounded_db(context.child("cap"), initial_size)
+            .await
+            .unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
         assert_eq!(db.inactivity_floor_loc(), initial_floor);
@@ -789,10 +796,11 @@ pub(crate) mod test {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
-        // Rewind across a tail where:
+        // Select a commit before a tail where
         // - the same key (`key0`) was updated multiple times
         // - `key1` was deleted then recreated (exercises net-zero active_keys_delta path)
-        let db = db.rewind_to_size(size_a).await.unwrap();
+        drop(db);
+        let db = bounded_db(context.child("cap"), size_a).await.unwrap();
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size(), size_a);
         assert_eq!(db.inactivity_floor_loc(), floor_a);
@@ -811,7 +819,7 @@ pub(crate) mod test {
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
         assert_eq!(db.get(&key2).await.unwrap(), None);
 
-        // Fresh writes from the rewound tip should produce a correct new chain and persist
+        // Fresh writes from the selected tip should produce a correct new chain and persist
         // across reopen.
         let value2_d = make_value(40);
         let metadata_d = make_value(41);
@@ -835,8 +843,11 @@ pub(crate) mod test {
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2_d));
 
-        // Rewind all the way to the initial commit boundary (`first_commit_loc + 1`).
-        let db = db.rewind_to_size(initial_size).await.unwrap();
+        // Reopen at the initial commit boundary (`first_commit_loc + 1`).
+        drop(db);
+        let db = bounded_db(context.child("cap"), initial_size)
+            .await
+            .unwrap();
         assert_eq!(db.root(), initial_root);
         assert_eq!(db.size(), initial_size);
         assert_eq!(db.inactivity_floor_loc(), initial_floor);
@@ -1315,7 +1326,7 @@ pub(crate) mod test {
         unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
     use commonware_macros::{test_group, test_traced};
-    use commonware_parallel::{Sequential, Strategy};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
@@ -1530,6 +1541,44 @@ pub(crate) mod test {
     // `<f>_<variant_label>`. `with_reopen` hands the test a db plus a reopen
     // closure, `with_make_value` hands it just the db.
     macro_rules! test_for_variant {
+        (with_cap: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$f _ $l>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        let ctx = context.child(stringify!($l));
+                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx), None)
+                            .await
+                            .unwrap();
+                        $f(
+                            ctx,
+                            db,
+                            |ctx| {
+                                Box::pin(async move {
+                                    <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx), None)
+                                        .await
+                                        .unwrap()
+                                })
+                            },
+                            |ctx, cap| {
+                                Box::pin(async move {
+                                    <$db>::init(
+                                        ctx.child("storage"),
+                                        $cfg::<OneCap>("db", &ctx),
+                                        Some(cap),
+                                    )
+                                    .await
+                                })
+                            },
+                            to_digest,
+                        )
+                        .await;
+                    });
+                }
+            }
+        };
         (with_reopen: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
             paste::paste! {
                 #[test_group("slow")]
@@ -1538,7 +1587,7 @@ pub(crate) mod test {
                     let executor = deterministic::Runner::default();
                     executor.start(|context| async move {
                         let ctx = context.child(stringify!($l));
-                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx), None)
                             .await
                             .unwrap();
                         $f(
@@ -1546,7 +1595,7 @@ pub(crate) mod test {
                             db,
                             |ctx| {
                                 Box::pin(async move {
-                                    <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                                    <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx), None)
                                         .await
                                         .unwrap()
                                 })
@@ -1566,7 +1615,7 @@ pub(crate) mod test {
                     let executor = deterministic::Runner::default();
                     executor.start(|context| async move {
                         let ctx = context.child(stringify!($l));
-                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx), None)
                             .await
                             .unwrap();
                         $f(ctx, db, to_digest).await;
@@ -1609,7 +1658,9 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
-    test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
+    with_mmr_variants!(
+        test_for_variant!(with_cap: test_any_db_bounded_initialization_recovery, "WARN")
+    );
 
     fn key(i: u64) -> Digest {
         Sha256::hash(&[&i.to_be_bytes()])
@@ -1644,6 +1695,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("e", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1673,6 +1725,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("m", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1703,6 +1756,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("g", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1750,6 +1804,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("mg", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1789,6 +1844,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("sg", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1830,6 +1886,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("dr", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1869,6 +1926,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("fr", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1915,6 +1973,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("ar", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1946,6 +2005,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("dc", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2012,6 +2072,7 @@ pub(crate) mod test {
             let db_a: UnorderedVariable = UnorderedVariableDb::init(
                 ctx_a.child("db"),
                 variable_db_config::<OneCap>("cms-a", &ctx_a),
+                None,
             )
             .await
             .unwrap();
@@ -2021,6 +2082,7 @@ pub(crate) mod test {
             let db_b: UnorderedVariable = UnorderedVariableDb::init(
                 ctx_b.child("db"),
                 variable_db_config::<OneCap>("cms-b", &ctx_b),
+                None,
             )
             .await
             .unwrap();
@@ -2077,6 +2139,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("cd", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2110,6 +2173,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("da", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2143,6 +2207,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("pf", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2196,6 +2261,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("frc", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2252,6 +2318,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("ab", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2287,6 +2354,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>(partition, &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2308,6 +2376,7 @@ pub(crate) mod test {
             let reopened: UnorderedVariable = UnorderedVariableDb::init(
                 context.child("reopen"),
                 variable_db_config::<OneCap>(partition, &context),
+                None,
             )
             .await
             .unwrap();
@@ -2318,9 +2387,9 @@ pub(crate) mod test {
         });
     }
 
-    /// Rewinding to a pruned target returns an error.
+    /// Reopening at a pruned target returns an error.
     #[test_traced("INFO")]
-    fn test_any_rewind_pruned_target_errors() {
+    fn test_any_bounded_initialization_pruned_target_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const KEYS: u64 = 64;
@@ -2329,6 +2398,7 @@ pub(crate) mod test {
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("rp", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2341,7 +2411,7 @@ pub(crate) mod test {
                 round += 1;
                 assert!(
                     round <= 64,
-                    "failed to prune enough history for rewind test"
+                    "failed to prune enough history for the bounded initialization test"
                 );
 
                 let updates: Vec<_> = (0..KEYS)
@@ -2358,45 +2428,61 @@ pub(crate) mod test {
             }
 
             let oldest_retained = db.bounds().start;
-            let Err(boundary_err) = db.rewind(oldest_retained).await else {
-                panic!("expected rewind at retained boundary to fail");
+            _ = db.sync().await.unwrap();
+            let Err(boundary_err) = UnorderedVariable::init(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("rp", &ctx),
+                Some(oldest_retained),
+            )
+            .await
+            else {
+                panic!("expected bounded initialization at retained boundary to fail");
             };
             assert!(
                 matches!(
                     boundary_err,
                     crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
                 ),
-                "unexpected rewind error at retained boundary: {boundary_err:?}"
+                "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
             );
 
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("reopen"),
                 variable_db_config::<OneCap>("rp", &ctx),
+                None,
             )
             .await
             .unwrap();
-            let Err(err) = db.rewind(first_range.start).await else {
-                panic!("expected rewind to pruned target to fail");
+            _ = db.sync().await.unwrap();
+            let Err(err) = UnorderedVariable::init(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("rp", &ctx),
+                Some(first_range.start),
+            )
+            .await
+            else {
+                panic!("expected bounded initialization to pruned target to fail");
             };
             assert!(
                 matches!(
                     err,
                     crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
                 ),
-                "unexpected rewind error: {err:?}"
+                "unexpected bounded initialization error: {err:?}"
             );
         });
     }
 
-    /// Rewinding rejects out-of-range targets and keeps state unchanged.
+    /// Zero is rejected. Equal and above-end bounds preserve the committed state.
     #[test_traced("INFO")]
-    fn test_any_rewind_invalid_target_errors() {
+    fn test_any_bounded_initialization_zero_equal_and_above_end() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("ri", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2406,24 +2492,38 @@ pub(crate) mod test {
 
             let root_before = db.root();
             let size_before = db.size();
-            let db = db.rewind(size_before).await.unwrap();
+            let db = {
+                _ = db.sync().await.unwrap();
+                UnorderedVariable::init(
+                    ctx.child("cap"),
+                    variable_db_config::<OneCap>("ri", &ctx),
+                    Some(size_before),
+                )
+                .await
+            }
+            .unwrap();
             assert_eq!(db.root(), root_before);
             assert_eq!(db.size(), size_before);
 
-            let Err(zero_err) = db.rewind(Location::new(0)).await else {
-                panic!("expected rewind to zero to fail");
+            _ = db.sync().await.unwrap();
+            let Err(zero_err) = UnorderedVariable::init(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("ri", &ctx),
+                Some(Location::new(0)),
+            )
+            .await
+            else {
+                panic!("expected bounded initialization to zero to fail");
             };
             assert!(
-                matches!(
-                    zero_err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(0))
-                ),
-                "unexpected rewind error: {zero_err:?}"
+                matches!(zero_err, crate::qmdb::Error::InvalidInitializationBound),
+                "unexpected bounded initialization error: {zero_err:?}"
             );
 
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("reopen"),
                 variable_db_config::<OneCap>("ri", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2431,21 +2531,21 @@ pub(crate) mod test {
             assert_eq!(db.size(), size_before);
 
             let too_large_target = size_before + 1;
-            let Err(too_large_err) = db.rewind(too_large_target).await else {
-                panic!("expected rewind past size to fail");
-            };
-            assert!(
-                matches!(
-                    too_large_err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(size))
-                    if size == *too_large_target
-                ),
-                "unexpected rewind error: {too_large_err:?}"
-            );
+            drop(db);
+            let db = UnorderedVariable::init(
+                ctx.child("above"),
+                variable_db_config::<OneCap>("ri", &ctx),
+                Some(too_large_target),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root_before);
+            drop(db);
 
             let db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("reopen2"),
                 variable_db_config::<OneCap>("ri", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2456,17 +2556,20 @@ pub(crate) mod test {
         });
     }
 
-    /// Rewinding fails when the target commit's inactivity floor has been pruned, even if the
-    /// target commit location is still retained.
+    /// Bounded initialization fails when the target commit's inactivity floor has been pruned, even
+    /// if the target commit location is still retained.
     #[test_traced("INFO")]
-    fn test_any_rewind_rejects_target_with_pruned_floor() {
+    fn test_any_bounded_initialization_rejects_target_with_pruned_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const KEYS: u64 = 64;
 
             let ctx = context.child("db");
             let db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.child("storage"), variable_db_config::<OneCap>("rf", &ctx))
+                UnorderedVariableDb::init(
+                    ctx.child("storage"),
+                    variable_db_config::<OneCap>("rf", &ctx), None,
+                )
                     .await
                     .unwrap();
 
@@ -2478,12 +2581,13 @@ pub(crate) mod test {
             )
             .await;
 
-            let rewind_target = db.size();
+            let initialization_bound = db.size();
             let target_floor = db.inactivity_floor_loc();
             let prune_loc = target_floor + (KEYS / 2);
             assert!(
-                rewind_target > *prune_loc,
-                "test setup expected target size > prune_loc; target={rewind_target:?}, floor={target_floor:?}"
+                initialization_bound > *prune_loc,
+                "test setup expected target size > prune_loc. target={initialization_bound:?}, \
+                 floor={target_floor:?}"
             );
 
             let mut round = 0u64;
@@ -2491,7 +2595,7 @@ pub(crate) mod test {
                 round += 1;
                 assert!(
                     round <= 8,
-                    "failed to advance inactivity floor enough for floor-pruned rewind test"
+                    "failed to advance inactivity floor enough for floor-pruned initialization test"
                 );
                 (db, _) = commit_writes(
                     db,
@@ -2508,20 +2612,34 @@ pub(crate) mod test {
                 "test setup expected pruned start beyond target floor; bounds={bounds:?}, target_floor={target_floor:?}"
             );
             assert!(
-                rewind_target > bounds.start,
-                "test setup expected target commit retained; target={rewind_target:?}, bounds={bounds:?}"
+                initialization_bound > bounds.start,
+                "test setup expected target commit retained. target={initialization_bound:?}, \
+                 bounds={bounds:?}"
             );
 
-            let Err(err) = db.rewind(rewind_target).await else {
-                panic!("expected rewind to floor-pruned target to fail");
+            let original_root = db.root();
+            _ = db.sync().await.unwrap();
+            let Err(err) = UnorderedVariable::init(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("rf", &ctx),
+                Some(initialization_bound),
+            )
+            .await else {
+                panic!("expected bounded initialization to floor-pruned target to fail");
             };
             assert!(
                 matches!(
                     err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                    crate::qmdb::Error::HistoricalFloorPruned(_)
                 ),
-                "unexpected rewind error: {err:?}"
+                "unexpected bounded initialization error: {err:?}"
             );
+            let db = UnorderedVariable::init(
+                ctx.child("unchanged"),
+                variable_db_config::<OneCap>("rf", &ctx), None,
+            )
+            .await.unwrap();
+            assert_eq!(db.root(), original_root);
         });
     }
 
@@ -2529,7 +2647,7 @@ pub(crate) mod test {
     /// pruned. Journal pruning is section-granular while bitmap pruning rounds to chunk
     /// boundaries, so a coarse `items_per_section` can leave the journal retaining from the
     /// start while the bitmap has already crossed the next chunk boundary. A subsequent
-    /// `rewind()` to a still-retained early commit must still succeed.
+    /// bounded initialization at a still-retained early commit must still succeed.
     #[test_traced("INFO")]
     fn test_any_prune_keeps_bitmap_aligned_with_journal() {
         let executor = deterministic::Runner::default();
@@ -2549,15 +2667,15 @@ pub(crate) mod test {
             cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
 
             let db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.child("storage"), cfg).await.unwrap();
+                UnorderedVariableDb::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
 
             let (db, _) = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
-            let rewind_target = db.size();
-            // Rewind target must lie below the chunk boundary the buggy prune would advance
-            // to; otherwise the unfixed code would not panic on truncate.
+            let initialization_bound = db.size();
+            // Keep the selected commit below the bitmap chunk boundary that pruning must preserve.
             assert!(
-                *rewind_target < BITMAP_CHUNK_BITS,
-                "rewind_target {rewind_target:?} must be < {BITMAP_CHUNK_BITS} for the bug to manifest"
+                *initialization_bound < BITMAP_CHUNK_BITS,
+                "initialization_bound {initialization_bound:?} must be < {BITMAP_CHUNK_BITS} for \
+                 the bug to manifest"
             );
             let root_at_target = db.root();
 
@@ -2574,10 +2692,10 @@ pub(crate) mod test {
             )
             .await;
 
-            // Pre-rewind size must actually exceed the rewind target so the rewind is not a
-            // no-op.
+            // Pre-recovery size must actually exceed the initialization target so the recovery is
+            // not a no-op.
             let pre_prune_size = db.size();
-            assert!(pre_prune_size > rewind_target);
+            assert!(pre_prune_size > initialization_bound);
 
             let prune_loc = Location::new(600);
             // prune_loc must cross at least one bitmap chunk boundary; otherwise the buggy
@@ -2606,10 +2724,16 @@ pub(crate) mod test {
                 "bitmap pruned past journal retained start"
             );
 
-            // Rewind to the still-retained early commit must succeed and restore visible
+            // Reopen at the still-retained early commit must succeed and restore visible
             // state (root match implies the snapshot was rebuilt correctly).
-            let db = db.rewind(rewind_target).await.unwrap();
-            assert_eq!(db.size(), rewind_target);
+            _ = db.sync().await.unwrap();
+            let db = UnorderedVariable::init(
+                ctx.child("cap"),
+                cfg.clone(),
+                Some(initialization_bound),
+            )
+            .await.unwrap();
+            assert_eq!(db.size(), initialization_bound);
             assert_eq!(db.root(), root_at_target);
 
             db.destroy().await.unwrap();
@@ -2641,7 +2765,7 @@ pub(crate) mod test {
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
         let cfg = variable_db_config::<OneCap>(suffix, &context);
-        super::init(context, cfg).await.unwrap()
+        super::init(context, cfg, None).await.unwrap()
     }
 
     async fn commit_writes_mmb(
@@ -2778,6 +2902,7 @@ pub(crate) mod test {
             let mut db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("pipe", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2811,8 +2936,8 @@ pub(crate) mod test {
 #[cfg(test)]
 mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
-    //! `apply_batch`, `prune_bitmap`, and `rewind` is independent of the snapshot index variant,
-    //! so one variant (`unordered::variable`) suffices as the test bed.
+    //! `apply_batch`, `prune_bitmap`, and initialization is independent of the snapshot index
+    //! variant, so one variant (`unordered::variable`) suffices as the test bed.
     use crate::qmdb::any::unordered::variable::test::{AnyTest, create_test_config};
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::{boxed, test_traced};
@@ -2825,7 +2950,7 @@ mod bitmap_tests {
     /// Open a fresh test DB.
     async fn open_db(context: Context) -> AnyTest {
         let cfg = create_test_config(0, &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     /// Active locations (bit=1) in `[pruned_bits, len)` of `db.bitmap`.
@@ -2903,18 +3028,11 @@ mod bitmap_tests {
         });
     }
 
-    /// `any::Db::rewind` restores bitmap state correctly.
-    ///
-    /// `any::rewind` is the sole writer of the bitmap during rewind; it must:
-    ///   1. truncate the bitmap to the rewind size,
-    ///   2. flip restored locs (committed snapshot entries the rewound tail had superseded) back
-    ///      to active,
-    ///   3. set the rewound tail's CommitFloor bit to 1 (the new current commit).
-    ///
-    /// The oracle round-trip catches all three: any divergence from `init_from_log`'s rebuild
-    /// fails the comparison.
+    /// Bounded initialization rebuilds bitmap activity for the selected commit. Retained keys are
+    /// active, discarded keys are absent, and the selected commit is active. An ordinary reopen
+    /// must reconstruct the same bitmap.
     #[test_traced]
-    fn rewind_restores_bitmap_to_target_commit() {
+    fn bounded_initialization_restores_bitmap_to_target_commit() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db(context.child("db")).await;
             let k1 = Sha256::hash(&[&[1]]);
@@ -2944,10 +3062,19 @@ mod bitmap_tests {
             assert_eq!(db.get(&k2).await.unwrap(), Some(vec![20]));
             assert!(*db.bounds().end > *size_after_first);
 
-            // Rewind to the state after the first commit.
-            let db = db.rewind(size_after_first).await.unwrap();
+            // Reopen at the state after the first commit.
+            let db = {
+                _ = db.sync().await.unwrap();
+                AnyTest::init(
+                    context.child("cap"),
+                    create_test_config(0, &context),
+                    Some(size_after_first),
+                )
+                .await
+            }
+            .unwrap();
 
-            // Post-rewind: k2 gone, k1 remains.
+            // After recovery, k2 is gone and k1 remains.
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
             assert!(db.get(&k2).await.unwrap().is_none());
 
