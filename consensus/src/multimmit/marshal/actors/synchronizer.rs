@@ -879,8 +879,9 @@ where
                         match command {
                             Command::Header(_, header) => self.insert_header(header),
                             Command::Synchronize(next_span, next) => {
-                                if let Some(id) = next_span.id() {
-                                    span.follows_from(id);
+                                // Multiple hints from one router batch share their origin span.
+                                if span.id() != next_span.id() {
+                                    span.follows_from(next_span.id());
                                 }
                                 batch.merge(next);
                                 self.prepare_finality(batch.view);
@@ -964,8 +965,8 @@ where
             Command::Header(_, header) => self.insert_header(header),
             Command::Synchronize(span, batch) => match &mut self.deferred.synchronize {
                 Some((pending_span, pending)) => {
-                    if let Some(id) = span.id() {
-                        pending_span.follows_from(id);
+                    if pending_span.id() != span.id() {
+                        pending_span.follows_from(span.id());
                     }
                     pending.merge(batch);
                 }
@@ -2602,6 +2603,17 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
+    use tracing::{Subscriber, span::Id, subscriber::with_default};
+    use tracing_subscriber::{Layer, layer::Context as LayerContext, prelude::*, registry};
+
+    #[derive(Clone, Default)]
+    struct SpanLinks(Arc<Mutex<Vec<(Id, Id)>>>);
+
+    impl<S: Subscriber> Layer<S> for SpanLinks {
+        fn on_follows_from(&self, id: &Id, follows: &Id, _: LayerContext<'_, S>) {
+            self.0.lock().push((id.clone(), follows.clone()));
+        }
+    }
 
     type TestBody = EmptyBlock<Sha256>;
     type TestBlock = TransactionBlock<Sha256, TestBody>;
@@ -3128,7 +3140,8 @@ mod tests {
     fn genesis_record(committee: &Committee<MinPk>) -> Arc<TipRecord<Sha256Digest>> {
         let genesis = committee.config.genesis();
         Arc::new(
-            TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec()).unwrap(),
+            TipRecord::at_tips(genesis_history::<Sha256>(genesis), genesis.tips().to_vec())
+                .unwrap(),
         )
     }
 
@@ -4124,7 +4137,8 @@ mod tests {
             let base = base(0, 0);
             let blocks = vec![chain(epoch, base, 2)];
             let history = digest(b"cross-opening history", 0);
-            let first = Arc::new(TipRecord::at_tips(history, vec![blocks[0][0].reference()]).unwrap());
+            let first =
+                Arc::new(TipRecord::at_tips(history, vec![blocks[0][0].reference()]).unwrap());
             let first_id = first.commitment::<Sha256>();
             let second =
                 Arc::new(TipRecord::at_tips(first_id, vec![blocks[0][1].reference()]).unwrap());
@@ -4409,6 +4423,58 @@ mod tests {
 
             assert_eq!(actor.history_stack.high_water, 0);
             assert!(actor.catalog.selected.is_empty());
+        });
+    }
+
+    #[rstest]
+    #[case(true, true)]
+    #[case(true, false)]
+    #[case(false, true)]
+    #[case(false, false)]
+    fn synchronization_hints_link_only_distinct_spans(
+        #[case] queued: bool,
+        #[case] shared_span: bool,
+    ) {
+        let links = SpanLinks::default();
+        with_default(registry().with(links.clone()), || {
+            deterministic::Runner::default().start(|context| async move {
+                let committee = committee(17, 2, Limits::new(2, 1).unwrap());
+                let proof = Arc::new(committee.lqc(1));
+                let id = proof.id::<Sha256>();
+                let mut actor = genesis_actor(&committee, 4).await;
+                let first = info_span!(parent: None, "first_origin");
+                let second = if shared_span {
+                    first.clone()
+                } else {
+                    info_span!(parent: None, "second_origin")
+                };
+                let first_id = first.id().unwrap();
+                let second_id = second.id().unwrap();
+                let hints = [first, second].map(|span| {
+                    Command::Synchronize(span, FinalityBatch::new(id, Arc::clone(&proof), 2))
+                });
+                if queued {
+                    let (commands, receiver) = mailbox::new(context, NonZeroUsize::new(2).unwrap());
+                    for hint in hints {
+                        assert_eq!(commands.enqueue(hint), Feedback::Ok);
+                    }
+                    drop(commands);
+                    actor.run(receiver).await.unwrap();
+                } else {
+                    for hint in hints {
+                        actor.defer_command(hint).unwrap();
+                    }
+                }
+                let recorded = links.0.lock();
+                assert!(recorded.iter().all(|(span, cause)| span != cause));
+                assert_eq!(
+                    recorded
+                        .iter()
+                        .filter(|(span, cause)| { *span == first_id && *cause == second_id })
+                        .count(),
+                    usize::from(!shared_span),
+                );
+            });
         });
     }
 
