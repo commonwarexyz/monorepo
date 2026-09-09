@@ -10,23 +10,17 @@
 //!
 //! Current batches are branch-scoped views, not immutable snapshots.
 //!
-//! A batch remains valid only while its ancestor chain is still the committed prefix of the DB.
-//! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid objects:
-//! do not read through them, do not build children from them, and do not attempt to apply them.
+//! A batch remains usable only while its ancestor chain is still the committed prefix of the
+//! DB. Once a non-ancestor batch is applied, that batch and all of its descendants are stale.
+//! Reads and merkleization refuse with `StaleRead`, and applying is rejected with
+//! `StaleBatch` (see [`crate::qmdb::batch_chain`]).
 //!
-//! A short rule of thumb:
-//! - A batch is only usable while it stays on the winning branch.
-//!
-//! Valid:
-//! - Build `A`, apply `A`, then build `B` from `A` and read or merkleize `B`.
-//! - Call [`Db::to_batch`](db::Db::to_batch) and use the returned batch only while no divergent
-//!   branch has been applied.
-//!
-//! Invalid:
-//! - Build siblings `B1` and `B2`, apply `B1`, then call `B2.get()`, `B2.new_batch()`, or
-//!   `apply_batch(B2)`.
-//! - Hold `snapshot = db.to_batch()`, mutate the DB through another branch, then use `snapshot`
-//!   again.
+//! Concretely
+//! - Build `A`, apply `A`, then build `B` from `A` -- `B` reads and merkleizes normally.
+//! - Build siblings `B1` and `B2`, apply `B1` -- `B2.get()` and `B2.merkleize()` refuse with
+//!   `StaleRead`, and `apply_batch(B2)` is rejected with `StaleBatch`.
+//! - Hold `view = db.to_batch()`, mutate the DB through another branch -- `view`'s reads
+//!   refuse from then on.
 //!
 //! # Motivation
 //!

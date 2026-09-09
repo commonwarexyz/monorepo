@@ -199,7 +199,8 @@ mod tests {
             .new_batch()
             .append(value)
             .merkleize(&db, None, floor)
-            .await;
+            .await
+            .unwrap();
         let (db, range) = db.apply_batch(batch).await.unwrap();
         (db, range.start)
     }
@@ -402,7 +403,8 @@ mod tests {
                 .new_batch()
                 .append(value.clone())
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (db, range) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
             assert_eq!(
@@ -487,6 +489,9 @@ mod tests {
         test_keyless_fixed_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
         test_keyless_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, reopen_indexed;
         test_keyless_fixed_get_many => run_get_many, db;
+        test_keyless_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
+        test_keyless_fixed_merkleize_across_prune => run_merkleize_across_prune, db;
+        test_keyless_fixed_stale_fork_refuses => run_stale_fork_refuses, db;
     }
 
     #[test_traced("INFO")]
@@ -515,13 +520,15 @@ mod tests {
             .append(v1.clone())
             .append(v2.clone())
             .merkleize(&db, Some(metadata.clone()), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .append(v1)
             .append(v2)
             .merkleize(&compact, Some(metadata.clone()), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 
@@ -597,7 +604,7 @@ mod tests {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
             let floor = target_db.inactivity_floor_loc();
-            let merkleized = batch.merkleize(&target_db, None, floor).await;
+            let merkleized = batch.merkleize(&target_db, None, floor).await.unwrap();
             let (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();

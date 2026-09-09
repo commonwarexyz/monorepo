@@ -192,7 +192,8 @@ mod tests {
             .new_batch()
             .set(key, value)
             .merkleize(&db, None, floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db
     }
@@ -396,7 +397,8 @@ mod tests {
                 .new_batch()
                 .set(key, value)
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -564,6 +566,9 @@ mod tests {
         test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_fixed_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
         test_fixed_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
+        test_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
+        test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
         test_fixed_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
         test_fixed_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
     }
@@ -586,13 +591,15 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&compact, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 

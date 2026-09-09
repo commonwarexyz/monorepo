@@ -289,7 +289,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await;
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone(), floor).await.unwrap();
 
                     match expect_err {
                         None => {
@@ -348,13 +348,13 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
-                        .merkleize(&db, None, parent_floor).await;
+                        .merkleize(&db, None, parent_floor).await.unwrap();
                     // child: valid on its own; only the ancestor should trip the check.
                     let child_floor = parent_floor; // stay ≥ parent_floor even if parent is bad
                     let child = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])
-                        .merkleize(&db, None, child_floor).await;
+                        .merkleize(&db, None, child_floor).await.unwrap();
 
                     let before_last_commit = db.bounds().end - 1;
                     let before_floor = db.inactivity_floor_loc();
@@ -397,7 +397,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     // at a stale floor would.
                     let end = db.bounds().end;
                     let floor = Location::<F>::new(end.as_u64() + pending_count);
-                    let merkleized = batch.merkleize(&db, None, floor).await;
+                    let merkleized = batch.merkleize(&db, None, floor).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -412,7 +412,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -435,7 +435,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -457,7 +457,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -493,7 +493,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     for v in pending_appends.drain(..) {
                         batch = batch.append(v);
                     }
-                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                    let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -535,7 +535,7 @@ fn fuzz_family<F: Family, S: Strategy>(
         for v in pending_appends.drain(..) {
             batch = batch.append(v);
         }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
         let (db, _) = db
             .apply_batch(merkleized)
             .await
