@@ -1,9 +1,12 @@
-//! Small worker-affine handles for registered I/O.
+//! Completion handles for I/O registered on one worker.
 //!
 //! Adapters register requests inside their async bodies, then await an
 //! [`Operation`] containing only its waiter ID and weak worker identity.
 //! The driver retains both pending requests and completed results in one slab.
-//! Foreign destruction publishes cancellation to the owning worker.
+//!
+//! A registered operation must be polled on its owning worker, but may be
+//! dropped on any thread. Dropping it releases its observer. The driver decides
+//! whether to cancel the request or finish retained work such as writes and syncs.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -14,18 +17,16 @@ use super::{
 use crate::Error;
 use commonware_utils::channel::oneshot;
 use std::{
-    cell::RefCell,
     future::Future,
     mem,
     pin::Pin,
-    rc::Rc,
     sync::{Arc, Weak},
     task::{Context, Poll},
 };
 
 /// Registration identity retained until observation ends.
 enum State {
-    /// Registered on a worker and awaiting its retained result.
+    /// Registered request whose result has not been consumed.
     Waiting {
         /// Weak identity of the owning worker, checked before every poll.
         mailbox: Weak<Mailbox>,
@@ -38,7 +39,7 @@ enum State {
     Done,
 }
 
-/// Ordinary completion handle with no inline request storage.
+/// Handle to an ordinary request and its result in the worker's waiter slab.
 pub(crate) struct Operation {
     /// Registration identity, or the terminal state once observation ends.
     state: State,
@@ -49,16 +50,21 @@ impl Operation {
     ///
     /// Call this inside the adapter's async body so creating an I/O future
     /// remains lazy. The request is transferred before this handle is awaited.
-    pub(crate) fn register(request: Request) -> Self {
+    /// A closing worker returns a handle that resolves to [`Error::Closed`].
+    pub fn register(request: Request) -> Self {
         let owner = runtime::current().expect("io_uring I/O requires a current worker");
         let mut local = owner.borrow_mut();
+
         if local.closing {
+            // Request owners may run destructors that reenter the worker.
             drop(local);
             drop(request);
+
             return Self {
                 state: State::Closed,
             };
         }
+
         let expired = request
             .deadline()
             .is_some_and(|deadline| deadline <= local.now);
@@ -67,28 +73,31 @@ impl Operation {
             driver, deferred, ..
         } = &mut *local;
         let driver = driver.as_mut().unwrap();
+
+        // The driver takes ownership even when the SQ is full. Polling installs
+        // a waker only while the request is still pending.
         let waiter_id = driver.admit(request, Observer::Ordinary(None));
+
         if expired {
+            // Immediate timeouts use the same result path as CQE completions.
             driver.expire(waiter_id, deferred);
         }
+
         Self {
             state: State::Waiting { mailbox, waiter_id },
         }
     }
-}
 
-/// Resolve a registered worker, rejecting migration while allowing closed polls.
-pub(super) fn bound(mailbox: &Weak<Mailbox>) -> Result<Rc<RefCell<Local>>, Error> {
-    if let Some(local) = runtime::current() {
-        let matches = std::ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
-        if matches {
-            return Ok(local);
+    /// Release this observer once, routing cleanup to the owning worker.
+    ///
+    /// The caller must release any worker borrow before calling this method.
+    fn release(&mut self) {
+        if let State::Waiting { mailbox, waiter_id } = mem::replace(&mut self.state, State::Done) {
+            // Orphaning also releases an already completed result. The driver
+            // decides whether unfinished work must continue.
+            runtime::cancel(&mailbox, Message::Orphan(waiter_id));
         }
     }
-    if mailbox.upgrade().is_none_or(|mailbox| !mailbox.is_open()) {
-        return Err(Error::Closed);
-    }
-    panic!("registered io_uring operation polled outside its owning worker");
 }
 
 impl Future for Operation {
@@ -96,74 +105,83 @@ impl Future for Operation {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+
         // Validate affinity before changing ownership, so a rejected foreign
         // poll retains the identity needed by Drop.
-        let (owner, waiter_id) = match &this.state {
-            State::Waiting { mailbox, waiter_id } => match bound(mailbox) {
-                Ok(owner) => (owner, *waiter_id),
-                Err(error) => {
-                    drop(Self {
-                        state: mem::replace(&mut this.state, State::Done),
-                    });
-                    return Poll::Ready(Err(error));
-                }
-            },
+        let (mailbox, waiter_id) = match &this.state {
+            State::Waiting { mailbox, waiter_id } => (mailbox, *waiter_id),
             State::Closed => {
                 this.state = State::Done;
                 return Poll::Ready(Err(Error::Closed));
             }
             State::Done => panic!("io_uring operation polled after completion"),
         };
-        let mut incoming = None;
+        let owner = match runtime::bound(mailbox) {
+            Ok(owner) => owner,
+            Err(error) => {
+                this.release();
+                return Poll::Ready(Err(error));
+            }
+        };
+
+        let mut cloned_waker = None;
         loop {
             let mut local = owner.borrow_mut();
             if local.closing {
-                local.deferred.drops.extend(incoming);
+                // A waker clone may have closed the worker. Defer its destruction
+                // before release borrows the worker again.
+                local.deferred.drops.extend(cloned_waker);
                 drop(local);
-                drop(Self {
-                    state: mem::replace(&mut this.state, State::Done),
-                });
+                this.release();
                 return Poll::Ready(Err(Error::Closed));
             }
+
             let Local {
                 driver, deferred, ..
             } = &mut *local;
             let driver = driver.as_mut().unwrap();
+
+            // Inspect before cloning: ready results and matching wakers require
+            // no callback.
             match driver.observe(waiter_id, cx.waker()) {
                 Observation::Ready(output) => {
                     this.state = State::Done;
-                    deferred.drops.extend(incoming);
+
+                    // Completion may have raced the clone, leaving it unused.
+                    deferred.drops.extend(cloned_waker);
                     return Poll::Ready(Ok(output));
                 }
                 Observation::Pending => {
-                    deferred.drops.extend(incoming);
+                    deferred.drops.extend(cloned_waker);
                     return Poll::Pending;
                 }
                 Observation::Refresh => {
-                    if let Some(waker) = incoming.take() {
+                    if let Some(waker) = cloned_waker.take() {
                         deferred.drops.extend(driver.set_waker(waiter_id, waker));
                         return Poll::Pending;
                     }
                 }
             }
+
             // A clone can reenter and finish this request, or panic. Keep its
             // identity intact and inspect the slot again after the callback.
             drop(local);
-            incoming = Some(cx.waker().clone());
+            cloned_waker = Some(cx.waker().clone());
         }
     }
 }
 
 impl Drop for Operation {
     fn drop(&mut self) {
-        if let State::Waiting { mailbox, waiter_id } = mem::replace(&mut self.state, State::Done) {
-            cancel(&mailbox, Message::Orphan(waiter_id));
-        }
+        self.release();
     }
 }
 
 /// Transfer a sync to its worker and return its independent completion receiver.
-pub(crate) fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> {
+///
+/// Dropping the receiver leaves the sync running. A closing worker rejects the
+/// request and publishes [`Error::Closed`] through the receiver.
+pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> {
     let owner = runtime::current().expect("io_uring sync requires a current worker");
     let (sender, receiver) = oneshot::channel();
     let mut local = owner.borrow_mut();
@@ -173,6 +191,8 @@ pub(crate) fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), E
         drop(request);
         let _ = sender.send(Err(Error::Closed));
     } else {
+        // Registration needs no task waker. The worker publishes to this
+        // channel when the sync finishes.
         local
             .driver
             .as_mut()
@@ -182,55 +202,44 @@ pub(crate) fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), E
     receiver
 }
 
-/// Route destruction locally without weak upgrade, or publish to a foreign owner.
-pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
-    if let Some(local) = runtime::current() {
-        let mut local = local.borrow_mut();
-        if std::ptr::eq(Arc::as_ptr(&local.mailbox), mailbox.as_ptr()) {
-            match message {
-                Message::Orphan(id) => local.orphan(id),
-                Message::CancelTimer(id) => {
-                    if let Some(waker) = local.timers.cancel(id) {
-                        local.deferred.drops.push(waker);
-                    }
-                }
-                _ => unreachable!("invalid cancellation message"),
-            }
-            return;
-        }
-    }
-    if let Some(mailbox) = mailbox.upgrade() {
-        let _ = mailbox.send(message);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::request::{RecvRequest, SendRequest},
-        *,
-    };
+    use super::*;
     use crate::{
         Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _,
-        iouring::{Config, RingConfig, Runner},
+        iouring::{
+            Config, RingConfig, Runner,
+            request::{RecvRequest, SendRequest},
+            sleep::Sleep,
+        },
         utils::{extract_panic_message, reschedule},
     };
-    use futures::{FutureExt as _, poll};
+    use futures::{FutureExt as _, future::pending, poll};
     use std::{
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
+        pin::pin,
         sync::atomic::{AtomicUsize, Ordering},
         task::{RawWaker, RawWakerVTable, Waker},
-        time::Duration,
+        thread,
+        time::{Duration, Instant},
     };
 
     /// Arbitrary waker callbacks that reenter the current worker's local state.
+    ///
+    /// RawWaker exposes clone and drop as well as wake, so every callback can
+    /// check for an outstanding worker borrow or inject a panic.
     #[derive(Default)]
     struct Reentrant {
+        /// Number of cloned wakers, including clones that panic.
         clones: AtomicUsize,
+        /// Number of consuming and borrowed wakes.
         wakes: AtomicUsize,
+        /// Number of waker destructors invoked.
         drops: AtomicUsize,
+        /// Callback that should panic once, or zero when no panic is armed.
         panic_callback: AtomicUsize,
+        /// Optional action run while cloning, outside any worker borrow.
         on_clone: Option<fn()>,
     }
 
@@ -240,6 +249,7 @@ mod tests {
         const DROP: usize = 3;
 
         fn panic_once(&self, callback: usize) {
+            // Disarm before unwinding so cleanup can use the remaining wakers.
             if self
                 .panic_callback
                 .compare_exchange(callback, 0, Ordering::Relaxed, Ordering::Relaxed)
@@ -306,9 +316,64 @@ mod tests {
         }
     }
 
+    /// Limit the driver to one in-flight request.
+    fn runner() -> Runner {
+        Runner::new(Config::default().with_ring_config(RingConfig {
+            size: 1,
+            ..Default::default()
+        }))
+    }
+
+    /// Connected sockets whose local endpoint can be shared by requests.
+    ///
+    /// Keeping the peer open and silent blocks receives while allowing sends.
+    fn socket() -> (Arc<OwnedFd>, UnixStream) {
+        let (local, peer) = UnixStream::pair().unwrap();
+        local.set_nonblocking(true).unwrap();
+        (Arc::new(local.into()), peer)
+    }
+
+    /// Register a one-byte send on the current worker.
+    fn send(fd: Arc<OwnedFd>) -> Operation {
+        Operation::register(Request::Send(SendRequest {
+            fd,
+            write: IoBufs::from(vec![1]).into(),
+            deadline: None,
+        }))
+    }
+
+    /// Register a one-byte receive, optionally bounded by a deadline.
+    fn recv(fd: Arc<OwnedFd>, deadline: Option<Instant>) -> Operation {
+        Operation::register(Request::Recv(RecvRequest {
+            fd,
+            buf: IoBufMut::with_capacity(1),
+            offset: 0,
+            len: 1,
+            exact: true,
+            deadline,
+        }))
+    }
+
+    /// Service the worker until every request and cancellation CQE retires.
+    async fn drained() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !runtime::current()
+            .unwrap()
+            .borrow()
+            .driver
+            .as_ref()
+            .unwrap()
+            .is_empty()
+        {
+            assert!(Instant::now() < deadline, "I/O did not retire");
+            reschedule().await;
+        }
+    }
+
     #[test]
-    fn test_start_sync_returns_without_cloning_an_admission_waker() {
+    fn test_start_sync_returns_while_ring_is_full() {
         let callbacks = Arc::new(Reentrant::default());
+
         runner().start(|context| async move {
             let (blob, _) = context.open("observer_sync", b"file").await.unwrap();
             let (fd, _peer) = socket();
@@ -317,16 +382,67 @@ mod tests {
             reschedule().await;
 
             // The only in-flight slot is occupied, but sync accepts ownership now.
-            let mut sync = Box::pin(blob.start_sync());
+            let mut sync = pin!(blob.start_sync());
             let waker = callbacks.waker();
             let Poll::Ready(handle) = sync.poll_unpin(&mut Context::from_waker(&waker)) else {
                 panic!("sync must return its completion handle on the first poll");
             };
             assert_eq!(callbacks.clones.load(Ordering::Relaxed), 0);
             assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 0);
+
             drop(blocker);
             handle.await.unwrap();
         });
+    }
+
+    #[test]
+    fn test_worker_closure_rejects_registration_and_polling() {
+        for during_clone in [false, true] {
+            let callbacks = Arc::new(Reentrant {
+                on_clone: Some(|| runtime::current().unwrap().borrow_mut().closing = true),
+                ..Default::default()
+            });
+
+            runner().start(|context| async move {
+                let (blob, _) = context.open("observer_closed", b"file").await.unwrap();
+                let (fd, _peer) = socket();
+                let mut operation = recv(fd.clone(), None);
+                let waker = callbacks.waker();
+                let mut cx = Context::from_waker(&waker);
+
+                // Closure can precede polling or happen while a waker clone
+                // temporarily releases the worker borrow.
+                if !during_clone {
+                    runtime::current().unwrap().borrow_mut().closing = true;
+                }
+                assert!(matches!(
+                    operation.poll_unpin(&mut cx),
+                    Poll::Ready(Err(Error::Closed))
+                ));
+                assert_eq!(
+                    callbacks.clones.load(Ordering::Relaxed),
+                    usize::from(during_clone)
+                );
+
+                // New ordinary and detached requests must also reject closure.
+                let mut rejected = recv(fd, None);
+                assert!(matches!(
+                    rejected.poll_unpin(&mut cx),
+                    Poll::Ready(Err(Error::Closed))
+                ));
+                let handle = blob.start_sync().await;
+                assert!(matches!(handle.await, Err(Error::Closed)));
+                assert!(
+                    runtime::current()
+                        .unwrap()
+                        .borrow()
+                        .driver
+                        .as_ref()
+                        .unwrap()
+                        .is_empty()
+                );
+            });
+        }
     }
 
     #[test]
@@ -341,6 +457,7 @@ mod tests {
                         driver,
                         deferred,
                         now,
+                        timers,
                         ..
                     } = &mut *local;
                     driver
@@ -348,27 +465,23 @@ mod tests {
                         .unwrap()
                         .service(*now, false, deferred)
                         .unwrap();
-                    let Local {
-                        now,
-                        timers,
-                        deferred,
-                        ..
-                    } = &mut *local;
                     timers.expire(*now, &mut deferred.wakes);
                 }),
                 ..Default::default()
             });
+
             runner().start(|_| async {
                 let (fd, _peer) = socket();
                 let mut blocker = recv(fd.clone(), None);
                 assert!(poll!(&mut blocker).is_pending());
-                let mut queued = recv(
-                    fd,
-                    Some(std::time::Instant::now() + Duration::from_secs(60)),
-                );
-                let mut sleep = super::super::sleep::Sleep::new(Duration::from_secs(60));
+                let mut queued = recv(fd, Some(Instant::now() + Duration::from_secs(60)));
+                let mut sleep = Sleep::new(Duration::from_secs(60));
                 assert!(poll!(&mut queued).is_pending());
                 assert!(poll!(&mut sleep).is_pending());
+
+                // The first future triggers expiry while cloning its waker.
+                // It must recheck before installation, and the other future
+                // must observe its ready result without cloning at all.
                 let waker = callbacks.waker();
                 let mut cx = Context::from_waker(&waker);
                 if sleep_first {
@@ -387,7 +500,7 @@ mod tests {
     #[test]
     fn test_sleep_clone_panic_preserves_registration_cancellation() {
         runner().start(|_| async {
-            let mut sleep = super::super::sleep::Sleep::new(Duration::from_secs(60));
+            let mut sleep = Sleep::new(Duration::from_secs(60));
             let registered = Arc::new(Reentrant::default());
             let registered_waker = registered.waker();
             assert!(
@@ -395,6 +508,9 @@ mod tests {
                     .poll_unpin(&mut Context::from_waker(&registered_waker))
                     .is_pending()
             );
+
+            // A failed replacement must leave the old timer registration
+            // available for cancellation.
             let callbacks = Arc::new(Reentrant::default());
             callbacks
                 .panic_callback
@@ -405,7 +521,11 @@ mod tests {
             }))
             .expect_err("changed sleep observer must clone");
             assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
+
             drop(sleep);
+
+            // Cancellation hands the timer's cloned waker back to the worker
+            // for deferred destruction.
             reschedule().await;
             assert_eq!(registered.drops.load(Ordering::Relaxed), 1);
         });
@@ -414,38 +534,25 @@ mod tests {
     #[test]
     fn test_pending_observers_retain_equivalent_wakers() {
         let callbacks = Arc::new(Reentrant::default());
-        runner().start(|_| async {
-            let (fd, _peer) = socket();
-            let mut admitted = recv(fd.clone(), None);
-            let mut queued = recv(fd, None);
-            let mut sleep = super::super::sleep::Sleep::new(Duration::from_secs(60));
-            let waker = callbacks.waker();
-            let mut cx = Context::from_waker(&waker);
-            assert!(admitted.poll_unpin(&mut cx).is_pending());
-            assert!(queued.poll_unpin(&mut cx).is_pending());
-            assert!(sleep.poll_unpin(&mut cx).is_pending());
-            let clones = callbacks.clones.load(Ordering::Relaxed);
-            assert!(admitted.poll_unpin(&mut cx).is_pending());
-            assert!(queued.poll_unpin(&mut cx).is_pending());
-            assert!(sleep.poll_unpin(&mut cx).is_pending());
-            assert_eq!(callbacks.clones.load(Ordering::Relaxed), clones);
-        });
-    }
 
-    #[test]
-    fn test_ready_observer_does_not_clone_unused_waker() {
-        let callbacks = Arc::new(Reentrant::default());
         runner().start(|_| async {
             let (fd, _peer) = socket();
-            let mut operation = send(fd);
+            let mut first = recv(fd.clone(), None);
+            let mut queued = recv(fd, None);
+            let mut sleep = Sleep::new(Duration::from_secs(60));
             let waker = callbacks.waker();
             let mut cx = Context::from_waker(&waker);
-            assert!(operation.poll_unpin(&mut cx).is_pending());
-            while callbacks.wakes.load(Ordering::Relaxed) == 0 {
-                reschedule().await;
-            }
+            assert!(first.poll_unpin(&mut cx).is_pending());
+            reschedule().await;
+            assert!(queued.poll_unpin(&mut cx).is_pending());
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
+
+            // Equivalent wakers need no replacement for an in-flight request,
+            // a queued request, or a registered sleep.
             let clones = callbacks.clones.load(Ordering::Relaxed);
-            assert!(operation.poll_unpin(&mut cx).is_ready());
+            assert!(first.poll_unpin(&mut cx).is_pending());
+            assert!(queued.poll_unpin(&mut cx).is_pending());
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
             assert_eq!(callbacks.clones.load(Ordering::Relaxed), clones);
         });
     }
@@ -453,26 +560,41 @@ mod tests {
     #[test]
     fn test_observer_clone_wake_and_drop_run_outside_local_borrows() {
         let callbacks = Arc::new(Reentrant::default());
+
         runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut operation = send(fd);
             let waker = callbacks.waker();
             let mut cx = Context::from_waker(&waker);
             assert!(operation.poll_unpin(&mut cx).is_pending());
-            // Refreshing displaces the first observer. The deferred destructor
-            // must run without keeping the waiter slab borrowed.
+
+            // Replace the observer with a noop waker, then restore it. The
+            // old observer must be dropped after the worker borrow ends.
             assert!(
                 operation
                     .poll_unpin(&mut Context::from_waker(Waker::noop()))
                     .is_pending()
             );
             assert!(operation.poll_unpin(&mut cx).is_pending());
+
             while callbacks.wakes.load(Ordering::Relaxed) == 0 {
                 reschedule().await;
             }
-            assert!(operation.poll_unpin(&mut cx).is_ready());
+
+            // A different waker would need cloning if the request were pending.
+            // Consuming the completed result must skip that callback entirely.
+            let ready = Arc::new(Reentrant::default());
+            let ready_waker = ready.waker();
+            assert!(matches!(
+                operation.poll_unpin(&mut Context::from_waker(&ready_waker)),
+                Poll::Ready(Ok(RequestOutput::Send(Ok(()))))
+            ));
+            assert_eq!(ready.clones.load(Ordering::Relaxed), 0);
             drop(waker);
         });
+
+        // Two installations, one completion wake, and destruction of the
+        // displaced clone and the original waker.
         assert_eq!(callbacks.clones.load(Ordering::Relaxed), 2);
         assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 1);
         assert_eq!(callbacks.drops.load(Ordering::Relaxed), 2);
@@ -484,16 +606,19 @@ mod tests {
         for queued in [false, true] {
             let callbacks = Arc::new(Reentrant::default());
             let (fd, _peer) = socket();
+
             runner().start(|_| async {
                 let mut blocker = queued.then(|| recv(fd.clone(), None));
                 if let Some(blocker) = &mut blocker {
                     assert!(poll!(blocker).is_pending());
                 }
+
                 let mut operation = recv(fd.clone(), None);
                 let waker = callbacks.waker();
                 let mut cx = Context::from_waker(&waker);
                 assert!(poll!(&mut operation).is_pending());
                 reschedule().await;
+
                 let registration = match &operation.state {
                     State::Waiting { waiter_id, .. } => *waiter_id,
                     _ => panic!("operation did not register"),
@@ -506,11 +631,11 @@ mod tests {
                 }))
                 .expect_err("observer clone must panic");
                 assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
-                let retained = match &operation.state {
-                    State::Waiting { waiter_id, .. } => *waiter_id,
-                    _ => panic!("clone panic lost cancellation identity"),
-                };
-                assert_eq!(retained, registration);
+                assert!(
+                    matches!(operation.state, State::Waiting { waiter_id, .. } if waiter_id == registration),
+                    "clone panic lost cancellation identity"
+                );
+
                 // A clone panic must retain the identity needed to cancel
                 // both queued and in-flight requests.
                 drop(operation);
@@ -527,9 +652,13 @@ mod tests {
 
     #[test]
     fn test_observer_wake_and_drop_panics_finish_worker_retirement() {
+        // These callbacks run in worker service. Their panics must leave
+        // through Runner::start only after all worker cleanup has finished.
         for callback in [Reentrant::WAKE, Reentrant::DROP] {
             let callbacks = Arc::new(Reentrant::default());
             let (fd, _peer) = socket();
+
+            // Keep Local alive to inspect cleanup after its scope is gone.
             let mut retained_local = None;
             let panic = catch_unwind(AssertUnwindSafe(|| {
                 runner().start(|_| async {
@@ -552,7 +681,7 @@ mod tests {
                                 .is_pending()
                         );
                     }
-                    futures::future::pending::<()>().await;
+                    pending::<()>().await;
                 });
             }))
             .expect_err("deferred observer callback must fail the runner");
@@ -569,41 +698,10 @@ mod tests {
         }
     }
 
-    fn runner() -> Runner {
-        Runner::new(Config::default().with_ring_config(RingConfig {
-            size: 1,
-            ..Default::default()
-        }))
-    }
-
-    fn socket() -> (Arc<OwnedFd>, UnixStream) {
-        let (local, peer) = UnixStream::pair().unwrap();
-        local.set_nonblocking(true).unwrap();
-        (Arc::new(local.into()), peer)
-    }
-
-    fn send(fd: Arc<OwnedFd>) -> Operation {
-        Operation::register(Request::Send(SendRequest {
-            fd,
-            write: IoBufs::from(vec![1]).into(),
-            deadline: None,
-        }))
-    }
-
-    fn recv(fd: Arc<OwnedFd>, deadline: Option<std::time::Instant>) -> Operation {
-        Operation::register(Request::Recv(RecvRequest {
-            fd,
-            buf: IoBufMut::with_capacity(1),
-            offset: 0,
-            len: 1,
-            exact: true,
-            deadline,
-        }))
-    }
-
     #[test]
-    fn test_queued_operation_completes_without_an_admission_poll() {
+    fn test_queued_operation_completes_without_further_polls() {
         let callbacks = Arc::new(Reentrant::default());
+
         runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut blocker = recv(fd.clone(), None);
@@ -619,39 +717,17 @@ mod tests {
             );
             drop(blocker);
 
-            // Await another request while the queued future receives no polls.
+            // Let a later request drive the worker. The queued future receives
+            // no polls, and its unconsumed result must not occupy the sole
+            // in-flight slot needed by this later request.
             assert!(matches!(send(fd).await, Ok(RequestOutput::Send(Ok(())))));
             assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
             assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 1);
-            assert!(
-                queued
-                    .poll_unpin(&mut Context::from_waker(&waker))
-                    .is_ready()
-            );
+            assert!(matches!(
+                queued.poll_unpin(&mut Context::from_waker(&waker)),
+                Poll::Ready(Ok(RequestOutput::Send(Ok(()))))
+            ));
             assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
-        });
-    }
-
-    #[test]
-    fn test_completed_unpolled_operation_releases_capacity_one() {
-        runner().start(|_| async {
-            let (fd, _peer) = socket();
-            let mut first = send(fd.clone());
-            assert!(poll!(&mut first).is_pending());
-            while !runtime::current()
-                .unwrap()
-                .borrow()
-                .driver
-                .as_ref()
-                .unwrap()
-                .is_empty()
-            {
-                reschedule().await;
-            }
-            // The first output remains retained while another request uses the
-            // sole in-flight slot and completes independently.
-            assert!(matches!(send(fd).await, Ok(RequestOutput::Send(Ok(())))));
-            assert!(matches!(first.await, Ok(RequestOutput::Send(Ok(())))));
         });
     }
 
@@ -661,12 +737,13 @@ mod tests {
             let (fd, _peer) = socket();
             let mut first = recv(fd.clone(), None);
             assert!(poll!(&mut first).is_pending());
-            let deadline = std::time::Instant::now() + Duration::from_millis(10);
+            let deadline = Instant::now() + Duration::from_millis(10);
             let waiting = recv(fd, Some(deadline));
             assert!(matches!(
                 waiting.await,
                 Ok(RequestOutput::Recv(Err((_, Error::Timeout))))
             ));
+
             // The untimed receive still occupies the only in-flight slot.
             // Sleeper expiry must also progress independently of that slot.
             context.sleep(Duration::from_millis(1)).await;
@@ -675,27 +752,8 @@ mod tests {
     }
 
     #[test]
-    fn test_foreign_drop_orphans_registered_request() {
-        runner().start(|_| async {
-            let (fd, _peer) = socket();
-            let mut operation = recv(fd, None);
-            assert!(poll!(&mut operation).is_pending());
-            std::thread::spawn(move || drop(operation)).join().unwrap();
-            while !runtime::current()
-                .unwrap()
-                .borrow()
-                .driver
-                .as_ref()
-                .unwrap()
-                .is_empty()
-            {
-                reschedule().await;
-            }
-        });
-    }
-
-    #[test]
     fn test_escaped_operation_observes_worker_closure() {
+        // Return the handle without awaiting it, then poll it after cleanup.
         let (operation,) = runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut operation = recv(fd, None);
@@ -709,31 +767,38 @@ mod tests {
     }
 
     #[test]
-    fn test_foreign_poll_rejection_keeps_cancellation_identity() {
-        runner().start(|_| async {
-            let (fd, _peer) = socket();
-            let mut operation = recv(fd, None);
-            assert!(poll!(&mut operation).is_pending());
-            let rejected = std::thread::spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    operation.poll_unpin(&mut Context::from_waker(Waker::noop()))
-                }));
-                assert!(result.is_err());
-                // Drop must still publish the original registration identity
-                // after a caller catches the unsupported migration attempt.
-                drop(operation);
+    fn test_foreign_drop_releases_registration() {
+        for (in_flight, poll_first) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            runner().start(|_| async {
+                let (fd, _peer) = socket();
+                let mut operation = recv(fd, None);
+                assert!(poll!(&mut operation).is_pending());
+
+                // A queued receive retires locally. A staged receive must wait
+                // for its operation CQE after cancellation.
+                if in_flight {
+                    reschedule().await;
+                }
+
+                thread::spawn(move || {
+                    if poll_first {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            operation.poll_unpin(&mut Context::from_waker(Waker::noop()))
+                        }));
+                        assert!(result.is_err());
+                    }
+                    // Both ordinary destruction and destruction after a rejected
+                    // poll must publish the original registration identity.
+                    drop(operation);
+                })
+                .join()
+                .unwrap();
+
+                // The owner must process the foreign message and finish any
+                // kernel cancellation before the registration can retire.
+                drained().await;
             });
-            rejected.join().unwrap();
-            while !runtime::current()
-                .unwrap()
-                .borrow()
-                .driver
-                .as_ref()
-                .unwrap()
-                .is_empty()
-            {
-                reschedule().await;
-            }
-        });
+        }
     }
 }

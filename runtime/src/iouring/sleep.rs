@@ -18,7 +18,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    operation, runtime,
+    runtime,
     slab::{Id, Slab},
     timeout::TimeoutWheel,
 };
@@ -107,7 +107,7 @@ impl Future for Sleep {
                 timer_id,
                 deadline,
             } => (
-                operation::bound(mailbox).expect("io_uring sleep polled after its worker closed"),
+                runtime::bound(mailbox).expect("io_uring sleep polled after its worker closed"),
                 *deadline,
                 Some(*timer_id),
             ),
@@ -168,7 +168,7 @@ impl Drop for Sleep {
             mailbox, timer_id, ..
         } = mem::replace(&mut self.state, State::Done)
         {
-            operation::cancel(&mailbox, Message::CancelTimer(timer_id));
+            runtime::cancel(&mailbox, Message::CancelTimer(timer_id));
         }
     }
 }

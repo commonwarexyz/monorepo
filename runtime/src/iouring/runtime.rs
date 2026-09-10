@@ -35,7 +35,7 @@ use super::{
     driver::Driver,
     mailbox::{Mailbox, Message},
     request::{RequestOutput, RetiredResources},
-    sleep::{Sleep, Timers},
+    sleep::{Sleep, TimerId, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{self, Runnable, Running, Target, Task, Tasks},
     timeout::TimeoutWheel,
@@ -88,6 +88,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     pin::{Pin, pin},
+    ptr,
     rc::Rc,
     sync::{Arc, Weak},
     task::{Context as TaskContext, Poll, Waker},
@@ -923,6 +924,13 @@ impl Local {
             .orphan(id, &mut self.deferred);
     }
 
+    /// Remove a sleep registration and defer destruction of its waker.
+    fn cancel_timer(&mut self, id: TimerId) {
+        if let Some(waker) = self.timers.cancel(id) {
+            self.deferred.drops.push(waker);
+        }
+    }
+
     /// Update aggregate pending-operation metrics using only this worker's delta.
     fn update_pending(&mut self) {
         let pending = self.driver.as_ref().unwrap().len();
@@ -999,6 +1007,45 @@ pub(super) fn current() -> Option<Rc<RefCell<Local>>> {
         .try_with(|current| current.borrow().clone())
         .ok()
         .flatten()
+}
+
+/// Resolve the owning worker for a registered operation or sleep.
+///
+/// With no matching current worker, returns [`Error::Closed`] if the owner has
+/// closed, and panics otherwise. The caller checks whether a matching worker is
+/// closing before accessing its registrations.
+pub(super) fn bound(mailbox: &Weak<Mailbox>) -> Result<Rc<RefCell<Local>>, Error> {
+    if let Some(local) = current() {
+        let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
+        if matches {
+            return Ok(local);
+        }
+    }
+    if mailbox.upgrade().is_none_or(|mailbox| !mailbox.is_open()) {
+        return Err(Error::Closed);
+    }
+    panic!("registered io_uring handle polled outside its owning worker");
+}
+
+/// Release an operation or timer on its worker, directly or through its mailbox.
+///
+/// Accepts only [`Message::Orphan`] and [`Message::CancelTimer`]. A worker whose
+/// mailbox is closed or gone has already taken responsibility for cleanup.
+pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
+    if let Some(local) = current() {
+        let mut local = local.borrow_mut();
+        if ptr::eq(Arc::as_ptr(&local.mailbox), mailbox.as_ptr()) {
+            match message {
+                Message::Orphan(id) => local.orphan(id),
+                Message::CancelTimer(id) => local.cancel_timer(id),
+                _ => unreachable!("invalid cancellation message"),
+            }
+            return;
+        }
+    }
+    if let Some(mailbox) = mailbox.upgrade() {
+        let _ = mailbox.send(message);
+    }
 }
 
 /// Panic payload reported after mandatory worker cleanup.
@@ -1292,12 +1339,7 @@ impl Worker {
                     }
                 }
                 Message::Orphan(id) => self.local.borrow_mut().orphan(id),
-                Message::CancelTimer(id) => {
-                    let mut local = self.local.borrow_mut();
-                    if let Some(waker) = local.timers.cancel(id) {
-                        local.deferred.drops.push(waker);
-                    }
-                }
+                Message::CancelTimer(id) => self.local.borrow_mut().cancel_timer(id),
             }
         }
     }
