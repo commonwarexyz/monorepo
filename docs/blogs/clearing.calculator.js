@@ -326,11 +326,11 @@ function injectStyles() {
       width: 100%;
     }
     .clearing-calculator-axis { color: ${GRAY}; font-size: 12px; text-align: center; }
-    .clearing-calculator-panel h3 { font-size: 14px; margin: 22px 0 10px; }
     .clearing-calculator-out {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
+      margin-top: 22px;
     }
     .clearing-calculator-out details {
       align-self: start;
@@ -466,14 +466,12 @@ function mount(root) {
   });
   panel.append(canvas, el('div', { class: 'clearing-calculator-axis' }, 'Recipients per live account (average)'));
 
-  const perClose = el('div', { class: 'clearing-calculator-out' });
-  panel.append(el('h3', {}, 'Data for one close'), perClose);
-  const oPosted = readout(perClose, 'Reader download', 'One reader holding the previous state.', 'clearing-calc-certified', 'reader');
-  const oDealt = readout(perClose, 'Evidence for all slices', 'Each slice once, with its own proof.', 'clearing-calc-dealt', 'evidence');
-  const perCommittee = el('div', { class: 'clearing-calculator-out' });
-  panel.append(el('h3', {}, 'Validator traffic per close'), perCommittee);
-  const oBusiest = readout(perCommittee, 'Largest validator download', 'Maximum received by one validator.', 'clearing-calc-busiest');
-  const oEgress = readout(perCommittee, 'Total sent to validators', '', 'clearing-calc-egress');
+  const results = el('div', { class: 'clearing-calculator-out' });
+  panel.append(results);
+  const oPosted = readout(results, 'Reader download', 'One reader holding the previous state.', 'clearing-calc-certified', 'reader');
+  const oDealt = readout(results, 'Evidence for all slices', 'Each slice once, with its own proof.', 'clearing-calc-dealt', 'evidence');
+  const oBusiest = readout(results, 'Largest validator download', 'Maximum received by one validator.', 'clearing-calc-busiest');
+  const oEgress = readout(results, 'Total sent to validators', '', 'clearing-calc-egress');
 
   // Committee sizes snap to n = 3f + 1.
   const curV = () => {
