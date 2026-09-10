@@ -7,7 +7,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    request::{Request, RequestOutput},
+    request::{Request, RequestOutput, SyncRequest},
     runtime::{self, Local},
     waiter::{Observation, Observer, WaiterId},
 };
@@ -157,11 +157,7 @@ impl Drop for Operation {
 }
 
 /// Transfer a sync to its worker and return its independent completion receiver.
-pub(crate) fn start_sync(request: Request) -> oneshot::Receiver<Result<(), Error>> {
-    assert!(
-        matches!(&request, Request::Sync(_)),
-        "detached request requires sync"
-    );
+pub(crate) fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> {
     let owner = runtime::current().expect("io_uring sync requires a current worker");
     let (sender, receiver) = oneshot::channel();
     let mut local = owner.borrow_mut();
@@ -175,7 +171,7 @@ pub(crate) fn start_sync(request: Request) -> oneshot::Receiver<Result<(), Error
             .driver
             .as_mut()
             .unwrap()
-            .admit(request, Observer::DetachedSync(sender));
+            .admit(Request::Sync(request), Observer::DetachedSync(sender));
     }
     receiver
 }
@@ -585,7 +581,6 @@ mod tests {
             fd,
             write: IoBufs::from(vec![1]).into(),
             deadline: None,
-            result: None,
         }))
     }
 
@@ -597,7 +592,6 @@ mod tests {
             len: 1,
             exact: true,
             deadline,
-            result: None,
         }))
     }
 

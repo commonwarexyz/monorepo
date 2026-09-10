@@ -313,8 +313,8 @@ impl Driver {
 
 impl State {
     /// Store the terminal result and defer resource destruction and callbacks.
-    fn complete(&mut self, id: WaiterId, error: Option<Error>, deferred: &mut Deferred) {
-        if let Some(tick) = self.waiters.finish(id, error, deferred) {
+    fn complete(&mut self, id: WaiterId, result: Result<(), Error>, deferred: &mut Deferred) {
+        if let Some(tick) = self.waiters.finish(id, result, deferred) {
             self.timeout_wheel.remove(tick);
         }
     }
@@ -331,7 +331,7 @@ impl State {
         if self.waiters.is_in_flight(id) {
             self.pending_cancels.push_back(id);
         } else {
-            self.complete(id, Some(Error::Timeout), deferred);
+            self.complete(id, Err(Error::Timeout), deferred);
         }
     }
 
@@ -363,12 +363,12 @@ impl State {
                     self.timeout_wheel.schedule(id, tick);
                     self.waiters.set_deadline(id, tick);
                 }
-                Ok(None) => self.complete(id, Some(Error::Timeout), deferred),
+                Ok(None) => self.complete(id, Err(Error::Timeout), deferred),
                 Err(message) => {
                     let error = Error::Io(
                         std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into(),
                     );
-                    self.complete(id, Some(error), deferred);
+                    self.complete(id, Err(error), deferred);
                 }
             }
         }
@@ -401,8 +401,8 @@ impl State {
             return;
         }
         match self.waiters.stage(id) {
-            StageOutcome::Timeout(id) => self.complete(id, Some(Error::Timeout), deferred),
-            StageOutcome::Orphaned(id) => self.complete(id, None, deferred),
+            StageOutcome::Timeout(id) => self.complete(id, Err(Error::Timeout), deferred),
+            StageOutcome::Orphaned(id) => self.complete(id, Err(Error::Closed), deferred),
             StageOutcome::Submit(sqe) => {
                 // SAFETY: The waiter owns all SQE-referenced descriptors and
                 // buffers until its operation CQE. Capacity was checked by the
@@ -511,7 +511,7 @@ impl State {
                     .expect("untracked cancellation CQE");
             }
             CompletionOutcome::Requeue(id) => self.ready_queue.push_back(id),
-            CompletionOutcome::Complete(id) => self.complete(id, None, deferred),
+            CompletionOutcome::Complete(id, result) => self.complete(id, result, deferred),
         }
         false
     }
@@ -767,8 +767,8 @@ mod tests {
                 .waiters
                 .on_completion(id.user_data(), result)
             {
-                CompletionOutcome::Complete(id) => {
-                    self.driver.state.complete(id, None, &mut self.deferred)
+                CompletionOutcome::Complete(id, result) => {
+                    self.driver.state.complete(id, result, &mut self.deferred)
                 }
                 CompletionOutcome::Requeue(id) => self.driver.state.ready_queue.push_back(id),
                 CompletionOutcome::Cancel => unreachable!(),
@@ -785,7 +785,6 @@ mod tests {
             len,
             exact,
             deadline,
-            result: None,
         })
     }
 
@@ -1456,17 +1455,13 @@ mod tests {
                 write: bufs.into(),
                 state: WriteAtState::WritingBeforeSync,
                 cache: Cache::Enabled,
-                result: None,
             }),
             0,
         );
         harness.orphan(id);
         let (sender, receiver) = oneshot::channel();
         harness.driver.admit(
-            Request::Sync(SyncRequest {
-                file: held,
-                result: None,
-            }),
+            Request::Sync(SyncRequest { file: held }),
             Observer::DetachedSync(sender),
         );
         // Retained completion receivers do not participate in drain progress.

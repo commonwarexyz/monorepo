@@ -174,8 +174,8 @@ fn fill_iovecs(bufs: &IoBufs, chunk: usize, offset: usize, iovecs: &mut [libc::i
 /// Each variant owns all buffers and FDs needed by the
 /// kernel, and progress cursors. The loop calls [build_sqe](Self::build_sqe)
 /// to produce the next SQE, [on_cqe](Self::on_cqe) to evaluate completions,
-/// and [complete](Self::complete) or [fail](Self::fail) to
-/// return results without invoking observers.
+/// and [complete](Self::complete) to combine a terminal status with its
+/// owned resources without invoking observers.
 pub(crate) enum Request {
     /// Send a whole logical buffer sequence.
     Send(SendRequest),
@@ -229,9 +229,10 @@ impl Request {
 
     /// Evaluate a CQE result against this request's progress and state.
     ///
-    /// Returns `true` when the request reached a terminal state, or `false`
-    /// when another SQE is needed.
-    pub fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+    /// Returns the terminal status, or `None` when another SQE is needed.
+    /// The caller passes terminal status to [`Self::complete`] without storing
+    /// it in the pending request.
+    pub fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match self {
             Self::Send(s) => s.on_cqe(state, result),
             Self::Recv(r) => r.on_cqe(state, result),
@@ -248,18 +249,18 @@ impl Request {
     /// The driver calls this only after the operation CQE or before staging its
     /// first SQE. Both returned values must leave the local borrow before they
     /// can be destroyed or delivered to an observer.
-    pub fn complete(self) -> (RequestOutput, RetiredResources) {
+    pub fn complete(self, result: Result<(), Error>) -> (RequestOutput, RetiredResources) {
         match self {
             Self::Send(r) => (
-                RequestOutput::Send(r.result.unwrap_or(Err(Error::SendFailed))),
+                RequestOutput::Send(result),
                 RetiredResources::Send {
                     _fd: r.fd,
                     _write: r.write,
                 },
             ),
             Self::Recv(r) => {
-                let result = match r.result.unwrap_or(Err(Error::RecvFailed)) {
-                    Ok(read) => Ok((r.buf, read)),
+                let result = match result {
+                    Ok(()) => Ok((r.buf, r.offset)),
                     Err(err) => Err((r.buf, err)),
                 };
                 (
@@ -268,7 +269,7 @@ impl Request {
                 )
             }
             Self::ReadAt(r) => {
-                let result = match r.result.unwrap_or(Err(Error::ReadFailed)) {
+                let result = match result {
                     Ok(()) => Ok(r.buf),
                     Err(err) => Err((r.buf, err)),
                 };
@@ -282,7 +283,7 @@ impl Request {
                 )
             }
             Self::WriteAt(r) => (
-                RequestOutput::WriteAt(r.result.unwrap_or(Err(Error::WriteFailed))),
+                RequestOutput::WriteAt(result),
                 RetiredResources::File {
                     _file: r.file,
                     _cache: Some(r.cache),
@@ -290,7 +291,7 @@ impl Request {
                 },
             ),
             Self::Sync(r) => (
-                RequestOutput::Sync(r.result.unwrap_or(Err(Error::Closed))),
+                RequestOutput::Sync(result),
                 RetiredResources::File {
                     _file: r.file,
                     _cache: None,
@@ -298,31 +299,17 @@ impl Request {
                 },
             ),
             Self::Connect(r) => (
-                RequestOutput::Connect(r.result.unwrap_or(Err(Error::ConnectionFailed))),
+                RequestOutput::Connect(result),
                 RetiredResources::Connect {
                     _fd: r.fd,
                     _address: r.address,
                 },
             ),
             Self::Poll(r) => (
-                RequestOutput::Poll(r.result.unwrap_or(Err(Error::ConnectionFailed))),
+                RequestOutput::Poll(result),
                 RetiredResources::Listener { _listener: r.fd },
             ),
         }
-    }
-
-    /// Record a local rejection and return its typed result without dropping owners.
-    pub fn fail(mut self, error: Error) -> (RequestOutput, RetiredResources) {
-        match &mut self {
-            Self::Send(r) => r.result = Some(Err(error)),
-            Self::Recv(r) => r.result = Some(Err(error)),
-            Self::ReadAt(r) => r.result = Some(Err(error)),
-            Self::WriteAt(r) => r.result = Some(Err(error)),
-            Self::Sync(r) => r.result = Some(Err(error)),
-            Self::Connect(r) => r.result = Some(Err(error)),
-            Self::Poll(r) => r.result = Some(Err(error)),
-        }
-        self.complete()
     }
 }
 
@@ -469,8 +456,6 @@ pub(crate) struct SendRequest {
     pub(crate) write: WriteBuffers,
     /// Absolute deadline for the whole logical request.
     pub(crate) deadline: Option<Instant>,
-    /// Terminal result captured by `on_cqe` and returned by `complete`.
-    pub(crate) result: Option<Result<(), Error>>,
 }
 
 /// Submit the representable prefix, leaving the remainder for a later SQE.
@@ -508,34 +493,25 @@ impl SendRequest {
 
     /// Classify one send CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                self.result = Some(Err(Error::Timeout));
-                true
+                Some(Err(Error::Timeout))
             }
-            CqeResult::Retry => false,
-            CqeResult::Cancelled => {
-                self.result = Some(Err(Error::Timeout));
-                true
-            }
-            CqeResult::Error(_) | CqeResult::Zero => {
-                self.result = Some(Err(Error::SendFailed));
-                true
-            }
+            CqeResult::Retry => None,
+            CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Error(_) | CqeResult::Zero => Some(Err(Error::SendFailed)),
             CqeResult::Positive(n) => {
                 self.write.advance(n);
                 if self.write.is_complete() {
-                    self.result = Some(Ok(()));
-                    true
+                    Some(Ok(()))
                 } else if matches!(state, WaiterState::CancelRequested) {
                     // Any send error after partial progress means some prefix
                     // of the frame may already be on the wire. Callers must
                     // drop the connection rather than retrying on this sink.
-                    self.result = Some(Err(Error::Timeout));
-                    true
+                    Some(Err(Error::Timeout))
                 } else {
-                    false
+                    None
                 }
             }
         }
@@ -556,8 +532,6 @@ pub(crate) struct RecvRequest {
     pub(crate) exact: bool,
     /// Absolute deadline for the whole logical request.
     pub(crate) deadline: Option<Instant>,
-    /// Terminal result captured by `on_cqe` and returned by `complete`.
-    pub(crate) result: Option<Result<usize, Error>>,
 }
 
 impl RecvRequest {
@@ -577,21 +551,14 @@ impl RecvRequest {
 
     /// Classify one recv CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                self.result = Some(Err(Error::Timeout));
-                true
+                Some(Err(Error::Timeout))
             }
-            CqeResult::Retry => false,
-            CqeResult::Cancelled => {
-                self.result = Some(Err(Error::Timeout));
-                true
-            }
-            CqeResult::Error(_) | CqeResult::Zero => {
-                self.result = Some(Err(Error::RecvFailed));
-                true
-            }
+            CqeResult::Retry => None,
+            CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Error(_) | CqeResult::Zero => Some(Err(Error::RecvFailed)),
             CqeResult::Positive(n) => {
                 let remaining = self.len - self.offset;
                 assert!(
@@ -600,13 +567,11 @@ impl RecvRequest {
                 );
                 self.offset += n;
                 if !self.exact || self.offset >= self.len {
-                    self.result = Some(Ok(self.offset));
-                    true
+                    Some(Ok(()))
                 } else if matches!(state, WaiterState::CancelRequested) {
-                    self.result = Some(Err(Error::Timeout));
-                    true
+                    Some(Err(Error::Timeout))
                 } else {
-                    false
+                    None
                 }
             }
         }
@@ -627,8 +592,6 @@ pub(crate) struct ReadAtRequest {
     pub(crate) buf: IoBufMut,
     /// Page-cache policy for this request.
     pub(crate) cache: Cache,
-    /// Terminal result captured by `on_cqe` and returned by `complete`.
-    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl ReadAtRequest {
@@ -662,18 +625,12 @@ impl ReadAtRequest {
 
     /// Classify one read CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry => false,
-            CqeResult::Error(code) if self.retry_cached(code) => false,
-            CqeResult::Cancelled | CqeResult::Error(_) => {
-                self.result = Some(Err(Error::ReadFailed));
-                true
-            }
-            CqeResult::Zero => {
-                self.result = Some(Err(Error::BlobInsufficientLength));
-                true
-            }
+            CqeResult::Retry => None,
+            CqeResult::Error(code) if self.retry_cached(code) => None,
+            CqeResult::Cancelled | CqeResult::Error(_) => Some(Err(Error::ReadFailed)),
+            CqeResult::Zero => Some(Err(Error::BlobInsufficientLength)),
             CqeResult::Positive(n) => {
                 let remaining = self.len - self.read;
                 assert!(
@@ -682,10 +639,9 @@ impl ReadAtRequest {
                 );
                 self.read += n;
                 if self.read >= self.len {
-                    self.result = Some(Ok(()));
-                    true
+                    Some(Ok(()))
                 } else {
-                    false
+                    None
                 }
             }
         }
@@ -747,24 +703,19 @@ fn build_datasync_sqe(file: &File) -> SqueueEntry {
         .build()
 }
 
-/// Classify one data-sync CQE and store its terminal result.
-fn on_sync_cqe(output: &mut Option<Result<(), Error>>, state: WaiterState, result: i32) -> bool {
+/// Return the terminal data-sync status, or `None` for a retry.
+fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
     match CqeResult::from_raw(result, state) {
-        CqeResult::Retry => false,
+        CqeResult::Retry => None,
         CqeResult::Cancelled => {
             let err = std::io::Error::from_raw_os_error(libc::ECANCELED);
-            *output = Some(Err(Error::Io(err.into())));
-            true
+            Some(Err(Error::Io(err.into())))
         }
         CqeResult::Error(code) => {
             let err = std::io::Error::from_raw_os_error(-code);
-            *output = Some(Err(Error::Io(err.into())));
-            true
+            Some(Err(Error::Io(err.into())))
         }
-        CqeResult::Zero | CqeResult::Positive(_) => {
-            *output = Some(Ok(()));
-            true
-        }
+        CqeResult::Zero | CqeResult::Positive(_) => Some(Ok(())),
     }
 }
 
@@ -782,8 +733,6 @@ pub(crate) struct WriteAtRequest {
     pub(crate) state: WriteAtState,
     /// Page-cache policy for this request.
     pub(crate) cache: Cache,
-    /// Terminal result captured by `on_cqe` and returned by `complete`.
-    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl WriteAtRequest {
@@ -842,17 +791,16 @@ impl WriteAtRequest {
 
     /// Classify one write CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         if self.state == WriteAtState::Syncing {
-            return on_sync_cqe(&mut self.result, state, result);
+            return on_sync_cqe(state, result);
         }
 
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry => false,
-            CqeResult::Error(code) if self.retry_cached(code) => false,
+            CqeResult::Retry => None,
+            CqeResult::Error(code) if self.retry_cached(code) => None,
             CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
-                self.result = Some(Err(Error::WriteFailed));
-                true
+                Some(Err(Error::WriteFailed))
             }
             CqeResult::Positive(n) => {
                 self.written += n;
@@ -860,13 +808,12 @@ impl WriteAtRequest {
                 if self.write.is_complete() {
                     if self.state == WriteAtState::WritingBeforeSync {
                         self.state = WriteAtState::Syncing;
-                        false
+                        None
                     } else {
-                        self.result = Some(Ok(()));
-                        true
+                        Some(Ok(()))
                     }
                 } else {
-                    false
+                    None
                 }
             }
         }
@@ -877,8 +824,6 @@ impl WriteAtRequest {
 pub(crate) struct SyncRequest {
     /// File descriptor to sync.
     pub(crate) file: Arc<Held>,
-    /// Terminal result captured by `on_cqe` and returned by `complete`.
-    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl SyncRequest {
@@ -889,8 +834,8 @@ impl SyncRequest {
 
     /// Classify one fsync CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
-        on_sync_cqe(&mut self.result, state, result)
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
+        on_sync_cqe(state, result)
     }
 }
 
@@ -902,8 +847,6 @@ pub(crate) struct ConnectRequest {
     pub(crate) address: Box<SockAddr>,
     /// Absolute deadline covering admission and every retry.
     pub(crate) deadline: Option<Instant>,
-    /// Terminal connection result.
-    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl ConnectRequest {
@@ -914,10 +857,9 @@ impl ConnectRequest {
     }
 
     /// Preserve connection success when it races a cancellation request.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         if result == -libc::EISCONN || result == 0 {
-            self.result = Some(Ok(()));
-            return true;
+            return Some(Ok(()));
         }
         let result = if result == -libc::EALREADY {
             -libc::EAGAIN
@@ -925,21 +867,12 @@ impl ConnectRequest {
             result
         };
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => false,
-            CqeResult::Retry | CqeResult::Cancelled => {
-                self.result = Some(Err(Error::Timeout));
-                true
-            }
-            CqeResult::Error(code) => {
-                self.result = Some(Err(Error::Io(
-                    std::io::Error::from_raw_os_error(-code).into(),
-                )));
-                true
-            }
-            CqeResult::Zero | CqeResult::Positive(_) => {
-                self.result = Some(Err(Error::ConnectionFailed));
-                true
-            }
+            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => None,
+            CqeResult::Retry | CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Error(code) => Some(Err(Error::Io(
+                std::io::Error::from_raw_os_error(-code).into(),
+            ))),
+            CqeResult::Zero | CqeResult::Positive(_) => Some(Err(Error::ConnectionFailed)),
         }
     }
 }
@@ -952,8 +885,6 @@ pub(crate) struct PollRequest {
     pub(crate) flags: u32,
     /// Absolute deadline for this readiness observation.
     pub(crate) deadline: Option<Instant>,
-    /// Terminal readiness result.
-    pub(crate) result: Option<Result<(), Error>>,
 }
 
 impl PollRequest {
@@ -963,23 +894,14 @@ impl PollRequest {
     }
 
     /// Treat readiness as a hint, allowing the caller to retry the actual syscall.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => false,
-            CqeResult::Retry | CqeResult::Cancelled => {
-                self.result = Some(Err(Error::Timeout));
-                true
-            }
-            CqeResult::Error(code) => {
-                self.result = Some(Err(Error::Io(
-                    std::io::Error::from_raw_os_error(-code).into(),
-                )));
-                true
-            }
-            CqeResult::Zero | CqeResult::Positive(_) => {
-                self.result = Some(Ok(()));
-                true
-            }
+            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => None,
+            CqeResult::Retry | CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Error(code) => Some(Err(Error::Io(
+                std::io::Error::from_raw_os_error(-code).into(),
+            ))),
+            CqeResult::Zero | CqeResult::Positive(_) => Some(Ok(())),
         }
     }
 }
@@ -1026,7 +948,6 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(5),
             cache,
-            result: None,
         }
     }
 
@@ -1038,7 +959,6 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache,
-            result: None,
         }
     }
 
@@ -1131,35 +1051,38 @@ mod tests {
                         .into(),
                 ),
                 deadline: None,
-                result: None,
             };
             let pointer = connect.address.as_raw();
             connect.build_sqe();
             let mut connect = std::hint::black_box(connect);
             assert_eq!(connect.address.as_raw(), pointer);
-            assert!(!connect.on_cqe(active, result));
-            assert!(connect.on_cqe(WaiterState::CancelRequested, result));
-            assert!(matches!(connect.result, Some(Err(Error::Timeout))));
+            assert!(connect.on_cqe(active, result).is_none());
+            assert!(matches!(
+                connect.on_cqe(WaiterState::CancelRequested, result),
+                Some(Err(Error::Timeout))
+            ));
         }
         for result in [0, -libc::EISCONN] {
             let mut connect = ConnectRequest {
                 fd: make_socket_fd(),
                 address: Box::new("[::1]:1234".parse::<std::net::SocketAddr>().unwrap().into()),
                 deadline: None,
-                result: None,
             };
-            assert!(connect.on_cqe(WaiterState::CancelRequested, result));
-            assert!(matches!(connect.result, Some(Ok(()))));
+            assert!(matches!(
+                connect.on_cqe(WaiterState::CancelRequested, result),
+                Some(Ok(()))
+            ));
         }
         for state in [active, WaiterState::CancelRequested] {
             let mut poll = PollRequest {
                 fd: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
                 flags: libc::POLLIN as u32,
                 deadline: None,
-                result: None,
             };
-            assert!(poll.on_cqe(state, -libc::ECANCELED));
-            match poll.result.unwrap().unwrap_err() {
+            let result = poll
+                .on_cqe(state, -libc::ECANCELED)
+                .expect("terminal completion");
+            match result.unwrap_err() {
                 Error::Io(error) if matches!(state, WaiterState::Active { .. }) => {
                     assert_eq!(error.raw_os_error(), Some(libc::ECANCELED));
                 }
@@ -1171,11 +1094,12 @@ mod tests {
             fd: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
             flags: libc::POLLIN as u32,
             deadline: None,
-            result: None,
         };
-        assert!(!poll.on_cqe(active, -libc::EINTR));
-        assert!(poll.on_cqe(WaiterState::CancelRequested, libc::POLLIN as i32));
-        assert!(matches!(poll.result, Some(Ok(()))));
+        assert!(poll.on_cqe(active, -libc::EINTR).is_none());
+        assert!(matches!(
+            poll.on_cqe(WaiterState::CancelRequested, libc::POLLIN as i32),
+            Some(Ok(()))
+        ));
     }
 
     #[test]
@@ -1217,11 +1141,14 @@ mod tests {
             fd: make_socket_fd(),
             write: bufs.into(),
             deadline: None,
-            result: None,
         });
         let guard = local.lock();
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        let (output, retired) = request.fail(Error::Timeout);
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 3)
+                .is_none()
+        );
+        let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(output, RequestOutput::Send(Err(Error::Timeout))));
         assert_eq!(*guard, 0);
         drop(guard);
@@ -1261,7 +1188,6 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: Some(send_deadline),
-            result: None,
         });
         assert_eq!(send.deadline(), Some(send_deadline));
 
@@ -1273,7 +1199,6 @@ mod tests {
             len: 8,
             exact: true,
             deadline: Some(recv_deadline),
-            result: None,
         });
         assert_eq!(recv.deadline(), Some(recv_deadline));
 
@@ -1284,7 +1209,6 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(4),
             cache: Cache::Enabled,
-            result: None,
         });
         assert_eq!(read.deadline(), None);
 
@@ -1298,7 +1222,6 @@ mod tests {
                 len: 4,
                 exact: true,
                 deadline: None,
-                result: None,
             });
             let _ = request.build_sqe(waiter_id(0, 0));
         });
@@ -1312,7 +1235,6 @@ mod tests {
                 len: 5,
                 exact: true,
                 deadline: None,
-                result: None,
             });
             let _ = request.build_sqe(waiter_id(0, 0));
         });
@@ -1326,7 +1248,6 @@ mod tests {
                 read: 0,
                 buf: IoBufMut::with_capacity(4),
                 cache: Cache::Enabled,
-                result: None,
             });
             let _ = request.build_sqe(waiter_id(0, 0));
         });
@@ -1340,7 +1261,6 @@ mod tests {
                 read: 5,
                 buf: IoBufMut::with_capacity(8),
                 cache: Cache::Enabled,
-                result: None,
             });
             let _ = request.build_sqe(waiter_id(0, 0));
         });
@@ -1366,7 +1286,6 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline,
-            result: None,
         };
         let mut recv = RecvRequest {
             fd: make_socket_fd(),
@@ -1375,7 +1294,6 @@ mod tests {
             len: 5,
             exact: true,
             deadline,
-            result: None,
         };
         let mut read = make_read_request(Cache::Enabled);
         read.offset = 7;
@@ -1384,9 +1302,9 @@ mod tests {
             assert_eq!(send.build_sqe().get_opcode(), opcode::Send::CODE as u32);
             assert_eq!(recv.build_sqe().get_opcode(), opcode::Recv::CODE as u32);
             assert_eq!(read.build_sqe().get_opcode(), opcode::Read::CODE as u32);
-            assert_eq!(send.on_cqe(active, progress), progress == 3);
-            assert_eq!(recv.on_cqe(active, progress), progress == 3);
-            assert_eq!(read.on_cqe(active, progress), progress == 3);
+            assert_eq!(send.on_cqe(active, progress).is_some(), progress == 3);
+            assert_eq!(recv.on_cqe(active, progress).is_some(), progress == 3);
+            assert_eq!(read.on_cqe(active, progress).is_some(), progress == 3);
             assert_eq!(send.deadline, deadline);
             assert_eq!(recv.deadline, deadline);
         }
@@ -1406,9 +1324,12 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN)
+                .is_none()
+        );
 
         // Partial progress followed by a retry after timeout should resolve to timeout.
 
@@ -1416,11 +1337,16 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
-        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EAGAIN));
-        let (output, retired) = request.complete();
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 2)
+                .is_none()
+        );
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, -libc::EAGAIN)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -1433,11 +1359,16 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
-        assert!(request.on_cqe(WaiterState::CancelRequested, 1));
-        let (output, retired) = request.complete();
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 2)
+                .is_none()
+        );
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, 1)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -1450,10 +1381,11 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -1469,11 +1401,16 @@ mod tests {
             fd: make_socket_fd(),
             write: vectored.into(),
             deadline: None,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 2));
-        let (output, retired) = request.complete();
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 3)
+                .is_none()
+        );
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 2)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -1486,10 +1423,11 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 0)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -1500,10 +1438,11 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -1516,10 +1455,11 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, 5));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, 5)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -1540,9 +1480,12 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN)
+                .is_none()
+        );
 
         // Non-exact recv should complete as soon as any positive byte count arrives.
 
@@ -1553,10 +1496,11 @@ mod tests {
             len: 5,
             exact: false,
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 3)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -1574,11 +1518,16 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        assert!(request.on_cqe(WaiterState::CancelRequested, 1));
-        let (output, retired) = request.complete();
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 3)
+                .is_none()
+        );
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, 1)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -1594,10 +1543,11 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EINTR));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, -libc::EINTR)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -1611,10 +1561,11 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -1630,10 +1581,11 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, 5));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, 5)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -1651,7 +1603,6 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
         let overflow = catch_unwind(AssertUnwindSafe(|| {
             let _ = request.on_cqe(WaiterState::Active { target_tick: None }, 6);
@@ -1667,10 +1618,11 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 0)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -1684,10 +1636,11 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -1708,9 +1661,12 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN)
+                .is_none()
+        );
 
         // Partial reads should requeue until the full logical length is satisfied.
 
@@ -1721,11 +1677,16 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        let (output, retired) = request.complete();
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 2)
+                .is_none()
+        );
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 3)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::ReadAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1741,10 +1702,11 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 0)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::ReadAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1758,10 +1720,11 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::ReadAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1777,10 +1740,11 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::ReadAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1795,11 +1759,17 @@ mod tests {
 
         // Preserve completed bytes while retrying without the rejected cache hint.
         assert_eq!(read.rw_flags(), libc::RWF_DONTCACHE);
-        assert!(!read.on_cqe(WaiterState::Active { target_tick: None }, 2));
+        assert!(
+            read.on_cqe(WaiterState::Active { target_tick: None }, 2)
+                .is_none()
+        );
         assert_eq!(read.read, 2);
         assert_eq!(read.rw_flags(), libc::RWF_DONTCACHE);
 
-        assert!(!read.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert!(
+            read.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
         assert_eq!(read.read, 2);
         assert!(!supported.load(Ordering::Relaxed));
         assert_eq!(read.rw_flags(), 0);
@@ -1811,7 +1781,11 @@ mod tests {
         let supported = Arc::new(AtomicBool::new(true));
         let mut write = make_write_request(Cache::Disabled(supported.clone()));
         assert_eq!(write.rw_flags(), libc::RWF_DONTCACHE);
-        assert!(!write.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert!(
+            write
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
         let mut sibling_read = make_read_request(Cache::Disabled(supported));
         assert_eq!(sibling_read.rw_flags(), 0);
 
@@ -1819,9 +1793,9 @@ mod tests {
         let supported = Arc::new(AtomicBool::new(true));
         let mut failing_read = make_read_request(Cache::Disabled(supported.clone()));
         assert_eq!(failing_read.rw_flags(), libc::RWF_DONTCACHE);
-        assert!(failing_read.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
+        let result = failing_read.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO);
         assert!(supported.load(Ordering::Relaxed));
-        assert!(matches!(failing_read.result, Some(Err(Error::ReadFailed))));
+        assert!(matches!(result, Some(Err(Error::ReadFailed))));
     }
 
     #[test]
@@ -1833,8 +1807,16 @@ mod tests {
         // Requests queued before the shared downgrade must each requeue without the hint.
         assert_eq!(first.rw_flags(), libc::RWF_DONTCACHE);
         assert_eq!(second.rw_flags(), libc::RWF_DONTCACHE);
-        assert!(!first.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
-        assert!(!second.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert!(
+            first
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
+        assert!(
+            second
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
         assert!(!supported.load(Ordering::Relaxed));
         assert_eq!(first.rw_flags(), 0);
         assert_eq!(second.rw_flags(), 0);
@@ -1861,23 +1843,22 @@ mod tests {
                 write: IoBufs::from(buf.clone()).into(),
                 state,
                 cache: Cache::Enabled,
-                result: None,
             };
             for _ in 0..2 {
                 assert_eq!(write.build_sqe().get_opcode(), opcode::Write::CODE as u32);
-                assert!(!write.on_cqe(active, i32::MAX));
+                assert!(write.on_cqe(active, i32::MAX).is_none());
             }
             assert_eq!(write.write.remaining_len(), 2);
             assert_eq!(write.build_sqe().get_opcode(), opcode::Write::CODE as u32);
-            assert_eq!(write.on_cqe(active, 2), !trailing_sync);
+            let mut result = write.on_cqe(active, 2);
             assert_eq!(write.written, len);
             assert!(write.write.is_complete());
             if trailing_sync {
-                assert!(write.result.is_none());
+                assert!(result.is_none());
                 assert_eq!(write.build_sqe().get_opcode(), opcode::Fsync::CODE as u32);
-                assert!(write.on_cqe(active, 0));
+                result = write.on_cqe(active, 0);
             }
-            assert!(matches!(write.result, Some(Ok(()))));
+            assert!(matches!(result, Some(Ok(()))));
         }
     }
 
@@ -1894,11 +1875,14 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
-            result: None,
         };
         assert_eq!(write.rw_flags(), 0);
         let mut request = Request::WriteAt(write);
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN)
+                .is_none()
+        );
 
         // Single-buffer writes should track partial progress until complete.
 
@@ -1909,11 +1893,16 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        let (output, retired) = request.complete();
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 2)
+                .is_none()
+        );
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 3)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1932,11 +1921,16 @@ mod tests {
             write: vectored.into(),
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 4));
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
-        let (output, retired) = request.complete();
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, 4)
+                .is_none()
+        );
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 1)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1952,10 +1946,11 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 0)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1969,10 +1964,11 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -1989,12 +1985,13 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::WritingSync,
             cache: Cache::Enabled,
-            result: None,
         };
         assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
         let mut request = Request::WriteAt(write);
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EINVAL)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -2010,10 +2007,11 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -2032,11 +2030,14 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::WritingSync,
             cache: Cache::Disabled(dont_cache_supported.clone()),
-            result: None,
         };
 
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EOPNOTSUPP)
+                .is_none()
+        );
         assert!(!dont_cache_supported.load(Ordering::Relaxed));
         request.cache = Cache::Disabled(dont_cache_supported);
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
@@ -2051,18 +2052,22 @@ mod tests {
 
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
-            result: None,
         });
-        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINTR));
+        assert!(
+            request
+                .on_cqe(WaiterState::Active { target_tick: None }, -libc::EINTR)
+                .is_none()
+        );
 
         // Timeout cancellation should preserve the kernel ECANCELED surface for sync callers.
 
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::CancelRequested, -libc::ECANCELED)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };
@@ -2077,10 +2082,11 @@ mod tests {
 
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };
@@ -2095,10 +2101,11 @@ mod tests {
 
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 0)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };
@@ -2107,10 +2114,11 @@ mod tests {
 
         let mut request = Request::Sync(SyncRequest {
             file: make_file_fd(),
-            result: None,
         });
-        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
-        let (output, retired) = request.complete();
+        let status = request
+            .on_cqe(WaiterState::Active { target_tick: None }, 1)
+            .expect("terminal completion");
+        let (output, retired) = request.complete(status);
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };
@@ -2119,99 +2127,14 @@ mod tests {
 
         let request = Request::Sync(SyncRequest {
             file: make_file_fd(),
-            result: None,
         });
-        let (output, retired) = request.fail(Error::Timeout);
+        let (output, retired) = request.complete(Err(Error::Timeout));
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };
         drop(retired);
         let err = result.expect_err("expected timeout error");
         assert!(matches!(err, Error::Timeout));
-    }
-
-    #[test]
-    fn test_finish_without_cqe_uses_fallback_results() {
-        // Verify unstarted requests preserve their kind-specific failure results.
-        // Network and storage requests each have their own fallback error surface.
-
-        // Network sends and recvs should preserve their wrapper-specific fallback errors.
-
-        let request = Request::Send(SendRequest {
-            fd: make_socket_fd(),
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            deadline: None,
-            result: None,
-        });
-        let (output, retired) = request.complete();
-        let RequestOutput::Send(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err(Error::SendFailed)));
-
-        let request = Request::Recv(RecvRequest {
-            fd: make_socket_fd(),
-            buf: IoBufMut::with_capacity(5),
-            offset: 0,
-            len: 5,
-            exact: true,
-            deadline: None,
-            result: None,
-        });
-        let (output, retired) = request.complete();
-        let RequestOutput::Recv(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err((_, Error::RecvFailed))));
-
-        // Storage reads and writes should surface the corresponding storage wrapper errors.
-
-        let request = Request::ReadAt(ReadAtRequest {
-            file: make_file_fd(),
-            offset: 0,
-            len: 5,
-            read: 0,
-            buf: IoBufMut::with_capacity(5),
-            cache: Cache::Enabled,
-            result: None,
-        });
-        let (output, retired) = request.complete();
-        let RequestOutput::ReadAt(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err((_, Error::ReadFailed))));
-
-        let request = Request::WriteAt(WriteAtRequest {
-            file: make_file_fd(),
-            offset: 0,
-            written: 0,
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            state: WriteAtState::Writing,
-            cache: Cache::Enabled,
-            result: None,
-        });
-        let (output, retired) = request.complete();
-        let RequestOutput::WriteAt(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err(Error::WriteFailed)));
-
-        // A sync that never executed must not falsely report durability.
-
-        let request = Request::Sync(SyncRequest {
-            file: make_file_fd(),
-            result: None,
-        });
-        let (output, retired) = request.complete();
-        let RequestOutput::Sync(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err(Error::Closed)));
     }
 
     #[test]
@@ -2226,9 +2149,8 @@ mod tests {
             fd: make_socket_fd(),
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: None,
-            result: None,
         });
-        let (output, retired) = request.fail(Error::Timeout);
+        let (output, retired) = request.complete(Err(Error::Timeout));
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -2242,9 +2164,8 @@ mod tests {
             len: 5,
             exact: true,
             deadline: None,
-            result: None,
         });
-        let (output, retired) = request.fail(Error::Timeout);
+        let (output, retired) = request.complete(Err(Error::Timeout));
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -2260,9 +2181,8 @@ mod tests {
             read: 0,
             buf: IoBufMut::with_capacity(5),
             cache: Cache::Enabled,
-            result: None,
         });
-        let (output, retired) = request.fail(Error::Timeout);
+        let (output, retired) = request.complete(Err(Error::Timeout));
         let RequestOutput::ReadAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -2276,9 +2196,8 @@ mod tests {
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache: Cache::Enabled,
-            result: None,
         });
-        let (output, retired) = request.fail(Error::Timeout);
+        let (output, retired) = request.complete(Err(Error::Timeout));
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -2287,9 +2206,8 @@ mod tests {
 
         let request = Request::Sync(SyncRequest {
             file: make_file_fd(),
-            result: None,
         });
-        let (output, retired) = request.fail(Error::Timeout);
+        let (output, retired) = request.complete(Err(Error::Timeout));
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };

@@ -206,7 +206,6 @@ impl crate::Network for Network {
             fd: fd.clone(),
             address: Box::new(SockAddr::from(socket)),
             deadline: Some(deadline),
-            result: None,
         }))
         .await
         .map_err(|_| Error::ConnectionFailed)?;
@@ -265,7 +264,6 @@ impl crate::Listener for Listener {
                 fd: self.inner.clone(),
                 flags: libc::POLLIN as u32,
                 deadline: Some(Instant::now() + self.read_write_timeout),
-                result: None,
             }))
             .await
             .map_err(|_| Error::ConnectionFailed)?;
@@ -378,7 +376,6 @@ impl crate::Sink for Sink {
             fd: self.fd.clone(),
             write: bufs.into(),
             deadline: Some(Instant::now() + self.timeout),
-            result: None,
         }))
         .await
         {
@@ -457,7 +454,6 @@ impl Stream {
             len: offset + len,
             exact,
             deadline: Some(deadline),
-            result: None,
         }))
         .await
         .map_err(|_| Error::RecvFailed)?;

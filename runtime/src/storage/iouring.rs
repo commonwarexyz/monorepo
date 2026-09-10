@@ -29,7 +29,8 @@
 
 use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
 use crate::{
-    BlobVersion, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, BufferPool, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions,
+    WriteOptions,
     iouring::{
         operation::{self, Operation},
         request::{
@@ -284,6 +285,25 @@ impl Blob {
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
         }
     }
+
+    /// Prepare a contiguous read destination, retaining chunked input for copy-back.
+    ///
+    /// Keep preparation synchronous so its moved-from buffer collection does not
+    /// occupy space in the suspended read future. The caller must fill `len`
+    /// bytes before exposing the destination's contents.
+    fn read_buffers(&self, mut bufs: IoBufsMut, len: usize) -> (IoBufMut, Option<IoBufsMut>) {
+        // SAFETY: The read loop fills `len` bytes before returning the buffers.
+        unsafe { bufs.set_len(len) };
+
+        if bufs.is_single() {
+            (bufs.coalesce(), None)
+        } else {
+            // Preserve the caller's chunk layout by reading into a temporary.
+            // SAFETY: The read loop fills `len` bytes before copying them back.
+            let buf = unsafe { self.pool.alloc_len(len) };
+            (buf, Some(bufs))
+        }
+    }
 }
 
 impl crate::Blob for Blob {
@@ -304,19 +324,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        let mut input_bufs = bufs.into();
-        // SAFETY: `len` bytes are filled via io_uring read loop below.
-        unsafe { input_bufs.set_len(len) };
-
-        // For single buffers, read directly into them (zero-copy).
-        // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
-        let (io_buf, original_bufs) = if input_bufs.is_single() {
-            (input_bufs.coalesce(), None)
-        } else {
-            // SAFETY: `len` bytes are filled via io_uring read loop below.
-            let tmp = unsafe { self.pool.alloc_len(len) };
-            (tmp, Some(input_bufs))
-        };
+        let (io_buf, original_bufs) = self.read_buffers(bufs.into(), len);
 
         let offset = offset
             .checked_add(self.data_offset)
@@ -345,7 +353,6 @@ impl crate::Blob for Blob {
             read: 0,
             buf: io_buf,
             cache,
-            result: None,
         }))
         .await
         .map_err(|_| Error::ReadFailed)?;
@@ -405,7 +412,6 @@ impl crate::Blob for Blob {
             write: bufs.into(),
             state,
             cache,
-            result: None,
         }))
         .await
         .map_err(|_| Error::WriteFailed)?;
@@ -432,7 +438,6 @@ impl crate::Blob for Blob {
     async fn sync(&self) -> Result<(), Error> {
         let output = Operation::register(Request::Sync(SyncRequest {
             file: self.file.clone(),
-            result: None,
         }))
         .await?;
         let RequestOutput::Sync(result) = output else {
@@ -449,10 +454,9 @@ impl crate::Blob for Blob {
     async fn start_sync(&self) -> Handle<()> {
         let partition = self.partition.clone();
         let name = self.name.clone();
-        let receiver = operation::start_sync(Request::Sync(SyncRequest {
+        let receiver = operation::start_sync(SyncRequest {
             file: self.file.clone(),
-            result: None,
-        }));
+        });
         Handle::from_future(async move {
             match receiver.await {
                 Ok(Ok(())) => Ok(()),

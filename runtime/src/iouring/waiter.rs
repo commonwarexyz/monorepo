@@ -140,8 +140,8 @@ pub enum CompletionOutcome {
     Cancel,
     /// Partial progress or retry requires another SQE for the same request.
     Requeue(WaiterId),
-    /// The driver must finish this request and publish or discard its result.
-    Complete(WaiterId),
+    /// Terminal status the driver must pass to [`Waiters::finish`] for this ID.
+    Complete(WaiterId, Result<(), Error>),
 }
 
 /// Result of inspecting an ordinary future without cloning its waker.
@@ -383,8 +383,7 @@ impl Waiters {
 
     /// Split terminal ownership and retain an ordinary result in the same slot.
     ///
-    /// A supplied `error` records a local failure. Otherwise the request yields
-    /// its recorded result, or its fallback error for unfinished orphaned work.
+    /// `result` is the terminal CQE status or an explicit local failure.
     /// Ordinary output replaces the pending request. Detached and orphaned
     /// output leaves the slab, freeing its slot immediately.
     ///
@@ -394,7 +393,7 @@ impl Waiters {
     pub(super) fn finish(
         &mut self,
         id: WaiterId,
-        error: Option<Error>,
+        result: Result<(), Error>,
         deferred: &mut Deferred,
     ) -> Option<Tick> {
         assert!(
@@ -410,10 +409,7 @@ impl Waiters {
             WaiterState::Active { target_tick } => target_tick,
             WaiterState::CancelRequested => None,
         };
-        let (output, resources) = match error {
-            Some(error) => waiter.request.fail(error),
-            None => waiter.request.complete(),
-        };
+        let (output, resources) = waiter.request.complete(result);
         deferred.resources.push(resources);
         match waiter.observer {
             Observer::Ordinary(waker) => {
@@ -504,15 +500,21 @@ impl Waiters {
             .expect("operation CQE for completed waiter");
         assert!(waiter.in_flight);
         waiter.in_flight = false;
-        let complete = waiter.request.on_cqe(waiter.state, result)
-            || (matches!(waiter.observer, Observer::Orphaned)
-                && !waiter.request.retains_on_orphan());
+        let outcome = match waiter.request.on_cqe(waiter.state, result) {
+            // Match success separately to avoid copying unused Error storage.
+            Some(Ok(())) => CompletionOutcome::Complete(id, Ok(())),
+            Some(Err(error)) => CompletionOutcome::Complete(id, Err(error)),
+            None if matches!(waiter.observer, Observer::Orphaned)
+                && !waiter.request.retains_on_orphan() =>
+            {
+                // An abandoned read or network request needs no follow-up SQE.
+                // Its output is discarded, but its owners still retire normally.
+                CompletionOutcome::Complete(id, Err(Error::Closed))
+            }
+            None => CompletionOutcome::Requeue(id),
+        };
         self.in_flight -= 1;
-        if complete {
-            CompletionOutcome::Complete(id)
-        } else {
-            CompletionOutcome::Requeue(id)
-        }
+        outcome
     }
 
     /// Whether this request has a staged operation whose CQE is still owed.
@@ -571,7 +573,6 @@ pub mod tests {
         let (socket, _peer) = UnixStream::pair().unwrap();
         Request::Sync(SyncRequest {
             file: held(File::from(OwnedFd::from(socket))),
-            result: None,
         })
     }
 
@@ -584,7 +585,6 @@ pub mod tests {
                 fd: Arc::new(fd),
                 write: IoBufs::from(IoBuf::from(b"hello")).into(),
                 deadline: None,
-                result: None,
             }),
             1 => Request::Recv(RecvRequest {
                 fd: Arc::new(fd),
@@ -593,7 +593,6 @@ pub mod tests {
                 len: 5,
                 exact: true,
                 deadline: None,
-                result: None,
             }),
             2 => Request::ReadAt(ReadAtRequest {
                 file: held(File::from(fd)),
@@ -602,7 +601,6 @@ pub mod tests {
                 read: 0,
                 buf: IoBufMut::with_capacity(5),
                 cache: Cache::Enabled,
-                result: None,
             }),
             _ => unreachable!(),
         }
@@ -620,10 +618,13 @@ pub mod tests {
         result: i32,
         deferred: &mut Deferred,
     ) -> Option<Tick> {
-        assert!(
-            matches!(waiters.on_completion(id.user_data(), result), CompletionOutcome::Complete(current) if current == id)
-        );
-        waiters.finish(id, None, deferred)
+        let CompletionOutcome::Complete(current, result) =
+            waiters.on_completion(id.user_data(), result)
+        else {
+            panic!("expected terminal completion");
+        };
+        assert_eq!(current, id);
+        waiters.finish(id, result, deferred)
     }
 
     /// Consume an ordinary result, failing if the request is still pending.
@@ -665,7 +666,7 @@ pub mod tests {
             id.0,
             WaiterId::GENERATION_MASK,
         ));
-        waiters.finish(last, None, &mut deferred);
+        waiters.finish(last, Err(Error::Closed), &mut deferred);
         drop(output(&mut waiters, last));
         let current = waiters.insert(make_sync_request(), None, observer());
         assert_eq!(current.0.generation, 1 << 31);
@@ -766,7 +767,7 @@ pub mod tests {
                 .will_wake(&waker)
         );
         assert!(waiters.set_waker(id, waker).unwrap().will_wake(&other));
-        waiters.finish(id, None, &mut deferred);
+        waiters.finish(id, Err(Error::Closed), &mut deferred);
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
         assert_eq!(deferred.wakes.len(), 1);
         deferred.wakes.pop().unwrap().wake();
@@ -794,7 +795,12 @@ pub mod tests {
         }
         assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(id))).is_err());
         assert!(
-            catch_unwind(AssertUnwindSafe(|| waiters.finish(id, None, &mut deferred))).is_err()
+            catch_unwind(AssertUnwindSafe(|| waiters.finish(
+                id,
+                Err(Error::Closed),
+                &mut deferred
+            )))
+            .is_err()
         );
         assert_eq!(complete(&mut waiters, id, 0, &mut deferred), None);
 
@@ -853,7 +859,7 @@ pub mod tests {
         assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(id))).is_err());
         assert!(!waiters.is_in_flight(id));
         assert_eq!(waiters.in_flight(), 0);
-        waiters.finish(id, Some(Error::RecvFailed), &mut deferred);
+        waiters.finish(id, Err(Error::RecvFailed), &mut deferred);
         assert!(matches!(
             output(&mut waiters, id),
             RequestOutput::Recv(Err((_, Error::RecvFailed)))
@@ -867,7 +873,10 @@ pub mod tests {
             let mut deferred = Deferred::default();
             let id = waiters.insert(read_request(kind), Some(7), Observer::Orphaned);
             assert!(matches!(waiters.stage(id), StageOutcome::Orphaned(current) if current == id));
-            assert_eq!(waiters.finish(id, None, &mut deferred), Some(7));
+            assert_eq!(
+                waiters.finish(id, Err(Error::Closed), &mut deferred),
+                Some(7)
+            );
             assert!(waiters.is_empty());
 
             for result in [-libc::EAGAIN, 2] {
@@ -888,7 +897,7 @@ pub mod tests {
         let id = waiters.insert(read_request(1), None, observer());
         assert!(waiters.cancel(id));
         assert!(matches!(waiters.stage(id), StageOutcome::Timeout(current) if current == id));
-        waiters.finish(id, Some(Error::Timeout), &mut deferred);
+        waiters.finish(id, Err(Error::Timeout), &mut deferred);
         assert!(waiters.is_empty());
         assert!(!waiters.is_pending(id));
 
@@ -909,7 +918,7 @@ pub mod tests {
         let pending = waiters.insert(read_request(1), None, observer());
         let sync = waiters.insert(make_sync_request(), None, observer());
         let ready = waiters.insert(read_request(1), None, observer());
-        waiters.finish(ready, Some(Error::Timeout), &mut deferred);
+        waiters.finish(ready, Err(Error::Timeout), &mut deferred);
         let (sender, receiver) = oneshot::channel();
         let detached = waiters.insert(make_sync_request(), None, Observer::DetachedSync(sender));
 
@@ -925,7 +934,7 @@ pub mod tests {
         complete(&mut waiters, sync, 0, &mut deferred);
         assert!(matches!(waiters.stage(detached), StageOutcome::Submit(_)));
         complete(&mut waiters, detached, 0, &mut deferred);
-        waiters.finish(pending, Some(Error::Timeout), &mut deferred);
+        waiters.finish(pending, Err(Error::Timeout), &mut deferred);
         assert!(waiters.is_empty());
         assert_eq!(waiters.entries.len(), 0);
 

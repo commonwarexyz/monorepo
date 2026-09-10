@@ -187,7 +187,6 @@ fn test_service_error_preserves_completions_before_cleanup() {
         len: 1,
         exact: true,
         deadline: None,
-        result: None,
     });
     let retained = Arc::new(Mutex::new(None));
     let operation = retained.clone();
