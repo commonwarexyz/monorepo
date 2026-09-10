@@ -22,6 +22,7 @@ commonware-macros.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
+rand_core.workspace = true
 thiserror.workspace = true
 
 [lib]

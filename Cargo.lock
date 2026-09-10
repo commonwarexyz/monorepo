@@ -1794,6 +1794,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-invariants",
  "commonware-macros",
+ "commonware-math",
  "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
@@ -1801,6 +1802,7 @@ dependencies = [
  "criterion",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
+ "rand_core 0.10.1",
  "thiserror 2.0.18",
 ]
 
