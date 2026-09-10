@@ -23,63 +23,32 @@ use crate::Error;
 use commonware_utils::channel::oneshot;
 use io_uring::squeue::Entry as SqueueEntry;
 use std::{mem, task::Waker, time::Instant};
-use tracing::warn;
 
 /// Kernel completion identity packed into an SQE's `user_data` field.
 pub type UserData = u64;
 
-/// Full-width identity for a tracked request.
+/// Slab identity used for operation SQE/CQE `user_data`.
 ///
-/// Userspace handles and queues retain the slab's full generation. SQE/CQE
-/// `user_data` uses the following layout:
-///
-/// - bits 0..31: slot index
-/// - bits 32..62: generation (31 bits, wraps at 2^31)
-/// - bit 63: reserved as cancel-tag in completion `user_data`
-///
-/// A slot cannot be recycled while its operation CQE is outstanding, so an
-/// operation CQE cannot refer to a reused slot. Cancellation acknowledgements
-/// may arrive after reuse. The generation check filters stale acknowledgements,
-/// but even a collision after the packed generation wraps cannot change the
-/// request or its result. The driver only decrements its outstanding cancellation
-/// count.
+/// Userspace retains the full generation. Kernel `user_data` packs the index in
+/// the low 32 bits and the low 32 generation bits in the high 32 bits.
+/// An operation CQE cannot be stale because its slot cannot recycle before it
+/// arrives, so completion lookup recovers the full identity from the live slot.
+/// Cancellation acknowledgements use a separate token handled by the driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WaiterId(
-    /// Slab index and full generation retained by userspace handles and queues.
-    pub Id,
-);
+pub struct WaiterId(pub Id);
 
 impl WaiterId {
-    /// Bitmask that extracts the waiter slot index from packed user data.
-    const INDEX_MASK: UserData = u32::MAX as UserData;
-    /// Bitmask that extracts the 31-bit generation from packed user data.
-    const GENERATION_MASK: UserData = (1 << 31) - 1;
-    /// High-bit tag used to mark cancellation CQE user data.
-    const CANCEL_TAG: UserData = 1 << 63;
-
     /// Encode this waiter id as `user_data` for the operation SQE/CQE.
     ///
-    /// This value contains only the packed waiter identity (slot + generation),
-    /// with the cancel tag bit clear.
+    /// The packed generation wraps at 2^32. Userspace handles and queues must
+    /// retain the full ID rather than using this truncated kernel identity.
     pub const fn user_data(self) -> UserData {
-        ((self.0.generation & Self::GENERATION_MASK) << 32) | self.0.index as UserData
+        ((self.0.generation & u32::MAX as UserData) << 32) | self.0.index as UserData
     }
 
-    /// Encode this waiter id as `user_data` for the cancel SQE/CQE.
-    ///
-    /// This preserves the waiter identity and sets the high cancel-tag bit so
-    /// completion handling can distinguish cancel CQEs from operation CQEs.
-    pub const fn cancel_user_data(self) -> UserData {
-        self.user_data() | Self::CANCEL_TAG
-    }
-
-    /// Decode the slot index, truncated generation, and cancellation tag.
-    const fn from_user_data(user_data: UserData) -> (usize, u64, bool) {
-        (
-            (user_data & Self::INDEX_MASK) as usize,
-            (user_data >> 32) & Self::GENERATION_MASK,
-            user_data & Self::CANCEL_TAG != 0,
-        )
+    /// Decode the slot index and truncated generation from kernel `user_data`.
+    const fn from_user_data(user_data: UserData) -> (u32, u32) {
+        (user_data as u32, (user_data >> 32) as u32)
     }
 }
 
@@ -140,11 +109,8 @@ enum Entry {
     Retiring,
 }
 
-/// Outcome produced when handling an operation or cancellation CQE.
+/// Outcome produced when handling an operation CQE for a waiter.
 pub enum CompletionOutcome {
-    /// Cancellation acknowledgement, requiring the driver to decrement its
-    /// outstanding cancellation count.
-    Cancel,
     /// The logical request needs another SQE and should be placed back in the
     /// ready queue.
     Requeue(WaiterId),
@@ -205,9 +171,8 @@ impl Waiters {
     /// remains occupied until an ordinary result is consumed or dropped.
     pub fn insert(&mut self, request: Request, observer: Observer) -> WaiterId {
         let id = self.entries.insert_with(|id| {
-            // Reserve the maximum index so cancellation IDs cannot alias the
-            // all-ones mailbox wake token, even when kernel generations wrap.
-            assert!(id.index < u32::MAX as usize, "waiter slot index overflow");
+            // Reserve the maximum index for cancellation and mailbox wake tokens.
+            assert!(id.index < u32::MAX, "waiter slot index overflow");
             Entry::Pending(Waiter {
                 state: WaiterState::Active { target_tick: None },
                 in_flight: false,
@@ -355,11 +320,10 @@ impl Waiters {
     pub fn close(&mut self, deferred: &mut Deferred) -> Vec<WaiterId> {
         let mut cancel = Vec::new();
         for index in 0..self.entries.slots() {
-            if let Some(id) = self.entries.id_at(index) {
-                let id = WaiterId(id);
-                if self.orphan(id, deferred) {
-                    cancel.push(id);
-                }
+            if let Some(id) = self.entries.id_at(index).map(WaiterId)
+                && self.orphan(id, deferred)
+            {
+                cancel.push(id);
             }
         }
         cancel
@@ -475,51 +439,28 @@ impl Waiters {
         sqe
     }
 
-    /// Process one CQE for a waiter.
+    /// Process one operation CQE for a waiter.
     ///
     /// An operation CQE releases its in-flight count and updates progress in
     /// place. The driver then requeues or finishes the request. A cancelled
     /// request never requeues, returning its terminal result or `Error::Timeout`
     /// if another SQE would be needed.
     ///
-    /// Cancellation acknowledgements leave request ownership and retained results
-    /// untouched. Missing or stale operation identities are invariant failures,
-    /// while late cancellation acknowledgements are accepted after completion or reuse.
+    /// A missing entry or mismatched packed generation is an invariant failure.
     pub fn on_completion(&mut self, user_data: UserData, result: i32) -> CompletionOutcome {
-        let (index, generation, is_cancel) = WaiterId::from_user_data(user_data);
-        let Some(id) = self
+        let (index, generation) = WaiterId::from_user_data(user_data);
+
+        // The outstanding SQE keeps this slot occupied, even if the packed
+        // generation has wrapped. Recover the full ID before returning it.
+        let id = self
             .entries
-            .id_at(index)
-            .filter(|id| id.generation & WaiterId::GENERATION_MASK == generation)
-        else {
-            assert!(is_cancel, "operation CQE for missing or stale waiter");
-            return CompletionOutcome::Cancel;
-        };
-        let id = WaiterId(id);
-
-        // A cancel acknowledgement may outlive the operation or its observer.
-        // It never changes a retained result or releases operation capacity.
-        if is_cancel {
-            if !self.is_pending(id) {
-                return CompletionOutcome::Cancel;
-            }
-            if result == 0 {
-                // Cancellation successful.
-            } else if result == -libc::EALREADY {
-                // Cancellation is no longer possible at this stage. The target
-                // operation CQE should follow shortly.
-            } else if result == -libc::ENOENT {
-                // Not found can mean the target already completed (common race) or
-                // stale/invalid user_data.
-            } else if result == -libc::EINVAL {
-                panic!("async cancel SQE rejected by kernel: EINVAL");
-            } else {
-                warn!(result, "unexpected async cancel CQE result");
-            }
-
-            return CompletionOutcome::Cancel;
-        }
-
+            .id_at(index as usize)
+            .map(WaiterId)
+            .expect("operation CQE for missing waiter");
+        assert_eq!(
+            id.0.generation as u32, generation,
+            "operation CQE for mismatched waiter generation"
+        );
         let waiter = self
             .get_mut(id)
             .expect("operation CQE for completed waiter");
@@ -591,10 +532,7 @@ pub mod tests {
 
     /// Build a full waiter identity without registering a request.
     pub fn waiter_id(index: u32, generation: u64) -> WaiterId {
-        WaiterId(Id {
-            index: index as usize,
-            generation,
-        })
+        WaiterId(Id { index, generation })
     }
 
     /// Share one directory hold across the simulated file requests in this process.
@@ -705,23 +643,21 @@ pub mod tests {
     }
 
     #[test]
-    fn test_waiter_id_encoding_preserves_full_generation() {
-        // Include the highest usable index and generations across the kernel
-        // wrap boundary. Packing must not affect the full userspace identity.
-        for index in [0, 7, u32::MAX - 1] {
-            for generation in [0, WaiterId::GENERATION_MASK, (1 << 31) + 3, u64::MAX] {
-                let id = waiter_id(index, generation);
-                let packed_generation = generation & WaiterId::GENERATION_MASK;
-                assert_eq!(id.0.generation, generation);
-                assert_eq!(
-                    WaiterId::from_user_data(id.user_data()),
-                    (index as usize, packed_generation, false)
-                );
-                assert_eq!(
-                    WaiterId::from_user_data(id.cancel_user_data()),
-                    (index as usize, packed_generation, true)
-                );
-            }
+    fn test_user_data_encoding() {
+        // All index bits survive, while only the low 32 generation bits reach the kernel.
+        for (index, generation, encoded) in [
+            (0, 0, 0),
+            (0x89ab_cdef, 0x0123_4567, 0x0123_4567_89ab_cdef),
+            (7, 1 << 31, 0x8000_0000_0000_0007),
+            (7, 1 << 32, 7),
+            (u32::MAX - 1, u64::MAX, u64::MAX - 1),
+        ] {
+            let id = waiter_id(index, generation);
+            assert_eq!(id.user_data(), encoded);
+            assert_eq!(
+                WaiterId::from_user_data(encoded),
+                (index, generation as u32)
+            );
         }
     }
 
@@ -730,34 +666,38 @@ pub mod tests {
         let mut waiters = Waiters::new(1);
         let mut deferred = Deferred::default();
         let id = waiters.insert(make_sync_request(), observer());
-        let last = WaiterId(set_generation(
-            &mut waiters.entries,
-            id.0,
-            WaiterId::GENERATION_MASK,
-        ));
+        let last = WaiterId(set_generation(&mut waiters.entries, id.0, u32::MAX as u64));
         waiters.finish(last, Err(Error::Closed), &mut deferred);
         drop(output(&mut waiters, last));
 
         let current = waiters.insert(make_sync_request(), observer());
-        assert_eq!(current.0.generation, 1 << 31);
+        assert_eq!(current.0.generation, 1 << 32);
 
-        // Packed generations wrap while all userspace queues keep the full ID.
+        // Kernel generations wrap while userspace IDs retain the full generation.
         assert_eq!(current.user_data(), id.user_data());
         assert!(!waiters.is_pending(id));
         assert!(!waiters.cancel(id));
-
-        // A late cancel CQE from the previous generation cannot retire this SQE.
         waiters.stage(current);
-        assert!(matches!(
-            waiters.on_completion(last.cancel_user_data(), 0),
-            CompletionOutcome::Cancel
-        ));
-        assert_eq!(waiters.in_flight(), 1);
 
+        // Neither a different generation nor a duplicate CQE can retire this SQE.
         assert!(
-            matches!(waiters.on_completion(current.user_data(), -libc::EINTR), CompletionOutcome::Requeue(id) if id == current)
+            catch_unwind(AssertUnwindSafe(|| {
+                waiters.on_completion(last.user_data(), 0)
+            }))
+            .is_err()
         );
+        assert_eq!(waiters.in_flight(), 1);
+        assert!(matches!(
+            waiters.on_completion(current.user_data(), -libc::EINTR),
+            CompletionOutcome::Requeue(id) if id == current
+        ));
         assert_eq!(waiters.in_flight(), 0);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                waiters.on_completion(current.user_data(), 0)
+            }))
+            .is_err()
+        );
 
         waiters.stage(current);
         complete(&mut waiters, current, 0, &mut deferred);
@@ -863,7 +803,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_cancellation_acknowledgements_do_not_retire_requests_or_results() {
+    fn test_cancellation_waits_for_operation_completion() {
         let mut waiters = Waiters::new(1);
         let mut deferred = Deferred::default();
         let id = waiters.insert(make_sync_request(), observer());
@@ -872,47 +812,26 @@ pub mod tests {
         assert!(waiters.cancel(id));
         assert!(!waiters.cancel(id));
 
-        // None of these acknowledgements ends the kernel's access to the request.
-        for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
-            assert!(matches!(
-                waiters.on_completion(id.cancel_user_data(), result),
-                CompletionOutcome::Cancel
-            ));
-            assert_eq!(waiters.in_flight(), 1);
-        }
-
+        // Cancellation cannot release resources before the operation's CQE.
         assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(id))).is_err());
         assert!(
-            catch_unwind(AssertUnwindSafe(|| waiters.finish(
-                id,
-                Err(Error::Closed),
-                &mut deferred
-            )))
+            catch_unwind(AssertUnwindSafe(|| {
+                waiters.finish(id, Err(Error::Closed), &mut deferred)
+            }))
             .is_err()
         );
+        assert_eq!(waiters.in_flight(), 1);
 
         assert_eq!(complete(&mut waiters, id, 0, &mut deferred), None);
-
-        // The result is still addressable when a late cancellation CQE arrives.
-        for result in [0, -libc::ENOENT, -libc::EINVAL] {
-            assert!(matches!(
-                waiters.on_completion(id.cancel_user_data(), result),
-                CompletionOutcome::Cancel
-            ));
-        }
         assert_eq!(waiters.in_flight(), 0);
         assert!(matches!(
             output(&mut waiters, id),
             RequestOutput::Sync(Ok(()))
         ));
-        assert!(matches!(
-            waiters.on_completion(id.cancel_user_data(), -libc::ENOENT),
-            CompletionOutcome::Cancel
-        ));
     }
 
     #[test]
-    fn test_invalid_ids_and_cancel_opcode_rejection() {
+    fn test_invalid_ids() {
         let mut waiters = Waiters::new(1);
 
         for id in [waiter_id(0, 0), waiter_id(7, 0)] {
@@ -925,18 +844,6 @@ pub mod tests {
                     .is_err()
             );
         }
-
-        // Unlike a stale acknowledgement, rejection for a live request points
-        // to an invalid cancellation SQE and must fail loudly.
-        let id = waiters.insert(make_sync_request(), observer());
-        waiters.stage(id);
-        assert!(
-            catch_unwind(AssertUnwindSafe(
-                || waiters.on_completion(id.cancel_user_data(), -libc::EINVAL)
-            ))
-            .is_err()
-        );
-        assert_eq!(waiters.in_flight(), 1);
     }
 
     #[test]

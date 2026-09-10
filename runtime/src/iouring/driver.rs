@@ -48,13 +48,12 @@ use super::{
     request::Request,
     runtime::{Deferred, RingConfig},
     timeout::TimeoutWheel,
-    waiter::{CompletionOutcome, Observation, Observer, WaiterId, Waiters},
+    waiter::{CompletionOutcome, Observation, Observer, UserData, WaiterId, Waiters},
     waker::{WAKE_USER_DATA, Waker},
 };
 use crate::Error;
 use io_uring::{
     IoUring,
-    cqueue::Entry as CqueueEntry,
     opcode::AsyncCancel,
     squeue::SubmissionQueue,
     types::{SubmitArgs, Timespec},
@@ -65,6 +64,12 @@ use std::{
     task::Waker as TaskWaker,
     time::{Duration, Instant},
 };
+use tracing::warn;
+
+/// Shared acknowledgement token for cancellation SQEs.
+///
+/// Like the wake token, this uses the slot index reserved by [`Waiters::insert`].
+const CANCEL_USER_DATA: UserData = u32::MAX as UserData;
 
 /// Ring and request state accessed exclusively by the owning worker.
 pub struct Driver {
@@ -483,7 +488,7 @@ impl State {
 
             let cancel = AsyncCancel::new(id.user_data())
                 .build()
-                .user_data(id.cancel_user_data());
+                .user_data(CANCEL_USER_DATA);
 
             // SAFETY: AsyncCancel carries only the stable user_data identity.
             // Its target's waiter retains every kernel-visible owner, and the
@@ -531,44 +536,62 @@ impl State {
         // Observer callbacks remain deferred until the worker borrow ends.
         for cqe in ring.completion() {
             // Keep processing the batch after a wake has requested an inbox check.
-            woke |= self.handle_cqe(cqe, deferred);
+            woke |= self.handle_cqe(cqe.user_data(), cqe.result(), cqe.flags(), deferred);
         }
 
         woke
     }
 
     /// Apply a CQE, returning whether the worker should recheck its mailbox.
-    fn handle_cqe(&mut self, cqe: CqueueEntry, deferred: &mut Deferred) -> bool {
-        let user_data = cqe.user_data();
-
+    fn handle_cqe(
+        &mut self,
+        user_data: UserData,
+        result: i32,
+        flags: u32,
+        deferred: &mut Deferred,
+    ) -> bool {
         // The reserved mailbox token is outside the waiter's ID space.
         if user_data == WAKE_USER_DATA {
             assert!(
-                cqe.result() >= 0,
+                result >= 0,
                 "wake poll CQE failed: requires Linux 6.1+ multishot polling"
             );
             // Clear eventfd readiness. The worker drains the actual messages
             // after this CQ batch and the local borrow have ended.
             self.waker.acknowledge();
-            if !io_uring::cqueue::more(cqe.flags()) {
+            if !io_uring::cqueue::more(flags) {
                 // The kernel removed the multishot poll. Reinstall it before
                 // the next blocking wait, even if this was service's final reap.
                 self.wake_rearm_needed = true;
             }
             return true;
         }
-
-        // Waiters releases an operation's in-flight count before returning its
-        // outcome. Cancellation acknowledgements leave that count untouched.
-        match self.waiters.on_completion(user_data, cqe.result()) {
-            CompletionOutcome::Cancel => {
-                // This CQE can outlive the request and its slot. Track the debt
-                // separately so shutdown still waits for its acknowledgement.
-                self.outstanding_cancels = self
-                    .outstanding_cancels
-                    .checked_sub(1)
-                    .expect("untracked cancellation CQE");
+        if user_data == CANCEL_USER_DATA {
+            if result == 0 {
+                // Cancellation successful.
+            } else if result == -libc::EALREADY {
+                // Cancellation is no longer possible at this stage. The target
+                // operation CQE should follow shortly.
+            } else if result == -libc::ENOENT {
+                // The target may already have completed and vacated its slot.
+            } else if result == -libc::EINVAL {
+                panic!("async cancel SQE rejected by kernel: EINVAL");
+            } else {
+                warn!(result, "unexpected async cancel CQE result");
             }
+
+            // The target's slot may already hold another request. Only the global
+            // count changes, so shutdown still waits for every acknowledgement.
+            self.outstanding_cancels = self
+                .outstanding_cancels
+                .checked_sub(1)
+                .expect("untracked cancellation CQE");
+
+            return false;
+        }
+
+        // Waiters releases an operation's in-flight count before returning its outcome.
+        match self.waiters.on_completion(user_data, result) {
             // Partial progress rejoins the tail behind already queued work.
             CompletionOutcome::Requeue(id) => self.ready_queue.push_back(id),
             CompletionOutcome::Complete(id, result) => self.complete(id, result, deferred),
@@ -600,6 +623,7 @@ pub mod tests {
             fd::{AsRawFd, RawFd},
             unix::net::UnixStream,
         },
+        panic::{AssertUnwindSafe, catch_unwind},
         sync::Arc,
         task::Wake,
         thread,
@@ -863,7 +887,6 @@ pub mod tests {
                     self.driver.state.complete(id, result, &mut self.deferred)
                 }
                 CompletionOutcome::Requeue(id) => self.driver.state.ready_queue.push_back(id),
-                CompletionOutcome::Cancel => unreachable!(),
             }
             self.collect();
         }
@@ -1345,41 +1368,167 @@ pub mod tests {
     }
 
     #[test]
-    fn test_drain_waits_for_cancel_cqe_after_request_finishes() {
+    fn test_cancel_acknowledgements_leave_requests_and_results_untouched() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
-        let id = harness.stage(recv(left, 8, None), Some(1), 0);
+        let id = harness.stage(recv(left, 5, None), None, 0);
+        harness.driver.state.cancel(id, &mut harness.deferred);
 
-        // Submit only the cancellation to the real kernel. Simulate the
-        // operation CQE so logical retirement is guaranteed to happen first.
-        harness.driver.state.advance_timeouts(
-            harness.start + Duration::from_millis(5),
-            &mut harness.deferred,
-        );
+        // Acknowledgements cannot release the operation's kernel resources.
+        for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
+            harness.driver.state.outstanding_cancels += 1;
+            assert!(!harness.driver.state.handle_cqe(
+                CANCEL_USER_DATA,
+                result,
+                0,
+                &mut harness.deferred
+            ));
+
+            assert_eq!(harness.driver.state.outstanding_cancels, 0);
+            assert_eq!(harness.driver.state.waiters.in_flight(), 1);
+            assert!(harness.driver.state.waiters.is_pending(id));
+        }
+
+        // Complete without collecting the result, leaving it in its waiter slot.
+        let CompletionOutcome::Complete(current, result) = harness
+            .driver
+            .state
+            .waiters
+            .on_completion(id.user_data(), 5)
+        else {
+            panic!("expected terminal completion");
+        };
+        assert_eq!(current, id);
+        harness
+            .driver
+            .state
+            .complete(id, result, &mut harness.deferred);
+
+        for result in [0, -libc::ENOENT] {
+            harness.driver.state.outstanding_cancels += 1;
+            assert!(!harness.driver.state.handle_cqe(
+                CANCEL_USER_DATA,
+                result,
+                0,
+                &mut harness.deferred
+            ));
+
+            assert_eq!(harness.driver.state.outstanding_cancels, 0);
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+        }
+
+        harness.collect();
+        assert_eq!(harness.completed.len(), 1);
+        assert_eq!(received(&harness.completed[0]).len(), 5);
+        harness.drain();
+    }
+
+    #[test]
+    fn test_cancel_acknowledgement_invariants() {
+        // Both control tokens use the index that Waiters refuses to allocate.
+        assert_ne!(CANCEL_USER_DATA, WAKE_USER_DATA);
+        for token in [CANCEL_USER_DATA, WAKE_USER_DATA] {
+            assert_eq!(token as u32, u32::MAX);
+        }
+
+        let mut harness = Harness::new(1);
+        harness.driver.state.outstanding_cancels = 1;
+
+        // EINVAL rejects the cancellation SQE itself, regardless of slot reuse.
         assert!(
-            !harness
-                .driver
-                .state
-                .stage_cancellations(&mut harness.driver.ring.submission())
+            catch_unwind(AssertUnwindSafe(|| {
+                harness.driver.state.handle_cqe(
+                    CANCEL_USER_DATA,
+                    -libc::EINVAL,
+                    0,
+                    &mut harness.deferred,
+                );
+            }))
+            .is_err()
         );
         assert_eq!(harness.driver.state.outstanding_cancels, 1);
 
-        harness.simulated_completion(id, 4);
-
-        assert!(matches!(
-            harness.completed[0].output,
-            RequestOutput::Recv(Err((_, Error::Timeout)))
-        ));
-
-        // The kernel will acknowledge the staged cancel after logical
-        // retirement. Drain must wait for that CQE despite the empty slab.
-        assert_eq!(harness.driver.len(), 0);
-        assert!(!harness.driver.is_empty());
-        assert!(harness.driver.next_deadline().is_none());
-
-        harness.drain();
-
+        harness
+            .driver
+            .state
+            .handle_cqe(CANCEL_USER_DATA, 0, 0, &mut harness.deferred);
         assert_eq!(harness.driver.state.outstanding_cancels, 0);
+
+        // An acknowledgement without a staged cancellation is an accounting error.
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                harness
+                    .driver
+                    .state
+                    .handle_cqe(CANCEL_USER_DATA, 0, 0, &mut harness.deferred);
+            }))
+            .is_err()
+        );
+        assert_eq!(harness.driver.state.outstanding_cancels, 0);
+    }
+
+    #[test]
+    fn test_drain_waits_for_cancel_cqe_after_request_finishes() {
+        for reuse in [false, true] {
+            let mut harness = Harness::new(1);
+            let (left, _right) = UnixStream::pair().unwrap();
+            let id = harness.stage(recv(left, 8, None), Some(1), 0);
+
+            // Submit only the cancellation to the real kernel. Simulate the
+            // operation CQE so logical retirement is guaranteed to happen first.
+            harness.driver.state.advance_timeouts(
+                harness.start + Duration::from_millis(5),
+                &mut harness.deferred,
+            );
+            assert!(
+                !harness
+                    .driver
+                    .state
+                    .stage_cancellations(&mut harness.driver.ring.submission())
+            );
+            assert_eq!(harness.driver.state.outstanding_cancels, 1);
+
+            harness.simulated_completion(id, 4);
+
+            assert!(matches!(
+                harness.completed[0].output,
+                RequestOutput::Recv(Err((_, Error::Timeout)))
+            ));
+
+            // The kernel will acknowledge the staged cancel after logical
+            // retirement. Drain must wait for that CQE despite the empty slab.
+            assert_eq!(harness.driver.len(), 0);
+            assert!(!harness.driver.is_empty());
+            assert!(harness.driver.next_deadline().is_none());
+
+            if reuse {
+                let (left, _right) = UnixStream::pair().unwrap();
+                let current = harness.stage(recv(left, 1, None), None, 1);
+                assert_eq!(current.0.index, id.0.index);
+                assert_ne!(current, id);
+
+                // Deliver the real cancellation CQE while the reused slot holds
+                // another operation. Its target identity must not affect lookup.
+                let limit = Instant::now() + Duration::from_secs(10);
+                while harness.driver.state.outstanding_cancels != 0 {
+                    assert!(
+                        Instant::now() < limit,
+                        "cancellation acknowledgement stalled"
+                    );
+                    harness.service();
+                    thread::yield_now();
+                }
+
+                assert!(harness.driver.state.waiters.is_in_flight(current));
+                assert_eq!(harness.driver.state.waiters.in_flight(), 1);
+                assert_eq!(harness.completed.len(), 1);
+                harness.simulated_completion(current, 1);
+            }
+
+            harness.drain();
+
+            assert_eq!(harness.driver.state.outstanding_cancels, 0);
+        }
     }
 
     #[test]

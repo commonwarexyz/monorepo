@@ -7,7 +7,7 @@
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Id {
     /// Position in the owning slab.
-    pub index: usize,
+    pub index: u32,
     /// Incarnation that distinguishes a reused slot from an old identity.
     pub generation: u64,
 }
@@ -55,7 +55,10 @@ impl<T> Slab<T> {
     pub fn insert_with(&mut self, make: impl FnOnce(Id) -> T) -> Id {
         let index = self.free.unwrap_or(self.slots.len());
         let generation = self.slots.get(index).map_or(0, |slot| slot.generation);
-        let id = Id { index, generation };
+        let id = Id {
+            index: u32::try_from(index).expect("slab slot index overflow"),
+            generation,
+        };
         let value = make(id);
 
         if index == self.slots.len() {
@@ -82,7 +85,7 @@ impl<T> Slab<T> {
 
     /// Borrow the live value at `id`, if any.
     pub fn get(&self, id: Id) -> Option<&T> {
-        let slot = self.slots.get(id.index)?;
+        let slot = self.slots.get(id.index as usize)?;
         if slot.generation != id.generation {
             return None;
         }
@@ -91,7 +94,7 @@ impl<T> Slab<T> {
 
     /// Mutably borrow the live value at `id`, if any.
     pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
-        let slot = self.slots.get_mut(id.index)?;
+        let slot = self.slots.get_mut(id.index as usize)?;
         if slot.generation != id.generation {
             return None;
         }
@@ -100,7 +103,7 @@ impl<T> Slab<T> {
 
     /// Remove a live value, advancing the slot's generation so `id` stops resolving.
     pub fn remove(&mut self, id: Id) -> Option<T> {
-        let slot = self.slots.get_mut(id.index)?;
+        let slot = self.slots.get_mut(id.index as usize)?;
         if slot.generation != id.generation {
             return None;
         }
@@ -109,7 +112,7 @@ impl<T> Slab<T> {
         if let Some(generation) = slot.generation.checked_add(1) {
             slot.generation = generation;
             slot.next_free = self.free;
-            self.free = Some(id.index);
+            self.free = Some(id.index as usize);
         }
         Some(value)
     }
@@ -128,7 +131,7 @@ impl<T> Slab<T> {
     pub fn id_at(&self, index: usize) -> Option<Id> {
         let slot = self.slots.get(index)?;
         slot.value.as_ref().map(|_| Id {
-            index,
+            index: u32::try_from(index).expect("slab slot index overflow"),
             generation: slot.generation,
         })
     }
@@ -142,7 +145,7 @@ pub mod tests {
     /// Force a live slot's generation so tests can reach exhaustion.
     pub fn set_generation<T>(slab: &mut Slab<T>, id: Id, generation: u64) -> Id {
         assert!(slab.get(id).is_some());
-        slab.slots[id.index].generation = generation;
+        slab.slots[id.index as usize].generation = generation;
         Id { generation, ..id }
     }
 
@@ -160,8 +163,8 @@ pub mod tests {
         assert_eq!(slab.len(), 2);
         assert_eq!(slab.slots(), 2);
         assert_eq!(slab.get(first), Some(&10));
-        assert_eq!(slab.id_at(first.index), Some(first));
-        assert_eq!(slab.id_at(second.index), Some(second));
+        assert_eq!(slab.id_at(first.index as usize), Some(first));
+        assert_eq!(slab.id_at(second.index as usize), Some(second));
 
         *slab.get_mut(first).unwrap() = 11;
         assert_eq!(slab.get(first), Some(&11));
@@ -171,8 +174,8 @@ pub mod tests {
         assert_eq!(slab.remove(first), Some(11));
         assert_eq!(slab.len(), 1);
         assert_eq!(slab.slots(), 2);
-        assert_eq!(slab.id_at(first.index), None);
-        assert_eq!(slab.id_at(second.index), Some(second));
+        assert_eq!(slab.id_at(first.index as usize), None);
+        assert_eq!(slab.id_at(second.index as usize), Some(second));
 
         assert_eq!(slab.remove(second), Some(20));
         assert_eq!(slab.len(), 0);
@@ -198,11 +201,11 @@ pub mod tests {
                 ..live
             },
             Id {
-                index: slab.slots(),
+                index: slab.slots() as u32,
                 generation: 0,
             },
             Id {
-                index: usize::MAX,
+                index: u32::MAX,
                 generation: u64::MAX,
             },
         ] {
@@ -214,7 +217,7 @@ pub mod tests {
         assert_eq!(slab.len(), 1);
         assert_eq!(slab.slots(), 2);
         assert_eq!(slab.get(live), Some(&20));
-        assert_eq!(slab.id_at(removed.index), None);
+        assert_eq!(slab.id_at(removed.index as usize), None);
         assert_eq!(slab.id_at(slab.slots()), None);
         assert_eq!(slab.id_at(usize::MAX), None);
 
@@ -248,7 +251,7 @@ pub mod tests {
             assert_eq!(current.index, old.index);
             assert_eq!(current.generation, old.generation + 1);
             assert_eq!(slab.get(current), Some(&current));
-            assert_eq!(slab.id_at(current.index), Some(current));
+            assert_eq!(slab.id_at(current.index as usize), Some(current));
             assert!(slab.get(old).is_none());
             assert!(slab.get_mut(old).is_none());
             assert!(slab.remove(old).is_none());
@@ -278,7 +281,7 @@ pub mod tests {
 
         assert_eq!(slab.len(), 0);
         assert_eq!(slab.slots(), 2);
-        assert_eq!(slab.id_at(exhausted.index), None);
+        assert_eq!(slab.id_at(exhausted.index as usize), None);
         assert!(slab.get(exhausted).is_none());
         assert!(slab.get_mut(exhausted).is_none());
         assert!(slab.remove(exhausted).is_none());
