@@ -2,6 +2,7 @@
 
 use super::{
     super::{
+        driver::tests::fail_after_completion,
         operation::Operation,
         request::{RecvRequest, Request},
     },
@@ -193,13 +194,8 @@ fn test_service_error_preserves_completions_before_cleanup() {
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config()).start(|_| async move {
             *operation.lock() = Some(Operation::register(request));
-            current()
-                .unwrap()
-                .borrow_mut()
-                .driver
-                .as_mut()
-                .unwrap()
-                .fail_service_after_completion = true;
+            let _fault =
+                fail_after_completion(current().unwrap().borrow().driver.as_ref().unwrap());
             // Keep the observer alive beyond root destruction so cleanup must
             // preserve its terminal resources before closing ordinary observation.
             futures::future::poll_fn(|cx| {

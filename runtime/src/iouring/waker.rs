@@ -743,9 +743,11 @@ pub mod tests {
         }
     }
 
-    pub fn wait_until_eventfd_armed(waker: &Waker) {
+    /// Wait for the eventfd arm, failing by the deadline if the owner never parks.
+    pub fn wait_until_eventfd_armed(waker: &Waker, deadline: Instant) {
         while waker.inner.state.load(Ordering::Relaxed) & WAITING_ON_EVENTFD_BIT == 0 {
-            std::hint::spin_loop();
+            assert!(Instant::now() < deadline, "eventfd wake path was not armed");
+            std::thread::yield_now();
         }
     }
 
