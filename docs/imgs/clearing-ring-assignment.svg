@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 470">
+  <rect width="1320" height="470" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 26px; font-weight: 700; fill: #111; }
+    .panel-title { font-size: 20px; font-weight: 700; fill: #111; text-anchor: middle; }
+    .axis { font-size: 15px; fill: #666; }
+    .axis-strong { font-size: 16px; font-weight: 700; fill: #111; }
+    .legend { font-size: 15px; font-weight: 700; }
+    .frame { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .ring { fill: none; stroke: #bbb; stroke-width: 2; }
+    .node { fill: #fff; stroke: #555; stroke-width: 1.5; }
+    .node-text { font-size: 12px; fill: #333; text-anchor: middle; }
+    .blue { stroke: #2424d4; fill: none; }
+    .purple { stroke: #7a3db8; fill: none; }
+    .orange { stroke: #b45f06; fill: none; }
+    .blue-text { fill: #2424d4; }
+    .purple-text { fill: #7a3db8; }
+    .orange-text { fill: #b45f06; }
+    .held { fill: #2424d4; fill-opacity: 0.18; stroke: none; }
+    .run { fill: none; stroke: #2424d4; stroke-width: 2; }
+    .wrap { fill: none; stroke: #2424d4; stroke-width: 2; stroke-dasharray: 5 4; }
+    .note { font-size: 14px; fill: #444; }
+  </style>
+  <text class="title" x="34" y="39">Slice Holders Slide Around the Validator Ring</text>
+  <text class="note" x="34" y="66">n = 16 validators, f = 5, quorum q = 11, S = 16 slices. Slice s is held by the 11 validators starting at floor(16 s / 16) = s.</text>
+  <rect class="frame" x="60" y="90" width="560" height="350" rx="6"/>
+  <text class="panel-title" x="340" y="122">Who holds slice s</text>
+  <circle class="ring" cx="236" cy="285" r="90"/>
+  <path class="blue" stroke-width="6" stroke-linecap="round" d="M220.9 176.0 A110 110 0 1 1 148.3 351.4"/>
+  <path class="purple" stroke-width="6" stroke-linecap="round" d="M357.9 316.8 A126 126 0 1 1 204.2 163.1"/>
+  <path class="orange" stroke-width="6" stroke-linecap="round" d="M150.3 398.2 A142 142 0 1 1 376.7 304.5"/>
+  <circle class="node" cx="236.0" cy="195.0" r="11"/>
+  <text class="node-text" x="236.0" y="199.0">0</text>
+  <circle class="node" cx="270.4" cy="201.9" r="11"/>
+  <text class="node-text" x="270.4" y="205.9">1</text>
+  <circle class="node" cx="299.6" cy="221.4" r="11"/>
+  <text class="node-text" x="299.6" y="225.4">2</text>
+  <circle class="node" cx="319.1" cy="250.6" r="11"/>
+  <text class="node-text" x="319.1" y="254.6">3</text>
+  <circle class="node" cx="326.0" cy="285.0" r="11"/>
+  <text class="node-text" x="326.0" y="289.0">4</text>
+  <circle class="node" cx="319.1" cy="319.4" r="11"/>
+  <text class="node-text" x="319.1" y="323.4">5</text>
+  <circle class="node" cx="299.6" cy="348.6" r="11"/>
+  <text class="node-text" x="299.6" y="352.6">6</text>
+  <circle class="node" cx="270.4" cy="368.1" r="11"/>
+  <text class="node-text" x="270.4" y="372.1">7</text>
+  <circle class="node" cx="236.0" cy="375.0" r="11"/>
+  <text class="node-text" x="236.0" y="379.0">8</text>
+  <circle class="node" cx="201.6" cy="368.1" r="11"/>
+  <text class="node-text" x="201.6" y="372.1">9</text>
+  <circle class="node" cx="172.4" cy="348.6" r="11"/>
+  <text class="node-text" x="172.4" y="352.6">10</text>
+  <circle class="node" cx="152.9" cy="319.4" r="11"/>
+  <text class="node-text" x="152.9" y="323.4">11</text>
+  <circle class="node" cx="146.0" cy="285.0" r="11"/>
+  <text class="node-text" x="146.0" y="289.0">12</text>
+  <circle class="node" cx="152.9" cy="250.6" r="11"/>
+  <text class="node-text" x="152.9" y="254.6">13</text>
+  <circle class="node" cx="172.4" cy="221.4" r="11"/>
+  <text class="node-text" x="172.4" y="225.4">14</text>
+  <circle class="node" cx="201.6" cy="201.9" r="11"/>
+  <text class="node-text" x="201.6" y="205.9">15</text>
+  <text class="axis" x="236" y="290" text-anchor="middle">validator ring</text>
+  <line class="blue" stroke-width="6" stroke-linecap="round" x1="412" y1="168" x2="442" y2="168"/>
+  <text class="legend blue-text" x="454" y="160">slice 0</text>
+  <text class="axis" x="454" y="179">validators 0..10</text>
+  <line class="purple" stroke-width="6" stroke-linecap="round" x1="412" y1="228" x2="442" y2="228"/>
+  <text class="legend purple-text" x="454" y="220">slice 5</text>
+  <text class="axis" x="454" y="239">validators 5..15</text>
+  <line class="orange" stroke-width="6" stroke-linecap="round" x1="412" y1="288" x2="442" y2="288"/>
+  <text class="legend orange-text" x="454" y="280">slice 10</text>
+  <text class="axis" x="454" y="299">validators 10..4</text>
+  <text class="axis" x="454" y="317">(wraps)</text>
+  <text class="note" x="412" y="368">each window starts one</text>
+  <text class="note" x="412" y="386">validator later, so all</text>
+  <text class="note" x="412" y="404">sixteen have 11 holders</text>
+  <rect class="frame" x="690" y="90" width="590" height="350" rx="6"/>
+  <text class="panel-title" x="985" y="122">What validator v holds</text>
+  <text class="note" x="722" y="146">11 holders per column, one span per row (dashed: two, wrapped)</text>
+  <text class="axis" x="802" y="171" text-anchor="end">0</text>
+  <rect class="held" x="812" y="161" width="26" height="12"/>
+  <rect class="wrap" x="812.5" y="161.5" width="25" height="11" rx="2"/>
+  <rect class="held" x="968" y="161" width="260" height="12"/>
+  <rect class="wrap" x="968.5" y="161.5" width="259" height="11" rx="2"/>
+  <text class="axis" x="802" y="185" text-anchor="end">1</text>
+  <rect class="held" x="812" y="175" width="52" height="12"/>
+  <rect class="wrap" x="812.5" y="175.5" width="51" height="11" rx="2"/>
+  <rect class="held" x="994" y="175" width="234" height="12"/>
+  <rect class="wrap" x="994.5" y="175.5" width="233" height="11" rx="2"/>
+  <text class="axis" x="802" y="199" text-anchor="end">2</text>
+  <rect class="held" x="812" y="189" width="78" height="12"/>
+  <rect class="wrap" x="812.5" y="189.5" width="77" height="11" rx="2"/>
+  <rect class="held" x="1020" y="189" width="208" height="12"/>
+  <rect class="wrap" x="1020.5" y="189.5" width="207" height="11" rx="2"/>
+  <text class="axis" x="802" y="213" text-anchor="end">3</text>
+  <rect class="held" x="812" y="203" width="104" height="12"/>
+  <rect class="wrap" x="812.5" y="203.5" width="103" height="11" rx="2"/>
+  <rect class="held" x="1046" y="203" width="182" height="12"/>
+  <rect class="wrap" x="1046.5" y="203.5" width="181" height="11" rx="2"/>
+  <text class="axis" x="802" y="227" text-anchor="end">4</text>
+  <rect class="held" x="812" y="217" width="130" height="12"/>
+  <rect class="wrap" x="812.5" y="217.5" width="129" height="11" rx="2"/>
+  <rect class="held" x="1072" y="217" width="156" height="12"/>
+  <rect class="wrap" x="1072.5" y="217.5" width="155" height="11" rx="2"/>
+  <text class="axis" x="802" y="241" text-anchor="end">5</text>
+  <rect class="held" x="812" y="231" width="156" height="12"/>
+  <rect class="wrap" x="812.5" y="231.5" width="155" height="11" rx="2"/>
+  <rect class="held" x="1098" y="231" width="130" height="12"/>
+  <rect class="wrap" x="1098.5" y="231.5" width="129" height="11" rx="2"/>
+  <text class="axis" x="802" y="255" text-anchor="end">6</text>
+  <rect class="held" x="812" y="245" width="182" height="12"/>
+  <rect class="wrap" x="812.5" y="245.5" width="181" height="11" rx="2"/>
+  <rect class="held" x="1124" y="245" width="104" height="12"/>
+  <rect class="wrap" x="1124.5" y="245.5" width="103" height="11" rx="2"/>
+  <text class="axis" x="802" y="269" text-anchor="end">7</text>
+  <rect class="held" x="812" y="259" width="208" height="12"/>
+  <rect class="wrap" x="812.5" y="259.5" width="207" height="11" rx="2"/>
+  <rect class="held" x="1150" y="259" width="78" height="12"/>
+  <rect class="wrap" x="1150.5" y="259.5" width="77" height="11" rx="2"/>
+  <text class="axis" x="802" y="283" text-anchor="end">8</text>
+  <rect class="held" x="812" y="273" width="234" height="12"/>
+  <rect class="wrap" x="812.5" y="273.5" width="233" height="11" rx="2"/>
+  <rect class="held" x="1176" y="273" width="52" height="12"/>
+  <rect class="wrap" x="1176.5" y="273.5" width="51" height="11" rx="2"/>
+  <text class="axis" x="802" y="297" text-anchor="end">9</text>
+  <rect class="held" x="812" y="287" width="260" height="12"/>
+  <rect class="wrap" x="812.5" y="287.5" width="259" height="11" rx="2"/>
+  <rect class="held" x="1202" y="287" width="26" height="12"/>
+  <rect class="wrap" x="1202.5" y="287.5" width="25" height="11" rx="2"/>
+  <text class="axis" x="802" y="311" text-anchor="end">10</text>
+  <rect class="held" x="812" y="301" width="286" height="12"/>
+  <rect class="run" x="812.5" y="301.5" width="285" height="11" rx="2"/>
+  <text class="axis" x="802" y="325" text-anchor="end">11</text>
+  <rect class="held" x="838" y="315" width="286" height="12"/>
+  <rect class="run" x="838.5" y="315.5" width="285" height="11" rx="2"/>
+  <text class="axis" x="802" y="339" text-anchor="end">12</text>
+  <rect class="held" x="864" y="329" width="286" height="12"/>
+  <rect class="run" x="864.5" y="329.5" width="285" height="11" rx="2"/>
+  <text class="axis" x="802" y="353" text-anchor="end">13</text>
+  <rect class="held" x="890" y="343" width="286" height="12"/>
+  <rect class="run" x="890.5" y="343.5" width="285" height="11" rx="2"/>
+  <text class="axis" x="802" y="367" text-anchor="end">14</text>
+  <rect class="held" x="916" y="357" width="286" height="12"/>
+  <rect class="run" x="916.5" y="357.5" width="285" height="11" rx="2"/>
+  <text class="axis" x="802" y="381" text-anchor="end">15</text>
+  <rect class="held" x="942" y="371" width="286" height="12"/>
+  <rect class="run" x="942.5" y="371.5" width="285" height="11" rx="2"/>
+  <text class="axis" x="825.0" y="401" text-anchor="middle">0</text>
+  <text class="axis" x="851.0" y="401" text-anchor="middle">1</text>
+  <text class="axis" x="877.0" y="401" text-anchor="middle">2</text>
+  <text class="axis" x="903.0" y="401" text-anchor="middle">3</text>
+  <text class="axis" x="929.0" y="401" text-anchor="middle">4</text>
+  <text class="axis" x="955.0" y="401" text-anchor="middle">5</text>
+  <text class="axis" x="981.0" y="401" text-anchor="middle">6</text>
+  <text class="axis" x="1007.0" y="401" text-anchor="middle">7</text>
+  <text class="axis" x="1033.0" y="401" text-anchor="middle">8</text>
+  <text class="axis" x="1059.0" y="401" text-anchor="middle">9</text>
+  <text class="axis" x="1085.0" y="401" text-anchor="middle">10</text>
+  <text class="axis" x="1111.0" y="401" text-anchor="middle">11</text>
+  <text class="axis" x="1137.0" y="401" text-anchor="middle">12</text>
+  <text class="axis" x="1163.0" y="401" text-anchor="middle">13</text>
+  <text class="axis" x="1189.0" y="401" text-anchor="middle">14</text>
+  <text class="axis" x="1215.0" y="401" text-anchor="middle">15</text>
+  <text class="axis-strong" x="1020.0" y="424" text-anchor="middle">slice</text>
+  <text class="axis-strong" x="772" y="272.0" text-anchor="middle" transform="rotate(-90 772 272.0)">validator</text>
+</svg>
