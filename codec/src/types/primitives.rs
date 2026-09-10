@@ -19,13 +19,13 @@
 //!   endian ambiguity.
 
 use crate::{
-    BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
     util::{at_least, at_least_items, read_fixed_vec},
     varint::UInt,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
+use bytes::{Buf as _, BufMut};
 use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 #[cfg(feature = "std")]
 use std::vec::Vec;
@@ -300,8 +300,8 @@ mod tests {
         super::tests::{Byte, TrackingReadBuf, TrackingWriteBuf},
         *,
     };
-    use crate::{CodecFixed, Decode, DecodeExt, Encode, EncodeFixed};
-    use bytes::{Buf, Bytes, BytesMut};
+    use crate::{CodecFixed, Copying, Decode, DecodeExt, Encode, EncodeFixed};
+    use bytes::{Bytes, BytesMut};
     use paste::paste;
 
     // Float tests
@@ -343,6 +343,27 @@ mod tests {
     impl_num_test!(f64, 8);
 
     #[test]
+    fn test_fragmented_numeric_reads() {
+        let mut buf = Bytes::from_static(&[0x01]).chain(Bytes::from_static(&[0x02, 0x03]));
+        assert_eq!(u16::read(&mut buf).unwrap(), 0x0102);
+        assert_eq!(buf.remaining(), 1);
+        assert!(matches!(u16::read(&mut buf), Err(Error::EndOfBuffer)));
+        assert_eq!(buf.remaining(), 1);
+
+        let mut buf = Bytes::from_static(&[1]).chain(Bytes::from_static(&[2, 3, 4]));
+        assert_eq!(u8::read_vec(&mut buf, 3, &()).unwrap(), vec![1, 2, 3]);
+        assert_eq!(u8::read(&mut buf).unwrap(), 4);
+
+        let mut buf = Bytes::from_static(&[1]).chain(Bytes::from_static(&[2, 3]));
+        assert_eq!(u8::read_array::<2>(&mut buf, &()).unwrap(), [1, 2]);
+        assert!(matches!(
+            u8::read_array::<2>(&mut buf, &()),
+            Err(Error::EndOfBuffer)
+        ));
+        assert_eq!(buf.remaining(), 1);
+    }
+
+    #[test]
     fn test_endianness() {
         // u16
         let encoded = 0x0102u16.encode();
@@ -360,7 +381,7 @@ mod tests {
     #[test]
     fn test_numeric_read_vec_bounds() {
         // A length whose byte size exceeds the buffer fails before decoding any elements.
-        let mut buf = [0u8; 8].as_slice();
+        let mut buf = Copying(&[0u8; 8]);
         assert!(matches!(
             u64::read_vec(&mut buf, 2, &()),
             Err(Error::EndOfBuffer)
@@ -368,28 +389,28 @@ mod tests {
         assert_eq!(buf.remaining(), 8);
 
         // A length whose byte size overflows usize fails the same way.
-        let mut buf = [0u8; 8].as_slice();
+        let mut buf = Copying(&[0u8; 8]);
         assert!(matches!(
             u64::read_vec(&mut buf, usize::MAX, &()),
             Err(Error::EndOfBuffer)
         ));
 
         // A valid read decodes big-endian values and consumes the exact bytes.
-        let mut buf = [0x00, 0x01, 0x00, 0x02, 0x00, 0x03].as_slice();
+        let mut buf = Copying(&[0x00, 0x01, 0x00, 0x02, 0x00, 0x03]);
         assert_eq!(u16::read_vec(&mut buf, 2, &()).unwrap(), vec![1u16, 2]);
         assert_eq!(buf.remaining(), 2);
     }
 
     #[test]
     fn test_numeric_read_array_bounds() {
-        let mut buf = [0u8; 8].as_slice();
+        let mut buf = Copying(&[0u8; 8]);
         assert!(matches!(
             u64::read_array::<2>(&mut buf, &()),
             Err(Error::EndOfBuffer)
         ));
         assert_eq!(buf.remaining(), 8);
 
-        let mut buf = [0x00, 0x01, 0x00, 0x02].as_slice();
+        let mut buf = Copying(&[0x00, 0x01, 0x00, 0x02]);
         assert_eq!(u16::read_array::<2>(&mut buf, &()).unwrap(), [1u16, 2]);
         assert_eq!(buf.remaining(), 0);
     }
@@ -397,7 +418,7 @@ mod tests {
     #[test]
     fn test_nonzero_read_vec_bounds() {
         // The upfront size check rejects a length larger than the buffer.
-        let mut buf = [0u8; 4].as_slice();
+        let mut buf = Copying(&[0u8; 4]);
         assert!(matches!(
             NonZeroU32::read_vec(&mut buf, 2, &()),
             Err(Error::EndOfBuffer)
@@ -405,14 +426,14 @@ mod tests {
         assert_eq!(buf.remaining(), 4);
 
         // Per-element validation still runs after the size check.
-        let mut buf = [0u8; 4].as_slice();
+        let mut buf = Copying(&[0u8; 4]);
         assert!(matches!(
             NonZeroU32::read_vec(&mut buf, 1, &()),
             Err(Error::Invalid("NonZeroU32", _))
         ));
 
         // A valid read decodes all values.
-        let mut buf = [0, 0, 0, 1, 0, 0, 0, 2].as_slice();
+        let mut buf = Copying(&[0, 0, 0, 1, 0, 0, 0, 2]);
         assert_eq!(
             NonZeroU32::read_vec(&mut buf, 2, &()).unwrap(),
             vec![NonZeroU32::new(1).unwrap(), NonZeroU32::new(2).unwrap()]
@@ -474,11 +495,11 @@ mod tests {
 
         // Fixed-size array decoding must reject both truncated payloads and trailing data.
         assert!(matches!(
-            <[u8; 3]>::decode([0x01, 0x02].as_slice()),
+            <[u8; 3]>::decode(Copying(&[0x01, 0x02])),
             Err(Error::EndOfBuffer)
         ));
         assert!(matches!(
-            <[u8; 3]>::decode([0x01, 0x02, 0x03, 0x04].as_slice()),
+            <[u8; 3]>::decode(Copying(&[0x01, 0x02, 0x03, 0x04])),
             Err(Error::ExtraData(1))
         ));
 
@@ -538,7 +559,7 @@ mod tests {
         [1u8, 2, 3].write_bufs(&mut buf);
         assert_eq!(buf.put_slice_calls, 1);
         assert_eq!(buf.put_u8_calls, 0);
-        assert_eq!(buf.push_calls, 0);
+        assert!(buf.pushed.is_empty());
 
         // Arrays delegate `write_bufs` to element implementations that push chunks.
         let mut buf = TrackingWriteBuf::new();
@@ -549,7 +570,7 @@ mod tests {
         .write_bufs(&mut buf);
         assert_eq!(buf.put_slice_calls, 0);
         assert_eq!(buf.put_u8_calls, 2);
-        assert_eq!(buf.push_calls, 2);
+        assert_eq!(buf.pushed.len(), 2);
 
         // `[u8; N]` reads the fixed-size payload with one bulk copy.
         let mut buf = TrackingReadBuf::new(&[0x01, 0x02, 0x03]);

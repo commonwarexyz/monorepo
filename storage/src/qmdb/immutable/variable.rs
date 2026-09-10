@@ -287,6 +287,7 @@ mod tests {
         test_variable_partial_ancestor_commit => run_partial_ancestor_commit, open;
         test_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
         test_variable_get_many => run_get_many, open;
+        test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
         test_variable_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;

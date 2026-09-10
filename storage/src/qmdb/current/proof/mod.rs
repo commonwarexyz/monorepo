@@ -3,7 +3,8 @@
 //! This module provides:
 //! - [OpsRootWitness]: Authenticates an ops root against a canonical `current` root.
 //! - [RangeProof]: Proves a range of operations exist in the database.
-//! - [OperationProof]: Proves a specific operation is active in the database.
+//! - [constant::OperationProof]: Proves a specific operation is active, with a fixed-size bitmap chunk.
+//! - [dynamic::OperationProof]: Uses a bitmap chunk size supplied when decoding.
 //!
 //! # Canonical root structure
 //!
@@ -36,18 +37,86 @@ use crate::{
     qmdb::{
         self, Error,
         current::{
-            db::{combine_roots, partial_chunk, pending_chunk},
+            db::{combine_roots, graftable_chunk_window, partial_chunk, pending_chunk},
             grafting,
         },
     },
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use tracing::debug;
+
+pub mod operation;
+
+/// Validate the chunk width before deriving bitmap indices or Merkle heights.
+pub(super) fn chunk_bits(chunk_size: usize) -> Result<u64, commonware_codec::Error> {
+    chunk_size
+        .checked_mul(8)
+        .and_then(|bits| u64::try_from(bits).ok())
+        .filter(|bits| bits.is_power_of_two() && bits.trailing_zeros() < 63)
+        .ok_or(commonware_codec::Error::Invalid(
+            "current proof",
+            "invalid bitmap chunk size",
+        ))
+}
+
+/// Bitmap chunk indices read by [RangeProof::new] or [constant::OperationProof::new].
+///
+/// Pass `None` for a range proof or the queried operation location for an operation proof.
+/// The returned indices are unique and increasing. At most three chunks are needed: the
+/// trailing partial chunk, a complete chunk awaiting its ops-tree ancestor, and the queried
+/// operation's chunk. This allows a storage adapter to preload bitmap bytes before exposing a
+/// synchronous [BitmapReadable] implementation.
+///
+/// `ops_leaves`, `bitmap_len`, and `pruned_chunks` must describe one consistent snapshot.
+/// `N` is the bitmap chunk size in bytes and must be a nonzero power of two.
+///
+/// # Errors
+///
+/// Returns [Error::DataCorrupted] if more than one complete chunk awaits its ancestor or
+/// pruning exceeds the graftable prefix. Returns [Error::OperationPruned] for a queried
+/// operation in a pruned chunk, and [merkle::Error::RangeOutOfBounds] for a queried operation
+/// outside the snapshot.
+pub fn required_chunks<F: Graftable, const N: usize>(
+    ops_leaves: Location<F>,
+    bitmap_len: u64,
+    pruned_chunks: u64,
+    location: Option<Location<F>>,
+) -> Result<impl Iterator<Item = u64>, Error<F>> {
+    const { assert!(N.is_power_of_two() && N <= usize::MAX / 8) };
+    let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+    let complete = bitmap_len / chunk_bits;
+    let graftable =
+        graftable_chunk_window(ops_leaves, complete, pruned_chunks, grafting::height::<N>())?;
+    let queried = if let Some(loc) = location {
+        if loc >= ops_leaves || *loc >= bitmap_len {
+            return Err(merkle::Error::RangeOutOfBounds(loc).into());
+        }
+        let chunk = *loc / chunk_bits;
+        if chunk < pruned_chunks {
+            return Err(Error::OperationPruned(loc));
+        }
+        Some(chunk)
+    } else {
+        None
+    };
+    let mut chunks = [
+        (!bitmap_len.is_multiple_of(chunk_bits)).then_some(complete),
+        (complete > graftable).then_some(graftable),
+        queried,
+    ];
+    chunks.sort_unstable();
+    let mut previous = None;
+    Ok(chunks.into_iter().flatten().filter(move |&chunk| {
+        let distinct = previous != Some(chunk);
+        previous = Some(chunk);
+        distinct
+    }))
+}
 
 /// Witness that a particular `ops_root` is committed by a `current` canonical root.
 ///
@@ -287,17 +356,19 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
     /// Reconstruct the canonical current root, optionally collecting the positioned digests
     /// required to compute the peaks covering the proven range.
-    fn reconstruct_root<H, O, const N: usize>(
+    fn reconstruct_root<H, O>(
         &self,
         start_loc: Location<F>,
         ops: &[O],
-        chunks: &[[u8; N]],
+        chunks: &[impl AsRef<[u8]>],
+        chunk_size: usize,
         collected: Option<&mut Vec<(Position<F>, D)>>,
     ) -> Result<D, merkle::Error<F>>
     where
         H: Hasher<Digest = D>,
         O: Codec,
     {
+        let chunk_bits = chunk_bits(chunk_size).map_err(|_| merkle::Error::InvalidProof)?;
         if ops.is_empty() || chunks.is_empty() {
             debug!("verification failed, empty input");
             return Err(merkle::Error::InvalidProof);
@@ -318,7 +389,6 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         }
 
         // Validate the number of input chunks.
-        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
         let start_chunk = *start_loc / chunk_bits;
         let end_chunk = (*end_loc - 1) / chunk_bits;
         let complete_chunks = *leaves / chunk_bits;
@@ -327,13 +397,20 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             debug!("verification failed, chunk metadata length mismatch");
             return Err(merkle::Error::InvalidProof);
         }
+        if chunks
+            .iter()
+            .any(|chunk| chunk.as_ref().len() != chunk_size)
+        {
+            debug!("verification failed, chunk size mismatch");
+            return Err(merkle::Error::InvalidProof);
+        }
 
         let next_bit = *leaves % chunk_bits;
         let has_partial_chunk = next_bit != 0;
 
         let elements = ops.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
-        let grafting_height = grafting::height::<N>();
+        let grafting_height = chunk_bits.trailing_zeros();
 
         let graftable_chunks =
             grafting::graftable_chunks::<F>(*leaves, grafting_height).min(complete_chunks);
@@ -375,7 +452,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
             // chunk provided by the caller matches the digest embedded in the proof.
             if end_chunk == complete_chunks {
                 let last_chunk = chunks.last().expect("chunks non-empty");
-                if last_chunk_digest != grafting_verifier.digest(last_chunk) {
+                if last_chunk_digest != grafting_verifier.digest(last_chunk.as_ref()) {
                     debug!("last chunk digest does not match expected value");
                     return Err(merkle::Error::InvalidProof);
                 }
@@ -403,7 +480,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
                     );
                     return Err(merkle::Error::InvalidProof);
                 };
-                if *pending_digest != grafting_verifier.digest(pending_chunk_bytes) {
+                if *pending_digest != grafting_verifier.digest(pending_chunk_bytes.as_ref()) {
                     debug!("pending chunk digest does not match expected value");
                     return Err(merkle::Error::InvalidProof);
                 }
@@ -442,8 +519,28 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
+        self.verify_with_chunk_size::<H, O>(start_loc, ops, chunks, N, root)
+    }
+
+    /// Verify an operation range using bitmap chunks whose size is configured at runtime.
+    ///
+    /// `chunk_size` must match the source database. It must be a nonzero power of two,
+    /// its bit width must fit in `usize` and `u64`, and its grafting height must be below 63.
+    /// Every supplied chunk must contain exactly `chunk_size` bytes. Invalid sizes and
+    /// malformed proofs return `false`.
+    ///
+    /// This verifies the same proof and wire encoding as [Self::verify], accepting arrays,
+    /// byte slices, or owned byte buffers without copying their contents.
+    pub fn verify_with_chunk_size<H: Hasher<Digest = D>, O: Codec>(
+        &self,
+        start_loc: Location<F>,
+        ops: &[O],
+        chunks: &[impl AsRef<[u8]>],
+        chunk_size: usize,
+        root: &D,
+    ) -> bool {
         matches!(
-            self.reconstruct_root::<H, O, N>(start_loc, ops, chunks, None),
+            self.reconstruct_root::<H, O>(start_loc, ops, chunks, chunk_size, None),
             Ok(reconstructed_root) if reconstructed_root == *root
         )
     }
@@ -466,7 +563,7 @@ where
 {
     let mut collected = Vec::new();
     let reconstructed_root =
-        proof.reconstruct_root::<H, Op, N>(start_loc, operations, chunks, Some(&mut collected))?;
+        proof.reconstruct_root::<H, Op>(start_loc, operations, chunks, N, Some(&mut collected))?;
     if reconstructed_root != *target_root {
         debug!("verification failed, root mismatch");
         return Err(merkle::Error::RootMismatch);
@@ -530,112 +627,46 @@ where
     }
 }
 
-/// A proof that a specific operation is currently active in the database.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct OperationProof<F: Graftable, D: Digest, const N: usize> {
-    /// The location of the operation in the db.
-    pub loc: Location<F>,
-
-    /// The status bitmap chunk that contains the bit corresponding the operation's location.
-    pub chunk: [u8; N],
-
-    /// The range proof that incorporates activity status for the operation designated by `loc`.
-    pub range_proof: RangeProof<F, D>,
+/// Proofs with fixed-size bitmap chunks.
+pub mod constant {
+    /// A proof that a specific operation is active, with a fixed-size bitmap chunk.
+    pub type OperationProof<F, D, const N: usize> = super::operation::Proof<F, D, [u8; N]>;
 }
 
-impl<F: Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
-    /// Return an inclusion proof that incorporates activity status for the operation designated by
-    /// `loc`.
+/// Proofs with runtime-sized bitmap chunks.
+pub mod dynamic {
+    /// An operation proof with a runtime-sized bitmap chunk.
     ///
-    /// # Errors
+    /// Decoding takes `(chunk_size, max_digests)` as configuration. The chunk size must match
+    /// the source database and satisfy [super::RangeProof::verify_with_chunk_size]'s size
+    /// requirements. The bitmap chunk has no length prefix, so its wire encoding matches
+    /// [super::constant::OperationProof].
+    /// The operation supplied to verification must use the source database's key and value codecs.
     ///
-    /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
-    pub async fn new<H: Hasher<Digest = D>, S: Storage<F, Digest = D>>(
-        status: &impl BitmapReadable<N>,
-        storage: &S,
-        inactivity_floor: Location<F>,
-        loc: Location<F>,
-        ops_root: D,
-    ) -> Result<Self, Error<F>> {
-        // Reject locations in pruned bitmap chunks.
-        if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
-            return Err(Error::OperationPruned(loc));
-        }
-        let range_proof =
-            RangeProof::new::<H, S, N>(status, storage, inactivity_floor, loc..loc + 1, ops_root)
-                .await?;
-        let chunk = status.get_chunk(BitMap::<N>::to_chunk_index(*loc));
-        Ok(Self {
-            loc,
-            chunk,
-            range_proof,
-        })
-    }
-
-    /// Verify that the proof proves that `operation` is active in the database with the given
-    /// `root`.
-    pub fn verify<H: Hasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {
-        // Make sure that the bit for the operation in the bitmap chunk is actually a 1 (indicating
-        // the operation is indeed active).
-        if !BitMap::<N>::get_bit_from_chunk(&self.chunk, *self.loc) {
-            debug!(
-                ?self.loc,
-                "proof verification failed, operation is inactive"
-            );
-            return false;
-        }
-
-        self.range_proof
-            .verify::<H, O, N>(self.loc, &[operation], &[self.chunk], root)
-    }
-}
-
-impl<F: Graftable, D: Digest, const N: usize> Write for OperationProof<F, D, N> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.loc.write(buf);
-        self.chunk.write(buf);
-        self.range_proof.write(buf);
-    }
-}
-
-impl<F: Graftable, D: Digest, const N: usize> EncodeSize for OperationProof<F, D, N> {
-    fn encode_size(&self) -> usize {
-        self.loc.encode_size() + self.chunk.encode_size() + self.range_proof.encode_size()
-    }
-}
-
-impl<F: Graftable, D: Digest, const N: usize> Read for OperationProof<F, D, N> {
-    /// The maximum number of digests forwarded to the embedded range proof.
-    type Cfg = usize;
-
-    fn read_cfg(
-        buf: &mut impl Buf,
-        max_digests: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let loc = Location::<F>::read(buf)?;
-        let chunk = <[u8; N]>::read(buf)?;
-        let range_proof = RangeProof::<F, D>::read_cfg(buf, max_digests)?;
-        Ok(Self {
-            loc,
-            chunk,
-            range_proof,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<F: Graftable, D: Digest, const N: usize> arbitrary::Arbitrary<'_> for OperationProof<F, D, N>
-where
-    D: for<'a> arbitrary::Arbitrary<'a>,
-    F::PendingChunk<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            loc: u.arbitrary()?,
-            chunk: u.arbitrary()?,
-            range_proof: u.arbitrary()?,
-        })
-    }
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_codec::{Codec, Decode, Input};
+    /// use commonware_cryptography::{Sha256, sha256::Digest};
+    /// use commonware_storage::{merkle::mmr, qmdb::current::proof::dynamic::OperationProof};
+    ///
+    /// fn verify<O: Codec>(
+    ///     encoded: impl Input,
+    ///     chunk_size: usize,
+    ///     max_digests: usize,
+    ///     operation: O,
+    ///     root: &Digest,
+    /// ) -> bool {
+    ///     let Ok(proof) = OperationProof::<mmr::Family, Digest>::decode_cfg(
+    ///         encoded,
+    ///         &(chunk_size, max_digests),
+    ///     ) else {
+    ///         return false;
+    ///     };
+    ///     proof.verify::<Sha256, _>(operation, root)
+    /// }
+    /// ```
+    pub type OperationProof<F, D> = super::operation::Proof<F, D, bytes::Bytes>;
 }
 
 #[cfg(test)]
@@ -646,12 +677,18 @@ mod tests {
         mmb, mmr,
         qmdb::current::{db, grafting},
     };
+    use bytes::Bytes;
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+    use commonware_utils::{
+        Widen,
+        bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+        sync::Mutex,
+    };
     use core::ops::Range;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn test_ops_root_witness_codec_roundtrip() {
@@ -823,7 +860,7 @@ mod tests {
 
         let chunk: [u8; N] = core::array::from_fn(|i| i as u8);
 
-        let proof = OperationProof::<F, sha256::Digest, N> {
+        let proof = constant::OperationProof::<F, sha256::Digest, N> {
             loc: mmb::Location::new(5),
             chunk,
             range_proof,
@@ -832,7 +869,8 @@ mod tests {
         let encoded = proof.encode();
         assert_eq!(encoded.len(), proof.encode_size());
         let decoded =
-            OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &MAX_DIGESTS).unwrap();
+            constant::OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &MAX_DIGESTS)
+                .unwrap();
         assert_eq!(decoded, proof);
     }
 
@@ -852,20 +890,25 @@ mod tests {
             ops_root: Sha256::hash(&[b"ops"]),
         };
         let total_digests = range_proof_digest_count(&range_proof);
-        let proof = OperationProof::<F, sha256::Digest, N> {
+        let proof = constant::OperationProof::<F, sha256::Digest, N> {
             loc: mmb::Location::new(5),
             chunk: core::array::from_fn(|i| i as u8),
             range_proof,
         };
 
         let encoded = proof.encode();
-        let decoded =
-            OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded.clone(), &total_digests)
-                .unwrap();
+        let decoded = constant::OperationProof::<F, sha256::Digest, N>::decode_cfg(
+            encoded.clone(),
+            &total_digests,
+        )
+        .unwrap();
         assert_eq!(decoded, proof);
         assert!(
-            OperationProof::<F, sha256::Digest, N>::decode_cfg(encoded, &(total_digests - 1))
-                .is_err()
+            constant::OperationProof::<F, sha256::Digest, N>::decode_cfg(
+                encoded,
+                &(total_digests - 1)
+            )
+            .is_err()
         );
     }
 
@@ -2135,9 +2178,511 @@ mod tests {
         assert!(proof.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root));
     }
 
+    fn invalid_chunk_sizes() -> impl Iterator<Item = usize> {
+        [0, 3, usize::MAX, 1 << (usize::BITS - 1)]
+            .into_iter()
+            .chain(usize::try_from(1u64 << 60).ok())
+    }
+
+    async fn check_dynamic_proofs<F: Graftable, const N: usize>() {
+        let chunk_bits = (N * 8) as u64;
+        let height = chunk_bits.trailing_zeros() as u64;
+        for leaves in [
+            chunk_bits - 1,
+            chunk_bits,
+            chunk_bits + 1,
+            chunk_bits + height,
+            chunk_bits * 2,
+            chunk_bits * 2 + 2,
+        ] {
+            let start = Location::<F>::new(chunk_bits - 2);
+            let (_, proof, operations, chunks, root, _) =
+                current_range_proof_fixture::<F, N>(leaves, start..Location::new(leaves)).await;
+            assert!(proof.verify::<Sha256, _, N>(start, &operations, &chunks, &root));
+            let slices = chunks.iter().map(<[u8; N]>::as_slice).collect::<Vec<_>>();
+            assert!(proof.verify_with_chunk_size::<Sha256, _>(
+                start,
+                &operations,
+                &slices,
+                N,
+                &root
+            ));
+            assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+                start,
+                &operations,
+                &slices,
+                N,
+                &Sha256::hash(&[b"wrong root"]),
+            ));
+
+            for loc in [start, Location::new(leaves - 1)] {
+                let (_, range_proof, operations, chunks, root, _) =
+                    current_range_proof_fixture::<F, N>(leaves, loc..loc + 1).await;
+                let native = constant::OperationProof::<F, sha256::Digest, N> {
+                    loc,
+                    chunk: chunks[0],
+                    range_proof,
+                };
+                assert!(native.verify::<Sha256, _>(operations[0], &root));
+                let encoded = native.encode();
+                let max_digests = native.range_proof.proof.digests.len();
+                let dynamic = dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(
+                    encoded.clone(),
+                    &(N, max_digests),
+                )
+                .unwrap();
+                assert_eq!(dynamic.encode(), encoded);
+                assert_eq!(dynamic.encode_size(), encoded.len());
+                assert_eq!(dynamic.loc, loc);
+                assert_eq!(dynamic.chunk.as_ref(), native.chunk.as_slice());
+                assert!(dynamic.verify::<Sha256, _>(operations[0], &root));
+                assert!(!dynamic.verify::<Sha256, _>(Sha256::hash(&[b"wrong operation"]), &root,));
+                assert!(
+                    !dynamic.verify::<Sha256, _>(operations[0], &Sha256::hash(&[b"wrong root"]),)
+                );
+
+                let mut inactive = dynamic;
+                let mut chunk = inactive.chunk.to_vec();
+                let bit = (*loc % chunk_bits) as usize;
+                chunk[bit / 8] &= !(1 << (bit % 8));
+                inactive.chunk = Bytes::from(chunk);
+                assert!(!inactive.verify::<Sha256, _>(operations[0], &root));
+            }
+        }
+    }
+
+    #[test_async]
+    async fn dynamic_proofs_match_native_mmr() {
+        check_dynamic_proofs::<mmr::Family, 1>().await;
+        check_dynamic_proofs::<mmr::Family, 32>().await;
+        check_dynamic_proofs::<mmr::Family, 64>().await;
+    }
+
+    #[test_async]
+    async fn dynamic_proofs_match_native_mmb() {
+        check_dynamic_proofs::<mmb::Family, 1>().await;
+        check_dynamic_proofs::<mmb::Family, 32>().await;
+        check_dynamic_proofs::<mmb::Family, 64>().await;
+    }
+
+    async fn check_dynamic_range_rejections<F: Graftable>() {
+        const N: usize = 1;
+        let start = Location::<F>::new(6);
+        let (_, proof, operations, chunks, root, _) =
+            current_range_proof_fixture::<F, N>(18, start..Location::new(18)).await;
+        let chunks = chunks
+            .iter()
+            .map(|chunk| chunk.to_vec())
+            .collect::<Vec<_>>();
+        for chunk_size in invalid_chunk_sizes() {
+            assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+                start,
+                &operations,
+                &chunks,
+                chunk_size,
+                &root,
+            ));
+        }
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(start, &operations, &chunks, 2, &root));
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+            start,
+            &operations[..0],
+            &chunks,
+            N,
+            &root
+        ));
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+            start,
+            &operations,
+            &chunks[..0],
+            N,
+            &root
+        ));
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+            start,
+            &operations,
+            &chunks[..chunks.len() - 1],
+            N,
+            &root,
+        ));
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+            proof.proof.leaves,
+            &operations,
+            &chunks,
+            N,
+            &root,
+        ));
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+            F::MAX_LEAVES,
+            &operations,
+            &chunks,
+            N,
+            &root,
+        ));
+
+        let mut extra = chunks.clone();
+        extra.push(chunks[0].clone());
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(start, &operations, &extra, N, &root));
+        for chunk_len in [0, 2, 3] {
+            let mut malformed = chunks.clone();
+            malformed[1].resize(chunk_len, 0);
+            assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+                start,
+                &operations,
+                &malformed,
+                N,
+                &root,
+            ));
+        }
+
+        let mut tampered = chunks.clone();
+        tampered.last_mut().unwrap()[0] ^= 1;
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+            start,
+            &operations,
+            &tampered,
+            N,
+            &root
+        ));
+        let mut missing_partial = proof.clone();
+        assert!(missing_partial.partial_chunk_digest.take().is_some());
+        assert!(!missing_partial.verify_with_chunk_size::<Sha256, _>(
+            start,
+            &operations,
+            &chunks,
+            N,
+            &root,
+        ));
+        let mut wrong_operations = operations;
+        wrong_operations[0] = Sha256::hash(&[b"wrong operation"]);
+        assert!(!proof.verify_with_chunk_size::<Sha256, _>(
+            start,
+            &wrong_operations,
+            &chunks,
+            N,
+            &root,
+        ));
+    }
+
+    #[test_async]
+    async fn dynamic_range_rejects_malformed_inputs() {
+        check_dynamic_range_rejections::<mmr::Family>().await;
+        check_dynamic_range_rejections::<mmb::Family>().await;
+    }
+
+    async fn check_dynamic_operation_codec_rejections<F: Graftable>() {
+        const N: usize = 32;
+        let loc = Location::<F>::new(14);
+        let (_, range_proof, operations, chunks, root, _) =
+            current_range_proof_fixture::<F, N>(18, loc..loc + 1).await;
+        let native = constant::OperationProof::<F, sha256::Digest, N> {
+            loc,
+            chunk: chunks[0],
+            range_proof,
+        };
+        let encoded = native.encode();
+        let max_digests = native.range_proof.proof.digests.len();
+        assert!(max_digests > 0);
+        assert!(
+            dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(
+                encoded.clone(),
+                &(N, max_digests - 1),
+            )
+            .is_err()
+        );
+        for end in 0..encoded.len() {
+            assert!(
+                dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(
+                    encoded.slice(..end),
+                    &(N, max_digests),
+                )
+                .is_err(),
+                "truncated proof decoded at {end}"
+            );
+        }
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(
+            dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(trailing, &(N, max_digests),)
+                .is_err()
+        );
+        for chunk_size in invalid_chunk_sizes() {
+            assert!(matches!(
+                dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(
+                    encoded.clone(),
+                    &(chunk_size, max_digests),
+                ),
+                Err(commonware_codec::Error::Invalid(_, _)),
+            ));
+        }
+        for chunk_size in [1, N / 2, N * 2] {
+            if let Ok(dynamic) = dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(
+                encoded.clone(),
+                &(chunk_size, max_digests),
+            ) {
+                assert!(!dynamic.verify::<Sha256, _>(operations[0], &root));
+            }
+        }
+        let dynamic =
+            dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(encoded, &(N, max_digests))
+                .unwrap();
+        for chunk in [Bytes::new(), Bytes::from_static(&[0; 3])] {
+            let mut malformed = dynamic.clone();
+            malformed.chunk = chunk;
+            assert!(!malformed.verify::<Sha256, _>(operations[0], &root));
+        }
+    }
+
+    #[test_async]
+    async fn dynamic_operation_codec_rejects_malformed_inputs() {
+        check_dynamic_operation_codec_rejections::<mmr::Family>().await;
+        check_dynamic_operation_codec_rejections::<mmb::Family>().await;
+    }
+
+    struct PreloadedBitmap<'a> {
+        bitmap: &'a BitMap<1>,
+        chunks: BTreeMap<usize, [u8; 1]>,
+        reads: Mutex<BTreeSet<usize>>,
+    }
+
+    impl BitmapReadable<1> for PreloadedBitmap<'_> {
+        fn complete_chunks(&self) -> usize {
+            self.bitmap.complete_chunks()
+        }
+
+        fn get_chunk(&self, chunk: usize) -> [u8; 1] {
+            self.reads.lock().insert(chunk);
+            self.chunks[&chunk]
+        }
+
+        fn last_chunk(&self) -> ([u8; 1], u64) {
+            let (_, bits) = self.bitmap.last_chunk();
+            let chunk = BitMap::<1>::to_chunk_index(self.len() - 1);
+            (self.get_chunk(chunk), bits)
+        }
+
+        fn pruned_chunks(&self) -> usize {
+            self.bitmap.pruned_chunks()
+        }
+
+        fn len(&self) -> u64 {
+            self.bitmap.len()
+        }
+    }
+
+    async fn fixture<F: Graftable>(
+        leaves: u64,
+        pruned: u64,
+    ) -> (BitMap<1>, Mem<F, sha256::Digest>, Mem<F, sha256::Digest>) {
+        let hasher = qmdb::hasher::<Sha256>();
+        let height = grafting::height::<1>();
+        let ops = build_test_mem(&hasher, Mem::<F, sha256::Digest>::new(), leaves);
+        let mut bitmap = BitMap::<1>::new();
+        for loc in 0..leaves {
+            bitmap.push(loc >= pruned * 8);
+        }
+        let chunks = (0..grafting::graftable_chunks::<F>(leaves, height))
+            .map(|chunk| (chunk as usize, *bitmap.get_chunk(chunk as usize)));
+        let mut digests =
+            db::compute_grafted_leaves::<F, Sha256, Sequential, 1>(&ops, chunks, &Sequential)
+                .await
+                .unwrap();
+        digests.sort_unstable_by_key(|(chunk, _)| *chunk);
+        let mut grafted = Mem::<F, sha256::Digest>::new();
+        if !digests.is_empty() {
+            let mut batch = grafted.new_batch();
+            for (_, digest) in digests {
+                batch = batch.add_leaf_digest(digest);
+            }
+            let hasher = grafting::GraftedHasher::<F, _>::new(hasher, height);
+            let batch = batch.merkleize(&grafted, &hasher);
+            grafted.apply_batch(&batch).unwrap();
+        }
+        bitmap.prune_to_bit(pruned * 8);
+        (bitmap, ops, grafted)
+    }
+
+    async fn check_constructor_reads<F: Graftable>() {
+        for leaves in [1, 7, 8, 9, 10, 11, 16, 17, 18, 24, 25] {
+            let graftable = grafting::graftable_chunks::<F>(leaves, grafting::height::<1>());
+            for pruned in 0..=graftable {
+                let floor = Location::<F>::new(pruned * 8);
+                if *floor == leaves {
+                    continue;
+                }
+                let (bitmap, ops, grafted) = fixture::<F>(leaves, pruned).await;
+                let hasher = qmdb::hasher::<Sha256>();
+                let ops_root = ops.root(&hasher, 0).unwrap();
+                let storage = grafting::Storage::<F, Sha256, _, _>::new(
+                    &grafted,
+                    grafting::height::<1>(),
+                    &ops,
+                );
+                let root = db::compute_db_root::<F, Sha256, _, _, 1>(
+                    &bitmap,
+                    &storage,
+                    Location::new(leaves),
+                    db::partial_chunk::<_, 1>(&bitmap),
+                    floor,
+                    &ops_root,
+                )
+                .await
+                .unwrap();
+                for location in core::iter::once(None)
+                    .chain((*floor..leaves).map(|loc| Some(Location::new(loc))))
+                {
+                    let required = required_chunks::<F, 1>(
+                        Location::new(leaves),
+                        bitmap.len(),
+                        pruned,
+                        location,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>();
+                    assert!(required.windows(2).all(|pair| pair[0] < pair[1]));
+                    let preloaded = PreloadedBitmap {
+                        bitmap: &bitmap,
+                        chunks: required
+                            .iter()
+                            .map(|&chunk| (chunk as usize, *bitmap.get_chunk(chunk as usize)))
+                            .collect(),
+                        reads: Mutex::new(BTreeSet::new()),
+                    };
+                    if let Some(loc) = location {
+                        let proof =
+                            constant::OperationProof::<F, sha256::Digest, 1>::new::<Sha256, _>(
+                                &preloaded, &storage, floor, loc, ops_root,
+                            )
+                            .await
+                            .unwrap();
+                        assert!(
+                            proof.verify::<Sha256, _>(hasher.digest(&(*loc).to_be_bytes()), &root,)
+                        );
+                        let proof = dynamic::OperationProof::<F, sha256::Digest>::decode_cfg(
+                            proof.encode(),
+                            &(1, 64),
+                        )
+                        .unwrap();
+                        assert!(
+                            proof.verify::<Sha256, _>(hasher.digest(&(*loc).to_be_bytes()), &root)
+                        );
+                    } else {
+                        let proof = RangeProof::new::<Sha256, _, 1>(
+                            &preloaded,
+                            &storage,
+                            floor,
+                            floor..Location::new(leaves),
+                            ops_root,
+                        )
+                        .await
+                        .unwrap();
+                        let elements = (*floor..leaves)
+                            .map(|loc| hasher.digest(&loc.to_be_bytes()))
+                            .collect::<Vec<_>>();
+                        let chunks = (pruned..leaves.div_ceil(8))
+                            .map(|chunk| *bitmap.get_chunk(chunk as usize))
+                            .collect::<Vec<_>>();
+                        assert!(proof.verify::<Sha256, _, 1>(floor, &elements, &chunks, &root));
+                        assert!(proof.verify_with_chunk_size::<Sha256, _>(
+                            floor, &elements, &chunks, 1, &root,
+                        ));
+                    }
+                    let read_chunks = preloaded
+                        .reads
+                        .into_inner()
+                        .into_iter()
+                        .map(Widen::widen)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        read_chunks, required,
+                        "leaves={leaves}, pruned={pruned}, location={location:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test_async]
+    async fn required_chunks_match_constructor_reads() {
+        check_constructor_reads::<mmr::Family>().await;
+        check_constructor_reads::<mmb::Family>().await;
+    }
+
+    #[test]
+    fn required_chunks_boundary_sets() {
+        for (leaves, mmr, mmb) in [
+            (0, vec![], vec![]),
+            (1, vec![0], vec![0]),
+            (7, vec![0], vec![0]),
+            (8, vec![], vec![0]),
+            (9, vec![1], vec![0, 1]),
+            (10, vec![1], vec![0, 1]),
+            (11, vec![1], vec![1]),
+            (16, vec![], vec![1]),
+            (17, vec![2], vec![1, 2]),
+            (18, vec![2], vec![1, 2]),
+            (24, vec![], vec![2]),
+            (25, vec![3], vec![2, 3]),
+        ] {
+            assert_eq!(
+                required_chunks::<mmr::Family, 1>(Location::new(leaves), leaves, 0, None)
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+                mmr
+            );
+            assert_eq!(
+                required_chunks::<mmb::Family, 1>(Location::new(leaves), leaves, 0, None)
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+                mmb
+            );
+        }
+        assert!(
+            required_chunks::<mmr::Family, 1>(Location::new(16), 16, 2, None)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    fn check_invalid_metadata<F: Graftable>() {
+        for (ops_leaves, bitmap_len, loc) in [(0, 0, 0), (16, 16, 16), (8, 9, 8), (9, 8, 8)] {
+            assert!(matches!(
+                required_chunks::<F, 1>(Location::new(ops_leaves), bitmap_len, 0, Some(Location::new(loc))),
+                Err(Error::Merkle(merkle::Error::RangeOutOfBounds(found))) if *found == loc
+            ));
+        }
+        assert!(matches!(
+            required_chunks::<F, 1>(Location::new(16), 16, 1, Some(Location::new(7))),
+            Err(Error::OperationPruned(loc)) if *loc == 7
+        ));
+        assert!(matches!(
+            required_chunks::<F, 1>(Location::new(0), 24, 0, None),
+            Err(Error::DataCorrupted("multiple pending bitmap chunks"))
+        ));
+        assert!(matches!(
+            required_chunks::<F, 1>(Location::new(8), 8, 2, None),
+            Err(Error::DataCorrupted(
+                "pruned chunks exceed graftable chunks"
+            ))
+        ));
+    }
+
+    #[test]
+    fn required_chunks_reject_invalid_metadata() {
+        check_invalid_metadata::<mmr::Family>();
+        check_invalid_metadata::<mmb::Family>();
+        assert!(matches!(
+            required_chunks::<mmb::Family, 1>(Location::new(8), 8, 1, None),
+            Err(Error::DataCorrupted(
+                "pruned chunks exceed graftable chunks"
+            ))
+        ));
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::super::{OperationProof, OpsRootWitness, RangeProof};
+        use super::super::{OpsRootWitness, RangeProof, constant, dynamic};
         use crate::merkle::{mmb, mmr};
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256::Digest as Sha256Digest;
@@ -2147,8 +2692,10 @@ mod tests {
             CodecConformance<OpsRootWitness<mmb::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmr::Family, Sha256Digest>>,
             CodecConformance<RangeProof<mmb::Family, Sha256Digest>>,
-            CodecConformance<OperationProof<mmr::Family, Sha256Digest, 32>>,
-            CodecConformance<OperationProof<mmb::Family, Sha256Digest, 32>>,
+            CodecConformance<constant::OperationProof<mmr::Family, Sha256Digest, 32>>,
+            CodecConformance<constant::OperationProof<mmb::Family, Sha256Digest, 32>>,
+            CodecConformance<dynamic::OperationProof<mmr::Family, Sha256Digest>>,
+            CodecConformance<dynamic::OperationProof<mmb::Family, Sha256Digest>>,
         }
     }
 }
