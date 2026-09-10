@@ -2,15 +2,6 @@
    code, tables, footer) come from /style.css; everything here is scoped to the
    blog's widgets so it cannot leak into the rest of the site. */
 
-.lead {
-    font-size: 1.15em;
-    font-weight: bold;
-}
-
-.lead p {
-    line-height: 1.4;
-}
-
 .live {
     background: #fffbe8;
     border-bottom: 2px solid #d9251c;
@@ -310,7 +301,6 @@
 .sim-h.blue { fill: #1f1fd1; }
 
 .sim-h.left { text-anchor: start; }
-.sim-h.right { text-anchor: end; }
 .sim-muted { fill: gray; font-weight: normal; }
 
 .sim-divider {
@@ -382,8 +372,6 @@
     font-size: 13px;
 }
 
-.sim-row.right { text-anchor: end; }
-
 .sim-rule {
     stroke: #eee;
     stroke-width: 1;
@@ -411,7 +399,6 @@
     font-size: 10px;
 }
 .sim-tiny.hot { fill: #d9251c; font-weight: bold; }
-.sim-tiny.blue { fill: #1f1fd1; }
 .sim-tiny.center { text-anchor: middle; }
 .sim-tiny.right { text-anchor: end; }
 
@@ -460,12 +447,6 @@
 .sim-leaf.cold, .sim-inner.cold { fill: #eee; }
 .sim-edge.cold { stroke: #eee; }
 .sim-tiny.cold { fill: #ccc; }
-
-.sim-pane {
-    fill: white;
-    stroke: #e0e0e0;
-    stroke-width: 1;
-}
 
 .sim-flash {
     fill: #ffd54a;

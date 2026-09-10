@@ -20,8 +20,8 @@ katex: true
 </div>
 ```
 
-A few years ago when I first started thinking about private payments, I wanted to understand what throughput can we sustain for private payments? And the answer I typically got was a few hundred to a thousand private payments per second. This made no sense to me because there are experiments handling 100K+ TPS for regular payments.
-Surely cryptography was not the bottleneck? We can verify ~1000 Groth16 per second on a *single thread*. So what’s stopping us from scaling?
+A few years ago when I first started thinking about private payments, I wanted to understand what throughput we could sustain. And the answer I typically got was a few hundred to a thousand private payments per second. This made no sense to me because there are experiments handling 100K+ TPS for regular payments.
+Surely cryptography was not the bottleneck? We can verify ~1000 Groth16 proofs per second on a *single thread*. So what’s stopping us from scaling?
 
 I never got a satisfactory answer and always left feeling like the problems could be overcome with better engineering. But at least cryptography was not the bottleneck. Right?
 
@@ -43,7 +43,7 @@ Sure you can always throw more threads at the problem and use bigger machines bu
 <!-- TODO: Add link to Bonsai paper -->
 Below we present [Bonsai]() our design for a private payment scheme where:
 
-- **a million transactions** can be verified on an M5 Macbook Pro (18 cores)
+- **a million transactions** can be verified on an M5 MacBook Pro (18 cores)
 - every transaction is **256 bytes** and validators store a **single 32-byte commitment per account**
 - validator storage grows **logarithmically in \#(transactions)** and linearly in \#(accounts)
 - work done by users **only depends on the transactions they are involved in**
@@ -53,7 +53,7 @@ Below we present [Bonsai]() our design for a private payment scheme where:
 As a working example we have four accounts paying each other using a random stream of payments. Additionally, we have four panels which display all communication between parties, (potentially private) account balances, transactions posted to the ledger and the storage of each party.
 
 ```{=html}
-<div id="sim" role="region" aria-label="A bank to our construction.">
+<div id="sim" role="region" aria-label="From a bank to our construction.">
     <noscript>
         <style>
             #sim-source { display: block; }
@@ -74,7 +74,7 @@ David Chaum introduced [ecash](https://chaum.com/wp-content/uploads/2022/01/Chau
 
 Since the communication between the sender and receiver is hidden, the system hides who paid whom but the central authority/bank can still see balances and inflows/outflows of an account. However, the bank must remember a unique nullifier for every coin that was ever redeemed.
 
-Note that in this construction provides a very weak form of privacy if the amounts debited/credited are different across different transactions as it's effectively a finger print for the sender-receiver pair.
+Note that this construction provides a very weak form of privacy if the amounts debited/credited are different across different transactions as it's effectively a finger print for the sender-receiver pair.
 
 ### Decentralized ecash
 
@@ -191,7 +191,7 @@ Note that a private channel is not strictly required as the sender could always 
 We analyze the leakage in our private payment scheme under two different leakage functions to highlight the benefits of obfuscating the operation.
 
 - `L_unl`: the ledger sees the acting account and the operation send/receive
-- `L_ind`: the ledger sees only sees the acting account
+- `L_ind`: the ledger only sees the acting account
 
 To provide a quantitative comparison of the privacy guarantees we compute the number of causally possible *histories* that a sequence of transactions can have. In the interactive demo below, for a given sequence of transactions, we represent all possible histories as a root-to-leaf path.
 
@@ -258,7 +258,7 @@ One level per transaction; each root-to-leaf path is a history, and the one that
 **Comparison to shielded notes.**
 [Ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded notes guarantees that the ledger learns nothing about who is transacting. Our ledger, by contrast, always names the account that acted but is able to handle nullifiers more efficiently. Thus the **onchain** privacy in shielded notes is stronger than our protocol.
 
-In a real world deployment however, the gap may be narrower. Typically, wallet don't talk to the ledger directly and go through intermediary RPC nodes which sees which client submitted each transaction and when. Whoever runs it holds a table mapping users to the transactions they broadcast, which is precisely the *acting account* that `L_ind` leaks.
+In a real world deployment however, the gap may be narrower. Typically, wallets don't talk to the ledger directly and go through intermediary RPC nodes which see which client submitted each transaction and when. Whoever runs it holds a table mapping users to the transactions they broadcast, which is precisely the *acting account* that `L_ind` leaks.
 
 ```{=html}
 <script src="private-payments.sim.js"></script>

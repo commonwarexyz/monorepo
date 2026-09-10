@@ -108,13 +108,13 @@ Vamsi Policharla</a></div>
             <span class="live" id="live-txs">0</span> transactions.
         </div>
         <p>A few years ago when I first started thinking about private
-        payments, I wanted to understand what throughput can we sustain
-        for private payments? And the answer I typically got was a few
-        hundred to a thousand private payments per second. This made no
-        sense to me because there are experiments handling 100K+ TPS for
-        regular payments. Surely cryptography was not the bottleneck? We
-        can verify ~1000 Groth16 per second on a <em>single thread</em>.
-        So what’s stopping us from scaling?</p>
+        payments, I wanted to understand what throughput we could
+        sustain for private payments. And the answer I typically got was
+        a few hundred to a thousand private payments per second. This
+        made no sense to me because there are experiments handling 100K+
+        TPS for regular payments. Surely cryptography was not the
+        bottleneck? We can verify ~1000 Groth16 per second on a
+        <em>single thread</em>. So what’s stopping us from scaling?</p>
         <p>I never got a satisfactory answer and always left feeling
         like the problems could be overcome with better engineering. But
         at least cryptography was not the bottleneck. Right?</p>
@@ -154,7 +154,7 @@ Vamsi Policharla</a></div>
         private payment scheme where:</p>
         <ul>
         <li><strong>a million transactions</strong> can be verified on
-        an M5 Macbook Pro (18 cores)</li>
+        an M5 MacBook Pro (18 cores)</li>
         <li>every transaction is <strong>256 bytes</strong> and
         validators store a <strong>single 32-byte commitment per
         account</strong></li>
@@ -169,7 +169,7 @@ Vamsi Policharla</a></div>
         panels which display all communication between parties,
         (potentially private) account balances, transactions posted to
         the ledger and the storage of each party.</p>
-        <div id="sim" role="region" aria-label="A bank to our construction.">
+        <div id="sim" role="region" aria-label="From a bank to our construction.">
             <noscript>
                 <style>
                     #sim-source { display: block; }
@@ -194,7 +194,7 @@ Vamsi Policharla</a></div>
         authority/bank can still see balances and inflows/outflows of an
         account. However, the bank must remember a unique nullifier for
         every coin that was ever redeemed.</p>
-        <p>Note that in this construction provides a very weak form of
+        <p>Note that this construction provides a very weak form of
         privacy if the amounts debited/credited are different across
         different transactions as it’s effectively a finger print for
         the sender-receiver pair.</p>
@@ -475,7 +475,7 @@ Vamsi Policharla</a></div>
         <ul>
         <li><code>L_unl</code>: the ledger sees the acting account and
         the operation send/receive</li>
-        <li><code>L_ind</code>: the ledger sees only sees the acting
+        <li><code>L_ind</code>: the ledger only sees the acting
         account</li>
         </ul>
         <p>To provide a quantitative comparison of the privacy
@@ -556,8 +556,8 @@ Vamsi Policharla</a></div>
         <strong>onchain</strong> privacy in shielded notes is stronger
         than our protocol.</p>
         <p>In a real world deployment however, the gap may be narrower.
-        Typically, wallet don’t talk to the ledger directly and go
-        through intermediary RPC nodes which sees which client submitted
+        Typically, wallets don’t talk to the ledger directly and go
+        through intermediary RPC nodes which see which client submitted
         each transaction and when. Whoever runs it holds a table mapping
         users to the transactions they broadcast, which is precisely the
         <em>acting account</em> that <code>L_ind</code> leaks.</p>

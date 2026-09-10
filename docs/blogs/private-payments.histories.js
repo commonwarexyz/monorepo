@@ -1,5 +1,7 @@
 'use strict';
 
+(function () {
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -346,7 +348,7 @@ function fmt(n) {
 function describe(t) {
     return t.op === 'send'
         ? `${t.acct} sends to ${t.to}`
-        : `${t.acct} receives receipt from t${t.claims + 1}`;
+        : `${t.acct} claims receipt t${t.claims + 1}`;
 }
 
 // One row per transaction: what happened, then for each observer what it sees
@@ -522,10 +524,18 @@ function init() {
         }
         renderAll();
     });
+    // The trees are drawn to the measured column width, so redraw when it changes.
+    let resizeTimer = 0;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => renderTrees(Object.fromEntries(LEAKS.map(l => [l, countHistories(l)]))), 100);
+    });
     loadExample();
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+})();
 
 // Live counter in the introduction: what a ledger at 1M TPS would have accumulated since the
 // page was opened, assuming a 32-byte nullifier per transaction.
