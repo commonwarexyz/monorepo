@@ -17,6 +17,8 @@
 //!   ignore stale entries after slot reuse.
 //! - Buckets are drained in place, so inner `Vec` capacity is retained and reused across
 //!   cycles to reduce allocations.
+//! - Reusing an inactive bucket clears its stale entries without releasing capacity.
+//!   This bounds retention across cycles even when the wheel never becomes idle.
 //! - When no active deadlines remain, stale bucket entries are purged in bulk so
 //!   occupancy metadata does not drift and cause spurious wakeups.
 //!
@@ -233,6 +235,12 @@ impl TimeoutWheel {
             );
             self.occupied[slot / Self::WORD_BITS] |= 1u64 << (slot % Self::WORD_BITS);
             self.occupied_slots += 1;
+        }
+
+        // Every candidate in an inactive bucket is stale. Clear them before
+        // reuse so early completions cannot accumulate across wheel revolutions.
+        if self.active_counts[slot] == 0 {
+            self.buckets[slot].clear();
         }
 
         // Append timeout candidate, stale entries are filtered by caller on drain.
@@ -580,6 +588,69 @@ mod tests {
         wheel
             .advance(now_for_tick(wheel, now_tick))
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_completed_deadlines_do_not_accumulate_across_revolutions() {
+        let mut wheel = wheel(TICK * 10);
+        wheel.schedule(waiter_id(0, 0), 10);
+
+        // Keep one deadline active at every advance, while completing each
+        // request before expiry. Neither expiry nor idle cleanup can help.
+        for tick in 1..=1024 {
+            assert!(advance(&mut wheel, tick).is_empty());
+            wheel.schedule(waiter_id(0, tick), tick + 10);
+            wheel.remove(tick + 9);
+        }
+
+        assert_eq!(wheel.active_deadlines, 1);
+        let retained: usize = wheel.buckets.iter().map(Vec::len).sum();
+        assert!(
+            retained <= wheel.buckets.len(),
+            "retained {retained} records"
+        );
+
+        let expired = advance(&mut wheel, 1034);
+        assert!(expired.contains(&TimeoutEntry::new(waiter_id(0, 1024), 1034)));
+        wheel.remove(1034);
+        assert!(advance(&mut wheel, 1035).is_empty());
+        assert_eq!(wheel.occupied_slots, 0);
+    }
+
+    #[test]
+    fn test_inactive_bucket_reuses_storage_without_disturbing_live_deadlines() {
+        let mut wheel = wheel(TICK * 10);
+        let first = waiter_id(0, 0);
+        let second = waiter_id(1, 0);
+        wheel.schedule(first, 10);
+        wheel.schedule(second, 10);
+        let slot = wheel.slot_index(10);
+
+        // Removal stays lazy. Scheduling alongside a live deadline must also
+        // preserve the existing candidates in the bucket.
+        wheel.remove(10);
+        let third = waiter_id(2, 0);
+        wheel.schedule(third, 10);
+        assert_eq!(wheel.buckets[slot].len(), 3);
+        wheel.remove(10);
+        wheel.remove(10);
+        assert_eq!(wheel.buckets[slot].len(), 3);
+        let capacity = wheel.buckets[slot].capacity();
+
+        let current = waiter_id(0, 1);
+        wheel.schedule(current, 10);
+        assert_eq!(wheel.buckets[slot], vec![TimeoutEntry::new(current, 10)]);
+        assert_eq!(wheel.buckets[slot].capacity(), capacity);
+        assert_eq!(wheel.occupied_slots, 1);
+        assert_eq!(wheel.active_deadlines, 1);
+
+        assert_eq!(
+            advance(&mut wheel, 10),
+            vec![TimeoutEntry::new(current, 10)]
+        );
+        wheel.remove(10);
+        assert_eq!(wheel.occupied_slots, 0);
+        assert_eq!(wheel.active_deadlines, 0);
     }
 
     #[test]
