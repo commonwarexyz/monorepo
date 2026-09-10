@@ -51,7 +51,8 @@ where
     },
 }
 
-/// Aborts every owned handle when a group is no longer supervised.
+/// Signals all aborts before dropping any handle, whose result or completion future may wake
+/// other tasks in the group during destruction.
 struct HandleGroup<T>(Vec<Handle<T>>)
 where
     T: Send + 'static;
@@ -280,53 +281,45 @@ where
         }
     }
 
-    /// Wrap this handle so the task is aborted if the wrapper is dropped before being joined.
-    #[commonware_macros::stability(ALPHA)]
+    /// Wrap this handle so dropping the wrapper calls [`Handle::abort`].
     pub const fn abort_on_drop(self) -> AbortOnDrop<T> {
-        AbortOnDrop(Some(self))
+        AbortOnDrop(self)
     }
 }
 
-/// Aborts a task if dropped before being joined.
+/// Calls [`Handle::abort`] when dropped.
 ///
 /// Supervision ties spawned tasks to their spawning task's lifetime, but work spawned from a plain
 /// future outlives that future's drop. Wrapping the handle (see [`Handle::abort_on_drop`]) ties the
-/// task to the guard instead, so cancelling the future holding it cannot leave the task running.
-/// Dropping the guard only signals the abort. Use [`AbortOnDrop::abort`] to also await the
-/// task's exit.
-#[commonware_macros::stability(ALPHA)]
-pub struct AbortOnDrop<T: Send + 'static>(Option<Handle<T>>);
+/// task's cancellation to the guard instead. Dropping the guard signals cancellation; use
+/// [`AbortOnDrop::abort`] to also join the handle. Completion handles only stop waiting and do
+/// not cancel the underlying work (see [`Handle`]).
+pub struct AbortOnDrop<T: Send + 'static>(Handle<T>);
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Send + 'static> AbortOnDrop<T> {
-    /// Abort the task, then join it.
+    /// Abort and join the handle. Completion handles only stop waiting for the underlying work.
     pub async fn abort(mut self) {
-        let handle = self.0.take().expect("handle joined once");
-        handle.abort();
-        let _ = handle.await;
+        self.0.abort();
+        let _ = (&mut self.0).await;
     }
 
-    /// Join the task.
+    /// Join the handle.
     pub async fn join(mut self) -> Result<T, Error> {
         // Poll the handle by reference: the guard must keep owning it so dropping this future
         // mid-join still aborts the task.
-        let handle = self.0.as_mut().expect("handle joined once");
-        let result = handle.await;
-        self.0 = None;
-        result
+        (&mut self.0).await
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T, E1> AbortOnDrop<Result<T, E1>>
 where
     T: Send + 'static,
     E1: Send + 'static,
 {
     /// Join `guards` in order, collecting each task's output. On the first failure (a task
-    /// error or a failed join), abort and join every remaining guard before surfacing it,
-    /// so no task outlives the failure (dropping a guard only signals the abort without
-    /// awaiting it). Joining in order makes the surfaced failure deterministic.
+    /// error or a failed join), abort and join every remaining guard before surfacing it.
+    /// Spawned tasks are cancelled and joined; completion handles only stop waiting for their
+    /// underlying work. Joining in order makes the surfaced failure deterministic.
     pub async fn join_all<E2>(guards: Vec<Self>) -> Result<Vec<T>, E2>
     where
         E2: From<E1> + From<Error>,
@@ -348,12 +341,9 @@ where
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Send + 'static> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
-        if let Some(handle) = &self.0 {
-            handle.abort();
-        }
+        self.0.abort();
     }
 }
 
@@ -513,10 +503,10 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::Handle;
+    use super::{AbortOnDrop, Handle};
     use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::channel::oneshot;
-    use futures::future;
+    use futures::{FutureExt as _, future, poll};
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
@@ -674,6 +664,71 @@ mod tests {
 
             assert!(sender.send(Ok(())).is_ok());
             assert!(matches!(handle.await, Err(Error::Aborted)));
+        });
+    }
+
+    #[test]
+    fn abort_on_drop_cancels_pending_join() {
+        for poll_join in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                let (held, released) = oneshot::channel::<()>();
+                let guard = context
+                    .child("guarded")
+                    .spawn(move |_| async move {
+                        let _held = held;
+                        future::pending::<()>().await;
+                    })
+                    .abort_on_drop();
+                let mut join = Box::pin(guard.join());
+                if poll_join {
+                    assert!(poll!(&mut join).is_pending());
+                }
+                drop(join);
+                assert!(released.await.is_err());
+            });
+        }
+    }
+
+    #[test]
+    fn abort_on_drop_join_all_drains_pending_task() {
+        deterministic::Runner::default().start(|context| async move {
+            let (held, released) = oneshot::channel::<()>();
+            let pending = context
+                .child("pending")
+                .spawn(move |_| async move {
+                    let _held = held;
+                    future::pending::<Result<(), Error>>().await
+                })
+                .abort_on_drop();
+            let failed = Handle::ready(Ok(Err(Error::Closed))).abort_on_drop();
+            let result = AbortOnDrop::join_all::<Error>(vec![failed, pending]).await;
+            assert!(matches!(result, Err(Error::Closed)));
+            assert!(
+                released
+                    .now_or_never()
+                    .expect("task still owns sender")
+                    .is_err()
+            );
+        });
+    }
+
+    #[test]
+    fn abort_on_drop_completion_leaves_producer_running() {
+        deterministic::Runner::default().start(|context| async move {
+            let (release, wait) = oneshot::channel::<()>();
+            let (sender, receiver) = oneshot::channel();
+            let mut producer = context.child("producer").spawn(move |_| async move {
+                wait.await.unwrap();
+                let _ = sender.send(Ok(()));
+            });
+
+            Handle::from_receiver(receiver)
+                .abort_on_drop()
+                .abort()
+                .await;
+            assert!(poll!(&mut producer).is_pending());
+            release.send(()).unwrap();
+            producer.await.unwrap();
         });
     }
 
