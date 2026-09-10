@@ -688,7 +688,9 @@ $$
 
 and the posted close omits $U$, the transpose, and every derivable column. For the benchmark's fixed live set, $U=N-A$, though account creation, deletion, and external-payout rows break that identity in general. Every unchanged account contributes a leaf to the corpus and nothing to the posted close, every changed account a row, and every edge one cumulative entry on each side. Repeated payments update those entries without adding records; their wire size follows the integer widths described above. Acceptance reserves room per account and per edge, never per payment.
 
-Figure 6 compares the state update (the posted close) with compact validation data. Validators reconstruct the full proof slices from these downloads and their retained state. Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
+Figure 6 compares two encodings of the same close. **State update** (the posted close) lets a reader with the full previous account state rebuild and check the new state, reconstructing recipient credits from the senders' entries. **Validation data** lets validators check only their assigned slices. It includes incoming payment entries from outside each slice and proofs linking that slice to the close.
+
+Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
 
 ```{=html}
 <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive data-size calculator. Sliders set live accounts, average recipients per account, and validators. Results show the state update, one set of validation data, the largest validator download, and total sent to validators per close.">
@@ -698,7 +700,7 @@ Figure 6 compares the state update (the posted close) with compact validation da
 ```
 
 ::: {.image-caption}
-Figure 6: The colored curves compare the state update with one complete set of validation data. The gray line shows the account tree already stored by a reader. Both axes use logarithmic scales. Open a result for details.
+Figure 6: Data per close, with each validation slice counted once before replication across validators. The gray line shows the account tree already stored by a reader. Both axes use logarithmic scales. Open a result for its byte breakdown.
 :::
 
 <details class="clearing-calculator-assumptions">

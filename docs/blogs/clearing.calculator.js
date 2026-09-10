@@ -460,8 +460,8 @@ function mount(root) {
 
   const results = el('div', { class: 'clearing-calculator-out' });
   panel.append(results);
-  const oPosted = readout(results, 'State update', 'Apply one close to the previous state.', 'clearing-calc-certified', 'reader');
-  const oDealt = readout(results, 'Validation data', 'One complete set, before replication.', 'clearing-calc-dealt', 'evidence');
+  const oPosted = readout(results, 'State update', 'For updating and checking a full copy of account state.', 'clearing-calc-certified', 'reader');
+  const oDealt = readout(results, 'Validation data', 'For checking assigned slices. Counts every slice once.', 'clearing-calc-dealt', 'evidence');
   const oBusiest = readout(results, 'Largest validator download', 'Maximum received by one validator.', 'clearing-calc-busiest');
   const oEgress = readout(results, 'Total sent to validators', '', 'clearing-calc-egress');
 
@@ -504,17 +504,17 @@ function mount(root) {
     fillCard(oPosted.card, posted, [
       ['Header and roots', postedParts.fixed],
       ['Account updates', postedParts.rows],
-      ['Recipient entries', postedParts.vectors],
+      ['Payments by sender', postedParts.vectors],
       ['Operator signatures', postedParts.aggregates],
-    ]);
+    ], 'Uses compact account references and rebuilds recipient totals from the sender entries. The reader checks the close against its full prior state.');
     fillCard(oDealt.card, dt, [
       ['Account updates', dealtParts.rows],
-      ['Sender entries', dealtParts.entries],
-      ['Recipient entries', dealtParts.transpose],
+      ['Payments by sender', dealtParts.entries],
+      ['Payments by recipient', dealtParts.transpose],
       ['Operator signatures', dealtParts.aggregates],
       ['Slice proofs',
         dealtParts.fixed + dealtParts.boundaries + dealtParts.starts + dealtParts.openings + dealtParts.guards],
-    ], 'One copy of each slice. Full states and other derivable fields are reconstructed from retained state.');
+    ], 'Payment entries use full account keys and appear in both sender and recipient order. This lets a validator check credits from payers outside its slices. Proofs tie each slice to the close; prior account state comes from the validator\'s retained copy.');
     oBusiest.card.textContent = `The largest of ${count(V.n)} validator downloads. Adjacent slices share a proof; each validator receives one or two spans. Each slice goes to ${count(V.q)} validators.`;
     fillCard(oEgress.card, cm.egress, [
       ['Average per validator', cm.egress / V.n, ''],
