@@ -4,29 +4,29 @@ use super::code::Impl;
 use commonware_math::algebra::Additive;
 
 /// A fixed number of equally sized shards, in one allocation.
-pub(super) struct Shards {
-    pub(super) data: Vec<u8>,
-    pub(super) len: usize,
+pub struct Shards {
+    pub data: Vec<u8>,
+    pub len: usize,
 }
 
 impl Shards {
-    pub(super) fn new(shards: usize, len: usize) -> Self {
+    pub fn new(shards: usize, len: usize) -> Self {
         Self {
             data: vec![0; shards * len],
             len,
         }
     }
 
-    pub(super) fn shards(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn shards(&self) -> impl Iterator<Item = &[u8]> {
         self.data.chunks_exact(self.len)
     }
 
-    pub(super) fn shards_mut(&mut self) -> impl Iterator<Item = &mut [u8]> {
+    pub fn shards_mut(&mut self) -> impl Iterator<Item = &mut [u8]> {
         self.data.chunks_exact_mut(self.len)
     }
 
     /// Split shards `[r, r + 2 * dist)` into two halves of `dist` shards each.
-    pub(super) fn halves_mut(
+    pub fn halves_mut(
         &mut self,
         r: usize,
         dist: usize,
@@ -38,8 +38,8 @@ impl Shards {
     }
 }
 
-pub(super) struct Transform<I: Impl> {
-    pub(super) imp: I,
+pub struct Transform<I: Impl> {
+    pub imp: I,
     /// The twiddle factors of the transform, indexed by codeword position.
     ///
     /// Let `j` be the number of trailing zeros of `x`, and `b` be `x` with
@@ -52,7 +52,7 @@ pub(super) struct Transform<I: Impl> {
 
 impl<I: Impl> Transform<I> {
     /// Compute the transform's twiddle factors.
-    pub(super) fn new(imp: I) -> Self {
+    pub fn new(imp: I) -> Self {
         let basis = I::basis();
         assert_eq!(basis.len(), I::BITS, "basis has the wrong size");
 
@@ -89,7 +89,7 @@ impl<I: Impl> Transform<I> {
     /// Inverse transform `work` in place at `shift`.
     ///
     /// Shards at or past `nonzero` must be zero.
-    pub(super) fn ifft(&self, work: &mut Shards, nonzero: usize, shift: usize) {
+    pub fn ifft(&self, work: &mut Shards, nonzero: usize, shift: usize) {
         let m = work.data.len() / work.len;
         assert!(nonzero <= m);
 
@@ -110,7 +110,7 @@ impl<I: Impl> Transform<I> {
     /// Forward transform `work` in place, at position 0.
     ///
     /// Only the first `needed` outputs are guaranteed to be computed.
-    pub(super) fn fft(&self, work: &mut Shards, needed: usize) {
+    pub fn fft(&self, work: &mut Shards, needed: usize) {
         let m = work.data.len() / work.len;
         assert!(needed <= m);
 
