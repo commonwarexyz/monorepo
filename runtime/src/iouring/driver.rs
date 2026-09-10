@@ -67,7 +67,7 @@ use super::{
     request::Request,
     runtime::{Deferred, RingConfig},
     timeout::TimeoutWheel,
-    waiter::{CompletionOutcome, Observation, Observer, StageOutcome, WaiterId, Waiters},
+    waiter::{CompletionOutcome, Observation, Observer, WaiterId, Waiters},
     waker::{WAKE_USER_DATA, Waker},
 };
 use crate::Error;
@@ -80,6 +80,7 @@ use io_uring::{
 };
 use std::{
     collections::VecDeque,
+    task::Waker as TaskWaker,
     time::{Duration, Instant},
 };
 
@@ -198,11 +199,12 @@ impl Driver {
     }
 
     /// Inspect a retained result or determine whether its waker needs refreshing.
-    pub fn observe(&mut self, id: WaiterId, waker: &std::task::Waker) -> Observation {
+    pub fn observe(&mut self, id: WaiterId, waker: &TaskWaker) -> Observation {
         self.state.waiters.observe(id, waker)
     }
 
-    pub fn set_waker(&mut self, id: WaiterId, waker: std::task::Waker) -> Option<std::task::Waker> {
+    /// Install a waker cloned outside the worker borrow, returning the displaced one.
+    pub fn set_waker(&mut self, id: WaiterId, waker: TaskWaker) -> Option<TaskWaker> {
         self.state.waiters.set_waker(id, waker)
     }
 
@@ -242,7 +244,7 @@ impl Driver {
         self.state.advance_timeouts(now, deferred);
         self.state.register_deadlines(now, deferred);
         self.state.compact_ready_queue();
-        while self.state.fill_submission_queue(&mut self.ring, deferred) {
+        while self.state.fill_submission_queue(&mut self.ring) {
             let before = self.ring.submission().len();
             self.state.submit(&mut self.ring)?;
             if self.ring.submission().len() >= before {
@@ -376,8 +378,14 @@ impl State {
 
     /// Remove stale queue IDs once they exceed both 64 and the live queued count.
     fn compact_ready_queue(&mut self) {
+        // Every pending request without an in-flight SQE has exactly one ID
+        // in the ready queue. Any additional IDs belong to retired requests.
         let queued = self.waiters.len() - self.waiters.in_flight();
-        let stale = self.ready_queue.len() - queued;
+        let stale = self
+            .ready_queue
+            .len()
+            .checked_sub(queued)
+            .expect("queued request missing from ready queue");
         if stale <= 64 || stale <= queued {
             return;
         }
@@ -387,50 +395,41 @@ impl State {
         self.ready_queue.retain(|id| self.waiters.is_pending(*id));
     }
 
-    /// Build and push the SQE for a validated live waiter.
+    /// Build and push the SQE for a pending waiter.
     ///
-    /// SQE construction for requests retained after orphaning is callback-free
-    /// and cannot unwind for valid, validated request state.
-    fn stage_request(
-        &mut self,
-        id: WaiterId,
-        submission_queue: &mut SubmissionQueue<'_>,
-        deferred: &mut Deferred,
-    ) {
-        if !self.waiters.is_pending(id) {
-            return;
-        }
-        match self.waiters.stage(id) {
-            StageOutcome::Timeout(id) => self.complete(id, Err(Error::Timeout), deferred),
-            StageOutcome::Orphaned(id) => self.complete(id, Err(Error::Closed), deferred),
-            StageOutcome::Submit(sqe) => {
-                // SAFETY: The waiter owns all SQE-referenced descriptors and
-                // buffers until its operation CQE. Capacity was checked by the
-                // staging loop, and no callback can retire the waiter here.
-                unsafe {
-                    submission_queue
-                        .push(&sqe)
-                        .expect("checked operation SQ capacity");
-                }
-            }
+    /// The caller has checked that `id` is pending and the SQ has capacity.
+    /// Cancelled requests retire before reaching this point. SQE construction for
+    /// requests retained after orphaning is callback-free and cannot unwind for
+    /// valid, validated request state.
+    fn stage_request(&mut self, id: WaiterId, submission_queue: &mut SubmissionQueue<'_>) {
+        let sqe = self.waiters.stage(id);
+        // SAFETY: The waiter owns all SQE-referenced descriptors and
+        // buffers until its operation CQE. Capacity was checked by the
+        // staging loop, and no callback can retire the waiter here.
+        unsafe {
+            submission_queue
+                .push(&sqe)
+                .expect("checked operation SQ capacity");
         }
     }
 
     /// Stage operation SQEs in FIFO order, returning whether an SQ flush is needed.
-    fn stage_ready_requests(
-        &mut self,
-        submission_queue: &mut SubmissionQueue<'_>,
-        deferred: &mut Deferred,
-    ) -> bool {
+    fn stage_ready_requests(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
         while self.waiters.in_flight() < self.in_flight_limit {
             let Some(id) = self.ready_queue.front().copied() else {
                 return false;
             };
+            // Cancelled and expired requests leave their IDs behind. Drop them
+            // without consuming SQ capacity or reporting a flush.
+            if !self.waiters.is_pending(id) {
+                self.ready_queue.pop_front();
+                continue;
+            }
             if submission_queue.is_full() {
                 return true;
             }
             self.ready_queue.pop_front();
-            self.stage_request(id, submission_queue, deferred);
+            self.stage_request(id, submission_queue);
         }
         // Only a completion can release this limit. A flush cannot, and
         // cancellation and mailbox wake SQEs must still be allowed to stage.
@@ -463,12 +462,12 @@ impl State {
     }
 
     /// Fill available SQ slots and report whether more work requires a flush.
-    fn fill_submission_queue(&mut self, ring: &mut IoUring, deferred: &mut Deferred) -> bool {
+    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> bool {
         let mut submission_queue = ring.submission();
         if self.stage_cancellations(&mut submission_queue) {
             return true;
         }
-        if self.stage_ready_requests(&mut submission_queue, deferred) {
+        if self.stage_ready_requests(&mut submission_queue) {
             return true;
         }
         if self.wake_rearm_needed {
@@ -581,6 +580,8 @@ impl State {
 }
 
 /// Build a single-issuer ring requiring explicit completion-service enters.
+///
+/// Uses the CQ sizing and overflow policy described by [`RingConfig::size`].
 fn new_ring(cfg: &RingConfig) -> Result<IoUring, std::io::Error> {
     // DEFER_TASKRUN processes task work only during GETEVENTS. Every turn with
     // pending operation or cancellation SQEs therefore provides either a
@@ -598,8 +599,8 @@ mod tests {
         IoBuf, IoBufMut, IoBufs,
         iouring::{
             request::{
-                Cache, Held, IOVEC_BATCH_SIZE, RecvRequest, RequestOutput, SyncRequest,
-                WriteAtRequest, WriteAtState,
+                Cache, Held, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
+                SyncRequest, WriteAtRequest, WriteAtState,
             },
             waker::tests::wait_until_eventfd_armed,
         },
@@ -611,7 +612,7 @@ mod tests {
         io::Write,
         os::{fd::AsRawFd, unix::net::UnixStream},
         sync::Arc,
-        task::{Wake, Waker as TaskWaker},
+        task::Wake,
     };
 
     enum TestObserver {
@@ -1027,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stage_request_skips_stale_ready_queue_entry() {
+    fn test_staging_skips_stale_ready_queue_entry() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
         let old = harness.admit(
@@ -1049,6 +1050,47 @@ mod tests {
         assert_eq!(received(&harness.completed[1]), 2);
         assert!(harness.driver.next_deadline().is_none());
         harness.drain();
+    }
+
+    #[test]
+    fn test_staging_discards_stale_ids_with_full_sq() {
+        for with_pending in [false, true] {
+            let mut harness = Harness::new(1);
+            // The mailbox poll fills the SQ without using an operation slot.
+            harness.service();
+            assert!(harness.driver.ring.submission().is_full());
+
+            let (socket, _peer) = UnixStream::pair().unwrap();
+            let stale = harness.admit(recv(socket, 1, true, None), 0);
+            harness.orphan(stale);
+
+            let pending = with_pending.then(|| {
+                let (socket, mut peer) = UnixStream::pair().unwrap();
+                peer.write_all(b"x").unwrap();
+                harness.admit(recv(socket, 1, true, None), 1)
+            });
+            let flush = harness
+                .driver
+                .state
+                .stage_ready_requests(&mut harness.driver.ring.submission());
+
+            // Only a live request justifies a flush. A stale ID must disappear
+            // even if there is no SQ space and its slot has already been reused.
+            assert_eq!(flush, with_pending);
+            assert_eq!(
+                harness.driver.state.ready_queue.len(),
+                usize::from(with_pending)
+            );
+            assert_eq!(harness.driver.state.ready_queue.front().copied(), pending);
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            assert!(harness.driver.ring.submission().is_full());
+
+            if with_pending {
+                harness.until(2);
+                assert_eq!(received(&harness.completed[1]), 1);
+            }
+            harness.drain();
+        }
     }
 
     #[test]
@@ -1140,10 +1182,7 @@ mod tests {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.insert(recv(left, 5, true, None), None, 0);
-        assert!(matches!(
-            harness.driver.state.waiters.stage(id),
-            StageOutcome::Submit(_)
-        ));
+        harness.driver.state.waiters.stage(id);
         harness.driver.state.cancel(id, &mut harness.deferred);
         harness.simulated_completion(id, 5);
         assert_eq!(received(&harness.completed[0]), 5);
@@ -1164,10 +1203,7 @@ mod tests {
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.insert(recv(left, 8, true, None), Some(1), 0);
         harness.driver.state.timeout_wheel.schedule(id, 1);
-        assert!(matches!(
-            harness.driver.state.waiters.stage(id),
-            StageOutcome::Submit(_)
-        ));
+        harness.driver.state.waiters.stage(id);
         harness.driver.state.advance_timeouts(
             harness.start + Duration::from_millis(5),
             &mut harness.deferred,
@@ -1199,10 +1235,7 @@ mod tests {
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.insert(recv(left, 8, true, None), Some(1), 0);
         harness.driver.state.timeout_wheel.schedule(id, 1);
-        assert!(matches!(
-            harness.driver.state.waiters.stage(id),
-            StageOutcome::Submit(_)
-        ));
+        harness.driver.state.waiters.stage(id);
         harness.simulated_completion(id, 4);
         assert_eq!(harness.driver.state.ready_queue.len(), 1);
         harness.driver.state.advance_timeouts(
@@ -1224,10 +1257,7 @@ mod tests {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.insert(recv(left, 8, true, None), None, 0);
-        assert!(matches!(
-            harness.driver.state.waiters.stage(id),
-            StageOutcome::Submit(_)
-        ));
+        harness.driver.state.waiters.stage(id);
         harness.simulated_completion(id, 4);
         harness.orphan(id);
         let (left, mut right) = UnixStream::pair().unwrap();
@@ -1237,6 +1267,60 @@ mod tests {
         harness.until(2);
         assert_eq!(received(&harness.completed[1]), 5);
         harness.drain();
+    }
+
+    #[test]
+    fn test_orphaned_read_retries_do_not_requeue() {
+        let directory = std::env::temp_dir().join(format!(
+            "commonware_driver_read_test_{}",
+            std::process::id()
+        ));
+        let hold = Hold::acquire(&directory).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.join("read"))
+            .unwrap();
+        let held = Held::new(file, hold);
+
+        for close in [false, true] {
+            for result in [-libc::EAGAIN, 2] {
+                let mut harness = Harness::new(1);
+                let id = harness.insert(
+                    Request::ReadAt(ReadAtRequest {
+                        file: held.clone(),
+                        offset: 0,
+                        len: 5,
+                        read: 0,
+                        buf: IoBufMut::with_capacity(5),
+                        cache: Cache::Enabled,
+                    }),
+                    None,
+                    0,
+                );
+                harness.driver.state.waiters.stage(id);
+
+                if close {
+                    harness.driver.close(&mut harness.deferred);
+                } else {
+                    harness.orphan(id);
+                }
+
+                // ReadAt reports a retry or partial progress even after
+                // cancellation. The orphan guard must retire it at this CQE.
+                harness.simulated_completion(id, result);
+                assert!(harness.driver.state.ready_queue.is_empty());
+                assert!(harness.driver.is_empty());
+                assert_eq!(harness.completed.len(), 1);
+                assert!(matches!(
+                    harness.completed[0].observer,
+                    TestObserver::Orphaned
+                ));
+                harness.drain();
+            }
+        }
     }
 
     #[test]

@@ -25,16 +25,22 @@ use std::{
 
 /// Registration identity retained until observation ends.
 enum State {
+    /// Registered on a worker and awaiting its retained result.
     Waiting {
+        /// Weak identity of the owning worker, checked before every poll.
         mailbox: Weak<Mailbox>,
+        /// Slot holding the pending request or its retained result.
         waiter_id: WaiterId,
     },
+    /// Registration was rejected because the worker was closing.
     Closed,
+    /// The result was taken or the registration was released.
     Done,
 }
 
 /// Ordinary completion handle with no inline request storage.
 pub(crate) struct Operation {
+    /// Registration identity, or the terminal state once observation ends.
     state: State,
 }
 

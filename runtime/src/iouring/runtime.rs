@@ -105,6 +105,12 @@ pub struct RingConfig {
     ///
     /// Must be nonzero and round to at most 32,768. Defaults to 128. The runtime
     /// chooses 1024 for its production default and 128 when built for tests.
+    ///
+    /// The CQ uses the kernel default of twice the rounded SQ size. Cancellation
+    /// and mailbox wake CQEs also use that space, and cancellation acknowledgements
+    /// can outlive their requests. The operation limit therefore does not bound
+    /// all pending CQEs. The runtime relies on the kernel's CQ overflow backlog
+    /// (`IORING_FEAT_NODROP`), drained by subsequent completion-service enters.
     pub size: u32,
     /// Nonzero operation deadline granularity, defaulting to 5 milliseconds.
     ///
@@ -1177,12 +1183,12 @@ impl Worker {
         {
             let mut local = self.local.borrow_mut();
             let Local {
-                driver, deferred, ..
+                driver,
+                timers,
+                deferred,
+                ..
             } = &mut *local;
             driver.as_mut().unwrap().close(deferred);
-            let Local {
-                timers, deferred, ..
-            } = &mut *local;
             timers.clear(&mut deferred.drops);
             local.update_pending();
         }

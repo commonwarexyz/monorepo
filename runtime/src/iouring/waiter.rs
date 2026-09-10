@@ -124,16 +124,6 @@ enum Entry {
     Retiring,
 }
 
-/// Outcome of staging a pending request.
-pub enum StageOutcome {
-    /// Cancellation requires local timeout completion without an SQE.
-    Timeout(WaiterId),
-    /// An unobserved read or network request must finish without an SQE.
-    Orphaned(WaiterId),
-    /// Built SQE whose request is now counted as in flight.
-    Submit(SqueueEntry),
-}
-
 /// Action required after applying one CQE.
 pub enum CompletionOutcome {
     /// Cancellation acknowledgement, including one for an already retired request.
@@ -433,32 +423,25 @@ impl Waiters {
 
     /// Build the next SQE without moving the request out of its slot.
     ///
-    /// Submit marks the request in flight before returning the SQE. Other
-    /// outcomes leave it pending for local completion through [`Self::finish`].
-    /// Panics if the ID is not pending or already has an operation in flight.
-    pub fn stage(&mut self, id: WaiterId) -> StageOutcome {
+    /// Marks the request in flight before returning the SQE. The driver retires
+    /// cancelled requests before staging or at their operation CQE.
+    /// Panics if the ID is not pending, is cancelled, or already has an SQE in flight.
+    pub fn stage(&mut self, id: WaiterId) -> SqueueEntry {
         let waiter = self.get_mut(id).expect("stage called for untracked waiter");
         assert!(
             !waiter.in_flight,
             "stage called for waiter with op already in flight"
         );
-        match waiter.state {
-            WaiterState::CancelRequested => StageOutcome::Timeout(id),
-            WaiterState::Active { .. }
-                if matches!(waiter.observer, Observer::Orphaned)
-                    && !waiter.request.retains_on_orphan() =>
-            {
-                StageOutcome::Orphaned(id)
-            }
-            WaiterState::Active { .. } => {
-                // Construction can reject an invalid buffer range. Until it
-                // succeeds, cleanup must remain able to finish the request locally.
-                let sqe = waiter.request.build_sqe(id);
-                waiter.in_flight = true;
-                self.in_flight += 1;
-                StageOutcome::Submit(sqe)
-            }
-        }
+        assert!(
+            matches!(waiter.state, WaiterState::Active { .. }),
+            "stage called for cancelled waiter"
+        );
+        // Construction can reject an invalid buffer range. Until it
+        // succeeds, cleanup must remain able to finish the request locally.
+        let sqe = waiter.request.build_sqe(id);
+        waiter.in_flight = true;
+        self.in_flight += 1;
+        sqe
     }
 
     /// Apply an operation CQE or acknowledge a cancellation CQE.
@@ -501,9 +484,7 @@ impl Waiters {
         assert!(waiter.in_flight);
         waiter.in_flight = false;
         let outcome = match waiter.request.on_cqe(waiter.state, result) {
-            // Match success separately to avoid copying unused Error storage.
-            Some(Ok(())) => CompletionOutcome::Complete(id, Ok(())),
-            Some(Err(error)) => CompletionOutcome::Complete(id, Err(error)),
+            Some(result) => CompletionOutcome::Complete(id, result),
             None if matches!(waiter.observer, Observer::Orphaned)
                 && !waiter.request.retains_on_orphan() =>
             {
@@ -675,7 +656,7 @@ pub mod tests {
         assert_eq!(current.user_data(), id.user_data());
         assert!(!waiters.is_pending(id));
         assert!(!waiters.cancel(id));
-        assert!(matches!(waiters.stage(current), StageOutcome::Submit(_)));
+        waiters.stage(current);
         assert!(matches!(
             waiters.on_completion(last.cancel_user_data(), 0),
             CompletionOutcome::Cancel
@@ -686,7 +667,7 @@ pub mod tests {
         );
         assert_eq!(waiters.in_flight(), 0);
 
-        assert!(matches!(waiters.stage(current), StageOutcome::Submit(_)));
+        waiters.stage(current);
         complete(&mut waiters, current, 0, &mut deferred);
         assert!(waiters.is_empty());
         assert!(matches!(
@@ -702,7 +683,7 @@ pub mod tests {
         assert!(waiters.is_empty());
         let first = waiters.insert(make_sync_request(), Some(5), observer());
         assert_eq!(waiters.len(), 1);
-        assert!(matches!(waiters.stage(first), StageOutcome::Submit(_)));
+        waiters.stage(first);
         assert_eq!(complete(&mut waiters, first, 0, &mut deferred), Some(5));
 
         // The live result keeps its ID but must disappear from all I/O queries.
@@ -739,7 +720,7 @@ pub mod tests {
         let mut deferred = Deferred::default();
         let id = waiters.insert(make_sync_request(), None, observer());
         let exhausted = WaiterId(set_generation(&mut waiters.entries, id.0, u64::MAX));
-        assert!(matches!(waiters.stage(exhausted), StageOutcome::Submit(_)));
+        waiters.stage(exhausted);
         complete(&mut waiters, exhausted, 0, &mut deferred);
         drop(output(&mut waiters, exhausted));
         let next = waiters.insert(make_sync_request(), None, observer());
@@ -783,7 +764,7 @@ pub mod tests {
         let mut waiters = Waiters::new(1);
         let mut deferred = Deferred::default();
         let id = waiters.insert(make_sync_request(), Some(2), observer());
-        assert!(matches!(waiters.stage(id), StageOutcome::Submit(_)));
+        waiters.stage(id);
         assert!(waiters.cancel(id));
         assert!(!waiters.cancel(id));
         for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
@@ -836,7 +817,7 @@ pub mod tests {
             );
         }
         let id = waiters.insert(make_sync_request(), None, observer());
-        assert!(matches!(waiters.stage(id), StageOutcome::Submit(_)));
+        waiters.stage(id);
         assert!(
             catch_unwind(AssertUnwindSafe(
                 || waiters.on_completion(id.cancel_user_data(), -libc::EINVAL)
@@ -871,20 +852,24 @@ pub mod tests {
         for kind in 0..3 {
             let mut waiters = Waiters::new(1);
             let mut deferred = Deferred::default();
-            let id = waiters.insert(read_request(kind), Some(7), Observer::Orphaned);
-            assert!(matches!(waiters.stage(id), StageOutcome::Orphaned(current) if current == id));
-            assert_eq!(
-                waiters.finish(id, Err(Error::Closed), &mut deferred),
-                Some(7)
-            );
+            let id = waiters.insert(read_request(kind), Some(7), observer());
+            assert!(waiters.orphan(id, &mut deferred));
+            assert!(waiters.cancel(id));
+
+            // The driver retires queued cancellations without staging an SQE.
+            assert_eq!(waiters.finish(id, Err(Error::Timeout), &mut deferred), None);
             assert!(waiters.is_empty());
 
             for result in [-libc::EAGAIN, 2] {
                 let id = waiters.insert(read_request(kind), Some(9), observer());
-                assert!(matches!(waiters.stage(id), StageOutcome::Submit(_)));
+                waiters.stage(id);
                 assert!(waiters.orphan(id, &mut deferred));
                 assert!(!waiters.orphan(id, &mut deferred));
-                assert_eq!(complete(&mut waiters, id, result, &mut deferred), Some(9));
+                assert!(waiters.cancel(id));
+
+                // ReadAt can request another SQE despite cancellation. Its
+                // orphaned observer lets completion retire it here instead.
+                assert_eq!(complete(&mut waiters, id, result, &mut deferred), None);
                 assert!(waiters.is_empty());
             }
         }
@@ -896,7 +881,8 @@ pub mod tests {
         let mut deferred = Deferred::default();
         let id = waiters.insert(read_request(1), None, observer());
         assert!(waiters.cancel(id));
-        assert!(matches!(waiters.stage(id), StageOutcome::Timeout(current) if current == id));
+        assert!(catch_unwind(AssertUnwindSafe(|| waiters.stage(id))).is_err());
+        assert!(!waiters.is_in_flight(id));
         waiters.finish(id, Err(Error::Timeout), &mut deferred);
         assert!(waiters.is_empty());
         assert!(!waiters.is_pending(id));
@@ -926,13 +912,13 @@ pub mod tests {
         assert!(!waiters.is_pending(ready));
         assert!(!waiters.orphan(sync, &mut deferred));
         assert_eq!(waiters.len(), 3);
-        assert!(matches!(waiters.stage(sync), StageOutcome::Submit(_)));
+        waiters.stage(sync);
         assert!(
             matches!(waiters.on_completion(sync.user_data(), -libc::EINTR), CompletionOutcome::Requeue(id) if id == sync)
         );
-        assert!(matches!(waiters.stage(sync), StageOutcome::Submit(_)));
+        waiters.stage(sync);
         complete(&mut waiters, sync, 0, &mut deferred);
-        assert!(matches!(waiters.stage(detached), StageOutcome::Submit(_)));
+        waiters.stage(detached);
         complete(&mut waiters, detached, 0, &mut deferred);
         waiters.finish(pending, Err(Error::Timeout), &mut deferred);
         assert!(waiters.is_empty());
@@ -948,7 +934,7 @@ pub mod tests {
         let mut waiters = Waiters::new(1);
         let mut deferred = Deferred::default();
         let first = waiters.insert(make_sync_request(), None, observer());
-        assert!(matches!(waiters.stage(first), StageOutcome::Submit(_)));
+        waiters.stage(first);
         for _ in 0..64 {
             waiters.insert(make_sync_request(), None, observer());
         }

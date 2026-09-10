@@ -246,9 +246,9 @@ impl Request {
 
     /// Take the typed result and every owner that is no longer kernel-visible.
     ///
-    /// The driver calls this only after the operation CQE or before staging its
-    /// first SQE. Both returned values must leave the local borrow before they
-    /// can be destroyed or delivered to an observer.
+    /// The driver calls this only when no operation SQE is in flight. Both
+    /// returned values must leave the local borrow before they can be destroyed
+    /// or delivered to an observer.
     pub fn complete(self, result: Result<(), Error>) -> (RequestOutput, RetiredResources) {
         match self {
             Self::Send(r) => (
