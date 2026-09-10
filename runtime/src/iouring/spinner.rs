@@ -107,6 +107,7 @@ impl Spinner {
             cfg.budget_us,
             cfg.max_budget_us,
         );
+
         // Disabled workers never spin, so calibration cannot affect their policy.
         let iters_per_us = if cfg.budget_us == 0 {
             0
