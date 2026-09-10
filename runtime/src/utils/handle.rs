@@ -67,6 +67,21 @@ where
     }
 }
 
+/// Closes supervision and finishes metrics when task execution exits or unwinds.
+struct TaskGuard {
+    /// Supervision subtree owned by the task.
+    tree: Arc<Tree>,
+    /// Running-task metric, finished once even if cancellation already updated it.
+    metric: MetricHandle,
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.tree.abort();
+        self.metric.finish();
+    }
+}
+
 /// Normalizes receiver-backed and future-backed completions behind one abortable future.
 enum Completion<T>
 where
@@ -119,6 +134,13 @@ where
         // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
         let metric_handle = metric.clone();
         let task = async move {
+            // Cancellation can destroy the user future during this poll. Close
+            // its supervision subtree even if that destruction unwinds.
+            let _guard = TaskGuard {
+                tree,
+                metric: metric_handle,
+            };
+
             // Run future with panic catching and abort support
             let result =
                 Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
@@ -134,12 +156,6 @@ where
                 }
                 Err(Aborted) => {}
             }
-
-            // Mark the task as aborted and abort all descendants.
-            tree.abort();
-
-            // Finish the metric.
-            metric_handle.finish();
         };
 
         (
