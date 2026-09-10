@@ -235,11 +235,10 @@ impl<T, A, B> Threaded<T> for (T, A, B) {
     }
 }
 
-/// Runs an async operation with the owned value in `slot`, then restores the returned
-/// value and returns any extra outputs (see [Threaded]).
+/// Runs an async operation that consumes the value in `slot`, then restores the
+/// returned value and yields any extra outputs (see [Threaded]).
 ///
-/// Use this for a field stored as `Option<T>` when a method consumes `self`. The
-/// operation must return the replacement value as the first part of its result.
+/// Use this to call a method that consumes `self` on a value stored in an [Option].
 ///
 /// On error, `slot` stays empty.
 ///
@@ -250,8 +249,7 @@ impl<T, A, B> Threaded<T> for (T, A, B) {
 ///
 /// # Examples
 ///
-/// Given a journal whose `append` method returns `(Self, offset, length)`, restore
-/// the journal and return the record's offset and length:
+/// Append a record to a journal whose `append` method returns `(Self, offset, length)`:
 ///
 /// ```
 /// use commonware_utils::futures::rebind;
@@ -267,8 +265,6 @@ impl<T, A, B> Threaded<T> for (T, A, B) {
 /// # }
 /// # futures::executor::block_on(async {
 /// let mut journal = Some(Journal::default());
-/// // `append` consumes the journal. On success, `rebind` restores the returned
-/// // journal in the option and gives the caller `(offset, len)`.
 /// let (offset, len) = rebind(&mut journal, |journal| journal.append(b"vote"))
 ///     .await
 ///     .expect("append failed");
@@ -294,12 +290,11 @@ where
     Ok(rest)
 }
 
-/// Runs an async operation with the owned value at `key`, then inserts the returned
-/// value under the original key and returns any extra outputs (see [Threaded]).
+/// Runs an async operation that consumes the value at `key` in `map`, then restores
+/// the returned value under the original key and yields any extra outputs (see [Threaded]).
 ///
-/// Use this when a method consumes a value stored in a [BTreeMap]. The operation must
-/// return the replacement value as the first part of its result. For a value stored
-/// in an [Option], use [rebind].
+/// Use this to call a method that consumes `self` on a value stored in a [BTreeMap].
+/// For a value stored in an [Option], use [rebind].
 ///
 /// On error, the entry stays absent.
 ///
@@ -310,8 +305,7 @@ where
 ///
 /// # Examples
 ///
-/// Given journals stored by epoch, with `append` returning `(Self, position)`,
-/// update one journal and return the new record's position:
+/// Append a record to epoch 7's journal, whose `append` method returns `(Self, position)`:
 ///
 /// ```
 /// use commonware_utils::futures::rebind_entry;
@@ -328,8 +322,6 @@ where
 /// # }
 /// # futures::executor::block_on(async {
 /// let mut journals = BTreeMap::from([(7, Journal::default())]);
-/// // The closure takes ownership of epoch 7's journal. On success, the returned
-/// // journal goes back under key 7 and the caller receives its new record's position.
 /// let position = rebind_entry(&mut journals, &7, |journal| journal.append("vote"))
 ///     .await
 ///     .expect("append failed");
