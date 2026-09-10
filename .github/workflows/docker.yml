@@ -92,17 +92,16 @@ jobs:
       matrix:
         platform: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
-      - name: Checkout swap action
+      - name: Checkout runner actions
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          sparse-checkout: .github/actions/swap
+          sparse-checkout: |
+            .github/actions/swap
+            .github/actions/disk
       - name: Configure swap
         uses: ./.github/actions/swap
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        with:
-          large-packages: false
-          swap-storage: false
+      - name: Clear disk space
+        uses: ./.github/actions/disk
       - name: Prepare
         run: |
           platform=${{ matrix.platform }}
