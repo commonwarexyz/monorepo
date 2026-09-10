@@ -97,7 +97,7 @@ impl<D: Digest> PoolExtractor<D> {
         }
 
         let paths = VotePaths::new::<H, V>(leader, self.leader, &self.proposals, body)?;
-        paths.validate_index(&self.ancestry)?;
+        paths.validate_extensions(&self.ancestry, body.positions())?;
 
         for chain in 0..self.config.chains() {
             let chain_id = ChainId::new(chain as u32);
@@ -120,7 +120,7 @@ impl<D: Digest> PoolExtractor<D> {
             }
         }
         paths
-            .index(&mut self.ancestry)
+            .index_extensions(&mut self.ancestry, body.positions())
             .expect("vote paths were prevalidated against the ancestry index");
         self.signers_seen[index] = true;
         self.len += 1;
@@ -581,7 +581,8 @@ impl<D: Digest> PreparedVotes<D> {
         let mut ancestry = PathIndex::default();
         self.proposals.index(&mut ancestry)?;
         for vote in &self.votes {
-            vote.paths.index(&mut ancestry)?;
+            vote.paths
+                .index_extensions(&mut ancestry, &vote.positions)?;
         }
         Ok(ancestry)
     }

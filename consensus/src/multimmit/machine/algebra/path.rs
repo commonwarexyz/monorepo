@@ -8,7 +8,7 @@ use crate::{
     types::Height,
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 /// Read-only parent lookup used by authenticated path reconstruction.
 pub(crate) trait Ancestry<D: Digest> {
@@ -42,14 +42,15 @@ impl<D: Digest> PathIndex<D> {
         {
             return Err(Error::Vote);
         }
-        if self
-            .parents
-            .get(&child)
-            .is_some_and(|existing| *existing != parent)
-        {
-            return Err(Error::ConflictingAncestry);
+        match self.parents.entry(child) {
+            Entry::Occupied(entry) if *entry.get() != parent => {
+                return Err(Error::ConflictingAncestry);
+            }
+            Entry::Occupied(_) => {}
+            Entry::Vacant(entry) => {
+                entry.insert(parent);
+            }
         }
-        self.parents.entry(child).or_insert(parent);
         Ok(())
     }
 
@@ -241,18 +242,30 @@ impl<D: Digest> VotePaths<D> {
             .ok_or(Error::Chain(chain))
     }
 
-    /// Adds every reconstructed vote edge to `index`.
-    pub(crate) fn index(&self, index: &mut PathIndex<D>) -> Result<(), Error> {
-        for path in &self.chains {
-            index.insert(path)?;
+    /// Adds extension edges to an index containing the proposal paths.
+    ///
+    /// `positions` must be the positions used to reconstruct this vote.
+    pub(crate) fn index_extensions(
+        &self,
+        index: &mut PathIndex<D>,
+        positions: &[Position],
+    ) -> Result<(), Error> {
+        for (path, position) in self.chains.iter().zip(positions) {
+            index.insert(&path[position.get() as usize..])?;
         }
         Ok(())
     }
 
-    /// Checks every vote path against `index` without mutating it.
-    pub(crate) fn validate_index(&self, index: &PathIndex<D>) -> Result<(), Error> {
-        for path in &self.chains {
-            index.validate(path)?;
+    /// Checks extension edges against an index containing the proposal paths without mutating it.
+    ///
+    /// `positions` must be the positions used to reconstruct this vote.
+    pub(crate) fn validate_extensions(
+        &self,
+        index: &PathIndex<D>,
+        positions: &[Position],
+    ) -> Result<(), Error> {
+        for (path, position) in self.chains.iter().zip(positions) {
+            index.validate(&path[position.get() as usize..])?;
         }
         Ok(())
     }

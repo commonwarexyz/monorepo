@@ -1,7 +1,7 @@
 use super::{
     Error, ProposalPaths, VotePaths,
     path::PathIndex,
-    tips::{FinalTips, PoolExtractor, Tips},
+    tips::{FinalTips, PoolExtractor, PreparedVotes, Tips},
 };
 use crate::{
     multimmit::{
@@ -486,7 +486,9 @@ fn proposal_and_vote_paths_reconstruct_exact_headers() {
             .unwrap();
     let mut ancestry = PathIndex::default();
     proposals.index(&mut ancestry).unwrap();
-    paths.index(&mut ancestry).unwrap();
+    paths
+        .index_extensions(&mut ancestry, body.positions())
+        .unwrap();
     let chain = paths.chain(ChainId::new(0)).unwrap();
 
     assert_eq!(chain.len(), 3);
@@ -500,6 +502,123 @@ fn proposal_and_vote_paths_reconstruct_exact_headers() {
         chain[2],
         proposals.block(ChainId::new(0), Position::new(2)).unwrap()
     );
+}
+
+#[test]
+fn extension_ancestry_matches_full_vote_paths() {
+    let config = config(6);
+    for leader in [leader(6), cross_certificate_leader(6, 0, false).leader] {
+        let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+        for position in 0..=2 {
+            let bodies = [
+                vote(&leader, position, &[], config),
+                vote(&leader, position, &[b"shared"], config),
+                vote(&leader, position, &[b"shared", b"child"], config),
+                vote(&leader, position, &[b"fork"], config),
+            ];
+            let mut full = PathIndex::default();
+            proposals.index(&mut full).unwrap();
+            let mut extensions = full.clone();
+            for body in &bodies {
+                let paths = VotePaths::new::<Sha256, MinSig>(
+                    &leader,
+                    leader.digest::<Sha256>(),
+                    &proposals,
+                    body,
+                )
+                .unwrap();
+                for chain in 0..config.chains() {
+                    full.insert(paths.chain(ChainId::new(chain as u32)).unwrap())
+                        .unwrap();
+                }
+                paths
+                    .validate_extensions(&extensions, body.positions())
+                    .unwrap();
+                paths
+                    .index_extensions(&mut extensions, body.positions())
+                    .unwrap();
+                assert_eq!(extensions, full);
+            }
+            let prepared = PreparedVotes::new::<Sha256, MinSig, _>(
+                &leader,
+                bodies
+                    .iter()
+                    .enumerate()
+                    .map(|(signer, body)| (Participant::new(signer as u32), body)),
+                config,
+            )
+            .unwrap();
+            assert_eq!(prepared.ancestry().unwrap(), full);
+        }
+    }
+}
+
+#[test]
+fn conflicting_extension_prevalidation_does_not_mutate_ancestry() {
+    let config = config(6);
+    let leader = leader(6);
+    let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+    let positions = vec![Position::new(1); config.chains()];
+    let mut extensions = vec![Extension::empty(); config.chains()];
+    extensions[0] = Extension::new(vec![digest(b"valid")], config.extension_bound()).unwrap();
+    extensions[1] = Extension::new(
+        vec![digest(b"first"), digest(b"conflicting")],
+        config.extension_bound(),
+    )
+    .unwrap();
+    let body =
+        VoteBody::for_leader::<Sha256, MinSig>(&leader, positions, extensions, config).unwrap();
+    let paths =
+        VotePaths::new::<Sha256, MinSig>(&leader, leader.digest::<Sha256>(), &proposals, &body)
+            .unwrap();
+    let suffix = &paths.chain(ChainId::new(1)).unwrap()[1..];
+    let mut ancestry = PathIndex::default();
+    proposals.index(&mut ancestry).unwrap();
+    ancestry
+        .insert_parent(
+            suffix[2],
+            BlockRef::new(
+                suffix[1].chain(),
+                suffix[1].height(),
+                digest(b"wrong parent"),
+            ),
+        )
+        .unwrap();
+    let before = ancestry.clone();
+    assert_eq!(
+        paths.validate_extensions(&ancestry, body.positions()),
+        Err(Error::ConflictingAncestry)
+    );
+    assert_eq!(ancestry, before);
+    assert_eq!(ancestry.insert(suffix), Err(Error::ConflictingAncestry));
+    assert_eq!(ancestry, before);
+}
+
+#[test]
+fn ancestry_parent_entry_preserves_existing_edges() {
+    let parent = BlockRef::new(ChainId::new(0), Height::zero(), digest(b"parent"));
+    let child = BlockRef::new(ChainId::new(0), Height::new(1), digest(b"child"));
+    let mut ancestry = PathIndex::default();
+    ancestry.insert_parent(child, parent).unwrap();
+    let before = ancestry.clone();
+    ancestry.insert_parent(child, parent).unwrap();
+    for (replacement, error) in [
+        (
+            BlockRef::new(parent.chain(), parent.height(), digest(b"other")),
+            Error::ConflictingAncestry,
+        ),
+        (
+            BlockRef::new(ChainId::new(1), parent.height(), parent.digest()),
+            Error::Vote,
+        ),
+        (
+            BlockRef::new(parent.chain(), Height::new(1), parent.digest()),
+            Error::Vote,
+        ),
+    ] {
+        assert_eq!(ancestry.insert_parent(child, replacement), Err(error));
+        assert_eq!(ancestry, before);
+    }
 }
 
 #[test]
