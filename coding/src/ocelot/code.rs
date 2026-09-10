@@ -369,3 +369,186 @@ fn derivative<I: Impl>(imp: I, data: &mut [u8], len: usize) {
     imp.add_into(a, b);
     derivative(imp, b, len);
 }
+
+#[cfg(any(test, feature = "arbitrary"))]
+pub mod test_suites {
+    //! Property tests for implementations of Ocelot's shard arithmetic.
+
+    use super::{Decoder, Encoder, Error, Impl};
+    use arbitrary::Unstructured;
+    use commonware_math::algebra::{Additive, Field, Ring};
+
+    fn point<I: Impl>(i: usize) -> I::Element {
+        I::basis()
+            .iter()
+            .enumerate()
+            .filter(|(bit, _)| i & (1 << bit) != 0)
+            .fold(I::Element::zero(), |acc, (_, b)| acc + b)
+    }
+
+    fn check_basis<I: Impl>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let basis = I::basis();
+        assert_eq!(basis.len(), I::BITS);
+        assert_eq!(basis[0], I::Element::one());
+        assert_eq!(basis[0] + &basis[0], I::Element::zero());
+        for pair in basis.windows(2) {
+            assert_eq!(pair[1] * &pair[1] - &pair[1], pair[0]);
+        }
+        let a = u.int_in_range(0..=I::ORDER - 1)?;
+        let b = u.int_in_range(0..=I::ORDER - 1)?;
+        assert_eq!(point::<I>(a) + &point::<I>(b), point::<I>(a ^ b));
+        assert_eq!(point::<I>(a) == point::<I>(b), a == b);
+        Ok(())
+    }
+
+    /// Evaluate the Lagrange interpolant directly, independently of the FFT.
+    fn encode_reference<I: Impl>(imp: I, original: &[&[u8]], r: usize) -> Vec<Vec<u8>> {
+        if r == 0 {
+            return Vec::new();
+        }
+        let m = r.next_power_of_two();
+        let n = (m + original.len()).next_power_of_two();
+        // Padded original positions are evaluations fixed to zero.
+        let nodes: Vec<_> = (m..n).map(point::<I>).collect();
+        let weights: Vec<_> = nodes
+            .iter()
+            .take(original.len())
+            .enumerate()
+            .map(|(j, x)| {
+                nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(t, _)| *t != j)
+                    .fold(I::Element::one(), |acc, (_, y)| acc * &(*x - y))
+                    .inv()
+            })
+            .collect();
+        (0..r)
+            .map(|i| {
+                let x = point::<I>(i);
+                let product = nodes
+                    .iter()
+                    .fold(I::Element::one(), |acc, y| acc * &(x - y));
+                let mut out = vec![0; original[0].len()];
+                for (j, shard) in original.iter().enumerate() {
+                    let weight = product * &weights[j] * &(x - &nodes[j]).inv();
+                    imp.mul_add(&mut out, shard, weight);
+                }
+                out
+            })
+            .collect()
+    }
+
+    fn check_invalid_counts<I: Impl>(
+        u: &mut Unstructured<'_>,
+        decoder: &Decoder<I>,
+    ) -> arbitrary::Result<()> {
+        let k = u.int_in_range(0..=I::ORDER + 1)?;
+        let r = u.int_in_range(0..=I::ORDER + 1)?;
+        let m = if r == 0 { 0 } else { r.next_power_of_two() };
+        let expected = if k == 0 || k + m > I::ORDER {
+            Error::InvalidShardCount
+        } else {
+            Error::InsufficientShards {
+                present: 0,
+                required: k,
+            }
+        };
+        assert_eq!(
+            decoder.decode(&vec![None; k], &vec![None; r]),
+            Err(expected)
+        );
+        Ok(())
+    }
+
+    /// Check the Cantor basis, encoding, erasure recovery, and input validation
+    /// with arbitrary counts, lengths, shard contents, and erasure positions.
+    ///
+    /// Pass this function to `commonware_invariants::minifuzz::test`, capturing
+    /// the implementation to test in the closure. Counts are capped at 256
+    /// padded positions to keep each case bounded for larger fields. Cases
+    /// with at most 32 padded positions also check direct interpolation.
+    pub fn fuzz_code<I: Impl>(u: &mut Unstructured<'_>, imp: I) -> arbitrary::Result<()> {
+        check_basis::<I>(u)?;
+        let encoder = Encoder::new(imp);
+        let decoder = Decoder::new(imp);
+        assert_eq!(encoder.encode(&[&[], &[]], 3), vec![Vec::<u8>::new(); 3]);
+        check_invalid_counts(u, &decoder)?;
+        let limit = I::ORDER.min(256);
+        let r: usize = u.int_in_range(0..=limit / 2)?;
+        let m = if r == 0 { 0 } else { r.next_power_of_two() };
+        let k = u.int_in_range(1..=limit - m)?;
+        let len = u.int_in_range(0..=65)? * I::ALIGN;
+        let mut original = vec![vec![0; len]; k];
+        for shard in &mut original {
+            u.fill_buffer(shard)?;
+        }
+        let mut positions: Vec<_> = (0..k + r).collect();
+        for i in (1..positions.len()).rev() {
+            positions.swap(i, u.int_in_range(0..=i)?);
+        }
+        let erased = u.int_in_range(0..=k + r)?;
+
+        let refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
+        let recovery = encoder.encode(&refs, r);
+        assert_eq!(recovery.len(), r);
+        assert!(recovery.iter().all(|s| s.len() == len));
+        assert_eq!(encoder.encode(&refs, r), recovery);
+        if m + k <= 32 {
+            assert_eq!(recovery, encode_reference(imp, &refs, r));
+        }
+
+        let input: Vec<_> = original
+            .iter()
+            .chain(&recovery)
+            .map(|s| Some(s.as_slice()))
+            .collect();
+        if k + r > 1 || I::ALIGN > 1 {
+            let mut malformed = original[0].clone();
+            malformed.push(0);
+            let mut input = input.clone();
+            input[0] = Some(&malformed);
+            assert_eq!(
+                decoder.decode(&input[..k], &input[k..]),
+                Err(Error::InvalidShardLength)
+            );
+        }
+
+        // Recovery from parity alone must work when enough parity is present.
+        if r >= k {
+            let recovered = decoder.decode(&vec![None; k], &input[k..]).unwrap();
+            assert_eq!(
+                recovered,
+                original.iter().cloned().enumerate().collect::<Vec<_>>()
+            );
+        }
+
+        // Exercise both sides of the recovery threshold, as well as an
+        // arbitrary erasure count, using the same encoder and decoder.
+        for count in [0, r, r + 1, erased] {
+            let mut input = input.clone();
+            for &i in &positions[..count] {
+                input[i] = None;
+            }
+            let result = decoder.decode(&input[..k], &input[k..]);
+            if count > r {
+                assert_eq!(
+                    result,
+                    Err(Error::InsufficientShards {
+                        present: k + r - count,
+                        required: k,
+                    })
+                );
+                continue;
+            }
+            let recovered = result.unwrap();
+            let missing: Vec<_> = (0..k).filter(|&i| input[i].is_none()).collect();
+            assert_eq!(recovered.len(), missing.len());
+            for ((i, shard), expected) in recovered.iter().zip(missing) {
+                assert_eq!(*i, expected);
+                assert_eq!(shard, &original[*i]);
+            }
+        }
+        Ok(())
+    }
+}
