@@ -1604,20 +1604,9 @@ where
             }
             let event = match source {
                 ReadinessCursor::PERSISTENCE => {
-                    let ready = self
-                        .journal_responses
-                        .front_mut()
-                        .and_then(|pending| (&mut pending.response).now_or_never());
-                    match ready {
-                        Some(result) => {
-                            let pending = self
-                                .journal_responses
-                                .pop_front()
-                                .expect("the completed journal response remains queued");
-                            Some(RuntimeEvent::Persistence((pending.root, result)))
-                        }
-                        None => None,
-                    }
+                    next_journal_response(true, &mut self.journal_responses)
+                        .now_or_never()
+                        .map(RuntimeEvent::Persistence)
                 }
                 ReadinessCursor::COMPLETION => {
                     let mut completion = None;
@@ -1880,6 +1869,13 @@ where
         loop {
             if !self.journal.has_capacity() {
                 break;
+            }
+            if self.can_admit(Lane::PersistenceCompletion)
+                && !self.journal_responses.is_empty()
+                && let Some(completion) =
+                    next_journal_response(true, &mut self.journal_responses).now_or_never()
+            {
+                self.handle_runtime_event(RuntimeEvent::Persistence(completion))?;
             }
             let span = self.round_span.clone();
             let action = span
@@ -3227,23 +3223,28 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::journal;
     use super::*;
     use crate::multimmit::{
         config::Limits,
+        engine::open_stores,
         machine::{Role, Tuning},
-        mocks::Committee,
+        mocks::{Committee, MockApplication, RecordingRelay, RecordingReporter},
     };
     use commonware_cryptography::{
         Sha256, bls12381::primitives::variant::MinPk, ed25519, sha256::Digest as Sha256Digest,
     };
     use commonware_macros::test_traced;
+    use commonware_p2p::utils::mocks::inert_channel;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
-        Runner as _, Supervisor as _, deterministic,
+        Runner as _, Supervisor as _,
+        buffer::paged::{self, CacheRef},
+        deterministic,
         telemetry::traces::collector::{CollectingLayer, TraceStorage},
         tokio,
     };
-    use commonware_utils::sync::Condvar;
+    use commonware_utils::{NZU64, sync::Condvar, test_rng};
     use std::{
         num::NonZeroUsize,
         sync::atomic::{AtomicBool, Ordering},
@@ -3408,6 +3409,217 @@ mod tests {
                 assert!(carried.is_none());
                 assert!(receiver.try_recv().is_err());
             }
+        });
+    }
+
+    #[test]
+    fn ready_persistence_successor_enters_the_ongoing_core_cycle() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let committee = Committee::<MinPk>::new(87, 6, Limits::new(2, 1).unwrap());
+            let profile = Profile::new(committee.config.clone(), Role::Validator(Participant::new(0)), Tuning::default())
+                .unwrap();
+            let mut store_context = context.child("stores");
+            let stores = open_stores(
+                &mut store_context,
+                profile,
+                "ready_successor",
+                &committee.verifier,
+                &Sequential,
+                CacheRef::from_pooler(
+                    &context,
+                    paged::page_size(4096),
+                    NonZeroUsize::new(8).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+            let Startup::Fresh { core, journal } = stores.startup else {
+                panic!("fresh stores");
+            };
+            let mut machine = *core;
+            let (journal, journal_monitor) = journal::spawn(
+                context.child("journal"),
+                *journal,
+                NonZeroUsize::new(64).unwrap(),
+                NonZeroUsize::new(1024 * 1024).unwrap(),
+                Duration::ZERO,
+            );
+
+            // Issue real barriers without delivering their responses back to Core.
+            let collect = |machine: &mut CoreState<Sha256, MinPk>| {
+                let mut jobs = Vec::new();
+                loop {
+                    let capabilities = match machine.next_action(POLL_BUDGET).unwrap() {
+                        CoreTurn::Input(input) => input.transition.into_parts().0,
+                        CoreTurn::Work(work) => work.into_parts().0,
+                        CoreTurn::YieldRequired => {
+                            machine.resume_after_yield().unwrap();
+                            continue;
+                        }
+                        CoreTurn::Idle => break,
+                    };
+                    let mut released = Vec::new();
+                    for capability in capabilities {
+                        match capability {
+                            Capability::Durability(DurabilityCapability::Persist(directive)) => {
+                                let (job, _, after_enqueue, _) = directive.into_parts();
+                                jobs.push(job);
+                                released.extend(after_enqueue);
+                            }
+                            Capability::Durability(DurabilityCapability::Released(job)) => {
+                                released.push(job);
+                            }
+                            Capability::Leader(LeaderCapability::ArmTimer(timer)) => {
+                                machine.leader_timer_fired(timer).unwrap();
+                            }
+                            Capability::Verification(VerificationCapability::Verify(job)) => {
+                                let completion = job.verify::<_, ed25519::PublicKey, Sha256>(
+                                    &mut test_rng(),
+                                    &committee.verifier,
+                                    &Sequential,
+                                );
+                                machine.verification_completed(completion).unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                    for job in released {
+                        match job.request() {
+                            DurableEffect::Sign(request) => {
+                                let artifact = sign_request(&committee.signers[0], request).unwrap();
+                                machine.signing_completed(job.id(), job.generation(), Arc::new(artifact)).unwrap();
+                            }
+                            DurableEffect::SignBatch(requests) => {
+                                let artifacts = requests.iter().map(|request| sign_request(&committee.signers[0], request).unwrap()).collect();
+                                machine.signing_batch_completed(job.id(), job.generation(), artifacts).unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                jobs
+            };
+            machine.start_fresh().unwrap();
+            let mut startup = VecDeque::from(collect(&mut machine));
+            while let Some(job) = startup.pop_front() {
+                let durable = journal.try_append(Span::none(), job).ok().unwrap().await.unwrap();
+                machine.persistence_completed(durable.ack).unwrap();
+                startup.extend(collect(&mut machine));
+            }
+            let mut responses = VecDeque::new();
+            for view in 1..=3 {
+                let artifact = Artifact::Nullification(committee.nullification(view))
+                    .identify::<Sha256>(&mut Vec::new());
+                let bytes = artifact.id.encode_size() + artifact.artifact.encode_size();
+                machine.observe(vec![artifact], bytes).unwrap();
+                for job in collect(&mut machine) {
+                    responses.push_back(PendingJournal {
+                        response: journal.try_append(Span::none(), job).ok().unwrap(),
+                        root: Span::none(),
+                    });
+                }
+            }
+            assert!(responses.len() >= 3, "two completions and a FIFO readiness witness: got {}", responses.len());
+            // The journal sends replies in append order. Receiving the last reply proves every
+            // earlier response is already ready, without polling or consuming those responses.
+            let witness = responses.pop_back().unwrap().response.await.unwrap();
+            let first = responses.pop_front().unwrap();
+            let first_durable = first.response.await.unwrap();
+            let first_ack = first_durable.ack;
+            let pending = responses.len();
+            let limits = VoterLimits {
+                inflight_application: NonZeroUsize::new(4).unwrap(),
+                retry_initial: Duration::from_millis(100),
+                retry_ceiling: Duration::from_millis(400),
+                heartbeat: Duration::from_secs(3600),
+                checkpoint_interval: NZU64!(1_000_000),
+                skip_timeout: None,
+            };
+            let (batcher, _batcher_rx) = mailbox::new(context.child("batcher"), NonZeroUsize::new(64).unwrap());
+            let (resolver, _resolver_rx) = mailbox::new(context.child("resolver"), NonZeroUsize::new(64).unwrap());
+            let (sender, _receiver) = inert_channel(&committee.identities);
+            let hooks = TestHooks::default();
+            let initial_view = machine.inspection().view();
+            let mut driver = Driver {
+                context: context.child("driver"),
+                protocol_epoch: committee.config.epoch(),
+                leaders: machine.profile().protocol().leaders().clone(),
+                participant: Some(Participant::new(0)),
+                last_activity: vec![None; committee.identities.len()],
+                scheme: Arc::new(committee.signers[0].clone()),
+                strategy: Sequential,
+                critical_strategy: Sequential,
+                automaton: MockApplication::default(),
+                relay: RecordingRelay::default(),
+                reporter: RecordingReporter::default(),
+                machine,
+                journal,
+                journal_monitor,
+                journal_responses: responses,
+                pending_checkpoint: None,
+                pending_prune: None,
+                checkpoints: None,
+                egress: Egress::new(committee.config.epoch(), limits),
+                limits,
+                batcher,
+                resolver,
+                data: sender.clone(),
+                consensus: sender.clone(),
+                certificates: sender,
+                observation_sources: BTreeMap::new(),
+                input_spans: BTreeMap::new(),
+                verification_sources: BTreeMap::new(),
+                jobs: Pool::default(),
+                crypto: Pool::default(),
+                verification_tasks: BTreeMap::new(),
+                fast_verifications: VecDeque::new(),
+                bulk_verifications: VecDeque::new(),
+                verification_queue_limit: 64,
+                observation_batch: 8,
+                carried_observation: None,
+                pending_inspection: None,
+                active_custody: BTreeMap::new(),
+                view_timer: None,
+                production_timer: None,
+                heartbeat_at: context.current() + Duration::from_secs(3600),
+                events_since_checkpoint: 0,
+                round_view: initial_view,
+                round_span: Span::none(),
+                view_started_at: BTreeMap::new(),
+                block_arrivals: BlockArrivals::new(),
+                last_producer_progress: None,
+                producer_blocked_since: None,
+                producer_stall_reported: false,
+                da_own_chain: None,
+                da_updates: None,
+                da_update_sender: None,
+                da_command: None,
+                da_command_receiver: None,
+                da_handle: None,
+                validator_commands: Vec::new(),
+                validator_receivers: Vec::new(),
+                validator_handles: Vec::new(),
+                metrics: ActorMetrics::new(&context.child("metrics"), 1),
+                test_hooks: hooks.clone(),
+            };
+            driver.persistence_completed(first_durable, &Span::none()).unwrap();
+            assert!(!driver.can_admit(Lane::PersistenceCompletion));
+            driver.drive_core_cycle().await.unwrap();
+            let services = hooks.services();
+            assert_eq!(services.first().map(|(_, lane)| *lane), Some(Lane::PersistenceCompletion));
+            assert!(
+                driver.journal_responses.len() < pending,
+                "a ready FIFO successor must enter Core during the cycle that frees its admission slot"
+            );
+            assert!(services.windows(2).all(|pair| pair[0].0 == pair[1].0));
+            assert!(services.iter().filter(|(_, lane)| *lane == Lane::PersistenceCompletion).count() >= 2);
+            let acknowledgements = hooks.events().into_iter().filter_map(|event| match event {
+                TestEvent::Acknowledged { ack, .. } => Some(ack),
+                _ => None,
+            }).collect::<Vec<_>>();
+            assert_eq!(acknowledgements[0], first_ack);
+            assert!(acknowledgements.windows(2).all(|pair| pair[0].cursor() <= pair[1].cursor()));
+            assert!(acknowledgements.last().unwrap().cursor() < witness.ack.cursor());
         });
     }
 
