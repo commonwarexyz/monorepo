@@ -607,12 +607,12 @@ pub mod tests {
         IoBuf, IoBufMut, IoBufs,
         iouring::{
             request::{
-                Cache, Held, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
-                SyncRequest, WriteAtRequest, WriteAtState,
+                Cache, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput, SyncRequest,
+                WriteAtRequest, WriteAtState,
             },
             waker::tests::wait_until_eventfd_armed,
         },
-        storage::hold::Hold,
+        storage::hold::{Held, Hold},
     };
     use commonware_utils::channel::oneshot;
     use std::{

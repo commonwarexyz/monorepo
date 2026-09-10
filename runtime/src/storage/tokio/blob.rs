@@ -1,6 +1,6 @@
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
-    storage::hold::Hold,
+    storage::hold::{Held, Hold},
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
@@ -8,7 +8,6 @@ use commonware_utils::channel::oneshot;
 use std::{
     fs::File,
     io::IoSlice,
-    ops::Deref,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
         Arc,
@@ -46,29 +45,6 @@ impl Cache {
         };
         supported.store(false, Ordering::Relaxed);
         true
-    }
-}
-
-/// A blob's file bundled with the hold on its storage directory.
-///
-/// An operation must capture the file to touch it, so it carries the hold
-/// into the blocking pool without having to remember to.
-struct Held {
-    file: File,
-    _hold: Arc<Hold>,
-}
-
-impl Held {
-    fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
-        Arc::new(Self { file, _hold: hold })
-    }
-}
-
-impl Deref for Held {
-    type Target = File;
-
-    fn deref(&self) -> &File {
-        &self.file
     }
 }
 

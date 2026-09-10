@@ -14,12 +14,11 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::hold::Hold};
+use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::hold::Held};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
     net::TcpListener,
-    ops::Deref,
     os::fd::{AsRawFd, OwnedFd},
     sync::{
         Arc,
@@ -362,32 +361,6 @@ pub enum RetiredResources {
         /// Boxed native address whose kernel access has ended.
         _address: Box<SockAddr>,
     },
-}
-
-/// A blob's file bundled with the hold on its storage directory.
-///
-/// Each request retains this owner, keeping the directory hold alive while any
-/// blob or request still owns the file.
-pub struct Held {
-    /// Open file shared by every request on the blob.
-    file: File,
-    /// Directory exclusion retained until every file and request is released.
-    _hold: Arc<Hold>,
-}
-
-impl Held {
-    /// Retain a file and the directory hold that protects its storage.
-    pub fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
-        Arc::new(Self { file, _hold: hold })
-    }
-}
-
-impl Deref for Held {
-    type Target = File;
-
-    fn deref(&self) -> &Self::Target {
-        &self.file
-    }
 }
 
 /// Shared classification of a CQE result for the request state machines.
@@ -878,7 +851,7 @@ impl PollRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::waiter::tests::waiter_id;
+    use crate::{iouring::waiter::tests::waiter_id, storage::hold::Hold};
     use bytes::Bytes;
     use std::{
         net::SocketAddr,

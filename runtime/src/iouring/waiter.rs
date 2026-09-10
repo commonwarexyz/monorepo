@@ -498,12 +498,12 @@ pub mod tests {
         IoBuf, IoBufMut, IoBufs,
         iouring::{
             request::{
-                Cache, ConnectRequest, Held, PollRequest, ReadAtRequest, RecvRequest, SendRequest,
+                Cache, ConnectRequest, PollRequest, ReadAtRequest, RecvRequest, SendRequest,
                 SyncRequest,
             },
             slab::tests::set_generation,
         },
-        storage::hold::Hold,
+        storage::hold::{Held, Hold},
     };
     use std::{
         fs::File,
