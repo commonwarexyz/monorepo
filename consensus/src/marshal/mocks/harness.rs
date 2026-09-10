@@ -3083,8 +3083,9 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
         setup_network_links(&mut oracle, &participants, link.clone()).await;
 
         let mut blocks = Vec::new();
-        let mut parent = Sha256::hash(&[b""]);
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let genesis = H::genesis_block(participants.len() as u16);
+        let mut parent = H::digest(&genesis);
+        let mut parent_commitment = H::commitment(&genesis);
         for i in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
                 parent,

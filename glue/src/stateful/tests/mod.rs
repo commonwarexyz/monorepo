@@ -372,14 +372,11 @@ where
     let validator = engine.participants()[0].clone();
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Schedule(
-            Schedule::new()
-                .at(
-                    Duration::from_millis(2500),
-                    Action::Crash(validator.clone()),
-                )
-                .at(Duration::from_millis(5000), Action::Restart(validator)),
-        ))
+        .crash(Crash::ProcessedHeight {
+            participant: validator,
+            heights: 10..=49,
+            downtime: Duration::from_millis(2500),
+        })
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
         .run()
@@ -554,6 +551,11 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::ZERO,
+            success_rate: probability!(1.0),
+        })
         .crash(Crash::Random {
             frequency: Duration::from_millis(1500),
             downtime: Duration::from_secs(1),
@@ -574,13 +576,18 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::ZERO,
+            success_rate: probability!(1.0),
+        })
         .crash(Crash::Random {
-            frequency: Duration::from_millis(1500),
+            frequency: Duration::from_secs(5),
             downtime: Duration::from_secs(1),
             count: 3,
         })
-        .exit_condition(ProcessedHeightAtLeast::new(50))
-        .property(BlockAgreementAtHeight::new(50))
+        .exit_condition(ProcessedHeightAtLeast::new(100))
+        .property(BlockAgreementAtHeight::new(100))
         .run()
         .unwrap();
 }
@@ -772,8 +779,13 @@ where
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
-    PlanBuilder::new(engine)
+    let results = PlanBuilder::new(engine)
         .seeds(0..5)
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::ZERO,
+            success_rate: probability!(1.0),
+        })
         .crash(Crash::Random {
             frequency: Duration::from_millis(500),
             downtime: Duration::from_millis(100),
@@ -783,6 +795,12 @@ where
         .property(BlockAgreementAtHeight::new(50))
         .run()
         .unwrap();
+    for result in results {
+        assert!(
+            result.crashes >= 2,
+            "rapid recovery requires repeated crashes"
+        );
+    }
 }
 
 /// Temporarily partition one validator from the network, then heal,

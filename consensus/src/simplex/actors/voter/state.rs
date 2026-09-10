@@ -1365,6 +1365,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         mut parent: View,
         mut visit: impl FnMut(&D),
     ) -> Result<(), AncestryError> {
+        // A certificate's ancestors require certificates: a local vote at an
+        // earlier view may name a different proposal on an equivocating branch.
+        let mut optimistic = true;
         loop {
             if parent < self.last_finalized {
                 return Err(AncestryError::Invalid);
@@ -1378,6 +1381,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 .get(&parent)
                 .ok_or(AncestryError::Missing(parent))?;
             let proposal = if round.is_directly_notarized() {
+                optimistic = false;
                 round
                     .finalization()
                     .map(|certificate| &certificate.proposal)
@@ -1387,7 +1391,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                             .map(|certificate| &certificate.proposal)
                     })
             } else {
-                (round.has_unequivocated_proposal()
+                (optimistic
+                    && round.has_unequivocated_proposal()
                     && round.broadcast_notarize()
                     && round.is_verified())
                 .then(|| round.proposal())
@@ -4680,6 +4685,68 @@ mod tests {
             let finalization = build_finalization(&verifier, &schemes, &proposal);
             assert!(state.add_finalization(finalization).0);
             assert!(state.forwardable_proposal(view).is_some());
+        });
+    }
+
+    #[test]
+    fn ancestry_repairs_local_ancestor_below_notarized_parent() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+            let local = fetch_proposal(1, 0, 130);
+            assert!(state.set_proposal(local.view(), local.clone()));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert!(state.verified(local.view()));
+            assert!(state.construct_notarize(local.view()).is_some());
+
+            // A quorum excluding this validator can select a different proposal
+            // at view one before its notarization reaches this validator.
+            let quorum = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let selected = fetch_proposal(1, 0, 131);
+            let parent = fetch_proposal(2, 1, 132);
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &quorum, &parent))
+                    .0
+            );
+            let Verify::Ready(_, verifying_parent) = state.try_verify() else {
+                panic!("notarized parent should start verification");
+            };
+            assert_eq!(verifying_parent, parent);
+            let candidate = fetch_proposal(3, 2, 133);
+            assert!(state.set_proposal(candidate.view(), candidate.clone()));
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve { proposal, view, kind: Kind::Notarization, .. }
+                    if proposal == candidate.view() && view == selected.view()
+            ));
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &quorum, &selected))
+                    .0
+            );
+            let Verify::Ready(context, actual) = state.try_verify() else {
+                panic!("selected ancestry repair must preserve the verification request");
+            };
+            assert_eq!(actual, candidate);
+            assert_eq!(context.parent, (parent.view(), parent.payload));
+            assert_eq!(
+                state.ancestry(parent.view()).unwrap().as_ref(),
+                &[test_genesis(), selected.payload, parent.payload],
+            );
         });
     }
 

@@ -135,31 +135,15 @@ impl<S: Scheme, C: Digest> State<S, C> {
         fetch.above_round_floor(self.round)
     }
 
-    pub(super) fn fetch_if_permitted<R>(
-        &self,
-        resolver: &mut R,
-        fetch: Request<C>,
-    ) -> FetchAdmission
+    pub(super) fn fetch_if_permitted<R>(&self, resolver: &mut R, fetch: Request<C>)
     where
         R: Resolver<Key = Key<C>, Subscriber = Annotation>,
     {
         if !self.permits(&fetch) {
-            return FetchAdmission::Denied;
+            return;
         }
         resolver.fetch(fetch);
-        FetchAdmission::Issued
     }
-}
-
-/// Whether floor admission issued the resolver fetch.
-#[must_use = "fetch admission must be handled explicitly"]
-pub(super) enum FetchAdmission {
-    Issued,
-    Denied,
-}
-
-impl FetchAdmission {
-    pub(super) const fn ignore(self) {}
 }
 
 #[cfg(test)]
@@ -244,10 +228,7 @@ mod tests {
             Annotation::Round(round(4)),
             Annotation::Round(round(5)),
         ] {
-            assert!(matches!(
-                floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention)),
-                FetchAdmission::Denied
-            ));
+            floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention));
         }
         assert!(resolver.fetches().is_empty());
 
@@ -257,10 +238,7 @@ mod tests {
             Annotation::Subscription,
         ];
         for retention in retained {
-            assert!(matches!(
-                floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention)),
-                FetchAdmission::Issued
-            ));
+            floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention));
         }
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), retained.len());
@@ -275,10 +253,7 @@ mod tests {
         let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
         let mut resolver = TestResolver::default();
         let retention = Annotation::Height(Height::zero());
-        assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention)),
-            FetchAdmission::Issued
-        ));
+        floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention));
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 1);
         assert_eq!(fetches[0].key, Key::Block(digest(1)));

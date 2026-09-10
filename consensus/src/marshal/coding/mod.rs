@@ -853,6 +853,75 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_exact_delivery_leaves_parent_validation_to_verifier() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-exact-parent-validation",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let genesis = genesis_block();
+            let parent_commitment = genesis_coding_commitment(&genesis);
+            let parent = TestCodedBlock::new_trusted(genesis, parent_commitment);
+            let candidate_context = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: default_leader(),
+                parent: (View::zero(), parent_commitment),
+            };
+            let config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let block = TestCodedBlock::new(
+                make_coding_block(
+                    candidate_context.clone(),
+                    Sha256::hash(&[b"different parent"]),
+                    Height::new(1),
+                    100,
+                ),
+                config,
+                &Sequential,
+            );
+            let commitment = block.commitment();
+            assert!(
+                super::validation::validate_reconstruction(block.inner(), config, commitment)
+                    .is_ok()
+            );
+            let subscription = marshal.acquire(commitment);
+            while resolver.fetches().is_empty() {
+                reschedule().await;
+            }
+            let fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| fetch.key == handler::Key::Block(commitment))
+                .expect("exact commitment fetch");
+            assert!(
+                resolver.deliver(fetch, block.encode()).await,
+                "the peer served the requested commitment"
+            );
+            let delivered = subscription
+                .await
+                .expect("exact body must reach its verifier");
+            assert_eq!(delivered.commitment(), commitment);
+            assert_eq!(
+                super::validation::validate_block(
+                    &FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    delivered.as_ref(),
+                    &parent,
+                    &candidate_context,
+                    commitment,
+                    parent_commitment,
+                ),
+                Err(super::validation::BlockError::ParentDigest),
+            );
+            assert!(marshal.get_block(Height::new(1)).await.is_none());
+            assert!(marshal.get_finalization(Height::new(1)).await.is_none());
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_acquire_parent_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

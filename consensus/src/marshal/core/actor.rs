@@ -812,12 +812,10 @@ where
                     // The finalization carries a round and commitment, but not a
                     // height. Keep the request round-bound until the block is decoded.
                     debug!(?round, ?commitment, "finalized block missing");
-                    self.floor
-                        .fetch_if_permitted(
-                            resolver,
-                            Request::new(commitment, Annotation::Round(round)),
-                        )
-                        .ignore();
+                    self.floor.fetch_if_permitted(
+                        resolver,
+                        Request::new(commitment, Annotation::Round(round)),
+                    );
                 }
             }
             Message::GetBlock {
@@ -1166,8 +1164,7 @@ where
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
         self.floor
-            .fetch_if_permitted(resolver, Request::new(commitment, Annotation::Round(round)))
-            .ignore();
+            .fetch_if_permitted(resolver, Request::new(commitment, Annotation::Round(round)));
         self
     }
 
@@ -1419,7 +1416,8 @@ where
         };
         if V::commitment(&block) != commitment
             || block.digest() != digest
-            || (block.height() > Height::zero()
+            || (self.floor.matches_pending_anchor(commitment)
+                && block.height() > Height::zero()
                 && block.parent() != V::commitment_to_inner(V::parent_commitment(&block)))
             || parent_height.is_some_and(|height| height != block.height())
             || certified_height.is_some_and(|height| height != block.height())
@@ -1940,12 +1938,10 @@ where
                     wrote |= stored;
                 } else {
                     // Request the missing block.
-                    self.floor
-                        .fetch_if_permitted(
-                            resolver,
-                            Request::new(commitment, Annotation::Height(last_finalized)),
-                        )
-                        .ignore();
+                    self.floor.fetch_if_permitted(
+                        resolver,
+                        Request::new(commitment, Annotation::Height(last_finalized)),
+                    );
                 }
             }
         }
@@ -2004,12 +2000,10 @@ where
                     let parent_height = height
                         .previous()
                         .expect("cursor above gap start has a parent");
-                    self.floor
-                        .fetch_if_permitted(
-                            resolver,
-                            Request::new(parent_commitment, Annotation::Height(parent_height)),
-                        )
-                        .ignore();
+                    self.floor.fetch_if_permitted(
+                        resolver,
+                        Request::new(parent_commitment, Annotation::Height(parent_height)),
+                    );
                     break 'cache_repair;
                 }
             }

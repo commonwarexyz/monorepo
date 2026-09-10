@@ -331,10 +331,14 @@ where
             );
             return Some(false);
         }
-        if !self
-            .execution
-            .cache_pending(block_digest, parent.digest, round, merkleized, true)
-        {
+        if !self.execution.cache_pending(
+            block_digest,
+            parent.digest,
+            block.height(),
+            round,
+            merkleized,
+            true,
+        ) {
             warn!(
                 parent_digest = ?parent.digest,
                 ?block_digest,
