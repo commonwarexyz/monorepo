@@ -110,14 +110,14 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
             let (blocks, finalizations) = futures::join!(
                 async {
                     blocks
-                        .put(block)
+                        .put(&block)
                         .await
                         .unwrap_or_else(|e| panic!("failed to store finalized block: {e}"))
                 },
                 async {
                     match finalization {
                         Some(finalization) => finalizations
-                            .put(height, digest, finalization)
+                            .put(height, digest, &finalization)
                             .await
                             .unwrap_or_else(|e| panic!("failed to store finalization: {e}")),
                         None => finalizations,
@@ -393,7 +393,7 @@ where
         }
     };
 
-    if response_tx.send_lossy((finalization, V::into_inner(block)).encode()) {
+    if response_tx.send_lossy((finalization, V::into_shared(block)).encode()) {
         metrics.served.inc();
     } else {
         metrics.abandoned.inc();

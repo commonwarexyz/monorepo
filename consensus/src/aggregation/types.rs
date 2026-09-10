@@ -5,8 +5,8 @@ use crate::{
     aggregation::scheme,
     types::{Epoch, Height},
 };
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest,
     certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
@@ -608,7 +608,7 @@ mod tests {
         3u8.write(&mut buf); // Invalid discriminant
 
         let cfg = fixture.schemes[0].certificate_codec_config();
-        let result = Activity::<S, Sha256Digest>::read_cfg(&mut &buf[..], &cfg);
+        let result = Activity::<S, Sha256Digest>::read_cfg(&mut buf, &cfg);
         assert!(matches!(
             result,
             Err(CodecError::Invalid(

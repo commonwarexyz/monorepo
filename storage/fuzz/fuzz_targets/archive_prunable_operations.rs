@@ -182,7 +182,7 @@ fn fuzz(data: FuzzInput) {
                     // Put the item into the archive. A put below the prune floor is
                     // satisfied without storing, so the model only records puts at or
                     // above the floor.
-                    archive = archive.put(*index, key, value).await.expect("put failed");
+                    archive = archive.put(*index, key, &value).await.expect("put failed");
                     let below_floor = oldest_allowed.is_some_and(|min| *index < min);
 
                     // Only add if not already written (Archive doesn't allow overwrites)
@@ -208,7 +208,7 @@ fn fuzz(data: FuzzInput) {
                     let value = Value::new(value_data);
 
                     archive = archive
-                        .put_multi(index, key, value)
+                        .put_multi(index, key, &value)
                         .await
                         .expect("put_multi failed");
                     let below_floor = oldest_allowed.is_some_and(|min| index < min);

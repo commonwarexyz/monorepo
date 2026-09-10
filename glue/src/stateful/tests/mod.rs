@@ -1201,7 +1201,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),
@@ -1333,7 +1333,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "stable-leader-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(64),
                     view_retention: ViewDelta::new(BLOCKS),
@@ -1524,7 +1524,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-multi-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),
@@ -1778,7 +1778,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "prune-overlap-multi-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),

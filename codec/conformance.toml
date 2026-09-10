@@ -1,3 +1,11 @@
+["commonware_codec::codec::tests::conformance::CodecConformance<Arc<Vec<u8>>>"]
+n_cases = 65536
+hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"
+
+["commonware_codec::codec::tests::conformance::CodecConformance<Arc<u64>>"]
+n_cases = 65536
+hash = "60235eab7c1e2b919b14bd3b8cfd3f6ca311f2de976a061ef99a5be848cbb61e"
+
 ["commonware_codec::mode::tests::conformance::CodecConformance<Modes<1>>"]
 n_cases = 65536
 hash = "39a93e796b1f7608760451ba8c4f9ced2a7d657ceeeab42eeacddef0d0fc9682"

@@ -4,9 +4,9 @@
 mod conformance;
 
 use crate::{Hasher, sha256::Sha256};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize, FixedSize,
+    Buf, EncodeSize, FixedSize,
     codec::{Read, Write},
     error::Error as CodecError,
 };

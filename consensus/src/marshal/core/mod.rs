@@ -53,6 +53,7 @@ pub(crate) mod durability;
 mod floor;
 pub use floor::Floor;
 mod finalized;
+mod staged;
 mod stream;
 
 mod mailbox;

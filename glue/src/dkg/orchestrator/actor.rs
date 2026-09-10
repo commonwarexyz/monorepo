@@ -518,7 +518,7 @@ where
             return None;
         };
         let commitment = MV::commitment(&boundary);
-        let block = MV::into_inner(boundary);
+        let block = MV::into_shared(boundary);
         let Some(Payload::EpochInfo(info)) = block.payload() else {
             panic!("boundary block {height} missing epoch info");
         };
