@@ -15,11 +15,11 @@ katex: true
 <link rel="stylesheet" href="private-payments.css">
 ```
 
-When I first started thinking about private payments, I kept asking how fast they could be. The answers usually ranged from a few hundred to a thousand payments per second, while experiments with ordinary payments were already reaching 100K+ TPS. With a single thread able to verify roughly 1,000 Groth16 proofs per second, I expected better engineering and more parallelism to close the gap.
+When I first started thinking about private payments, I focused on throughput. The figures I saw usually ranged from a few hundred to a thousand payments per second, while experiments with ordinary payments were already reaching 100K+ TPS. With a single thread able to verify roughly 1,000 Groth16 proofs per second, I expected better engineering and more parallelism to close the gap.
 
-Working on the Commonware Library changed the question. Once the chain could process transactions [this fast](https://commonware.xyz/blogs/pipelining-simplex), I had to ask whether the cryptography could keep up.
+Working on the Commonware Library raised that throughput target. Once the chain could process transactions [at this rate](https://commonware.xyz/blogs/pipelining-simplex), I had to ask what it would take to sustain comparable throughput for private payments.
 
-Sustaining that throughput takes more than fast proof verification. Validators must also reject double spending without accumulating an unmanageable amount of state. And a wallet that has been offline for months should be able to return and make a payment without catching up on everyone else's activity.
+Verification cost is only part of that question. Validators must also reject double spending without accumulating an unmanageable amount of state as the payment history grows. And a wallet that has been offline for months should be able to return and make a payment without catching up on everyone else's activity.
 
 Our goal is to support private payments at over a million transactions per second, with low latency. Assuming each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (using [Groth16](https://eprint.iacr.org/2016/260), say), a million transactions per second requires:
 
@@ -190,15 +190,30 @@ A sender delivers the receipt opening and its position to the recipient through 
 
 Receiving a receipt does not automatically credit an account. The recipient chooses whether and when to claim it, so they can leave unsolicited payments from unwanted or malicious sources unclaimed.
 
-## Privacy Beyond the Ledger
+## Undermining Account Indistinguishability
 
-Privacy also depends on how a transaction reaches the ledger. An intermediary RPC service can observe which client submitted a transaction and when, even if the ledger hides the acting account. A wallet that submits its own transactions through that service can therefore expose a link between the client and those transactions.
+Even when the ledger hides the acting account, an RPC service can learn which client submitted each transaction and when. If a wallet submits its own transactions through an identifiable connection or session, the operator can group those submissions.
+
+In the example below, three wallets submit transactions through one RPC service. Switch between **Ledger observer** and **RPC operator** to see how submission metadata changes the view.
+
+```{=html}
+<div id="rpc-diagram" role="region" aria-label="Transaction grouping by an RPC operator">
+    <noscript>
+        <p>The RPC operator observes transactions 1, 3, and 6 from client A;
+        2 and 5 from client B; and 4 from client C. The public ledger does
+        not contain these client labels.</p>
+    </noscript>
+</div>
+```
+
+These groups identify submission sources: one client may use several accounts, and a relay may submit for several users. The grouping alone does not reveal payment amounts or recipients.
 
 [Ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded-note systems still provides stronger **on-chain** privacy: it hides which account is acting. Bonsai publishes that account identifier while hiding balances, amounts, the recipient, and whether the action is a send or receive. The RPC observation is available to the service handling the submission; Bonsai's account identifier is visible to anyone reading the ledger. Both the public record and the wallet's network connection matter when evaluating privacy in practice.
 
 ```{=html}
 <script src="private-payments.sim.js"></script>
 <script src="private-payments.counter.js"></script>
+<script src="private-payments.rpc.js"></script>
 ```
 
 ## Scalable Private Payments

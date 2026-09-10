@@ -462,3 +462,131 @@
 @media (max-width: 600px) {
     .sim-counters { flex-direction: column; }
 }
+
+#rpc-diagram {
+    margin: 18px 0;
+    font-family: monospace;
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+#rpc-diagram .rpc-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+}
+
+#rpc-diagram .rpc-controls label {
+    cursor: pointer;
+}
+
+#rpc-diagram input {
+    accent-color: #0000ee;
+}
+
+#rpc-diagram input:focus-visible {
+    outline: 2px solid #0000ee;
+    outline-offset: 3px;
+}
+
+#rpc-diagram .rpc-status,
+#rpc-diagram .rpc-caption {
+    margin: 10px 0;
+    line-height: 1.45;
+}
+
+#rpc-diagram .rpc-flow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1.4fr) 20px minmax(0, 1.1fr);
+    align-items: center;
+    gap: 8px;
+}
+
+#rpc-diagram .rpc-node {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid #bbb;
+    background: #fafafa;
+    overflow-wrap: anywhere;
+}
+
+#rpc-diagram .rpc-relay {
+    border-color: #1f1fd1;
+    background: #fff;
+}
+
+#rpc-diagram .rpc-detail {
+    display: block;
+    margin-top: 6px;
+    color: #555;
+    font-size: 13px;
+}
+
+#rpc-diagram .rpc-arrow {
+    color: #1f1fd1;
+    justify-self: center;
+    text-align: center;
+    font-size: 24px;
+}
+
+#rpc-diagram .rpc-transactions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+}
+
+#rpc-diagram .rpc-transactions li {
+    margin: 0;
+    padding: 4px;
+    border: 1px solid #bbb;
+    background: white;
+    text-align: center;
+}
+
+#rpc-diagram .rpc-groups {
+    margin-top: 12px;
+}
+
+#rpc-diagram .rpc-group-title {
+    color: #d9251c;
+    font-size: 12px;
+}
+
+#rpc-diagram .rpc-group {
+    display: grid;
+    gap: 2px;
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-left: 3px solid #d9251c;
+    background: #fffbe8;
+}
+
+#rpc-diagram .rpc-caption {
+    color: #555;
+    font-size: 12px;
+}
+
+#rpc-diagram [hidden] {
+    display: none;
+}
+
+@media (max-width: 600px) {
+    #rpc-diagram .rpc-flow {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 4px;
+    }
+
+    #rpc-diagram .rpc-arrow {
+        transform: rotate(90deg);
+    }
+
+    #rpc-diagram .rpc-transactions {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
