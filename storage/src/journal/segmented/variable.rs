@@ -732,7 +732,11 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        repair_blob(&mut self.journal, section, recoverable).await?;
+        self.journal
+            .0
+            .writer(section)
+            .truncate_pending(recoverable)
+            .await?;
         let mut reader = self
             .journal
             .0
@@ -771,7 +775,11 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         // track replay-time repaired sections separately. Keep the interruption guard set
         // until the repair is durable.
         self.repairing = true;
-        repair_blob(&mut self.journal, section, valid_offset).await?;
+        self.journal
+            .0
+            .writer(section)
+            .truncate_pending(valid_offset)
+            .await?;
         self.repairing = false;
         Ok(())
     }
@@ -946,17 +954,6 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         }
         Ok(self.journal)
     }
-}
-
-/// Truncates `section`'s blob to `size` and makes the truncation durable.
-async fn repair_blob<E: Storage + Metrics, V: Codec>(
-    journal: &mut Journal<E, V>,
-    section: u64,
-    size: u64,
-) -> Result<(), Error> {
-    let blob = journal.0.writer(section);
-    blob.truncate_pending(size).await?;
-    Ok(())
 }
 
 #[cfg(test)]

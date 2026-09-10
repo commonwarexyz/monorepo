@@ -830,7 +830,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
         section: u64,
         index_size: u64,
     ) -> Result<Self, Error> {
-        // Truncate index first
+        // Persist the shorter index before discarding the values it no longer references.
         self.index = self
             .index
             .truncate_pending_section(section, index_size)
@@ -838,9 +838,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
 
         // Derive value size from last entry (section may not exist if empty)
         let value_size = self.retained_value_end(section, index_size).await?;
-
-        // Persist the shorter index before discarding the values it no longer references.
-        self.index = self.index.sync(section).await?;
 
         // Truncate values
         self.values = self.values.truncate_section(section, value_size).await?;

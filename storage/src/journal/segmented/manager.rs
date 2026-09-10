@@ -64,7 +64,7 @@ pub trait SectionBuffer: Send + Sync {
     /// Shorten an unpublished section during initialization.
     fn truncate_pending(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Irreversibly publish this section for appends.
+    /// Publish this section for appends.
     fn publish(&mut self);
 }
 
@@ -94,7 +94,8 @@ impl<B: Blob> SectionBuffer for AppendBuffer<B> {
     }
 }
 
-impl<B: Blob> SectionBuffer for WriteBuffer<B> {
+// Glob's recovery owner controls access to truncation for uncached sections.
+impl<B: Blob> SectionBuffer for Write<B> {
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -112,12 +113,14 @@ impl<B: Blob> SectionBuffer for WriteBuffer<B> {
     }
 
     async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
-        self.truncate_pending(len).await
+        if len < self.size() {
+            self.resize(len).await?;
+            self.sync().await?;
+        }
+        Ok(())
     }
 
-    fn publish(&mut self) {
-        Self::publish(self);
-    }
+    fn publish(&mut self) {}
 }
 
 /// Factory for creating section buffers from raw blobs.
@@ -168,13 +171,10 @@ pub struct WriteFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for WriteFactory {
-    type Buffer = WriteBuffer<B>;
+    type Buffer = Write<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Ok(WriteBuffer {
-            inner: Write::new(blob, size, self.capacity, self.pool.clone()),
-            pending: true,
-        })
+        Ok(Write::new(blob, size, self.capacity, self.pool.clone()))
     }
 }
 
@@ -373,59 +373,6 @@ impl<B: Blob> crate::journal::frame::FrameReader for AppendBuffer<B> {
         buf: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
         Ok(self.read_up_to(offset, len, buf).await?)
-    }
-}
-
-/// Uncached section storage with a one-way initialization boundary.
-pub struct WriteBuffer<B: Blob> {
-    inner: Write<B>,
-    pending: bool,
-}
-impl<B: Blob> WriteBuffer<B> {
-    /// Publish the section.
-    pub const fn publish(&mut self) {
-        self.pending = false;
-    }
-
-    /// Repair the unpublished section. Panics if a published section would be shortened.
-    pub async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
-        if len >= self.inner.size() {
-            return Ok(());
-        }
-        assert!(self.pending, "cannot truncate a published section");
-        self.inner.resize(len).await?;
-        self.inner.sync().await
-    }
-
-    /// Current section length.
-    pub const fn size(&self) -> u64 {
-        self.inner.size()
-    }
-
-    /// Read section bytes.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, RError> {
-        self.inner.read_at(offset, len).await
-    }
-
-    /// Write bytes after closing initialization.
-    pub async fn write_at(&mut self, offset: u64, buf: Vec<u8>) -> Result<(), RError> {
-        self.publish();
-        self.inner.write_at(offset, buf).await
-    }
-
-    /// Sync section bytes.
-    pub async fn sync(&mut self) -> Result<(), RError> {
-        self.inner.sync().await
-    }
-
-    /// Begin syncing section bytes.
-    pub async fn start_sync(&mut self) -> Handle<()> {
-        self.inner.start_sync().await
-    }
-
-    /// Drain an existing sync.
-    pub async fn wait_for_sync(&mut self) -> Result<(), RError> {
-        self.inner.wait_for_sync().await
     }
 }
 
@@ -817,9 +764,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{
-        BufferPooler as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
-    };
+    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
@@ -865,23 +810,6 @@ mod tests {
             let mut writer = Writer::new(blob, size, 1024, cache).await.unwrap();
             writer.append(&[1; 8]).await.unwrap();
             let mut buffer = AppendBuffer::Live(writer);
-            buffer.truncate_pending(4).await.unwrap();
-        });
-    }
-    #[test]
-    #[should_panic(expected = "cannot truncate a published section")]
-    fn test_published_uncached_section_rejects_truncation() {
-        deterministic::Runner::default().start(|context| async move {
-            let (blob, _) = context.open("published", b"uncached").await.unwrap();
-            let mut buffer = WriteBuffer {
-                inner: Write::new(
-                    blob,
-                    8,
-                    commonware_utils::NZUsize!(1024),
-                    context.storage_buffer_pool().clone(),
-                ),
-                pending: false,
-            };
             buffer.truncate_pending(4).await.unwrap();
         });
     }

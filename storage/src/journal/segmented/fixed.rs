@@ -957,7 +957,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        repair_blob(&mut self.journal, section, target).await?;
+        self.journal
+            .0
+            .writer(section)
+            .truncate_pending(target)
+            .await?;
         let mut reader = self
             .journal
             .0
@@ -1029,7 +1033,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                             "incomplete item detected: truncating"
                         );
                         self.repairing = true;
-                        if let Err(err) = repair_blob(&mut self.journal, section, valid_size).await
+                        if let Err(err) = self
+                            .journal
+                            .0
+                            .writer(section)
+                            .truncate_pending(valid_size)
+                            .await
+                            .map_err(Error::from)
                         {
                             self.sections.pop_front();
                             return self.fail(err);
@@ -1096,17 +1106,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         }
         Ok(self.journal)
     }
-}
-
-/// Truncate a replayed section and make the repair durable before allowing new appends.
-async fn repair_blob<E: Storage + Metrics, A: CodecFixed>(
-    journal: &mut Journal<E, A>,
-    section: u64,
-    size: u64,
-) -> Result<(), Error> {
-    let blob = journal.0.writer(section);
-    blob.truncate_pending(size).await?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -841,6 +841,7 @@ where
     S: Strategy,
 {
     /// Create an authenticated journal ending at its last matching item.
+    /// An empty retained range preserves its append position.
     #[boxed]
     pub async fn new(
         context: E,
@@ -857,8 +858,8 @@ where
 
     /// Recover a journal whose last matching item ends at or below `max_size`.
     ///
-    /// Initialization durably discards the suffix before returning. A larger cap preserves
-    /// the recovered end. A cap below retained history returns a pruning error.
+    /// Initialization durably discards the suffix before returning. A cap below retained
+    /// history, or pruned history with no matching retained item, returns a pruning error.
     #[boxed]
     pub async fn init_at_most(
         context: E,
@@ -891,9 +892,14 @@ where
         bagging: merkle::Bagging,
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
-        let selected_end = journal
-            .last_matching(max_size.unwrap_or(u64::MAX), predicate)
-            .await?;
+        let bounds = journal.bounds();
+        let selected_end = if max_size.is_none() && bounds.is_empty() {
+            bounds.end
+        } else {
+            journal
+                .last_matching(max_size.unwrap_or(u64::MAX), predicate)
+                .await?
+        };
         let hasher = StandardHasher::<H>::new(bagging);
         let merkle = Merkle::prepare(
             context.child("merkle"),
@@ -902,7 +908,7 @@ where
             Some(Location::new(selected_end)),
         )
         .await?;
-        if *merkle.leaves() < journal.bounds().start {
+        if *merkle.leaves() < bounds.start {
             return Err(JournalError::ItemPruned(*merkle.leaves()).into());
         }
         Ok(Recovery {
@@ -3804,5 +3810,58 @@ mod tests {
             );
             assert!(ancestor.upgrade().is_none());
         });
+    }
+
+    async fn fully_pruned_authenticated_reopens<F: Family + PartialEq>(context: Context) {
+        let merkle_cfg = merkle_config("fully-pruned-reopen", &context);
+        let journal_cfg = journal_config("fully-pruned-reopen", &context);
+        assert_eq!(journal_cfg.items_per_blob.get(), 7);
+        let mut journal = TestJournal::<F>::new(
+            context.child("seed"),
+            merkle_cfg.clone(),
+            journal_cfg.clone(),
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for i in 0u8..7 {
+            let (next, pos) = journal.append(&create_operation::<F>(i)).await.unwrap();
+            journal = next;
+            assert_eq!(*pos, u64::from(i));
+        }
+        let journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        let (journal, boundary) = journal.prune(Location::new(7)).await.unwrap();
+        assert_eq!(*boundary, 7);
+        assert_eq!(journal.bounds(), 7..7);
+        assert_eq!(journal.root(0).unwrap(), root);
+        drop(journal);
+
+        let journal = TestJournal::<F>::new(
+            context.child("reopen"),
+            merkle_cfg,
+            journal_cfg,
+            |_| true,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.bounds(), 7..7);
+        assert_eq!(journal.root(0).unwrap(), root);
+        let (journal, pos) = journal.append(&create_operation::<F>(7)).await.unwrap();
+        assert_eq!(*pos, 7);
+        assert_eq!(journal.bounds(), 7..8);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_fully_pruned_authenticated_reopens_mmr() {
+        deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_fully_pruned_authenticated_reopens_mmb() {
+        deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmb::Family>);
     }
 }

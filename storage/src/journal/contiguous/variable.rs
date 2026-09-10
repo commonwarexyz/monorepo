@@ -1055,10 +1055,9 @@ pub struct Recovery<E: Context, V: CodecShared> {
     partition: Partition<E>,
     pending: BTreeMap<u64, PagedRecovery<E::Blob>>,
     discarded: Vec<u64>,
-    /// Frame offsets discovered by inspection, covering every retained position at or above
-    /// the offsets watermark.
-    recovered_offsets: BTreeMap<u64, u64>,
     recovered_scans: BTreeMap<u64, BlobScan>,
+    /// Inspection rebuilds retained entries at or above the watermark from validated frames.
+    /// Together with acknowledged entries, these cover every position in `bounds`.
     offsets: Box<fixed::Recovery<E, u64>>,
     bounds: Range<u64>,
     bounded: bool,
@@ -1155,30 +1154,27 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             writer.truncate(valid).await?;
         }
 
-        let mut recovery = Self {
+        Self {
             context,
             cfg,
             partition,
             pending,
             discarded,
-            recovered_offsets: BTreeMap::new(),
             recovered_scans: BTreeMap::new(),
             offsets: Box::new(offsets),
             bounds: 0..0,
             bounded: max_size.is_some(),
-        };
-        recovery.bounds = recovery
-            .inspect(max_size.unwrap_or(u64::MAX), &valid_lengths)
-            .await?;
-        Ok(recovery)
+        }
+        .inspect(max_size.unwrap_or(u64::MAX), &valid_lengths)
+        .await
     }
 
     /// Scan only the recovery suffix, stopping before decoding discarded frames.
     async fn inspect(
-        &mut self,
+        mut self,
         ceiling: u64,
         valid_lengths: &BTreeMap<u64, u64>,
-    ) -> Result<Range<u64>, Error> {
+    ) -> Result<Self, Error> {
         let per_blob = self.cfg.items_per_section.get();
         let offsets_start = self.offsets.pruning_boundary();
         let oldest = self
@@ -1194,7 +1190,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                     "retained offsets have no data blobs".into(),
                 ));
             }
-            return Ok(end..end);
+            self.bounds = end..end;
+            return Ok(self);
         };
         let data_start = blob_first_position(oldest, per_blob)?;
         let start = offsets_start.max(data_start);
@@ -1202,7 +1199,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             return Err(Error::ItemPruned(ceiling));
         }
         if ceiling == start {
-            return Ok(start..start);
+            self.bounds = start..start;
+            return Ok(self);
         }
         if self.offsets.size() < data_start {
             return Err(Error::Corruption(
@@ -1233,6 +1231,11 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 "missing acknowledged data blob {expected}"
             )));
         }
+
+        // Data owns the derived suffix. Rebuild it without advancing the watermark so an
+        // interrupted inspection can replay the same source frames on its next attempt.
+        let offsets_end = self.offsets.size();
+        self.offsets = self.offsets.truncate(anchor).await?;
         let mut end = anchor;
         while let Some(writer) = self.pending.get_mut(&blob) {
             let first = blob_first_position(blob, per_blob)?.max(start);
@@ -1254,7 +1257,9 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             while pos < limit {
                 match scanner.next().await? {
                     Frame::Item { offset } => {
-                        self.recovered_offsets.insert(pos, offset);
+                        if pos >= anchor {
+                            self.offsets = self.offsets.append(&offset).await?;
+                        }
                         pos = pos.checked_add(1).ok_or(Error::OffsetOverflow)?;
                     }
                     Frame::End { .. } => break,
@@ -1272,7 +1277,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                     format!(
                         "offsets recovery watermark {anchor} exceeds retained data end {pos} (offsets bounds {}..{})",
                         self.offsets.pruning_boundary(),
-                        self.offsets.size()
+                        offsets_end
                     )
                 };
                 return Err(Error::Corruption(message));
@@ -1297,7 +1302,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             }
             blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
         }
-        Ok(start..end)
+        self.bounds = start..end;
+        Ok(self)
     }
 
     /// Resolve a terminal byte offset without depending on a discarded offset entry.
@@ -1308,21 +1314,12 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         if size == first {
             return Ok(0);
         }
-        if let Some(&offset) = self.recovered_offsets.get(&size) {
-            return Ok(offset);
-        }
         if size == self.bounds.end
             && let Some(scan) = self.recovered_scans.get(&blob)
         {
             return Ok(scan.valid_size);
         }
-        if size < self.offsets.recovery_watermark() && size < self.offsets.size() {
-            // The acknowledged next entry already records the selected prefix's byte end.
-            return self.offsets.item(size).await;
-        }
-        Err(Error::Corruption(format!(
-            "missing recovered terminal offset at {size}"
-        )))
+        self.offsets.item(size).await
     }
 
     /// Repair both partitions and publish a live handle once the selected prefix is durable.
@@ -1332,7 +1329,12 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             return Err(Error::ItemPruned(size));
         }
         let per_blob = self.cfg.items_per_section.get();
+
+        // Offsets authorize releasing data. Select their prefix and lower the watermark before
+        // discarding any data that inspection made available to the caller.
         let terminal = self.terminal_offset(size).await?;
+        self.offsets = self.offsets.truncate(size).await?;
+
         let tail = position_to_blob(size, per_blob);
         let retained_bytes = |blob| {
             if blob == tail {
@@ -1351,8 +1353,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 retained_bytes(blob).is_some_and(|bytes| bytes < writer.size())
             });
         if repair_data {
-            // Offsets authorize releasing data. Lower their watermark before any data repair.
-            self.offsets = self.offsets.truncate(size).await?;
             for blob in self.discarded.into_iter().rev() {
                 self.partition.remove(blob).await?;
             }
@@ -1390,7 +1390,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             &self.cfg.codec_config,
             self.cfg.compression.is_some(),
             &self.recovered_scans,
-            &self.recovered_offsets,
         )
         .await?;
         if bounds.end > size {
@@ -1833,9 +1832,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// Align the offsets journal and data blobs to be consistent in case a crash occurred on a
     /// previous run and left them in an inconsistent state.
     ///
-    /// The data blobs are the source of truth. This function replays them as needed to verify or
-    /// rebuild the offsets suffix, then fixes any mismatches. Final blob-index contiguity is
-    /// enforced by [Writable::recover]. Repairs mutate `pending` in place.
+    /// Inspection supplies the rebuilt offsets and scan results for the selected data prefix.
+    /// Final blob-index contiguity is enforced by [Writable::recover]. Repairs mutate `pending`
+    /// in place, and the data must be durable before publishing the offsets watermark.
     ///
     /// Returns the recovered bounds (`pruning_boundary..size`).
     #[allow(clippy::too_many_arguments)]
@@ -1848,7 +1847,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         codec_config: &V::Cfg,
         compressed: bool,
         scans: &BTreeMap<u64, BlobScan>,
-        recovered_offsets: &BTreeMap<u64, u64>,
     ) -> Result<(Box<fixed::Recovery<E, u64>>, Range<u64>), Error> {
         // Find the newest item-bearing blob, truncating torn trailing bytes along the way (the
         // first invalid frame is the end of the journal).
@@ -1943,22 +1941,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // The newest item-bearing blob bounds how far recovery can possibly go. If it is also
         // the oldest retained blob, its logical start may be a mid-blob pruning boundary.
-        let retained_data_end_bound = blob_first_position(newest_blob, items_per_blob)?
+        let data_size = blob_first_position(newest_blob, items_per_blob)?
             .max(offsets_bounds.start)
             .checked_add(items_in_newest)
             .ok_or(Error::OffsetOverflow)?;
-        let data_sync_start =
-            Self::recovery_anchor(&offsets, &offsets_bounds, retained_data_end_bound)?;
-
-        // Rebuild the offsets suffix by replaying data from there.
-        let data_size;
-        (offsets, data_size) = Self::rebuild_offsets_from_anchor(
-            offsets,
-            data_sync_start,
-            retained_data_end_bound,
-            recovered_offsets,
-        )
-        .await?;
+        let data_sync_start = Self::recovery_anchor(&offsets, &offsets_bounds, data_size)?;
 
         // Final invariant checks. These hold by construction after alignment, but the inputs are
         // recovered from disk, so a violation means corruption rather than a logic bug.
@@ -2098,28 +2085,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         )
         .await?;
         Ok(())
-    }
-
-    /// Rebuild derived offsets from the frames already validated during inspection.
-    async fn rebuild_offsets_from_anchor(
-        mut offsets: Box<fixed::Recovery<E, u64>>,
-        anchor: u64,
-        end: u64,
-        recovered: &BTreeMap<u64, u64>,
-    ) -> Result<(Box<fixed::Recovery<E, u64>>, u64), Error> {
-        if anchor < offsets.pruning_boundary() || anchor > offsets.size() || anchor > end {
-            return Err(Error::Corruption(
-                "offsets recovery anchor outside retained bounds".into(),
-            ));
-        }
-        offsets = offsets.truncate(anchor).await?;
-        for pos in anchor..end {
-            let offset = recovered
-                .get(&pos)
-                .ok_or_else(|| Error::Corruption(format!("missing recovered offset at {pos}")))?;
-            offsets = offsets.append(offset).await?;
-        }
-        Ok((offsets, end))
     }
 
     /// Remove every blob newer than `blob`, newest-first so a crash leaves a contiguous prefix.
@@ -2470,7 +2435,7 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
         self.bounds.clone()
     }
 
-    /// Read directly from recovery data, trusting offsets only below their watermark.
+    /// Read recovery data through the acknowledged and rebuilt offsets.
     async fn read(&self, pos: u64) -> Result<V, Error> {
         if pos < self.bounds.start {
             return Err(Error::ItemPruned(pos));
@@ -2484,16 +2449,7 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
             .pending
             .get(&blob)
             .ok_or_else(|| Error::Corruption(format!("missing recovery data blob {blob}")))?;
-        // Inspection records every readable position at or above the watermark.
-        let offset = if let Some(&offset) = self.recovered_offsets.get(&pos) {
-            offset
-        } else if pos < self.offsets.recovery_watermark() && pos < self.offsets.size() {
-            self.offsets.item(pos).await?
-        } else {
-            return Err(Error::Corruption(format!(
-                "missing recovered offset at {pos}"
-            )));
-        };
+        let offset = self.offsets.item(pos).await?;
         read_frame_at::<V>(
             writer,
             offset,
@@ -2517,7 +2473,6 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
             })
             .await?;
         self.discarded.clear();
-        self.recovered_offsets.clear();
         self.recovered_scans.clear();
         self.bounds = size..size;
         Ok(self)
@@ -2616,7 +2571,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 mod tests {
     use super::*;
     use crate::{
-        journal::{authenticated::BackingRecovery as _, contiguous::tests::run_contiguous_tests},
+        journal::{
+            authenticated::BackingRecovery as _,
+            contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
+        },
         utils::codec::View,
     };
     use commonware_macros::test_traced;
@@ -2904,6 +2862,81 @@ mod tests {
                 (journal, _) = journal.append(&Counted(99)).await.unwrap();
                 assert_eq!(journal.read(size).await.unwrap().0, 99);
             });
+        }
+    }
+
+    #[test]
+    fn test_interrupted_offset_rebuild_preserves_committed_data() {
+        fn config(
+            context: &deterministic::Context,
+        ) -> Config<<Counted as commonware_codec::Read>::Cfg> {
+            Config {
+                partition: "interrupted-offset-rebuild".into(),
+                items_per_section: NZU64!(256),
+                compression: None,
+                codec_config: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(128),
+            }
+        }
+
+        for start in [0, 7] {
+            for retention_rate in [probability!(0.0), probability!(1.0)] {
+                let ((), checkpoint) =
+                    deterministic::Runner::default().start_and_recover(|context| async move {
+                        let cfg = config(&context);
+                        let mut journal =
+                            Journal::init_at_size(context.child("seed"), cfg.clone(), start)
+                                .await
+                                .unwrap();
+                        for value in start..128 {
+                            (journal, _) = journal.append(&Counted(value)).await.unwrap();
+                        }
+                        drop(journal.commit().await.unwrap());
+
+                        let count = cfg.codec_config.clone();
+                        count.store(0, std::sync::atomic::Ordering::Relaxed);
+                        *context.storage_fault_config().write() = deterministic::FaultConfig {
+                            write_rate: Some(deterministic::WriteConfig {
+                                failure_rate: probability!(1.0),
+                                retention_rate,
+                                mode: deterministic::PartialWriteMode::Prefix,
+                            }),
+                            ..Default::default()
+                        };
+                        assert!(
+                            Recovery::<_, Counted>::open(context.child("faulted"), cfg, None)
+                                .await
+                                .is_err()
+                        );
+
+                        // The fault must interrupt replay after it starts and before it reaches
+                        // the end, so this exercises a partially rebuilt offsets suffix.
+                        let decoded = count.load(std::sync::atomic::Ordering::Relaxed);
+                        assert!(decoded > 0 && decoded < (128 - start) as usize);
+                    });
+
+                deterministic::Runner::from(checkpoint).start(|context| async move {
+                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                    let cfg = config(&context);
+                    let checkpoint =
+                        Checkpoint::open(context.child("checkpoint"), &cfg.offsets_partition())
+                            .await
+                            .unwrap();
+                    assert_eq!(checkpoint.watermark(), Some(start));
+                    assert_eq!(checkpoint.clear_target(), None);
+                    drop(checkpoint);
+
+                    let journal = Journal::<_, Counted>::init(context.child("retry"), cfg)
+                        .await
+                        .unwrap();
+                    assert_eq!(journal.bounds(), start..128);
+                    for value in start..128 {
+                        assert_eq!(journal.read(value).await.unwrap().0, value);
+                    }
+                });
+            }
         }
     }
 
@@ -6134,54 +6167,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_rebuild_offsets_rejects_anchor_outside_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let offsets_cfg = fixed::Config {
-                partition: "rebuild-anchor-outside-offsets".into(),
-                items_per_blob: NZU64!(10),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-            };
-
-            let partition = Partition::new(
-                context.child("data"),
-                "rebuild-anchor-outside-data".into(),
-                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                NZUsize!(1024),
-            );
-            let mut pending = BTreeMap::new();
-            pending.insert(0, partition.open_recovery(0).await.unwrap());
-            let offsets = fixed::Recovery::<_, u64>::init_cleared(
-                context.child("offsets"),
-                offsets_cfg,
-                None,
-                || async { Ok(()) },
-            )
-            .await
-            .unwrap();
-
-            let mut encoded = Vec::new();
-            encode_frame_into(None, &100u64, &mut encoded).unwrap();
-            pending.get_mut(&0).unwrap().append(&encoded).await.unwrap();
-            let offsets = Box::new(offsets).append(&0).await.unwrap();
-
-            let result =
-                Inner::<_, u64>::rebuild_offsets_from_anchor(offsets, 2, 2, &BTreeMap::new()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-
-            drop(pending);
-            Partition::<deterministic::Context>::remove_all(
-                &context,
-                "rebuild-anchor-outside-data",
-            )
-            .await
-            .unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_variable_recovery_rejects_watermark_beyond_retained_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -6212,14 +6197,12 @@ mod tests {
                 .unwrap();
             journal.test_truncate_data(12).await.unwrap();
 
-            // Recovery must preserve the evidence and fail consistently on retry.
+            // Missing acknowledged data remains an error on every recovery attempt.
             for child in ["second", "retry"] {
                 match Journal::<_, u64>::init(context.child(child), cfg.clone()).await {
-                    Err(Error::Corruption(message)) => assert_eq!(
-                        message,
-                        "offsets recovery watermark 15 exceeds retained data end 12 \
-                         (offsets bounds 0..20)"
-                    ),
+                    Err(Error::Corruption(message)) => assert!(message.starts_with(
+                        "offsets recovery watermark 15 exceeds retained data end 12 ("
+                    )),
                     Err(error) => panic!("unexpected error: {error}"),
                     Ok(_) => panic!("missing acknowledged data was accepted"),
                 }

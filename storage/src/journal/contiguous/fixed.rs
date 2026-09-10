@@ -1972,7 +1972,9 @@ impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recover
     }
 
     async fn finish(self, size: u64) -> Result<Self::Journal, Error> {
-        Ok(Journal(Box::new(Self::publish(self, size).await?)))
+        Journal(Box::new(Self::publish(self, size).await?))
+            .commit()
+            .await
     }
 }
 
@@ -2005,8 +2007,8 @@ mod tests {
         buffer::paged::{Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
-            drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, VisibleContext, WriteFaultContext,
+            WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
@@ -4660,7 +4662,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(writer.size(), 16);
-            writer.truncate(20).await.unwrap();
+            writer.append(&[0; 4]).await.unwrap();
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
             drop(writer);
 
@@ -7266,5 +7269,69 @@ mod tests {
 
             journal.destroy().await.unwrap();
         });
+    }
+
+    #[test]
+    fn test_unbounded_recovery_finish_is_durable() {
+        fn config(context: &deterministic::Context, page_size: NonZeroU16) -> Config {
+            let mut cfg = test_cfg(context, NZU64!(10));
+            cfg.page_cache = CacheRef::from_pooler(context, page_size, NZUsize!(16));
+            cfg.write_buffer = NZUsize!(8);
+            cfg
+        }
+        for page_size in [NZU16!(8), NZU16!(16)] {
+            let ((), checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let cfg = config(&context, page_size);
+                    let visible = VisibleContext::new(context.child("visible"));
+                    let journal = Journal::<_, u64>::init(visible.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    let (journal, _) = journal.append(&42).await.unwrap();
+                    let (journal, reader) = journal.snapshot().await.unwrap();
+                    assert_eq!(reader.read(0).await.unwrap(), 42);
+                    drop(reader);
+                    drop(journal);
+
+                    let recovery = <Journal<_, u64> as authenticated::Backing<_>>::recover(
+                        visible.child("recover"),
+                        cfg.clone(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(authenticated::BackingRecovery::bounds(&recovery), 0..1);
+                    assert_eq!(
+                        authenticated::BackingRecovery::read(&recovery, 0)
+                            .await
+                            .unwrap(),
+                        42
+                    );
+
+                    // The retained page is visible across opens but has not survived a sync.
+                    let (blob, durable_len) = context
+                        .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                        .await
+                        .unwrap();
+                    assert_eq!(durable_len, 0);
+                    drop(blob);
+
+                    let journal = authenticated::BackingRecovery::finish(recovery, 1)
+                        .await
+                        .unwrap();
+                    assert_eq!(journal.read(0).await.unwrap(), 42);
+                    drop(journal);
+                    drop(visible);
+                });
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let cfg = config(&context, page_size);
+                let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 0..1);
+                assert_eq!(journal.read(0).await.unwrap(), 42);
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 }

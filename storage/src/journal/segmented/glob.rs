@@ -387,8 +387,7 @@ pub(crate) struct Recovery<E: Context, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: Context, V: CodecShared> From<Recovery<E, V>> for Glob<E, V> {
     /// Publish every value section after paired recovery.
-    fn from(mut recovery: Recovery<E, V>) -> Self {
-        recovery.0.manager.publish_all();
+    fn from(recovery: Recovery<E, V>) -> Self {
         Self(recovery.0)
     }
 }
