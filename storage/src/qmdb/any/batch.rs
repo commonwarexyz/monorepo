@@ -879,7 +879,7 @@ where
             for key in mutations.keys() {
                 match ancestors.resolve(key) {
                     Some(DiffEntry::Deleted { .. }) => {
-                        // No live operation; resolve_creates handles any recreation.
+                        // No live operation remains. resolve_creates handles any recreation.
                     }
                     Some(DiffEntry::Active {
                         loc, base_old_loc, ..
@@ -907,7 +907,7 @@ where
 
     /// Resolve remaining mutations into creates in key order. Re-created keys inherit
     /// the base location of the nearest ancestor deletion. Existing keys must already
-    /// be resolved and removed from `mutations`; deletes of absent keys are ignored.
+    /// be resolved and removed from `mutations`. Deletes of absent keys are ignored.
     #[allow(clippy::type_complexity)]
     fn resolve_creates(
         &self,
@@ -3536,7 +3536,7 @@ mod tests {
     }
 
     // Recreated keys replace their committed locations when a pending chain is applied.
-    // Fresh and recreated keys share key order; absent deletes do not change the batch.
+    // Fresh and recreated keys share key order. Absent deletes do not change the batch.
     macro_rules! recreated_keys_apply_pending_chain_test {
         ($name:ident, $db:ident) => {
             #[test]
