@@ -4,8 +4,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -402,25 +402,15 @@ mod tests {
     }
 
     fn parse_private_key(private_key: &str) -> PrivateKey {
-        PrivateKey::decode(
-            commonware_formatting::from_hex(private_key)
-                .unwrap()
-                .as_ref(),
-        )
-        .unwrap()
+        PrivateKey::decode(commonware_formatting::from_hex(private_key).unwrap()).unwrap()
     }
 
     fn parse_public_key(public_key: &str) -> PublicKey {
-        PublicKey::decode(
-            commonware_formatting::from_hex(public_key)
-                .unwrap()
-                .as_ref(),
-        )
-        .unwrap()
+        PublicKey::decode(commonware_formatting::from_hex(public_key).unwrap()).unwrap()
     }
 
     fn parse_signature(signature: &str) -> Signature {
-        Signature::decode(commonware_formatting::from_hex(signature).unwrap().as_ref()).unwrap()
+        Signature::decode(commonware_formatting::from_hex(signature).unwrap()).unwrap()
     }
 
     fn vector_1() -> (PrivateKey, PublicKey, Vec<u8>, Signature) {
@@ -713,10 +703,10 @@ mod tests {
         )
         .unwrap();
         test_sign_and_verify(
-            PrivateKey::decode(private_key.as_ref()).unwrap(),
-            PublicKey::decode(public_key.as_ref()).unwrap(),
+            PrivateKey::decode(private_key).unwrap(),
+            PublicKey::decode(public_key).unwrap(),
             &message,
-            Signature::decode(signature.as_ref()).unwrap(),
+            Signature::decode(signature).unwrap(),
         )
     }
 
@@ -743,7 +733,7 @@ mod tests {
             None,
             &v2.2,
             &v2.1,
-            &Signature::decode(bad_signature.as_ref()).unwrap()
+            &Signature::decode(bad_signature).unwrap()
         ));
         assert!(!batch.verify(&mut test_rng(), &Sequential));
     }
@@ -768,7 +758,7 @@ mod tests {
     #[test]
     fn test_zero_signature_fails() {
         let (_, public_key, message, _) = vector_1();
-        let zero_sig = Signature::decode(vec![0u8; Signature::SIZE].as_ref()).unwrap();
+        let zero_sig = Signature::decode(vec![0u8; Signature::SIZE]).unwrap();
         assert!(!public_key.verify_inner(None, &message, &zero_sig));
     }
 
@@ -777,7 +767,7 @@ mod tests {
         let (_, public_key, message, signature) = vector_1();
         let mut bad_signature = signature.to_vec();
         bad_signature[63] |= 0x80; // make S non-canonical
-        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        let bad_signature = Signature::decode(bad_signature).unwrap();
         assert!(!public_key.verify_inner(None, &message, &bad_signature));
     }
 
@@ -788,7 +778,7 @@ mod tests {
         for b in bad_signature.iter_mut().take(32) {
             *b = 0xff; // invalid R component
         }
-        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        let bad_signature = Signature::decode(bad_signature).unwrap();
         assert!(!public_key.verify_inner(None, &message, &bad_signature));
     }
 

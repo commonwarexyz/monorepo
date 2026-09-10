@@ -47,8 +47,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
@@ -2233,7 +2233,7 @@ mod tests {
         serialized.extend_from_slice(&1usize.encode()); // claims 1 sibling but no data follows
 
         // Should fail because the buffer claims 1 sibling but doesn't have the data
-        let err = Proof::<Digest>::decode_cfg(serialized.as_slice(), &1).unwrap_err();
+        let err = Proof::<Digest>::decode_cfg(serialized, &1).unwrap_err();
         assert!(matches!(err, commonware_codec::Error::EndOfBuffer));
     }
 

@@ -4,10 +4,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
 };
-use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, btree_map::Entry};
 use tracing::{Span, info_span};
 
 /// A set of local subscribers waiting for one block.
@@ -25,14 +22,14 @@ struct BlockSubscription<V: Variant> {
 /// A waiter for a block, carrying the span of its mailbox request.
 struct Subscriber<V: Variant> {
     span: Span,
-    sender: oneshot::Sender<Arc<V::Block>>,
+    sender: oneshot::Sender<V::Block>,
 }
 
 /// Delivers a block to a subscriber inside the dequeue-side child of its
 /// carried span, marking fulfillment in the trace.
-fn deliver<V: Variant>(subscriber: Subscriber<V>, block: &Arc<V::Block>) {
+fn deliver<V: Variant>(subscriber: Subscriber<V>, block: &V::Block) {
     let _guard = info_span!(parent: &subscriber.span, "marshal.actor.notify").entered();
-    subscriber.sender.send_lossy(Arc::clone(block));
+    subscriber.sender.send_lossy(block.clone());
 }
 
 /// The key used to track block subscriptions.
@@ -73,7 +70,7 @@ impl<V: Variant> Subscriptions<V> {
     }
 
     /// Notify subscribers waiting for the provided block.
-    pub(super) fn notify(&mut self, block: Arc<V::Block>) {
+    pub(super) fn notify(&mut self, block: V::Block) {
         let digest_key = Key::Digest(block.digest());
         let commitment_key = Key::Commitment(V::commitment(&block));
 
@@ -93,8 +90,8 @@ impl<V: Variant> Subscriptions<V> {
         &mut self,
         span: Span,
         key: KeyFor<V>,
-        response: oneshot::Sender<Arc<V::Block>>,
-        waiters: &mut AbortablePool<'_, Result<Arc<V::Block>, KeyFor<V>>>,
+        response: oneshot::Sender<V::Block>,
+        waiters: &mut AbortablePool<'_, Result<V::Block, KeyFor<V>>>,
         buffer: &Buf,
     ) {
         let subscriber = Subscriber {

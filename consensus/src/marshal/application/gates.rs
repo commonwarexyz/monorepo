@@ -106,7 +106,7 @@ impl<D: Digest, B> Gates<D, B> {
     pub(crate) fn flush_unrelayed<S, V>(&self, marshal: &Mailbox<S, V>, round: Round, id: D)
     where
         S: Scheme,
-        V: Variant<Block = B>,
+        V: Variant<Block = Arc<B>>,
     {
         if let Some((block, ack)) = self.take_staged(round, id) {
             marshal.verified_deferred(round, block, ack);

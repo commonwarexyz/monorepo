@@ -1,7 +1,6 @@
 //! Shared hasher trait and standard implementation for Merkle-family data structures.
 
 use crate::merkle::{Bagging, Error, Family, Location, Position};
-use alloc::vec::Vec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use core::marker::PhantomData;
 
@@ -70,7 +69,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     ) -> Result<Self::Digest, Error<F>>
     where
         I: IntoIterator<Item = &'a Self::Digest>,
-        I::IntoIter: ExactSizeIterator,
+        I::IntoIter: ExactSizeIterator + DoubleEndedIterator,
     {
         let iter = peak_digests.into_iter();
         let peaks = iter.len();
@@ -93,13 +92,17 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     ///
     /// Returns `None` if `inactive_peaks_to_fold` exceeds the number of provided peak digests, or
     /// if a nonzero inactive boundary is requested for an empty tree.
-    fn root_with_folded_peaks<'a>(
+    fn root_with_folded_peaks<'a, I>(
         &self,
         leaves: Location<F>,
         inactive_peaks_to_fold: usize,
         committed_inactive_peaks: usize,
-        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
-    ) -> Option<Self::Digest> {
+        peak_digests: I,
+    ) -> Option<Self::Digest>
+    where
+        I: IntoIterator<Item = &'a Self::Digest>,
+        I::IntoIter: DoubleEndedIterator,
+    {
         let mut peak_digests = peak_digests.into_iter();
         let Some(first) = peak_digests.next() else {
             return (inactive_peaks_to_fold == 0 && committed_inactive_peaks == 0)
@@ -119,18 +122,11 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
                 }
                 acc
             }
-            Bagging::BackwardFold => {
-                let (lower, upper) = peak_digests.size_hint();
-                let mut active_peaks = Vec::with_capacity(1 + upper.unwrap_or(lower));
-                active_peaks.push(acc);
-                active_peaks.extend(peak_digests.copied());
-
-                let mut acc = *active_peaks.last().unwrap();
-                for peak in active_peaks.iter().rev().skip(1) {
-                    acc = self.fold(peak, &acc);
-                }
-                acc
-            }
+            Bagging::BackwardFold => peak_digests
+                .rev()
+                .copied()
+                .reduce(|bag, peak| self.fold(&peak, &bag))
+                .map_or(acc, |bag| self.fold(&acc, &bag)),
         };
 
         if committed_inactive_peaks == 0 {
@@ -256,18 +252,22 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
     ) -> Result<Self::Digest, Error<F>>
     where
         I: IntoIterator<Item = &'a Self::Digest>,
-        I::IntoIter: ExactSizeIterator,
+        I::IntoIter: ExactSizeIterator + DoubleEndedIterator,
     {
         (**self).root(leaves, inactive_peaks, peak_digests)
     }
 
-    fn root_with_folded_peaks<'a>(
+    fn root_with_folded_peaks<'a, I>(
         &self,
         leaves: Location<F>,
         inactive_peaks_to_fold: usize,
         committed_inactive_peaks: usize,
-        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
-    ) -> Option<Self::Digest> {
+        peak_digests: I,
+    ) -> Option<Self::Digest>
+    where
+        I: IntoIterator<Item = &'a Self::Digest>,
+        I::IntoIter: DoubleEndedIterator,
+    {
         (**self).root_with_folded_peaks(
             leaves,
             inactive_peaks_to_fold,

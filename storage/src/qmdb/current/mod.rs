@@ -46,7 +46,7 @@
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
 //!   8` bits each). `N` must be a power of two.
 //!
-//!   One exception by convention: the *current* `last_commit_loc` carries bit = 1 even though a
+//!   One exception by convention: the *current* last commit carries bit = 1 even though a
 //!   CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
 //!   0. Maintaining this makes the chunk containing the latest commit deterministic across init and
 //!   `apply_batch`.
@@ -302,7 +302,7 @@
 //!   the ops-tree topology but substitutes graftable chunks at height `gh`. When no chunks are
 //!   graftable, `grafted_root` still reflects the ops-tree peak structure. Used for proofs about
 //!   operation values and their activity status. See [RangeProof](proof::RangeProof) and
-//!   [OperationProof](proof::OperationProof).
+//!   [OperationProof](proof::constant::OperationProof).
 //!
 //! - **Pending chunk digest** (optional): `H(pending_chunk_bytes)` when a chunk's bits are complete
 //!   but its height-`gh` ancestor has not yet been born in the ops tree. Absent in MMR and in the
@@ -1795,10 +1795,8 @@ pub mod tests {
             // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
             // [b, a), which cyclically covered `c` and verified).
             let kvp = db.key_value_proof(b.clone()).await.unwrap();
-            let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
-            assert!(!ForgedExclusionDb::verify_exclusion_proof(
-                &c, &forged, &root
-            ));
+            let forged = ordered::proof::constant::ExclusionProof::KeyValue(kvp.proof, span_b);
+            assert!(!forged.verify::<Sha256>(&c, &root));
 
             db.destroy().await.unwrap();
         });

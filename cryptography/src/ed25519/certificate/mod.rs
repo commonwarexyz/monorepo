@@ -13,8 +13,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant,
@@ -1002,7 +1002,7 @@ mod tests {
             .collect();
 
         let signer = attestations[0].signer;
-        let mut truncated = &[0u8; 3][..];
+        let mut truncated = Bytes::from_static(&[0u8; 3]);
         attestations[0].signature = Lazy::deferred(&mut truncated, ());
 
         assert_eq!(
