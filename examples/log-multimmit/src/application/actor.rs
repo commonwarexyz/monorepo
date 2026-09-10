@@ -33,7 +33,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const BODY_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_BODY";
 /// Attempts to subscribe to a block body while the marshal reports a full mailbox.
@@ -656,7 +656,7 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                     proposal_latency.cancel(reference, "staged_identity_conflict");
                     return;
                 }
-                info!(
+                debug!(
                     chain = context.chain().get(),
                     height = context.height().get(),
                     ?body_digest,
