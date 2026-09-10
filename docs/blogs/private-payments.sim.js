@@ -669,7 +669,8 @@
         // bodies move to cold storage (faded), and only the paths of positions >= L stay hot.
         //
         // `d` is the minimum depth. The drawn depth D is capped by the width; beyond it each
-        // drawn leaf stands for 2^(d-D) consecutive positions.
+        // drawn leaf stands for 2^(d-D) consecutive positions and nodes below that resolution
+        // (including frontier and hot nodes) cannot be drawn, so a note flags the coarsening.
         function drawSMT(c, x, y, w, h, positions, space, d, opts) {
             opts = opts || {};
             const maxD = Math.max(d, Math.floor(Math.log2(w / 1.7)));
@@ -685,7 +686,9 @@
                 const inserted = n > prevN && n > 0;
                 const r = Math.min(4.5, Math.max(1.1, w / LD / 2.6));
                 const labelRoom = D === d && w / LD >= 6;
-                const th = labelRoom ? h - 22 : h;
+                const coarse = D < d;
+                const th = labelRoom || coarse ? h - 22 : h;
+                if (coarse) label(g, x + w / 2, y + h - 4, `${1 << (d - D)} positions per drawn leaf`, 'sim-tiny center');
                 const pos = (lvl, i) => ({ x: x + (i + 0.5) * w / (1 << lvl), y: y + r + lvl * (th - 2 * r) / D });
                 // The range of positions under the i-th drawn node at level lvl.
                 const lo = (lvl, i) => i << (d - lvl), hi = (lvl, i) => (i + 1) << (d - lvl);

@@ -125,8 +125,7 @@ We have the benefit of working in the account based model and albeit providing l
 Since nullifiers are never published on chain, they no longer need to look random. The nullifier of a receipt can simply be its **position** $\mathsf{pid}$ in the receipt MMR.
 
 Validator storage now grows with accounts, not transactions. Great.
-
-But eventually... the nullifier set will grow too big for users to manage as well.
+But eventually... the nullifier set will grow too big for users to manage too? We've just delayed the problem.
 
 ### Scaling: prune nullifiers
 
