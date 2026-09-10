@@ -495,9 +495,6 @@ impl SendRequest {
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                Some(Err(Error::Timeout))
-            }
             CqeResult::Retry => None,
             CqeResult::Cancelled => Some(Err(Error::Timeout)),
             CqeResult::Error(_) | CqeResult::Zero => Some(Err(Error::SendFailed)),
@@ -505,11 +502,6 @@ impl SendRequest {
                 self.write.advance(n);
                 if self.write.is_complete() {
                     Some(Ok(()))
-                } else if matches!(state, WaiterState::CancelRequested) {
-                    // Any send error after partial progress means some prefix
-                    // of the frame may already be on the wire. Callers must
-                    // drop the connection rather than retrying on this sink.
-                    Some(Err(Error::Timeout))
                 } else {
                     None
                 }
@@ -553,9 +545,6 @@ impl RecvRequest {
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
-                Some(Err(Error::Timeout))
-            }
             CqeResult::Retry => None,
             CqeResult::Cancelled => Some(Err(Error::Timeout)),
             CqeResult::Error(_) | CqeResult::Zero => Some(Err(Error::RecvFailed)),
@@ -568,8 +557,6 @@ impl RecvRequest {
                 self.offset += n;
                 if !self.exact || self.offset >= self.len {
                     Some(Ok(()))
-                } else if matches!(state, WaiterState::CancelRequested) {
-                    Some(Err(Error::Timeout))
                 } else {
                     None
                 }
@@ -867,8 +854,8 @@ impl ConnectRequest {
             result
         };
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => None,
-            CqeResult::Retry | CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Retry => None,
+            CqeResult::Cancelled => Some(Err(Error::Timeout)),
             CqeResult::Error(code) => Some(Err(Error::Io(
                 std::io::Error::from_raw_os_error(-code).into(),
             ))),
@@ -896,8 +883,8 @@ impl PollRequest {
     /// Treat readiness as a hint, allowing the caller to retry the actual syscall.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
-            CqeResult::Retry if !matches!(state, WaiterState::CancelRequested) => None,
-            CqeResult::Retry | CqeResult::Cancelled => Some(Err(Error::Timeout)),
+            CqeResult::Retry => None,
+            CqeResult::Cancelled => Some(Err(Error::Timeout)),
             CqeResult::Error(code) => Some(Err(Error::Io(
                 std::io::Error::from_raw_os_error(-code).into(),
             ))),
@@ -1057,10 +1044,6 @@ mod tests {
             let mut connect = std::hint::black_box(connect);
             assert_eq!(connect.address.as_raw(), pointer);
             assert!(connect.on_cqe(active, result).is_none());
-            assert!(matches!(
-                connect.on_cqe(WaiterState::CancelRequested, result),
-                Some(Err(Error::Timeout))
-            ));
         }
         for result in [0, -libc::EISCONN] {
             let mut connect = ConnectRequest {
@@ -1331,50 +1314,6 @@ mod tests {
                 .is_none()
         );
 
-        // Partial progress followed by a retry after timeout should resolve to timeout.
-
-        let mut request = Request::Send(SendRequest {
-            fd: make_socket_fd(),
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            deadline: None,
-        });
-        assert!(
-            request
-                .on_cqe(WaiterState::Active { target_tick: None }, 2)
-                .is_none()
-        );
-        let status = request
-            .on_cqe(WaiterState::CancelRequested, -libc::EAGAIN)
-            .expect("terminal completion");
-        let (output, retired) = request.complete(status);
-        let RequestOutput::Send(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err(Error::Timeout)));
-
-        // Partial progress after timeout must also resolve to timeout rather than requeueing.
-
-        let mut request = Request::Send(SendRequest {
-            fd: make_socket_fd(),
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            deadline: None,
-        });
-        assert!(
-            request
-                .on_cqe(WaiterState::Active { target_tick: None }, 2)
-                .is_none()
-        );
-        let status = request
-            .on_cqe(WaiterState::CancelRequested, 1)
-            .expect("terminal completion");
-        let (output, retired) = request.complete(status);
-        let RequestOutput::Send(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err(Error::Timeout)));
-
         // A canceled send that comes back as ECANCELED should also resolve to timeout.
 
         let mut request = Request::Send(SendRequest {
@@ -1508,51 +1447,7 @@ mod tests {
         let (_buf, read) = result.expect("recv should complete successfully");
         assert_eq!(read, 3);
 
-        // Exact recv should requeue after partial progress, but timeout wins if the follow-up CQE
-        // arrives after cancellation was requested.
-
-        let mut request = Request::Recv(RecvRequest {
-            fd: make_socket_fd(),
-            buf: IoBufMut::with_capacity(5),
-            offset: 0,
-            len: 5,
-            exact: true,
-            deadline: None,
-        });
-        assert!(
-            request
-                .on_cqe(WaiterState::Active { target_tick: None }, 3)
-                .is_none()
-        );
-        let status = request
-            .on_cqe(WaiterState::CancelRequested, 1)
-            .expect("terminal completion");
-        let (output, retired) = request.complete(status);
-        let RequestOutput::Recv(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err((_, Error::Timeout))));
-
-        // Retryable and ECANCELED completions after timeout should both resolve to timeout.
-
-        let mut request = Request::Recv(RecvRequest {
-            fd: make_socket_fd(),
-            buf: IoBufMut::with_capacity(5),
-            offset: 0,
-            len: 5,
-            exact: true,
-            deadline: None,
-        });
-        let status = request
-            .on_cqe(WaiterState::CancelRequested, -libc::EINTR)
-            .expect("terminal completion");
-        let (output, retired) = request.complete(status);
-        let RequestOutput::Recv(result) = output else {
-            panic!("unexpected request output");
-        };
-        drop(retired);
-        assert!(matches!(result, Err((_, Error::Timeout))));
+        // ECANCELED after a cancellation request resolves to timeout.
 
         let mut request = Request::Recv(RecvRequest {
             fd: make_socket_fd(),

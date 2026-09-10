@@ -144,7 +144,7 @@ impl Driver {
         let timed = request.deadline().is_some();
 
         // Transfer ownership once. Both queues below carry only this identity.
-        let id = self.state.waiters.insert(request, None, observer);
+        let id = self.state.waiters.insert(request, observer);
         if timed {
             // A task poll may have taken long enough to leave the wheel behind.
             // Service refreshes it before assigning this deadline a tick.
@@ -742,13 +742,14 @@ pub mod tests {
         /// Stage a request without submitting its SQE, for simulated completions.
         fn stage(&mut self, request: Request, tick: Option<u64>, tag: u64) -> WaiterId {
             let waker = TaskWaker::from(Arc::new(Notify));
-            let id = self.driver.state.waiters.insert(
-                request,
-                tick,
-                Observer::Ordinary(Some(waker.clone())),
-            );
+            let id = self
+                .driver
+                .state
+                .waiters
+                .insert(request, Observer::Ordinary(Some(waker.clone())));
             if let Some(tick) = tick {
                 self.driver.state.timeout_wheel.schedule(id, tick);
+                self.driver.state.waiters.set_deadline(id, tick);
             }
 
             // Keep the fixture out of the ready queue and the kernel. Only
