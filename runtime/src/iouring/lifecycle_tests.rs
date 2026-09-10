@@ -176,11 +176,11 @@ fn root_shutdown_cancels_descendants_across_workers() {
 }
 
 #[test]
-fn service_error_reconciles_completions_before_cleanup() {
+fn test_service_error_preserves_completions_before_cleanup() {
     let (socket, mut peer) = UnixStream::pair().unwrap();
     socket.set_nonblocking(true).unwrap();
     peer.write_all(b"x").unwrap();
-    let retained = Arc::new(Mutex::new(Operation::new(Request::Recv(RecvRequest {
+    let request = Request::Recv(RecvRequest {
         fd: Arc::new(socket.into()),
         buf: IoBufMut::with_capacity(1),
         offset: 0,
@@ -188,10 +188,12 @@ fn service_error_reconciles_completions_before_cleanup() {
         exact: true,
         deadline: None,
         result: None,
-    }))));
+    });
+    let retained = Arc::new(Mutex::new(None));
     let operation = retained.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config()).start(|_| async move {
+            *operation.lock() = Some(Operation::register(request));
             current()
                 .unwrap()
                 .borrow_mut()
@@ -200,9 +202,13 @@ fn service_error_reconciles_completions_before_cleanup() {
                 .unwrap()
                 .fail_service_after_completion = true;
             // Keep the observer alive beyond root destruction so cleanup must
-            // reconcile the retired waiter before closing ordinary operations.
+            // preserve its terminal resources before closing ordinary observation.
             futures::future::poll_fn(|cx| {
-                assert!(Pin::new(&mut *operation.lock()).poll(cx).is_pending());
+                assert!(
+                    Pin::new(operation.lock().as_mut().unwrap())
+                        .poll(cx)
+                        .is_pending()
+                );
                 Poll::<()>::Pending
             })
             .await;

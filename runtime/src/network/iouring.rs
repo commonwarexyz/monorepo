@@ -202,7 +202,7 @@ impl crate::Network for Network {
         // SAFETY: `raw` is the unique successful result of socket above and has
         // not been closed or placed in another owning descriptor.
         let fd = Arc::new(unsafe { OwnedFd::from_raw_fd(raw) });
-        let output = Operation::new(Request::Connect(ConnectRequest {
+        let output = Operation::register(Request::Connect(ConnectRequest {
             fd: fd.clone(),
             address: Box::new(SockAddr::from(socket)),
             deadline: Some(deadline),
@@ -261,7 +261,7 @@ impl crate::Listener for Listener {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(_) => return Err(Error::ConnectionFailed),
             }
-            let output = Operation::new(Request::Poll(PollRequest {
+            let output = Operation::register(Request::Poll(PollRequest {
                 fd: self.inner.clone(),
                 flags: libc::POLLIN as u32,
                 deadline: Some(Instant::now() + self.read_write_timeout),
@@ -374,7 +374,7 @@ impl crate::Sink for Sink {
         // detected by the next send.
         self.state = SinkState::Sending;
 
-        let result = match Operation::new(Request::Send(SendRequest {
+        let result = match Operation::register(Request::Send(SendRequest {
             fd: self.fd.clone(),
             write: bufs.into(),
             deadline: Some(Instant::now() + self.timeout),
@@ -450,7 +450,7 @@ impl Stream {
         exact: bool,
         deadline: Instant,
     ) -> Result<Result<(IoBufMut, usize), (IoBufMut, Error)>, Error> {
-        let output = Operation::new(Request::Recv(RecvRequest {
+        let output = Operation::register(Request::Recv(RecvRequest {
             fd: self.fd.clone(),
             buf: buffer,
             offset,

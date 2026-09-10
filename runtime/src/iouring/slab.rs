@@ -34,15 +34,20 @@ pub struct Slab<T> {
 
 impl<T> Default for Slab<T> {
     fn default() -> Self {
-        Self {
-            slots: Vec::new(),
-            free: None,
-            len: 0,
-        }
+        Self::with_capacity(0)
     }
 }
 
 impl<T> Slab<T> {
+    /// Create an empty slab with room for at least `capacity` slots.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity),
+            free: None,
+            len: 0,
+        }
+    }
+
     /// Insert a value built from its own identity.
     ///
     /// The value is constructed before the slab changes, so a panicking

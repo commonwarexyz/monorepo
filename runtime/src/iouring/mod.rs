@@ -12,14 +12,14 @@
 //! ```text
 //! foreign context or waker -> mailbox -> owning worker
 //!                                      | tasks and local timers
-//!                                      | FIFO I/O admission
+//!                                      | queued I/O requests
 //!                                      v
 //!                                  io_uring driver
 //!                                      |
 //!                            completion -> local result
 //! ```
 //!
-//! Local tasks, admission, timers, and ordinary results need no shared locks.
+//! Local tasks, requests, timers, and ordinary results need no shared locks.
 //! Mailboxes, task handles, supervision, metrics, and shared resource lifetimes
 //! retain synchronization where access can cross threads. See the private
 //! mechanism modules for their state transitions and cancellation invariants.
@@ -28,17 +28,18 @@
 //!
 //! Linux 6.1 or newer is required for single-issuer rings with deferred task
 //! work. A task must return from each poll so the worker can service I/O and
-//! deadlines. Ring capacity bounds admitted requests, not application dependency
-//! cycles. Use deadlines or cancellation when admitted operations may depend on
-//! work waiting for admission.
+//! deadlines. Ring capacity bounds outstanding operation SQEs. Use deadlines
+//! or cancellation when an in-flight operation depends on work waiting for
+//! staging capacity, since that dependency can prevent either from progressing.
 //!
 //! # Shutdown
 //!
-//! The runner closes admission, aborts supervised tasks, and retires kernel
-//! requests before returning. Admitted writes and syncs finish even if their
-//! callers are gone. Shutdown waits for every accepted worker to finish runtime
-//! cleanup and failure publication, with no time limit. Native TLS destruction
-//! may follow that boundary.
+//! The runner rejects new requests, aborts supervised tasks, and retires accepted
+//! requests before returning. The first poll registers I/O with its worker.
+//! Registered writes and syncs finish even if still queued when their callers
+//! disappear. Reads and network operations are eligible for cancellation.
+//! Shutdown waits for every accepted worker to finish runtime cleanup and failure
+//! publication, with no time limit. Native TLS destruction may follow that boundary.
 //!
 //! # Examples
 //!
@@ -51,7 +52,6 @@
 //! });
 //! ```
 
-mod admission;
 mod driver;
 mod mailbox;
 pub(crate) mod operation;

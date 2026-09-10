@@ -9,10 +9,9 @@
 //! ever destroyed under the lock.
 
 use super::{
-    admission::AdmissionId,
-    operation::OperationId,
     sleep::TimerId,
     task::{Runnable, Target},
+    waiter::WaiterId,
     waker::Waker,
 };
 use commonware_utils::sync::Mutex;
@@ -24,10 +23,8 @@ pub enum Message {
     Wake(Target),
     /// Place a spawned task on this worker.
     Spawn(Pin<Box<dyn Runnable>>),
-    /// Release a queued or granted admission reservation.
-    CancelAdmission(AdmissionId),
     /// Stop observing an admitted operation or retained result.
-    OrphanOperation(OperationId),
+    Orphan(WaiterId),
     /// Cancel a timer whose sleep future was dropped.
     CancelTimer(TimerId),
 }

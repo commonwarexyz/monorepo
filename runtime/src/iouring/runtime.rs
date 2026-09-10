@@ -1,6 +1,6 @@
 //! Native worker execution and runner-wide lifecycle.
 //!
-//! One worker owns its ring, task arena, admission queue, ordinary operation
+//! One worker owns its ring, task arena, queued requests, ordinary operation
 //! results, and sleeper deadlines. Its [`Scope`] installs checked thread-local
 //! access for short transitions. Polls, callbacks, and destruction run after
 //! releasing local state. The calling thread runs the ordinary worker.
@@ -27,20 +27,19 @@
 //! Shared -> Registry <- responsibility  Shared
 //! Scope -> Local                        Scope -> Local
 //!          tasks, timers                          tasks, timers
-//!          admissions, operations                 admissions, operations
 //!          Driver -> ring                         Driver -> ring
+//!                 -> requests, results                   -> requests, results
 //! ```
 
 use super::{
-    admission::Admissions,
-    driver::{Completed, Driver},
+    driver::Driver,
     mailbox::{Mailbox, Message},
-    operation::Operations,
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{self, Runnable, Running, Target, Task, Tasks},
     timeout::TimeoutWheel,
+    waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
 };
 #[cfg(feature = "external")]
@@ -102,7 +101,7 @@ use std::{
 /// one-off workers. The wheel horizon is derived from network timeout policy.
 #[derive(Clone, Debug)]
 pub struct RingConfig {
-    /// Requested waiter capacity, rounded up to the next power of two.
+    /// SQ size and maximum outstanding operation SQEs, rounded up to a power of two.
     ///
     /// Must be nonzero and round to at most 32,768. Defaults to 128. The runtime
     /// chooses 1024 for its production default and 128 when built for tests.
@@ -217,7 +216,7 @@ impl Config {
         self
     }
 
-    /// Set the outbound connection timeout, including admission and retries.
+    /// Set the outbound connection timeout, including queueing and retries.
     ///
     /// Must be nonzero and no greater than 30 years. The maximum configured
     /// network timeout must fit the wheel slot limit in [`RingConfig`].
@@ -226,7 +225,7 @@ impl Config {
         self
     }
 
-    /// Set the send and receive timeout, including admission and partial progress.
+    /// Set the send and receive timeout, including queueing and partial progress.
     ///
     /// Must be nonzero and no greater than 30 years. The maximum configured
     /// network timeout must fit the wheel slot limit in [`RingConfig`].
@@ -853,10 +852,6 @@ pub(super) struct Local {
     pub(super) driver: Option<Driver>,
     /// Concrete task cells and FIFO ready tokens.
     pub(super) tasks: Tasks,
-    /// FIFO capacity registrations, independent of active ring waiters.
-    pub(super) admissions: Admissions,
-    /// Ordinary observers and retained results, independent of waiter capacity.
-    pub(super) operations: Operations,
     /// Sleeper registrations and deadlines.
     pub(super) timers: Timers,
     /// Reject new registration while allowing idempotent cancellation.
@@ -869,8 +864,6 @@ pub(super) struct Local {
     pub(super) mailbox: Arc<Mailbox>,
     /// Ownership detached from local transitions before callbacks run.
     pub(super) deferred: Deferred,
-    /// Driver outputs awaiting operation-slab reconciliation.
-    pub(super) completed: Vec<Completed>,
     /// Runner configuration, metrics, and shared adapters.
     shared: Arc<Shared>,
     /// This worker's contribution currently included in the aggregate gauge.
@@ -903,20 +896,25 @@ impl Local {
         Ok(Self {
             driver: Some(driver),
             tasks: Tasks::default(),
-            admissions: Admissions::default(),
-            operations: Operations::default(),
             timers: Timers::new(),
             closing: false,
             now,
             root_ready: true,
             mailbox,
             deferred: Deferred::default(),
-            completed: Vec::new(),
             shared,
             reported_pending: 0,
             #[cfg(test)]
             forbid_park: false,
         })
+    }
+
+    /// Detach observation without running callbacks under the local borrow.
+    pub(super) fn orphan(&mut self, id: WaiterId) {
+        self.driver
+            .as_mut()
+            .expect("driver present during orphaning")
+            .orphan(id, &mut self.deferred);
     }
 
     /// Update aggregate pending-operation metrics using only this worker's delta.
@@ -936,17 +934,13 @@ impl Local {
 
     /// Whether task polling or callbacks prevent the worker from parking.
     fn is_ready(&self) -> bool {
-        self.tasks.is_ready()
-            || self.root_ready
-            || !self.completed.is_empty()
-            || !self.deferred.is_empty()
+        self.tasks.is_ready() || self.root_ready || !self.deferred.is_empty()
     }
 
-    /// Earliest absolute deadline across operations, admission, and sleepers.
+    /// Earliest absolute deadline across driver requests and sleepers.
     fn next_deadline(&mut self) -> Option<Instant> {
         [
             self.driver.as_mut().unwrap().next_deadline(),
-            self.admissions.next_deadline(),
             self.timers.next_deadline(),
         ]
         .into_iter()
@@ -1075,7 +1069,7 @@ impl Deferred {
         mem::swap(self, &mut local.deferred);
     }
 
-    const fn is_empty(&self) -> bool {
+    pub(super) const fn is_empty(&self) -> bool {
         self.wakes.is_empty()
             && self.drops.is_empty()
             && self.outputs.is_empty()
@@ -1182,16 +1176,14 @@ impl Worker {
         }
         {
             let mut local = self.local.borrow_mut();
-            local.close_operations();
             let Local {
-                admissions,
-                timers,
-                deferred,
-                ..
+                driver, deferred, ..
             } = &mut *local;
-            admissions.clear(&mut deferred.drops);
+            driver.as_mut().unwrap().close(deferred);
+            let Local {
+                timers, deferred, ..
+            } = &mut *local;
             timers.clear(&mut deferred.drops);
-            local.apply_completions();
             local.update_pending();
         }
         self.callbacks();
@@ -1205,16 +1197,15 @@ impl Worker {
                 local.now = Instant::now();
                 let Local {
                     driver,
-                    completed,
+                    deferred,
                     now,
                     ..
                 } = &mut *local;
                 driver
                     .as_mut()
                     .unwrap()
-                    .service(*now, false, completed)
+                    .service(*now, false, deferred)
                     .expect("io_uring shutdown service failed");
-                local.apply_completions();
                 local.update_pending();
             }
             self.callbacks();
@@ -1294,8 +1285,7 @@ impl Worker {
                         Target::Task(id) => local.tasks.wake(id),
                     }
                 }
-                Message::CancelAdmission(id) => self.local.borrow_mut().cancel_admission(id),
-                Message::OrphanOperation(id) => self.local.borrow_mut().orphan_operation(id),
+                Message::Orphan(id) => self.local.borrow_mut().orphan(id),
                 Message::CancelTimer(id) => {
                     let mut local = self.local.borrow_mut();
                     if let Some(waker) = local.timers.cancel(id) {
@@ -1313,15 +1303,13 @@ impl Worker {
         let Local {
             now,
             driver,
-            completed,
+            deferred,
             ..
         } = &mut *local;
         let result = driver
             .as_mut()
             .unwrap()
-            .service(*now, defer_kernel_service, completed);
-        // Reconcile retired waiters before an error can trigger observer disposal.
-        local.apply_completions();
+            .service(*now, defer_kernel_service, deferred);
         let woke = result.expect("io_uring driver service failed");
         let Local {
             timers,

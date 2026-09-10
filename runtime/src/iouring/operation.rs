@@ -1,30 +1,15 @@
-//! Worker-affine I/O futures and retained ordinary completion results.
+//! Small worker-affine handles for registered I/O.
 //!
-//! An [`Operation`] owns its request until admission. Admission allocates an
-//! ordinary result entry together with a bounded driver waiter. Completion
-//! releases the waiter before notifying the observer, while the growable local
-//! result slab retains the output until its future takes or drops it.
-//!
-//! ```text
-//! Unbound -> Admitting -> Waiting -> Done
-//!              |            |
-//!              |            +-> operation entry: Pending -> Ready -> recycle
-//!              +-> FIFO grant          |
-//!                                  bounded waiter -> kernel retirement
-//! ```
-//!
-//! Futures retain only full-width IDs and weak mailbox identities across polls.
-//! Resources may move between workers between operations, but registered work
-//! cannot move between live workers. Foreign destruction publishes cancellation
-//! instead of accessing the original worker's local state.
+//! Adapters register requests inside their async bodies, then await an
+//! [`Operation`] containing only its waiter ID and weak worker identity.
+//! The driver retains both pending requests and completed results in one slab.
+//! Foreign destruction publishes cancellation to the owning worker.
 
 use super::{
-    admission::AdmissionId,
     mailbox::{Mailbox, Message},
     request::{Request, RequestOutput},
     runtime::{self, Local},
-    slab::{Id, Slab},
-    waiter::{Observer, WaiterId},
+    waiter::{Observation, Observer, WaiterId},
 };
 use crate::Error;
 use commonware_utils::channel::oneshot;
@@ -35,85 +20,53 @@ use std::{
     pin::Pin,
     rc::Rc,
     sync::{Arc, Weak},
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
 
-/// Full-width observer identity, independent of the kernel's packed waiter ID.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OperationId(pub(super) Id);
-
-/// Contents retained for a live ordinary observer.
-pub(super) enum EntryState {
-    /// The driver still owns the request and its kernel resources.
-    Pending {
-        /// Bounded waiter paired with this observer at admission.
-        waiter_id: WaiterId,
-        /// Most recent observer waker, replaced without destruction under Local.
-        waker: Waker,
-    },
-    /// Terminal output retained independently of active waiter capacity.
-    Ready(RequestOutput),
-}
-
-/// Ordinary observer state owned exclusively by one worker.
-#[derive(Default)]
-pub(super) struct Operations {
-    /// Growable result storage that is not bounded by ring capacity.
-    entries: Slab<EntryState>,
-}
-
-impl Operations {
-    /// Install an entry built from its own identity.
-    fn insert(&mut self, make: impl FnOnce(OperationId) -> EntryState) -> OperationId {
-        OperationId(self.entries.insert_with(|id| make(OperationId(id))))
-    }
-
-    /// Inspect a live full-width identity without following stale waiter IDs.
-    fn get_mut(&mut self, id: OperationId) -> Option<&mut EntryState> {
-        self.entries.get_mut(id.0)
-    }
-
-    /// Recycle only the observer slot, returning all owned values untouched.
-    fn take(&mut self, id: OperationId) -> Option<EntryState> {
-        self.entries.remove(id.0)
-    }
-}
-
-/// Ownership held by an ordinary future across polls.
+/// Registration identity retained until observation ends.
 enum State {
-    /// No worker has been selected and the request is still caller-owned.
-    Unbound(Request),
-    /// Waiting for one FIFO reservation on the selected worker.
-    Admitting {
-        /// Weak identity of the selected worker.
-        mailbox: Weak<Mailbox>,
-        /// Request data not yet transferred to the driver.
-        request: Request,
-        /// Existing FIFO registration, reused on subsequent polls.
-        registration: AdmissionId,
-    },
-    /// The request is admitted and this future observes its local result slot.
     Waiting {
-        /// Weak identity checked before every subsequent poll.
         mailbox: Weak<Mailbox>,
-        /// Ordinary result slot retained until take or destruction.
-        operation_id: OperationId,
+        waiter_id: WaiterId,
     },
-    /// Terminal state installed before arbitrary callbacks can run.
+    Closed,
     Done,
 }
 
-/// Ordinary I/O bound to the worker that first polls it.
+/// Ordinary completion handle with no inline request storage.
 pub(crate) struct Operation {
-    /// Request or observer ownership retained between polls.
     state: State,
 }
 
 impl Operation {
-    /// Construct an unbound request without requiring a current worker.
-    pub(crate) const fn new(request: Request) -> Self {
+    /// Register on the current worker and return a handle to its result.
+    ///
+    /// Call this inside the adapter's async body so creating an I/O future
+    /// remains lazy. The request is transferred before this handle is awaited.
+    pub(crate) fn register(request: Request) -> Self {
+        let owner = runtime::current().expect("io_uring I/O requires a current worker");
+        let mut local = owner.borrow_mut();
+        if local.closing {
+            drop(local);
+            drop(request);
+            return Self {
+                state: State::Closed,
+            };
+        }
+        let expired = request
+            .deadline()
+            .is_some_and(|deadline| deadline <= local.now);
+        let mailbox = Arc::downgrade(&local.mailbox);
+        let Local {
+            driver, deferred, ..
+        } = &mut *local;
+        let driver = driver.as_mut().unwrap();
+        let waiter_id = driver.admit(request, Observer::Ordinary(None));
+        if expired {
+            driver.expire(waiter_id, deferred);
+        }
         Self {
-            state: State::Unbound(request),
+            state: State::Waiting { mailbox, waiter_id },
         }
     }
 }
@@ -137,23 +90,21 @@ impl Future for Operation {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        // Validate affinity before moving registration ownership out of the
-        // future. A rejected foreign poll can then unwind through normal Drop,
-        // which still has the identity needed to cancel on the owning worker.
-        let owner = match &this.state {
-            State::Unbound(_) => {
-                runtime::current().expect("io_uring I/O requires a current worker")
-            }
-            State::Admitting { mailbox, .. } | State::Waiting { mailbox, .. } => {
-                match bound(mailbox) {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        drop(Self {
-                            state: mem::replace(&mut this.state, State::Done),
-                        });
-                        return Poll::Ready(Err(error));
-                    }
+        // Validate affinity before changing ownership, so a rejected foreign
+        // poll retains the identity needed by Drop.
+        let (owner, waiter_id) = match &this.state {
+            State::Waiting { mailbox, waiter_id } => match bound(mailbox) {
+                Ok(owner) => (owner, *waiter_id),
+                Err(error) => {
+                    drop(Self {
+                        state: mem::replace(&mut this.state, State::Done),
+                    });
+                    return Poll::Ready(Err(error));
                 }
+            },
+            State::Closed => {
+                this.state = State::Done;
+                return Poll::Ready(Err(Error::Closed));
             }
             State::Done => panic!("io_uring operation polled after completion"),
         };
@@ -161,318 +112,72 @@ impl Future for Operation {
         loop {
             let mut local = owner.borrow_mut();
             if local.closing {
-                if let Some(incoming) = incoming {
-                    local.deferred.drops.push(incoming);
-                }
+                local.deferred.drops.extend(incoming);
                 drop(local);
                 drop(Self {
                     state: mem::replace(&mut this.state, State::Done),
                 });
                 return Poll::Ready(Err(Error::Closed));
             }
-            match &this.state {
-                State::Waiting { operation_id, .. } => {
-                    match local
-                        .operations
-                        .get_mut(*operation_id)
-                        .expect("live operation entry missing")
-                    {
-                        EntryState::Ready(_) => {
-                            let Some(EntryState::Ready(output)) =
-                                local.operations.take(*operation_id)
-                            else {
-                                unreachable!()
-                            };
-                            this.state = State::Done;
-                            if let Some(incoming) = incoming {
-                                local.deferred.drops.push(incoming);
-                            }
-                            return Poll::Ready(Ok(output));
-                        }
-                        EntryState::Pending { waker, .. } => {
-                            if incoming.is_none() && waker.will_wake(cx.waker()) {
-                                return Poll::Pending;
-                            }
-                        }
-                    }
+            let Local {
+                driver, deferred, ..
+            } = &mut *local;
+            let driver = driver.as_mut().unwrap();
+            match driver.observe(waiter_id, cx.waker()) {
+                Observation::Ready(output) => {
+                    this.state = State::Done;
+                    deferred.drops.extend(incoming);
+                    return Poll::Ready(Ok(output));
                 }
-                State::Unbound(request) | State::Admitting { request, .. } => {
-                    if request
-                        .deadline()
-                        .is_some_and(|deadline| deadline <= local.now)
-                    {
-                        let request = match mem::replace(&mut this.state, State::Done) {
-                            State::Unbound(request) => request,
-                            State::Admitting {
-                                request,
-                                registration,
-                                ..
-                            } => {
-                                local.cancel_admission(registration);
-                                request
-                            }
-                            _ => unreachable!(),
-                        };
-                        let (output, retired) = request.timeout();
-                        local.deferred.resources.push(retired);
-                        if let Some(incoming) = incoming {
-                            local.deferred.drops.push(incoming);
-                        }
-                        return Poll::Ready(Ok(output));
-                    }
-                    local.reconcile_admissions();
-                    if let State::Admitting { registration, .. } = &this.state
-                        && incoming.is_none()
-                        && local.admissions.is_waiting(*registration, cx.waker())
-                    {
+                Observation::Pending => {
+                    deferred.drops.extend(incoming);
+                    return Poll::Pending;
+                }
+                Observation::Refresh => {
+                    if let Some(waker) = incoming.take() {
+                        deferred.drops.extend(driver.set_waker(waiter_id, waker));
                         return Poll::Pending;
                     }
                 }
-                State::Done => unreachable!(),
             }
-            let Some(incoming) = incoming.take() else {
-                // Keep cancellation identity through a clone panic. Reentry can
-                // complete or expire this registration, so inspect it again.
-                drop(local);
-                incoming = Some(cx.waker().clone());
-                continue;
-            };
-            let (request, mailbox, registration) = match mem::replace(&mut this.state, State::Done)
-            {
-                State::Unbound(request) => (request, Arc::downgrade(&local.mailbox), None),
-                State::Admitting {
-                    request,
-                    mailbox,
-                    registration,
-                } => (request, mailbox, Some(registration)),
-                State::Waiting {
-                    mailbox,
-                    operation_id,
-                } => {
-                    let Some(EntryState::Pending { waker, .. }) =
-                        local.operations.get_mut(operation_id)
-                    else {
-                        unreachable!()
-                    };
-                    let old = mem::replace(waker, incoming);
-                    local.deferred.drops.push(old);
-                    this.state = State::Waiting {
-                        mailbox,
-                        operation_id,
-                    };
-                    return Poll::Pending;
-                }
-                State::Done => unreachable!(),
-            };
-            // A grant already owns capacity. Fresh callers may only use capacity
-            // left after older registrations received their FIFO reservations.
-            let granted = match registration {
-                Some(id) => match local.admissions.take_grant(id) {
-                    Ok(old) => {
-                        if let Some(old) = old {
-                            local.deferred.drops.push(old);
-                        }
-                        true
-                    }
-                    Err(()) => false,
-                },
-                None => local
-                    .admissions
-                    .can_admit(local.driver.as_ref().unwrap().free_slots()),
-            };
-            if granted {
-                let Local {
-                    operations, driver, ..
-                } = &mut *local;
-                let id = operations.insert(|id| EntryState::Pending {
-                    waiter_id: driver
-                        .as_mut()
-                        .unwrap()
-                        .admit(request, Observer::Ordinary(id)),
-                    waker: incoming,
-                });
-                this.state = State::Waiting {
-                    mailbox,
-                    operation_id: id,
-                };
-            } else {
-                let id = match registration {
-                    Some(id) => {
-                        let old = local
-                            .admissions
-                            .refresh(id, incoming)
-                            .expect("live admission missing");
-                        if let Some(old) = old {
-                            local.deferred.drops.push(old);
-                        }
-                        id
-                    }
-                    None => local.admissions.register(request.deadline(), incoming),
-                };
-                this.state = State::Admitting {
-                    mailbox,
-                    request,
-                    registration: id,
-                };
-            }
-            return Poll::Pending;
+            // A clone can reenter and finish this request, or panic. Keep its
+            // identity intact and inspect the slot again after the callback.
+            drop(local);
+            incoming = Some(cx.waker().clone());
         }
     }
 }
 
 impl Drop for Operation {
     fn drop(&mut self) {
-        match mem::replace(&mut self.state, State::Done) {
-            State::Admitting {
-                mailbox,
-                registration,
-                request,
-            } => {
-                cancel(&mailbox, Message::CancelAdmission(registration));
-                drop(request);
-            }
-            State::Waiting {
-                mailbox,
-                operation_id,
-            } => cancel(&mailbox, Message::OrphanOperation(operation_id)),
-            State::Unbound(request) => drop(request),
-            State::Done => {}
+        if let State::Waiting { mailbox, waiter_id } = mem::replace(&mut self.state, State::Done) {
+            cancel(&mailbox, Message::Orphan(waiter_id));
         }
     }
 }
 
-/// Admission state for a sync whose result may outlive the owning worker.
-struct SyncAdmission {
-    /// Unsubmitted request, transferred only after a grant is consumed.
-    request: Option<Request>,
-    /// Selected worker, fixed on the first poll.
-    mailbox: Option<Weak<Mailbox>>,
-    /// FIFO registration while waiting for capacity.
-    registration: Option<AdmissionId>,
-    /// Sender transferred directly to the detached waiter at admission.
-    sender: Option<oneshot::Sender<Result<(), Error>>>,
-    /// Receiver returned only once the request is admitted or rejected.
-    receiver: Option<oneshot::Receiver<Result<(), Error>>>,
-}
-
-/// Admit a sync before returning its independent completion receiver.
-pub(crate) async fn start_sync(request: Request) -> oneshot::Receiver<Result<(), Error>> {
+/// Transfer a sync to its worker and return its independent completion receiver.
+pub(crate) fn start_sync(request: Request) -> oneshot::Receiver<Result<(), Error>> {
     assert!(
         matches!(&request, Request::Sync(_)),
-        "detached admission requires sync"
+        "detached request requires sync"
     );
+    let owner = runtime::current().expect("io_uring sync requires a current worker");
     let (sender, receiver) = oneshot::channel();
-    SyncAdmission {
-        request: Some(request),
-        mailbox: None,
-        registration: None,
-        sender: Some(sender),
-        receiver: Some(receiver),
-    }
-    .await
-}
-
-impl Future for SyncAdmission {
-    type Output = oneshot::Receiver<Result<(), Error>>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        if this.mailbox.is_none() {
-            let owner = runtime::current().expect("io_uring sync requires a current worker");
-            this.mailbox = Some(Arc::downgrade(&owner.borrow().mailbox));
-        }
-        let owner = bound(this.mailbox.as_ref().unwrap());
-        if let Ok(owner) = owner {
-            let mut incoming = None;
-            loop {
-                let mut local = owner.borrow_mut();
-                if local.closing {
-                    if let Some(incoming) = incoming {
-                        local.deferred.drops.push(incoming);
-                    }
-                    if let Some(id) = this.registration.take() {
-                        local.cancel_admission(id);
-                    }
-                    break;
-                }
-                local.reconcile_admissions();
-                let granted = match this.registration {
-                    Some(id) => match local.admissions.take_grant(id) {
-                        Ok(old) => {
-                            if let Some(old) = old {
-                                local.deferred.drops.push(old);
-                            }
-                            true
-                        }
-                        Err(()) => false,
-                    },
-                    None => local
-                        .admissions
-                        .can_admit(local.driver.as_ref().unwrap().free_slots()),
-                };
-                if granted {
-                    if let Some(incoming) = incoming {
-                        local.deferred.drops.push(incoming);
-                    }
-                    let request = this.request.take().expect("sync polled after admission");
-                    let sender = this.sender.take().unwrap();
-                    local
-                        .driver
-                        .as_mut()
-                        .unwrap()
-                        .admit(request, Observer::DetachedSync(sender));
-                    this.registration = None;
-                    return Poll::Ready(this.receiver.take().unwrap());
-                }
-                if incoming.is_none()
-                    && this
-                        .registration
-                        .is_some_and(|id| local.admissions.is_waiting(id, cx.waker()))
-                {
-                    return Poll::Pending;
-                }
-                let Some(incoming) = incoming.take() else {
-                    drop(local);
-                    incoming = Some(cx.waker().clone());
-                    continue;
-                };
-                this.registration = Some(match this.registration {
-                    Some(id) => {
-                        let old = local
-                            .admissions
-                            .refresh(id, incoming)
-                            .expect("sync admission missing");
-                        if let Some(old) = old {
-                            local.deferred.drops.push(old);
-                        }
-                        id
-                    }
-                    None => local.admissions.register(None, incoming),
-                });
-                return Poll::Pending;
-            }
-        }
-        // Closure rejects unstarted work and publishes only after releasing
-        // Local. The request was never exposed to the kernel.
-        let request = this.request.take();
-        let receiver = this.receiver.take().expect("sync polled after completion");
-        let sender = this.sender.take().unwrap();
-        this.registration = None;
+    let mut local = owner.borrow_mut();
+    if local.closing {
+        // Release the request and publish closure outside the local borrow.
+        drop(local);
         drop(request);
         let _ = sender.send(Err(Error::Closed));
-        Poll::Ready(receiver)
+    } else {
+        local
+            .driver
+            .as_mut()
+            .unwrap()
+            .admit(request, Observer::DetachedSync(sender));
     }
-}
-
-impl Drop for SyncAdmission {
-    fn drop(&mut self) {
-        if let Some(id) = self.registration.take() {
-            cancel(
-                self.mailbox.as_ref().expect("registered sync has a worker"),
-                Message::CancelAdmission(id),
-            );
-        }
-    }
+    receiver
 }
 
 /// Route destruction locally without weak upgrade, or publish to a foreign owner.
@@ -481,8 +186,7 @@ pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
         let mut local = local.borrow_mut();
         if std::ptr::eq(Arc::as_ptr(&local.mailbox), mailbox.as_ptr()) {
             match message {
-                Message::CancelAdmission(id) => local.cancel_admission(id),
-                Message::OrphanOperation(id) => local.orphan_operation(id),
+                Message::Orphan(id) => local.orphan(id),
                 Message::CancelTimer(id) => {
                     if let Some(waker) = local.timers.cancel(id) {
                         local.deferred.drops.push(waker);
@@ -498,87 +202,6 @@ pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
     }
 }
 
-impl Local {
-    /// Redistribute released capacity before invoking any observer notification.
-    pub(super) fn reconcile_admissions(&mut self) {
-        let free = self
-            .driver
-            .as_ref()
-            .expect("driver present during local access")
-            .free_slots();
-        self.admissions
-            .reconcile(self.now, free, &mut self.deferred.wakes);
-    }
-
-    /// Release an admission reservation and immediately grant its successor.
-    pub(super) fn cancel_admission(&mut self, id: AdmissionId) {
-        if let Some(waker) = self.admissions.cancel(id) {
-            self.deferred.drops.push(waker);
-        }
-        if !self.closing {
-            self.reconcile_admissions();
-        }
-    }
-
-    /// Detach an observer before changing its waiter's cancellation state.
-    pub(super) fn orphan_operation(&mut self, id: OperationId) {
-        match self.operations.take(id) {
-            Some(EntryState::Pending { waiter_id, waker }) => {
-                self.deferred.drops.push(waker);
-                self.driver
-                    .as_mut()
-                    .expect("driver present during orphaning")
-                    .orphan(waiter_id, id, &mut self.completed);
-                self.apply_completions();
-            }
-            Some(EntryState::Ready(output)) => self.deferred.outputs.push(output),
-            None => {}
-        }
-    }
-
-    /// Transfer terminal results out of bounded waiter capacity before waking.
-    pub(super) fn apply_completions(&mut self) {
-        for completed in self.completed.drain(..) {
-            self.deferred.resources.push(completed.retired);
-            match completed.observer {
-                Observer::Ordinary(id) => {
-                    // Driver retirement has already returned waiter capacity.
-                    // Keep the result in its original observer slot until take,
-                    // so an unpolled completion cannot block another request.
-                    let entry = self
-                        .operations
-                        .get_mut(id)
-                        .expect("completed observer missing");
-                    let old = mem::replace(entry, EntryState::Ready(completed.output));
-                    let EntryState::Pending { waker, .. } = old else {
-                        panic!("operation completed twice")
-                    };
-                    self.deferred.wakes.push(waker);
-                }
-                Observer::DetachedSync(sender) => {
-                    let RequestOutput::Sync(output) = completed.output else {
-                        panic!("sync observer received other request")
-                    };
-                    self.deferred.sync_results.push((sender, output));
-                }
-                Observer::Orphaned => self.deferred.outputs.push(completed.output),
-            }
-        }
-        if !self.closing {
-            self.reconcile_admissions();
-        }
-    }
-
-    /// Remove all ordinary observers, including futures retained outside workers.
-    pub(super) fn close_operations(&mut self) {
-        for index in 0..self.operations.entries.slots() {
-            if let Some(id) = self.operations.entries.id_at(index) {
-                self.orphan_operation(OperationId(id));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -587,7 +210,7 @@ mod tests {
     };
     use crate::{
         Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _,
-        iouring::{Config, RingConfig, Runner, slab::tests::set_generation},
+        iouring::{Config, RingConfig, Runner},
         utils::{extract_panic_message, reschedule},
     };
     use futures::{FutureExt as _, poll};
@@ -595,7 +218,7 @@ mod tests {
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
         sync::atomic::{AtomicUsize, Ordering},
-        task::{RawWaker, RawWakerVTable},
+        task::{RawWaker, RawWakerVTable, Waker},
         time::Duration,
     };
 
@@ -682,49 +305,47 @@ mod tests {
     }
 
     #[test]
-    fn sync_admission_clones_only_changed_pending_observers() {
-        for queued in [false, true] {
-            let callbacks = Arc::new(Reentrant::default());
-            runner().start(|context| async move {
-                let (blob, _) = context.open("observer_sync", b"file").await.unwrap();
-                let (fd, _peer) = socket();
-                let mut blocker = queued.then(|| recv(fd, None));
-                if let Some(blocker) = &mut blocker {
-                    assert!(poll!(blocker).is_pending());
-                }
-                let mut admission = Box::pin(blob.start_sync());
-                let waker = callbacks.waker();
-                let mut cx = Context::from_waker(&waker);
-                if queued {
-                    assert!(admission.poll_unpin(&mut cx).is_pending());
-                    assert!(admission.poll_unpin(&mut cx).is_pending());
-                    assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
-                    drop(blocker);
-                    while callbacks.wakes.load(Ordering::Relaxed) == 0 {
-                        reschedule().await;
-                    }
-                }
-                let Poll::Ready(handle) = admission.poll_unpin(&mut cx) else {
-                    panic!("available sync admission must complete");
-                };
-                assert_eq!(
-                    callbacks.clones.load(Ordering::Relaxed),
-                    usize::from(queued)
-                );
-                handle.await.unwrap();
-            });
-        }
+    fn test_start_sync_returns_without_cloning_an_admission_waker() {
+        let callbacks = Arc::new(Reentrant::default());
+        runner().start(|context| async move {
+            let (blob, _) = context.open("observer_sync", b"file").await.unwrap();
+            let (fd, _peer) = socket();
+            let mut blocker = recv(fd, None);
+            assert!(poll!(&mut blocker).is_pending());
+            reschedule().await;
+
+            // The only in-flight slot is occupied, but sync accepts ownership now.
+            let mut sync = Box::pin(blob.start_sync());
+            let waker = callbacks.waker();
+            let Poll::Ready(handle) = sync.poll_unpin(&mut Context::from_waker(&waker)) else {
+                panic!("sync must return its completion handle on the first poll");
+            };
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), 0);
+            assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 0);
+            drop(blocker);
+            handle.await.unwrap();
+        });
     }
 
     #[test]
-    fn observer_clone_reentry_rechecks_expired_registrations() {
+    fn test_observer_clone_reentry_rechecks_expired_registrations() {
         for sleep_first in [false, true] {
             let callbacks = Arc::new(Reentrant {
                 on_clone: Some(|| {
                     let owner = runtime::current().unwrap();
                     let mut local = owner.borrow_mut();
                     local.now += Duration::from_secs(120);
-                    local.reconcile_admissions();
+                    let Local {
+                        driver,
+                        deferred,
+                        now,
+                        ..
+                    } = &mut *local;
+                    driver
+                        .as_mut()
+                        .unwrap()
+                        .service(*now, false, deferred)
+                        .unwrap();
                     let Local {
                         now,
                         timers,
@@ -762,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_clone_panic_preserves_registration_cancellation() {
+    fn test_sleep_clone_panic_preserves_registration_cancellation() {
         runner().start(|_| async {
             let mut sleep = super::super::sleep::Sleep::new(Duration::from_secs(60));
             let registered = Arc::new(Reentrant::default());
@@ -789,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_observers_retain_equivalent_wakers() {
+    fn test_pending_observers_retain_equivalent_wakers() {
         let callbacks = Arc::new(Reentrant::default());
         runner().start(|_| async {
             let (fd, _peer) = socket();
@@ -810,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_observer_does_not_clone_unused_waker() {
+    fn test_ready_observer_does_not_clone_unused_waker() {
         let callbacks = Arc::new(Reentrant::default());
         runner().start(|_| async {
             let (fd, _peer) = socket();
@@ -828,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn observer_clone_wake_and_drop_run_outside_local_borrows() {
+    fn test_observer_clone_wake_and_drop_run_outside_local_borrows() {
         let callbacks = Arc::new(Reentrant::default());
         runner().start(|_| async {
             let (fd, _peer) = socket();
@@ -837,7 +458,7 @@ mod tests {
             let mut cx = Context::from_waker(&waker);
             assert!(operation.poll_unpin(&mut cx).is_pending());
             // Refreshing displaces the first observer. The deferred destructor
-            // must run without keeping the operation slab borrowed.
+            // must run without keeping the waiter slab borrowed.
             assert!(
                 operation
                     .poll_unpin(&mut Context::from_waker(Waker::noop()))
@@ -857,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn observer_clone_panic_preserves_queued_and_admitted_cancellation() {
+    fn test_observer_clone_panic_preserves_queued_and_in_flight_cancellation() {
         for queued in [false, true] {
             let callbacks = Arc::new(Reentrant::default());
             let (fd, _peer) = socket();
@@ -870,9 +491,9 @@ mod tests {
                 let waker = callbacks.waker();
                 let mut cx = Context::from_waker(&waker);
                 assert!(poll!(&mut operation).is_pending());
+                reschedule().await;
                 let registration = match &operation.state {
-                    State::Admitting { registration, .. } => (Some(*registration), None),
-                    State::Waiting { operation_id, .. } => (None, Some(*operation_id)),
+                    State::Waiting { waiter_id, .. } => *waiter_id,
                     _ => panic!("operation did not register"),
                 };
                 callbacks
@@ -884,13 +505,12 @@ mod tests {
                 .expect_err("observer clone must panic");
                 assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
                 let retained = match &operation.state {
-                    State::Admitting { registration, .. } if queued => (Some(*registration), None),
-                    State::Waiting { operation_id, .. } if !queued => (None, Some(*operation_id)),
+                    State::Waiting { waiter_id, .. } => *waiter_id,
                     _ => panic!("clone panic lost cancellation identity"),
                 };
                 assert_eq!(retained, registration);
-                // Dropping after the caught poll failure must return both the
-                // queued grant and any admitted waiter to the size-one driver.
+                // A clone panic must retain the identity needed to cancel
+                // both queued and in-flight requests.
                 drop(operation);
                 drop(blocker);
                 assert!(matches!(
@@ -904,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn observer_wake_and_drop_panics_finish_worker_retirement() {
+    fn test_observer_wake_and_drop_panics_finish_worker_retirement() {
         for callback in [Reentrant::WAKE, Reentrant::DROP] {
             let callbacks = Arc::new(Reentrant::default());
             let (fd, _peer) = socket();
@@ -940,7 +560,6 @@ mod tests {
             );
             let local = retained_local.unwrap();
             let local = local.borrow();
-            assert_eq!(local.operations.entries.len(), 0);
             assert!(local.driver.is_none());
             assert!(runtime::current().is_none());
             assert_eq!(Arc::strong_count(&fd), 1);
@@ -962,7 +581,7 @@ mod tests {
     }
 
     fn send(fd: Arc<OwnedFd>) -> Operation {
-        Operation::new(Request::Send(SendRequest {
+        Operation::register(Request::Send(SendRequest {
             fd,
             write: IoBufs::from(vec![1]).into(),
             deadline: None,
@@ -971,7 +590,7 @@ mod tests {
     }
 
     fn recv(fd: Arc<OwnedFd>, deadline: Option<std::time::Instant>) -> Operation {
-        Operation::new(Request::Recv(RecvRequest {
+        Operation::register(Request::Recv(RecvRequest {
             fd,
             buf: IoBufMut::with_capacity(1),
             offset: 0,
@@ -983,31 +602,61 @@ mod tests {
     }
 
     #[test]
-    fn completed_unpolled_operation_releases_capacity_one() {
+    fn test_queued_operation_completes_without_an_admission_poll() {
+        let callbacks = Arc::new(Reentrant::default());
+        runner().start(|_| async {
+            let (fd, _peer) = socket();
+            let mut blocker = recv(fd.clone(), None);
+            assert!(poll!(&mut blocker).is_pending());
+            reschedule().await;
+
+            let mut queued = send(fd.clone());
+            let waker = callbacks.waker();
+            assert!(
+                queued
+                    .poll_unpin(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            drop(blocker);
+
+            // Await another request while the queued future receives no polls.
+            assert!(matches!(send(fd).await, Ok(RequestOutput::Send(Ok(())))));
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
+            assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 1);
+            assert!(
+                queued
+                    .poll_unpin(&mut Context::from_waker(&waker))
+                    .is_ready()
+            );
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn test_completed_unpolled_operation_releases_capacity_one() {
         runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut first = send(fd.clone());
             assert!(poll!(&mut first).is_pending());
-            while runtime::current()
+            while !runtime::current()
                 .unwrap()
                 .borrow()
                 .driver
                 .as_ref()
                 .unwrap()
-                .free_slots()
-                == 0
+                .is_empty()
             {
                 reschedule().await;
             }
-            // The first output remains retained while another request acquires
-            // the sole waiter, completes, and releases that waiter again.
+            // The first output remains retained while another request uses the
+            // sole in-flight slot and completes independently.
             assert!(matches!(send(fd).await, Ok(RequestOutput::Send(Ok(())))));
             assert!(matches!(first.await, Ok(RequestOutput::Send(Ok(())))));
         });
     }
 
     #[test]
-    fn admission_deadline_and_timer_progress_with_full_ring() {
+    fn test_queued_deadline_and_timer_progress_with_full_ring() {
         runner().start(|context| async move {
             let (fd, _peer) = socket();
             let mut first = recv(fd.clone(), None);
@@ -1018,28 +667,27 @@ mod tests {
                 waiting.await,
                 Ok(RequestOutput::Recv(Err((_, Error::Timeout))))
             ));
-            // An untimed admitted receive still owns the only waiter. Sleep
-            // registration and expiry must not depend on obtaining that slot.
+            // The untimed receive still occupies the only in-flight slot.
+            // Sleeper expiry must also progress independently of that slot.
             context.sleep(Duration::from_millis(1)).await;
             drop(first);
         });
     }
 
     #[test]
-    fn foreign_drop_orphans_registered_request() {
+    fn test_foreign_drop_orphans_registered_request() {
         runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut operation = recv(fd, None);
             assert!(poll!(&mut operation).is_pending());
             std::thread::spawn(move || drop(operation)).join().unwrap();
-            while runtime::current()
+            while !runtime::current()
                 .unwrap()
                 .borrow()
                 .driver
                 .as_ref()
                 .unwrap()
-                .free_slots()
-                == 0
+                .is_empty()
             {
                 reschedule().await;
             }
@@ -1047,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn escaped_operation_observes_worker_closure() {
+    fn test_escaped_operation_observes_worker_closure() {
         let (operation,) = runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut operation = recv(fd, None);
@@ -1061,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn foreign_poll_rejection_keeps_cancellation_identity() {
+    fn test_foreign_poll_rejection_keeps_cancellation_identity() {
         runner().start(|_| async {
             let (fd, _peer) = socket();
             let mut operation = recv(fd, None);
@@ -1076,70 +724,16 @@ mod tests {
                 drop(operation);
             });
             rejected.join().unwrap();
-            while runtime::current()
+            while !runtime::current()
                 .unwrap()
                 .borrow()
                 .driver
                 .as_ref()
                 .unwrap()
-                .free_slots()
-                == 0
+                .is_empty()
             {
                 reschedule().await;
             }
         });
-    }
-
-    fn pending(waiter_id: WaiterId) -> EntryState {
-        EntryState::Pending {
-            waiter_id,
-            waker: Waker::noop().clone(),
-        }
-    }
-
-    #[test]
-    fn retained_result_survives_waiter_reuse() {
-        let mut operations = Operations::default();
-        let first = operations.insert(|_| pending(WaiterId::new(0, 0)));
-        let old = mem::replace(
-            operations.get_mut(first).unwrap(),
-            EntryState::Ready(RequestOutput::Send(Ok(()))),
-        );
-        drop(old);
-
-        // The next operation can use the same bounded waiter while the earlier
-        // output remains in its independent observer slot.
-        let second = operations.insert(|_| pending(WaiterId::new(0, 1)));
-        assert_ne!(first, second);
-        assert!(matches!(
-            operations.take(first),
-            Some(EntryState::Ready(RequestOutput::Send(Ok(()))))
-        ));
-        assert!(matches!(
-            operations.get_mut(second),
-            Some(EntryState::Pending { .. })
-        ));
-    }
-
-    #[test]
-    fn delayed_drop_cannot_alias_recycled_result_slot() {
-        let mut operations = Operations::default();
-        let first = operations.insert(|_| pending(WaiterId::new(0, 0)));
-        drop(operations.take(first));
-        let second = operations.insert(|_| pending(WaiterId::new(0, 1)));
-        assert_eq!(first.0.index, second.0.index);
-        assert_ne!(first.0.generation, second.0.generation);
-        assert!(operations.take(first).is_none());
-        assert!(operations.get_mut(second).is_some());
-    }
-
-    #[test]
-    fn exhausted_result_generation_retires_slot() {
-        let mut operations = Operations::default();
-        let id = operations.insert(|_| pending(WaiterId::new(0, 0)));
-        let exhausted = OperationId(set_generation(&mut operations.entries, id.0, u64::MAX));
-        drop(operations.take(exhausted));
-        let next = operations.insert(|_| pending(WaiterId::new(0, 1)));
-        assert_ne!(next.0.index, id.0.index);
     }
 }

@@ -918,8 +918,9 @@ stability_scope!(BETA {
 
         /// Request that all pending data is durably persisted.
         ///
-        /// Awaiting this future waits until the sync has started. Awaiting the returned
-        /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
+        /// Awaiting this future waits until the runtime accepts responsibility for
+        /// the sync. It continues even if the returned [`Handle`] is dropped.
+        /// Awaiting that handle waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 

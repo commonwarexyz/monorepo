@@ -7,11 +7,11 @@
 //! Storage and blob handles retain no ring identity, so resources can move
 //! between workers between operations. Metadata and resize remain synchronous.
 //!
-//! A shared directory hold follows each blob's file into admitted requests.
+//! A shared directory hold follows each blob's file into registered requests.
 //! Dropping a caller never releases that hold while the kernel can still access
-//! the file. Once admitted, writes and syncs finish their logical work after caller
-//! cancellation. Dropping an operation while it is still waiting for admission
-//! prevents submission.
+//! the file. The first poll transfers each operation to its worker. Registered
+//! writes and syncs finish their logical work after caller cancellation,
+//! including requests still queued for staging capacity.
 //!
 //! ## Memory Safety
 //!
@@ -338,7 +338,7 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
-        let output = Operation::new(Request::ReadAt(ReadAtRequest {
+        let output = Operation::register(Request::ReadAt(ReadAtRequest {
             file: self.file.clone(),
             offset,
             len,
@@ -398,7 +398,7 @@ impl crate::Blob for Blob {
         } else {
             WriteAtState::WritingBeforeSync
         };
-        let output = Operation::new(Request::WriteAt(WriteAtRequest {
+        let output = Operation::register(Request::WriteAt(WriteAtRequest {
             file: self.file.clone(),
             offset,
             written: 0,
@@ -430,7 +430,7 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let output = Operation::new(Request::Sync(SyncRequest {
+        let output = Operation::register(Request::Sync(SyncRequest {
             file: self.file.clone(),
             result: None,
         }))
@@ -452,8 +452,7 @@ impl crate::Blob for Blob {
         let receiver = operation::start_sync(Request::Sync(SyncRequest {
             file: self.file.clone(),
             result: None,
-        }))
-        .await;
+        }));
         Handle::from_future(async move {
             match receiver.await {
                 Ok(Ok(())) => Ok(()),
@@ -1349,10 +1348,8 @@ mod tests {
     }
 
     #[test]
-    // Return the admission future so it can be observed after worker shutdown.
-    #[allow(clippy::async_yields_async)]
-    fn test_pending_start_sync_observes_worker_closure() {
-        let (read, sync, directory) = iouring::Runner::new(
+    fn test_queued_write_and_start_sync_finish_through_shutdown() {
+        let (blob, handle, directory) = iouring::Runner::new(
             iouring::Config::default().with_ring_config(iouring::RingConfig {
                 size: 1,
                 ..Default::default()
@@ -1360,23 +1357,25 @@ mod tests {
         )
         .start(|_| async {
             let (storage, directory) = create_test_storage();
-            let (blob, _) = storage.open("partition", b"pending_sync").await.unwrap();
-            let reader = blob.clone();
-            let mut read =
-                Box::pin(async move { reader.read_at(0, 1, ReadOptions::default()).await });
-            let mut sync = Box::pin(async move { blob.start_sync().await });
-            // The read occupies the only waiter without yielding to driver
-            // service, so start_sync must register pending admission.
+            let (blob, _) = storage.open("partition", b"queued_sync").await.unwrap();
+            let mut read = Box::pin(blob.read_at(0, 1, ReadOptions::default()));
             assert!(futures::poll!(read.as_mut()).is_pending());
-            assert!(futures::poll!(sync.as_mut()).is_pending());
-            (read, sync, directory)
+
+            // The write is registered beyond the ring's size and dropped before
+            // any driver service. Worker ownership must survive that drop.
+            let mut write = Box::pin(blob.write_at(0, b"x", WriteOptions::default()));
+            assert!(futures::poll!(write.as_mut()).is_pending());
+            drop(write);
+            let handle = blob.start_sync().await;
+            drop(read);
+            (blob, handle, directory)
         });
-        let handle = futures::executor::block_on(sync);
-        assert!(matches!(
-            futures::executor::block_on(handle),
-            Err(Error::Closed)
-        ));
-        drop(read);
+
+        futures::executor::block_on(handle).unwrap();
+        iouring::Runner::default().start(|_| async move {
+            let data = blob.read_at(0, 1, ReadOptions::default()).await.unwrap();
+            assert_eq!(data.coalesce().as_ref(), b"x");
+        });
         std::fs::remove_dir_all(directory).unwrap();
     }
 

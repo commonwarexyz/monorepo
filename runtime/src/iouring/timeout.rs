@@ -563,6 +563,7 @@ impl TimeoutWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iouring::waiter::tests::waiter_id;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const TICK: Duration = Duration::from_millis(5);
@@ -666,7 +667,7 @@ mod tests {
                 .checked_target_tick(now + horizon + Duration::from_nanos(1), now)
                 .is_err()
         );
-        wheel.schedule(WaiterId::new(0, 0), 4);
+        wheel.schedule(waiter_id(0, 0), 4);
         assert_eq!(
             wheel.next_deadline_at(),
             Some(start + Duration::from_millis(20))
@@ -683,7 +684,7 @@ mod tests {
             wheel.checked_target_tick(now + horizon, now),
             Ok(Some(12_004))
         );
-        wheel.schedule(WaiterId::new(0, 1), 12_004);
+        wheel.schedule(waiter_id(0, 1), 12_004);
         let absolute = start + Duration::from_millis(60_020);
         assert_eq!(wheel.next_deadline_at(), Some(absolute));
         wheel.advance(now + Duration::from_millis(6));
@@ -700,18 +701,18 @@ mod tests {
 
         // No-op path: now tick does not move forward.
         let mut no_op = wheel(Duration::from_millis(100));
-        no_op.schedule(WaiterId::new(1, 0), 2);
+        no_op.schedule(waiter_id(1, 0), 2);
         assert!(advance(&mut no_op, 0).is_empty());
         assert_eq!(no_op.current_tick, 0);
 
         // Active deadline exists, but it is still in the future.
         let mut future = wheel(Duration::from_millis(100));
-        future.schedule(WaiterId::new(7, 0), 10);
+        future.schedule(waiter_id(7, 0), 10);
         assert!(future.advance(now_for_tick(&future, 5)).is_none());
 
         // Earliest active deadline has not arrived yet.
         let mut none_due = wheel(Duration::from_millis(100));
-        none_due.schedule(WaiterId::new(7, 0), 2);
+        none_due.schedule(waiter_id(7, 0), 2);
         assert!(none_due.advance(now_for_tick(&none_due, 1)).is_none());
     }
 
@@ -727,11 +728,11 @@ mod tests {
             .unwrap()
             .expect("deadline should be schedulable");
         assert_eq!(target_tick, 12);
-        wheel.schedule(WaiterId::new(1, 0), target_tick);
+        wheel.schedule(waiter_id(1, 0), target_tick);
         assert!(advance(&mut wheel, 11).is_empty());
         assert_eq!(
             advance(&mut wheel, 12),
-            vec![TimeoutEntry::new(WaiterId::new(1, 0), 12)]
+            vec![TimeoutEntry::new(waiter_id(1, 0), 12)]
         );
     }
 
@@ -739,8 +740,8 @@ mod tests {
     fn test_schedule_advance_and_timeout_lookup() {
         let mut wheel = wheel(Duration::from_millis(100));
 
-        wheel.schedule(WaiterId::new(1, 0), 2);
-        wheel.schedule(WaiterId::new(2, 0), 5);
+        wheel.schedule(waiter_id(1, 0), 2);
+        wheel.schedule(waiter_id(2, 0), 5);
 
         // Earliest target tick is 2 => 2 * 5ms from current tick 0.
         assert_eq!(wheel.next_deadline(), Some(Duration::from_millis(10)));
@@ -748,13 +749,13 @@ mod tests {
         assert!(advance(&mut wheel, 1).is_empty());
         assert_eq!(
             advance(&mut wheel, 2),
-            vec![TimeoutEntry::new(WaiterId::new(1, 0), 2)]
+            vec![TimeoutEntry::new(waiter_id(1, 0), 2)]
         );
         wheel.remove(2);
         assert_eq!(wheel.next_deadline(), Some(Duration::from_millis(15)));
         assert_eq!(
             advance(&mut wheel, 5),
-            vec![TimeoutEntry::new(WaiterId::new(2, 0), 5)]
+            vec![TimeoutEntry::new(waiter_id(2, 0), 5)]
         );
         wheel.remove(5);
         assert_eq!(wheel.next_deadline(), None);
@@ -763,21 +764,21 @@ mod tests {
     #[test]
     fn test_interleaved_schedule_advance_cycles() {
         let mut wheel = wheel(Duration::from_millis(100));
-        wheel.schedule(WaiterId::new(1, 0), 2);
+        wheel.schedule(waiter_id(1, 0), 2);
 
         assert!(advance(&mut wheel, 1).is_empty());
-        wheel.schedule(WaiterId::new(2, 0), 4);
+        wheel.schedule(waiter_id(2, 0), 4);
 
         assert_eq!(
             advance(&mut wheel, 2),
-            vec![TimeoutEntry::new(WaiterId::new(1, 0), 2)]
+            vec![TimeoutEntry::new(waiter_id(1, 0), 2)]
         );
         wheel.remove(2);
 
         assert!(advance(&mut wheel, 3).is_empty());
         assert_eq!(
             advance(&mut wheel, 4),
-            vec![TimeoutEntry::new(WaiterId::new(2, 0), 4)]
+            vec![TimeoutEntry::new(waiter_id(2, 0), 4)]
         );
         wheel.remove(4);
         assert_eq!(wheel.next_deadline(), None);
@@ -786,7 +787,7 @@ mod tests {
     #[test]
     fn test_advance_no_active_fast_path_and_stale_purge() {
         let mut wheel = wheel(Duration::from_millis(100));
-        wheel.schedule(WaiterId::new(1, 0), 2);
+        wheel.schedule(waiter_id(1, 0), 2);
         wheel.remove(2);
 
         // With no active deadlines, the first advance purges stale occupancy and
@@ -807,14 +808,14 @@ mod tests {
     #[test]
     fn test_advance_returns_all_waiters_from_same_bucket() {
         let mut wheel = wheel(Duration::from_millis(100));
-        wheel.schedule(WaiterId::new(1, 0), 2);
-        wheel.schedule(WaiterId::new(2, 0), 2);
+        wheel.schedule(waiter_id(1, 0), 2);
+        wheel.schedule(waiter_id(2, 0), 2);
 
         assert_eq!(
             advance(&mut wheel, 2),
             vec![
-                TimeoutEntry::new(WaiterId::new(1, 0), 2),
-                TimeoutEntry::new(WaiterId::new(2, 0), 2)
+                TimeoutEntry::new(waiter_id(1, 0), 2),
+                TimeoutEntry::new(waiter_id(2, 0), 2)
             ]
         );
     }
@@ -823,21 +824,21 @@ mod tests {
     fn test_wraparound_deadline_and_range_drain() {
         let mut wheel = wheel(Duration::from_millis(100));
         assert!(advance(&mut wheel, 30).is_empty());
-        wheel.schedule(WaiterId::new(3, 0), 33);
+        wheel.schedule(waiter_id(3, 0), 33);
 
         // current=30, target=33 => 3 ticks of 5ms.
         assert_eq!(wheel.next_deadline(), Some(Duration::from_millis(15)));
 
         // Add an earlier wrapped slot so one advance drains tail and head ranges.
-        wheel.schedule(WaiterId::new(1, 0), 31);
-        wheel.schedule(WaiterId::new(2, 0), 33);
+        wheel.schedule(waiter_id(1, 0), 31);
+        wheel.schedule(waiter_id(2, 0), 33);
 
         assert_eq!(
             advance(&mut wheel, 33),
             vec![
-                TimeoutEntry::new(WaiterId::new(1, 0), 31),
-                TimeoutEntry::new(WaiterId::new(3, 0), 33),
-                TimeoutEntry::new(WaiterId::new(2, 0), 33)
+                TimeoutEntry::new(waiter_id(1, 0), 31),
+                TimeoutEntry::new(waiter_id(3, 0), 33),
+                TimeoutEntry::new(waiter_id(2, 0), 33)
             ]
         );
     }
@@ -845,16 +846,16 @@ mod tests {
     #[test]
     fn test_multi_word_bitset_end_to_end_advance() {
         let mut wheel = wheel(Duration::from_millis(500));
-        wheel.schedule(WaiterId::new(1, 0), 63);
-        wheel.schedule(WaiterId::new(2, 0), 64);
-        wheel.schedule(WaiterId::new(3, 0), 65);
+        wheel.schedule(waiter_id(1, 0), 63);
+        wheel.schedule(waiter_id(2, 0), 64);
+        wheel.schedule(waiter_id(3, 0), 65);
 
         assert_eq!(
             advance(&mut wheel, 65),
             vec![
-                TimeoutEntry::new(WaiterId::new(1, 0), 63),
-                TimeoutEntry::new(WaiterId::new(2, 0), 64),
-                TimeoutEntry::new(WaiterId::new(3, 0), 65)
+                TimeoutEntry::new(waiter_id(1, 0), 63),
+                TimeoutEntry::new(waiter_id(2, 0), 64),
+                TimeoutEntry::new(waiter_id(3, 0), 65)
             ]
         );
     }
@@ -862,17 +863,17 @@ mod tests {
     #[test]
     fn test_full_revolution_drain_and_reschedule() {
         let mut wheel = wheel(Duration::from_millis(100));
-        wheel.schedule(WaiterId::new(1, 0), 20);
-        wheel.schedule(WaiterId::new(2, 0), 5);
+        wheel.schedule(waiter_id(1, 0), 20);
+        wheel.schedule(waiter_id(2, 0), 5);
 
         // slots=32 for max_timeout=100ms. Jumping by >=32 ticks expires all buckets.
         let mut expired = wheel.advance(now_for_tick(&wheel, 40)).unwrap_or_default();
-        expired.sort_unstable_by_key(|entry| entry.waiter_id.index());
+        expired.sort_unstable_by_key(|entry| entry.waiter_id.0.index);
         assert_eq!(
             expired,
             vec![
-                TimeoutEntry::new(WaiterId::new(1, 0), 20),
-                TimeoutEntry::new(WaiterId::new(2, 0), 5)
+                TimeoutEntry::new(waiter_id(1, 0), 20),
+                TimeoutEntry::new(waiter_id(2, 0), 5)
             ]
         );
         wheel.remove(20);
@@ -880,17 +881,17 @@ mod tests {
         assert_eq!(wheel.next_deadline(), None);
 
         // Wheel remains usable after a full-revolution drain.
-        wheel.schedule(WaiterId::new(2, 0), 41);
+        wheel.schedule(waiter_id(2, 0), 41);
         assert_eq!(
             advance(&mut wheel, 41),
-            vec![TimeoutEntry::new(WaiterId::new(2, 0), 41)]
+            vec![TimeoutEntry::new(waiter_id(2, 0), 41)]
         );
     }
 
     #[test]
     fn test_advance_returns_none_when_due_scan_finds_no_occupied_slots() {
         let mut wheel = wheel(Duration::from_millis(100));
-        wheel.schedule(WaiterId::new(1, 0), 5);
+        wheel.schedule(waiter_id(1, 0), 5);
 
         // Corrupt only bucket-occupancy metadata so active state says "due",
         // but the scan sees no occupied buckets and returns None.
@@ -903,7 +904,7 @@ mod tests {
     fn test_min_scheduled_tick_update_paths() {
         // Case 1: early advance before minimum tick should not lose the entry.
         let mut wheel_future = wheel(Duration::from_millis(500));
-        wheel_future.schedule(WaiterId::new(9, 0), 100);
+        wheel_future.schedule(waiter_id(9, 0), 100);
 
         // now_tick is before earliest scheduled tick, so advance should fast-skip.
         assert!(advance(&mut wheel_future, 50).is_empty());
@@ -913,17 +914,17 @@ mod tests {
         // Once we reach the target tick, the entry should still expire.
         assert_eq!(
             advance(&mut wheel_future, 100),
-            vec![TimeoutEntry::new(WaiterId::new(9, 0), 100)]
+            vec![TimeoutEntry::new(waiter_id(9, 0), 100)]
         );
         wheel_future.remove(100);
 
         // Case 2: removing the minimum should recompute to the next active tick.
         let mut wheel_recompute = wheel(Duration::from_millis(100));
-        wheel_recompute.schedule(WaiterId::new(1, 0), 5);
-        wheel_recompute.schedule(WaiterId::new(2, 0), 10);
+        wheel_recompute.schedule(waiter_id(1, 0), 5);
+        wheel_recompute.schedule(waiter_id(2, 0), 10);
         assert_eq!(
             advance(&mut wheel_recompute, 5),
-            vec![TimeoutEntry::new(WaiterId::new(1, 0), 5)]
+            vec![TimeoutEntry::new(waiter_id(1, 0), 5)]
         );
         wheel_recompute.remove(5);
         assert_eq!(wheel_recompute.min_scheduled_tick, 10);
@@ -934,8 +935,8 @@ mod tests {
 
         // Case 3: removing a non-minimum tick should keep the minimum unchanged.
         let mut wheel_non_min = wheel(Duration::from_millis(100));
-        wheel_non_min.schedule(WaiterId::new(1, 0), 5);
-        wheel_non_min.schedule(WaiterId::new(2, 0), 10);
+        wheel_non_min.schedule(waiter_id(1, 0), 5);
+        wheel_non_min.schedule(waiter_id(2, 0), 10);
         wheel_non_min.remove(10);
         assert_eq!(wheel_non_min.min_scheduled_tick, 5);
         assert_eq!(
@@ -948,17 +949,17 @@ mod tests {
     fn test_reused_slot_stale_entry_preserves_tick_identity() {
         let mut wheel = wheel(Duration::from_millis(100));
 
-        wheel.schedule(WaiterId::new(7, 0), 5);
+        wheel.schedule(waiter_id(7, 0), 5);
         wheel.remove(5); // completed early; stale entry stays in bucket until drain
-        wheel.schedule(WaiterId::new(7, 0), 10); // slot reused for new waiter
+        wheel.schedule(waiter_id(7, 0), 10); // slot reused for new waiter
 
         // When the later deadline is reached, both stale and live entries can be
         // returned. Tick identity disambiguates them.
         assert_eq!(
             advance(&mut wheel, 10),
             vec![
-                TimeoutEntry::new(WaiterId::new(7, 0), 5),
-                TimeoutEntry::new(WaiterId::new(7, 0), 10)
+                TimeoutEntry::new(waiter_id(7, 0), 5),
+                TimeoutEntry::new(waiter_id(7, 0), 10)
             ]
         );
     }
@@ -1005,7 +1006,7 @@ mod tests {
 
         let mut wrapped_wheel = wheel(Duration::from_millis(100));
         assert!(advance(&mut wrapped_wheel, 30).is_empty());
-        wrapped_wheel.schedule(WaiterId::new(1, 0), 33);
+        wrapped_wheel.schedule(waiter_id(1, 0), 33);
         assert_eq!(wrapped_wheel.compute_min_scheduled_tick(), 33);
 
         // Multi-word wrap case: with 128 slots and current tick at 63,
@@ -1031,7 +1032,7 @@ mod tests {
     #[test]
     fn test_drain_occupied_range_empty_interval_noop() {
         let mut wheel = wheel(Duration::from_millis(100));
-        wheel.schedule(WaiterId::new(1, 0), 2);
+        wheel.schedule(waiter_id(1, 0), 2);
 
         let mut expired = Vec::new();
         wheel.drain_occupied_range(7, 7, &mut expired);
@@ -1044,7 +1045,7 @@ mod tests {
         {
             let mut wheel = wheel(Duration::from_millis(100));
             let err = catch_unwind(AssertUnwindSafe(|| {
-                wheel.schedule(WaiterId::new(1, 0), 0);
+                wheel.schedule(waiter_id(1, 0), 0);
             }));
             assert!(
                 err.is_err(),
@@ -1056,7 +1057,7 @@ mod tests {
             let mut wheel = wheel(Duration::from_millis(100));
             let too_far = wheel.buckets.len() as Tick;
             let err = catch_unwind(AssertUnwindSafe(|| {
-                wheel.schedule(WaiterId::new(1, 0), too_far);
+                wheel.schedule(waiter_id(1, 0), too_far);
             }));
             assert!(err.is_err(), "schedule should reject horizon overflow");
         }
@@ -1090,7 +1091,7 @@ mod tests {
             wheel.occupied[slot / TimeoutWheel::WORD_BITS] |=
                 1u64 << (slot % TimeoutWheel::WORD_BITS);
             let err = catch_unwind(AssertUnwindSafe(|| {
-                wheel.schedule(WaiterId::new(1, 0), 1);
+                wheel.schedule(waiter_id(1, 0), 1);
             }));
             assert!(
                 err.is_err(),

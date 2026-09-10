@@ -13,7 +13,7 @@
 //!                  terminal completion
 //!                     /            \
 //!              RequestOutput   RetiredResources
-//!              operation slab  drop outside Local
+//!              waiter: Ready   drop outside Local
 //! ```
 //!
 //! Consumed write chunks remain owned until terminal retirement. Progress never
@@ -174,7 +174,7 @@ fn fill_iovecs(bufs: &IoBufs, chunk: usize, offset: usize, iovecs: &mut [libc::i
 /// Each variant owns all buffers and FDs needed by the
 /// kernel, and progress cursors. The loop calls [build_sqe](Self::build_sqe)
 /// to produce the next SQE, [on_cqe](Self::on_cqe) to evaluate completions,
-/// and [complete](Self::complete) or [timeout](Self::timeout) to
+/// and [complete](Self::complete) or [fail](Self::fail) to
 /// return results without invoking observers.
 pub(crate) enum Request {
     /// Send a whole logical buffer sequence.
@@ -311,11 +311,6 @@ impl Request {
         }
     }
 
-    /// Complete a request whose deadline expired before another SQE was staged.
-    pub fn timeout(self) -> (RequestOutput, RetiredResources) {
-        self.fail(Error::Timeout)
-    }
-
     /// Record a local rejection and return its typed result without dropping owners.
     pub fn fail(mut self, error: Error) -> (RequestOutput, RetiredResources) {
         match &mut self {
@@ -331,7 +326,7 @@ impl Request {
     }
 }
 
-/// Typed terminal results retained separately from active waiter capacity.
+/// Typed terminal results retained after their driver requests retire.
 #[derive(Debug)]
 pub(crate) enum RequestOutput {
     /// Completion of a logical network send.
@@ -992,6 +987,7 @@ impl PollRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iouring::waiter::tests::waiter_id;
     use bytes::Bytes;
     use std::{
         os::{
@@ -1225,7 +1221,7 @@ mod tests {
         });
         let guard = local.lock();
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        let (output, retired) = request.timeout();
+        let (output, retired) = request.fail(Error::Timeout);
         assert!(matches!(output, RequestOutput::Send(Err(Error::Timeout))));
         assert_eq!(*guard, 0);
         drop(guard);
@@ -1304,7 +1300,7 @@ mod tests {
                 deadline: None,
                 result: None,
             });
-            let _ = request.build_sqe(WaiterId::new(0, 0));
+            let _ = request.build_sqe(waiter_id(0, 0));
         });
         assert!(recv_overread.is_err());
 
@@ -1318,7 +1314,7 @@ mod tests {
                 deadline: None,
                 result: None,
             });
-            let _ = request.build_sqe(WaiterId::new(0, 0));
+            let _ = request.build_sqe(waiter_id(0, 0));
         });
         assert!(recv_oversized.is_err());
 
@@ -1332,7 +1328,7 @@ mod tests {
                 cache: Cache::Enabled,
                 result: None,
             });
-            let _ = request.build_sqe(WaiterId::new(0, 0));
+            let _ = request.build_sqe(waiter_id(0, 0));
         });
         assert!(read_oversized.is_err());
 
@@ -1346,7 +1342,7 @@ mod tests {
                 cache: Cache::Enabled,
                 result: None,
             });
-            let _ = request.build_sqe(WaiterId::new(0, 0));
+            let _ = request.build_sqe(waiter_id(0, 0));
         });
         assert!(read_overread.is_err());
     }
@@ -2125,7 +2121,7 @@ mod tests {
             file: make_file_fd(),
             result: None,
         });
-        let (output, retired) = request.timeout();
+        let (output, retired) = request.fail(Error::Timeout);
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };
@@ -2232,7 +2228,7 @@ mod tests {
             deadline: None,
             result: None,
         });
-        let (output, retired) = request.timeout();
+        let (output, retired) = request.fail(Error::Timeout);
         let RequestOutput::Send(result) = output else {
             panic!("unexpected request output");
         };
@@ -2248,7 +2244,7 @@ mod tests {
             deadline: None,
             result: None,
         });
-        let (output, retired) = request.timeout();
+        let (output, retired) = request.fail(Error::Timeout);
         let RequestOutput::Recv(result) = output else {
             panic!("unexpected request output");
         };
@@ -2266,7 +2262,7 @@ mod tests {
             cache: Cache::Enabled,
             result: None,
         });
-        let (output, retired) = request.timeout();
+        let (output, retired) = request.fail(Error::Timeout);
         let RequestOutput::ReadAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -2282,7 +2278,7 @@ mod tests {
             cache: Cache::Enabled,
             result: None,
         });
-        let (output, retired) = request.timeout();
+        let (output, retired) = request.fail(Error::Timeout);
         let RequestOutput::WriteAt(result) = output else {
             panic!("unexpected request output");
         };
@@ -2293,7 +2289,7 @@ mod tests {
             file: make_file_fd(),
             result: None,
         });
-        let (output, retired) = request.timeout();
+        let (output, retired) = request.fail(Error::Timeout);
         let RequestOutput::Sync(result) = output else {
             panic!("unexpected request output");
         };
