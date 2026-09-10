@@ -645,16 +645,16 @@ fn canonical_reference<'a, V: Variant, D: Digest>(
     leader: &LeaderBlock<V, D>,
     votes: impl IntoIterator<Item = (&'a [Position], &'a [Extension<D>])>,
 ) -> Vec<Extension<D>> {
-    let mut standard_candidates = BTreeMap::<Vec<Extension<D>>, usize>::new();
-    let mut all_candidates = BTreeMap::<Vec<Extension<D>>, usize>::new();
+    let mut standard_candidates = BTreeMap::<&[Extension<D>], usize>::new();
+    let mut all_candidates = BTreeMap::<&[Extension<D>], usize>::new();
     for (positions, extensions) in votes {
-        *all_candidates.entry(extensions.to_vec()).or_default() += 1;
+        *all_candidates.entry(extensions).or_default() += 1;
         let at_tips = positions
             .iter()
             .zip(leader.proposals())
             .all(|(position, proposal)| position.get() == proposal.payloads().len() as u32);
         if at_tips {
-            *standard_candidates.entry(extensions.to_vec()).or_default() += 1;
+            *standard_candidates.entry(extensions).or_default() += 1;
         }
     }
 
@@ -670,7 +670,7 @@ fn canonical_reference<'a, V: Variant, D: Digest>(
                 .cmp(right_count)
                 .then_with(|| right_value.encode().cmp(&left_value.encode()))
         })
-        .map(|(extensions, _)| extensions)
+        .map(|(extensions, _)| extensions.to_vec())
         .expect("a tally always contains at least one vote")
 }
 
@@ -1126,6 +1126,87 @@ mod tests {
     fn sparse_certificates_preserve_signatures_tips_and_measure_sizes() {
         certificate_extension_deviations::<MinPk>();
         certificate_extension_deviations::<MinSig>();
+    }
+
+    #[test]
+    fn certificate_decoding_matches_constructor_tally_validation() {
+        let committee = Committee::<MinSig>::new_with_namespace(
+            6,
+            b"_COMMONWARE_CONSENSUS_CERTIFICATE_TALLY_DECODE_TEST",
+            6,
+            Limits::new(2, 1).unwrap(),
+        );
+        let config = committee.codec();
+        let lqc = committee.lqc(1);
+        let vqc = lqc.derive_vqc(config).unwrap();
+        let leader = lqc.leader();
+        let tally = lqc.tally();
+        let mut cases = vec![tally.clone()];
+        let mut wrong_length = tally.clone();
+        wrong_length.reference_extensions.pop();
+        cases.push(wrong_length);
+        let mut wrong_participants = tally.clone();
+        wrong_participants.signers = Signers::new(6, [Participant::new(0)]).unwrap();
+        cases.push(wrong_participants);
+        let mut invalid_position = tally.clone();
+        invalid_position.deviations = vec![Deviation::new(
+            Participant::new(0),
+            vec![PositionDeviation::new(
+                ChainId::new(0),
+                Position::new(u32::MAX),
+            )],
+            Vec::new(),
+        )];
+        cases.push(invalid_position);
+        let mut invalid_chain = tally.clone();
+        invalid_chain.deviations = vec![Deviation::new(
+            Participant::new(0),
+            vec![PositionDeviation::new(ChainId::new(6), Position::new(0))],
+            Vec::new(),
+        )];
+        cases.push(invalid_chain);
+        let mut duplicate = tally.clone();
+        let deviation = Deviation::new(Participant::new(0), Vec::new(), Vec::new());
+        duplicate.deviations = vec![deviation.clone(), deviation];
+        cases.push(duplicate);
+
+        for (index, tally) in cases.into_iter().enumerate() {
+            let lqc_result = Lqc::new(
+                leader.clone(),
+                tally.clone(),
+                lqc.signature().unwrap().clone(),
+                config,
+            );
+            let vqc_result = Vqc::new(
+                leader.clone(),
+                tally.clone(),
+                vqc.novoters().clone(),
+                Vec::new(),
+                vqc.signature().unwrap().clone(),
+                config,
+            );
+            assert_eq!(lqc_result.is_ok(), index == 0);
+            assert_eq!(vqc_result.is_ok(), index == 0);
+            let replace_tally = |encoded: bytes::Bytes| {
+                let start = leader.encode_size();
+                let end = start + lqc.tally().encode_size();
+                let mut replaced = BytesMut::new();
+                replaced.extend_from_slice(&encoded[..start]);
+                tally.write(&mut replaced);
+                replaced.extend_from_slice(&encoded[end..]);
+                replaced.freeze()
+            };
+            assert_eq!(
+                Lqc::<MinSig, sha256::Digest>::decode_cfg(replace_tally(lqc.encode()), &config)
+                    .is_ok(),
+                lqc_result.is_ok(),
+            );
+            assert_eq!(
+                Vqc::<MinSig, sha256::Digest>::decode_cfg(replace_tally(vqc.encode()), &config)
+                    .is_ok(),
+                vqc_result.is_ok(),
+            );
+        }
     }
 
     #[test]

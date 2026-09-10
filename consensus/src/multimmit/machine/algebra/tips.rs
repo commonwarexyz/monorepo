@@ -413,7 +413,10 @@ impl<D: Digest> FinalTips<D> {
         Self::from_prepared(&prepared, config)
     }
 
-    fn from_prepared(prepared: &PreparedVotes<D>, config: CodecConfig) -> Result<Self, Error> {
+    pub(super) fn from_prepared(
+        prepared: &PreparedVotes<D>,
+        config: CodecConfig,
+    ) -> Result<Self, Error> {
         if prepared.len() < config.view_quorum() {
             return Err(Error::Quorum);
         }
@@ -478,8 +481,9 @@ impl<D: Digest> FinalTips<D> {
                 .map_err(|_| Error::Vote)?;
             votes.push((signer, body));
         }
-        let prepared = PreparedVotes::new::<H, V, _>(
+        let prepared = PreparedVotes::new_with_leader_digest::<H, V, _>(
             leader,
+            leader_digest,
             votes.iter().map(|(signer, body)| (*signer, body)),
             config,
         )?;
@@ -552,7 +556,7 @@ impl<D: Digest> PreparedVotes<D> {
         Self::new_with_leader_digest::<H, V, I>(leader, leader.digest::<H>(), votes, config)
     }
 
-    fn new_with_leader_digest<'a, H, V, I>(
+    pub(super) fn new_with_leader_digest<'a, H, V, I>(
         leader: &LeaderBlock<V, D>,
         leader_digest: D,
         votes: I,

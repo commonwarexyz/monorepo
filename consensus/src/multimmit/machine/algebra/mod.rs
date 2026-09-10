@@ -205,11 +205,13 @@ where
             .map_err(|_| Error::Vote)?;
         expanded.push((signer, body));
     }
-    let tips = FinalTips::from_pool::<H, V, _>(
+    let prepared = tips::PreparedVotes::new_with_leader_digest::<H, V, _>(
         leader,
+        leader_digest,
         expanded.iter().map(|(signer, body)| (*signer, body)),
         config,
     )?;
+    let tips = FinalTips::from_prepared(&prepared, config)?;
     let votes = expanded
         .into_iter()
         .map(|(signer, body)| VerifiedVote::new::<H>(signer, body))

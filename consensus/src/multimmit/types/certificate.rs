@@ -272,7 +272,7 @@ impl<V: Variant, D: Digest> Read for Vqc<V, D> {
             &(RangeCfg::from(0..=config.vqc_max_messages()), *config),
         )?;
         let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
-        validate_vqc_parts(&leader, &tally, &novoters, &conflicting, *config)
+        validate_vqc_participants(&tally, &novoters, &conflicting, *config)
             .map_err(|_| CodecError::Invalid("Vqc", "invalid compact transcript"))?;
         Ok(Self {
             leader,
@@ -404,9 +404,7 @@ impl<V: Variant, D: Digest> Read for Lqc<V, D> {
         let leader = LeaderBlock::<V, D>::read_cfg(reader, config)?;
         let tally = Tally::read_cfg(reader, &leader, *config)?;
         let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
-        tally
-            .validate(&leader, *config)
-            .and_then(|()| validate_signers(tally.signers(), *config, config.view_quorum()))
+        validate_signers(tally.signers(), *config, config.view_quorum())
             .map_err(|_| CodecError::Invalid("Lqc", "invalid compact transcript"))?;
         Ok(Self {
             leader,
@@ -432,6 +430,15 @@ fn validate_vqc_parts<V: Variant, D: Digest>(
 ) -> Result<(), Error> {
     leader.validate(config)?;
     tally.validate(leader, config)?;
+    validate_vqc_participants(tally, novoters, conflicting, config)
+}
+
+fn validate_vqc_participants<D: Digest>(
+    tally: &Tally<D>,
+    novoters: &Signers,
+    conflicting: &[ConflictingVote<D>],
+    config: CodecConfig,
+) -> Result<(), Error> {
     if tally.signers().count() < config.designation_quorum()
         || novoters.len() != config.participants()
         || conflicting
