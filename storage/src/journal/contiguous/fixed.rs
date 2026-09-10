@@ -294,7 +294,8 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
         batch.reserve(count);
 
         // Decode whole records through the concrete buffer so the compiler can specialize
-        // their length checks and field copies.
+        // their length checks and field copies. Stop this blob on error because decoding
+        // may have consumed only part of a record.
         let base = self.pos;
         for i in 0..count {
             match self.replay.read::<A>() {

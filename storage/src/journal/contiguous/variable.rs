@@ -302,8 +302,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             };
             let item_len = next_offset - self.offset;
 
-            // The header is consumed; bound decoding to this frame's payload. Use the concrete
-            // buffer so the compiler can specialize the field reads.
+            // Read only this frame's payload. Select Paged or View once per record so field
+            // reads don't repeat that choice.
             match self
                 .replay
                 .decode::<V>(item_size, &self.codec_config, self.compressed)
