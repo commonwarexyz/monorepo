@@ -101,12 +101,11 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
-        <p><em>Update (9/10/26): Payers now sign cumulative vectors that
-        can advance several recipients in one batch, removing
-        recipient-side contention. The close carries one row per changed
-        account and one entry per edge, with every credit backed by a
-        payer-signed entry. Validators retain state between closes and
-        receive only the delta.</em></p>
+        <p><em>Update (9/10/26): Operators can now process payments to
+        the same recipient in parallel across payers. Each batch needs
+        one payer signature. Validators retain state between closes and
+        receive only account changes, cumulative payment entries, and
+        proofs.</em></p>
         <p><em>Update (8/20/26): Clearing now uses a 32-byte commitment
         and BLS12-381 multisignatures for the commitment
         certificate.</em></p>
