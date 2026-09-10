@@ -1251,13 +1251,14 @@ where
         app: &mut A,
         context: &E,
         target_digest: PendingDigest<A, E>,
+        digest: PendingDigest<A, E>,
         block: Arc<A::Block>,
         cancellation: &mut C,
     ) -> ReplayResult
     where
         C: Cancellation,
     {
-        let (digest, parent_digest) = (block.digest(), block.parent());
+        let parent_digest = block.parent();
         let consensus_context = block.context();
         let round = consensus_context.round();
 
@@ -1335,6 +1336,7 @@ where
                             app,
                             context,
                             target_digest,
+                            owner.digest,
                             Arc::clone(&block),
                             cancellation,
                         )
@@ -1592,6 +1594,7 @@ mod tests {
     };
     use futures::StreamExt;
     use std::{
+        cell::Cell,
         collections::{BTreeMap, HashSet, VecDeque},
         num::NonZeroUsize,
         sync::{
@@ -1655,6 +1658,10 @@ mod tests {
         assert_eq!(boundary.disposition(&progress), Disposition::Reject,);
     }
 
+    thread_local! {
+        static DIGEST_CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
         context: TestContext,
@@ -1705,6 +1712,7 @@ mod tests {
         type Digest = Digest;
 
         fn digest(&self) -> Digest {
+            DIGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
             Sha256::hash(&[&self.encode()])
         }
     }
@@ -3183,6 +3191,40 @@ mod tests {
                 "completed work on a losing fork must not publish after finalization",
             );
             assert!(!harness.processor.pending_contains(&late_child.digest()));
+        });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_reuses_replay_digest() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let block = harness
+                .stage_pending_child(&Block::genesis(), View::new(1))
+                .await;
+            let digest = block.digest();
+            let blocks = harness.provider.source(&block);
+            harness.processor.clear_pending();
+            let (mut response, _live) = oneshot::channel::<bool>();
+
+            DIGEST_CALLS.set(0);
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    blocks,
+                    Arc::new(block),
+                    &mut response,
+                )
+                .await;
+            let digest_calls = DIGEST_CALLS.get();
+
+            assert_eq!(result, Ok(()));
+            assert!(harness.processor.pending_contains(&digest));
+            assert!(harness.processor.replays.is_empty());
+            assert!(
+                digest_calls <= 3,
+                "replay must reuse its registered digest: {digest_calls} hashes",
+            );
         });
     }
 

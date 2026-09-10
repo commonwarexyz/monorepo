@@ -131,7 +131,7 @@ impl<V: Variant> Acquisitions<V> {
         }
     }
 
-    /// Transfers demand to an explicit caller and reports whether a fetch is active.
+    /// Removes speculative demand and reports whether a fetch is active.
     pub(super) fn claim(&mut self, commitment: V::Commitment) -> bool {
         self.remove(&commitment)
             .is_some_and(|demand| matches!(demand.phase, Phase::Active))
@@ -154,7 +154,7 @@ impl<V: Variant> Acquisitions<V> {
         self.satisfied(commitment);
     }
 
-    /// Removes closed leases and returns commitments whose final owner disappeared.
+    /// Removes closed leases and returns active fetches whose final owner disappeared.
     pub(super) async fn closed(&mut self) -> Vec<V::Commitment> {
         poll_fn(|cx| {
             let closed: Vec<_> = self
@@ -173,8 +173,7 @@ impl<V: Variant> Acquisitions<V> {
                         continue;
                     };
                     demand.owners.remove(&id);
-                    if demand.owners.is_empty() {
-                        self.remove(commitment);
+                    if demand.owners.is_empty() && self.claim(*commitment) {
                         removed.push(*commitment);
                     }
                 }
@@ -265,7 +264,7 @@ mod tests {
         assert_eq!(acquisitions.closed().now_or_never(), Some(Vec::new()));
         assert_eq!(Arc::strong_count(&body), 2);
         drop(second);
-        assert_eq!(acquisitions.closed().now_or_never(), Some(vec![commitment]));
+        assert_eq!(acquisitions.closed().now_or_never(), Some(Vec::new()));
         assert_eq!(Arc::strong_count(&body), 1);
         assert!(acquisitions.entries.is_empty());
     }
@@ -302,7 +301,7 @@ mod tests {
         let old = lease(&mut acquisitions, &[first, first]);
         let _second = lease(&mut acquisitions, &[second]);
         drop(old);
-        assert_eq!(acquisitions.closed().now_or_never(), Some(vec![first]));
+        assert_eq!(acquisitions.closed().now_or_never(), Some(Vec::new()));
         let _first = lease(&mut acquisitions, &[first]);
         assert_eq!(acquisitions.next(), Some(second));
         assert_eq!(acquisitions.next(), Some(first));

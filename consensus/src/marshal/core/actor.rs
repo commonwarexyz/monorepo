@@ -797,7 +797,14 @@ where
                     (self, stored) = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
-                        .store_finalization(height, digest, &block, Some(finalization), application)
+                        .store_finalization(
+                            height,
+                            digest,
+                            &block,
+                            Some(finalization),
+                            application,
+                            resolver,
+                        )
                         .await;
                     if stored {
                         self.staged.insert(height, block);
@@ -1452,7 +1459,7 @@ where
         }
         if finalization.is_some() || self.finalized_commitment(height).await == Some(commitment) {
             (self, _) = self
-                .store_finalization(height, digest, &block, finalization, application)
+                .store_finalization(height, digest, &block, finalization, application, resolver)
                 .await;
         } else if certified_height.is_some()
             && height > self.floor.processed_height()
@@ -1731,6 +1738,7 @@ where
         block: &V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
@@ -1768,7 +1776,11 @@ where
             }
         )
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
-        self.acquisitions.satisfied(V::commitment(block));
+
+        let commitment = V::commitment(block);
+        if self.acquisitions.claim(commitment) {
+            Self::cancel_acquisitions(resolver, vec![commitment]);
+        }
         self.finalized_subscriptions.notify(block);
 
         // The write above is buffered and readable before it is durable, so
@@ -1933,6 +1945,7 @@ where
                             &block,
                             Some(finalization),
                             application,
+                            resolver,
                         )
                         .await;
                     wrote |= stored;
@@ -1986,6 +1999,7 @@ where
                             &block,
                             finalization,
                             application,
+                            resolver,
                         )
                         .await;
                     wrote |= stored;

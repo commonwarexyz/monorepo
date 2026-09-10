@@ -3927,6 +3927,19 @@ mod tests {
             }).await;
             assert!(!resolver.fetches().iter().any(|fetch| fetch.key == second_key));
 
+            let queued = mailbox.prefetch(Arc::from([
+                Sha256::hash(&[b"unused queued prefetch one"]),
+                Sha256::hash(&[b"unused queued prefetch two"]),
+            ]), 0..2);
+            let _ = mailbox.get_processed_height().await;
+            let retains = resolver.retain_count();
+            drop(queued);
+            let _ = mailbox.get_processed_height().await;
+            assert_eq!(
+                resolver.retain_count(), retains,
+                "discarding queued metadata must not scan active resolver requests",
+            );
+
             let mut direct = mailbox.acquire(first.digest());
             wait_until(&context, Duration::from_secs(1), "direct claim releases speculative capacity", || {
                 resolver.active_fetches().iter().any(|fetch| fetch.key == second_key)
@@ -8110,6 +8123,95 @@ mod tests {
                 second_dispatched >= STAGGER + PACE,
                 "block dispatched before its sync completed: {second_dispatched:?}"
             );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_local_gap_repair_retires_speculative_fetch() {
+        const PARTITION: &str = "local-gap-repair-retires-prefetch";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
+            let mut config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(1);
+            let (actor, mut mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, blocks, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(
+                application.clone(),
+                buffer.clone(),
+                (resolver_rx, resolver.clone()),
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let child = make_raw_block(parent.digest(), Height::new(2), 101);
+            let next = Sha256::hash(&[b"prefetch after locally repaired parent"]);
+            let mut lease = mailbox.prefetch(Arc::from([parent.digest(), next]), 0..2);
+            let parent_fetch = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(parent.digest())
+                    && fetch.subscriber == handler::Annotation::Subscription
+            };
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "speculative parent fetch",
+                || resolver.active_fetches().iter().any(parent_fetch),
+            )
+            .await;
+            assert_eq!(buffer.commitment_subscription_count(), 0);
+
+            // Speculation has no buffer waiter. Canonical repair must retire its
+            // resolver request when the parent becomes available locally.
+            buffer.insert(parent.clone());
+            buffer.insert(child.clone());
+            let finalized_parent = mailbox.finalized(parent.height());
+            StandardHarness::report_finalization(
+                &mut mailbox,
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(2)),
+                        View::new(1),
+                        child.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            assert_eq!(finalized_parent.await.unwrap().digest(), parent.digest());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "local repair releases speculative capacity",
+                || {
+                    resolver.active_fetches().iter().any(|fetch| {
+                        fetch.key == handler::Key::Block(next)
+                            && fetch.subscriber == handler::Annotation::Subscription
+                    })
+                },
+            )
+            .await;
+            assert!(
+                !resolver.active_fetches().iter().any(parent_fetch),
+                "locally repaired parent still has an unresolved speculative fetch",
+            );
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
         });
     }
 
