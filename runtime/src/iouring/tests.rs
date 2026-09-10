@@ -238,7 +238,7 @@ pub fn before_park() {
 }
 
 #[test]
-fn test_config_validation_bounds_ring_and_wheel_before_startup() {
+fn test_config_validation_before_startup() {
     let mut rounded = config().with_ring_config(RingConfig {
         size: 3,
         ..RingConfig::default()
@@ -269,11 +269,19 @@ fn test_config_validation_bounds_ring_and_wheel_before_startup() {
         }
     }
 
-    for tick in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
-        let invalid = config().with_ring_config(RingConfig {
+    let invalid_layouts = [Duration::ZERO, Duration::from_nanos(1), Duration::MAX].map(|tick| {
+        config().with_ring_config(RingConfig {
             timeout_wheel_tick: tick,
             ..RingConfig::default()
-        });
+        })
+    });
+    let invalid_spinner = config().with_idle_spinner(SpinnerConfig {
+        budget_us: 2,
+        max_budget_us: 1,
+        ..SpinnerConfig::default()
+    });
+
+    for invalid in invalid_layouts.into_iter().chain([invalid_spinner]) {
         let directory = invalid.storage_directory().clone();
         assert!(!directory.exists());
         let called = AtomicBool::new(false);
@@ -286,8 +294,8 @@ fn test_config_validation_bounds_ring_and_wheel_before_startup() {
             }))
             .is_err()
         );
-        // Invalid layouts must fail before acquiring storage resources or
-        // invoking user code, even when slot arithmetic overflows.
+        // Invalid settings must fail before acquiring storage resources or
+        // invoking user code, including layouts whose slot arithmetic overflows.
         assert!(!called.load(Ordering::SeqCst));
         assert!(!directory.exists());
     }

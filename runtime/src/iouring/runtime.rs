@@ -436,6 +436,12 @@ impl Config {
             .expect("ring size overflow");
         assert!(self.ring_config.size <= 32_768, "ring size exceeds 32768");
         assert!(
+            self.idle_spinner.budget_us <= self.idle_spinner.max_budget_us,
+            "spinner budget_us ({}) must not exceed max_budget_us ({})",
+            self.idle_spinner.budget_us,
+            self.idle_spinner.max_budget_us,
+        );
+        assert!(
             !self.storage_blob_layouts.is_empty(),
             "storage blob layouts must be non-empty"
         );
@@ -1378,7 +1384,6 @@ impl Worker {
             shared.workers.close();
         }
         worker.begin_close();
-        drop(root_waker);
         Ok((worker, output))
     }
 
@@ -1402,8 +1407,9 @@ impl Worker {
             worker.result(output)
         }));
 
-        if let Err(panic) = result.unwrap_or_else(Err) {
-            shared.panicker.notify(panic);
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) | Err(panic) => shared.panicker.notify(panic),
         }
 
         // Runtime cleanup, Shared destruction, and failure publication precede
@@ -1419,6 +1425,11 @@ impl Worker {
         self.deferred.run(&mut self.panics);
     }
 
+    /// Acknowledge one transferred mailbox batch.
+    fn acknowledge_batch(&mut self) {
+        self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
+    }
+
     /// Close local registration and mailbox publication, retaining accepted tasks.
     /// Repeated calls leave the worker closed and preserve its existing inbox.
     fn begin_close(&mut self) {
@@ -1430,7 +1441,7 @@ impl Worker {
         let messages = mailbox.close();
 
         if !messages.is_empty() {
-            self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
+            self.acknowledge_batch();
         }
 
         // Keep accepted tasks alive until the caller has cancelled them and
@@ -1487,29 +1498,14 @@ impl Worker {
         loop {
             // A retained write may still be queued without an SQE in flight.
             // Service must stage that work before we consider waiting for a CQE.
-            {
-                let mut local = self.local.borrow_mut();
-                local.now = Instant::now();
-                let Local {
-                    driver,
-                    deferred,
-                    now,
-                    ..
-                } = &mut *local;
-                driver
-                    .as_mut()
-                    .unwrap()
-                    .service(*now, false, deferred)
-                    .expect("io_uring shutdown service failed");
-                local.update_pending();
-            }
+            self.service(false);
             self.callbacks();
 
             let mut local = self.local.borrow_mut();
 
             // Callbacks can enqueue another batch. Keep TLS installed until
             // all deferred work and kernel completions have been handled.
-            if !local.deferred.is_empty() || !self.deferred.is_empty() {
+            if !local.deferred.is_empty() {
                 continue;
             }
 
@@ -1563,7 +1559,7 @@ impl Worker {
         {
             // Count transfer once, not each message application. Reversing
             // allows bounded FIFO processing without shifting the remainder.
-            self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
+            self.acknowledge_batch();
             self.inbox.reverse();
         }
 
@@ -1666,10 +1662,7 @@ impl Worker {
 
             // The root has no Tasks entry. Its flag also records notifications
             // forwarded from other workers through the mailbox.
-            let poll_root = {
-                let mut local = self.local.borrow_mut();
-                mem::take(&mut local.root_ready)
-            };
+            let poll_root = mem::take(&mut self.local.borrow_mut().root_ready);
 
             if poll_root {
                 let mut cx = TaskContext::from_waker(root_waker);
