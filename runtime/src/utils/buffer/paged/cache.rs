@@ -5,7 +5,7 @@ use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache::Clock, sync::RwLock};
-use futures::{FutureExt, future::Shared};
+use futures::{FutureExt, StreamExt as _, future::Shared, stream::FuturesUnordered};
 use std::{
     collections::hash_map::Entry,
     future::Future,
@@ -357,16 +357,19 @@ impl CacheRef {
 
         // Copy and release each completed page before waiting for other reads, which may
         // need its buffer to return to a bounded pool before they can proceed.
-        futures::future::try_join_all(segments.chunk_by_mut(|a, b| a.0 == b.0).map(
-            |group| async move {
+        let mut reads = segments
+            .chunk_by_mut(|a, b| a.0 == b.0)
+            .map(|group| async move {
                 let page = fetch_full_page(blob, group[0].0, self.page_size).await?;
                 for (_, offset, dest) in group {
                     dest.copy_from_slice(&page.as_ref()[*offset..*offset + dest.len()]);
                 }
                 Ok::<(), Error>(())
-            },
-        ))
-        .await?;
+            })
+            .collect::<FuturesUnordered<_>>();
+        while let Some(result) = reads.next().await {
+            result?;
+        }
         Ok(())
     }
 
@@ -1093,6 +1096,55 @@ mod tests {
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
         }
+    }
+
+    #[rstest]
+    #[case::cached_small(false, 30)]
+    #[case::cached_large(false, 31)]
+    #[case::uncached_small(true, 30)]
+    #[case::uncached_large(true, 31)]
+    fn test_batch_reports_later_error(#[case] uncached: bool, #[case] pages: u64) {
+        deterministic::Runner::default().start(|context| async move {
+            let (started_tx, _started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let reads = Arc::new(AtomicUsize::new(0));
+            let blob = ControlledBlob {
+                started: Arc::new(Mutex::new(Some(started_tx))),
+                release: Arc::new(Mutex::new(Some(release_rx))),
+                reads: reads.clone(),
+                result: ControlledBlobResult::Error,
+            };
+            let cache = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(1));
+            let id = cache.next_id();
+            let sealed =
+                super::super::Sealed::new(blob, PAGE_SIZE_U64 * pages, None, cache.clone(), id);
+            let offsets: Vec<_> = (0..pages).map(|i| i * PAGE_SIZE_U64).collect();
+            let mut out = vec![0; offsets.len() * 4];
+            let mut read = Box::pin(async {
+                if uncached {
+                    sealed
+                        .read_many_into_uncached(&mut out, &offsets, NZUsize!(4))
+                        .await
+                } else {
+                    sealed.read_many_into(&mut out, &offsets, NZUsize!(4)).await
+                }
+            });
+            let result = commonware_macros::select! {
+                result = &mut read => Some(result),
+                _ = context.sleep(Duration::from_secs(1)) => None,
+            };
+            assert!(reads.load(Ordering::Relaxed) >= 2);
+            assert!(cache.cache.read().page_fetches.is_empty());
+            assert!(
+                matches!(result, Some(Err(Error::ReadFailed))),
+                "completed page error hidden for {pages} pages (uncached={uncached})"
+            );
+            assert!(
+                release_tx.send(()).is_err(),
+                "stalled read was not cancelled"
+            );
+            drop(read);
+        });
     }
 
     #[test_traced]
