@@ -46,7 +46,6 @@ function levels(leafCount) {
 
 // Siblings of the inclusive leaf range [start, end] in a BMT of leafCount leaves.
 function siblings(leafCount, start, end) {
-  if (leafCount === 0) return 0;
   let count = 0;
   let levelStart = start;
   let levelEnd = end;
@@ -63,7 +62,6 @@ function siblings(leafCount, start, end) {
 
 // A range opening: the start position, the leaf count, and the sibling digests.
 function opening(leafCount, start, end) {
-  if (leafCount === 0) return 4 + 4 + varint(0);
   const n = siblings(leafCount, start, end);
   return 4 + 4 + varint(n) + DIGEST * n;
 }
@@ -156,10 +154,10 @@ function maxDegree(N) {
 // All accounts stay live; sparse sender and recipient cohorts may overlap.
 function scenario(N, k, slices) {
   const S = k < 1 ? Math.round(N * k) : N;
-  const perSender = k < 1 ? 1 : Math.min(maxDegree(N), Math.max(1, Math.round(k)));
+  const perSender = k < 1 ? 1 : Math.min(maxDegree(N), Math.round(k));
   const E = S * perSender;
   const A = Math.min(N, 2 * S);
-  const intervals = S === 0 ? [] : 2 * S < N ? [[0, S], [N - S, N]] : [[0, N]];
+  const intervals = 2 * S < N ? [[0, S], [N - S, N]] : [[0, N]];
   const sendersBefore = (p) => Math.min(p, S);
   const recipientsBefore = (p) => Math.max(0, p - (N - S));
   const rowsBefore = (p) => sendersBefore(p) + recipientsBefore(p) - Math.max(0, Math.min(p, S) - (N - S));
@@ -177,7 +175,7 @@ function scenario(N, k, slices) {
     const senders = sendersBefore(p1) - sendersBefore(p0);
     const groups = recipientsBefore(p1) - recipientsBefore(p0);
     counts.push({
-      p0, p1, c0, c1, senders, groups,
+      p0, p1, c0, c1, senders,
       t0: recipientsBefore(p0) * perSender,
       t1: recipientsBefore(p1) * perSender,
       x0: prefix(p0), x1: prefix(p1),
@@ -205,16 +203,14 @@ function corpus(sc) {
 
 // The quorum window holding slice s: q consecutive validators starting at floor(s n / S).
 function spans(n, q, validator, slices) {
-  const held = [];
+  const out = [];
   for (let s = 0; s < slices; s += 1) {
     const start = Math.floor((s * n) / slices);
     const end = start + q;
-    if ((validator >= start && validator < end) || (end > n && validator < end - n)) held.push(s);
-  }
-  const out = [];
-  for (const s of held) {
-    if (out.length && out[out.length - 1][1] === s) out[out.length - 1][1] = s + 1;
-    else out.push([s, s + 1]);
+    if ((validator >= start && validator < end) || (end > n && validator < end - n)) {
+      if (out.length && out[out.length - 1][1] === s) out[out.length - 1][1] = s + 1;
+      else out.push([s, s + 1]);
+    }
   }
   return out;
 }
@@ -257,12 +253,8 @@ function count(n) {
   return Math.round(n).toLocaleString('en-US');
 }
 
-const STYLE_ID = 'clearing-calculator-style';
-
 function injectStyles() {
-  if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
-  style.id = STYLE_ID;
   style.textContent = `
     .clearing-calculator-panel {
       font-family: monospace;
@@ -475,7 +467,7 @@ function mount(root) {
 
   // Committee sizes snap to n = 3f + 1.
   const curV = () => {
-    const f = Math.max(1, Math.round((Math.pow(10, parseFloat(sV.input.value)) - 1) / 3));
+    const f = Math.round((Math.pow(10, parseFloat(sV.input.value)) - 1) / 3);
     const n = 3 * f + 1;
     return { n, q: 2 * f + 1, slices: sliceCount(n) };
   };
@@ -529,9 +521,9 @@ function mount(root) {
       ['Validators', count(V.n), ''],
     ], 'Average download multiplied by validator count. Counts evidence delivery; excludes transport overhead and other protocol messages.');
 
-    const w = canvas.clientWidth || 840;
+    const w = canvas.clientWidth;
     const h = Math.max(240, Math.round(w * 0.42));
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = window.devicePixelRatio;
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
     canvas.style.height = `${h}px`;
@@ -565,7 +557,7 @@ function mount(root) {
     }
     yMin = Math.min(yMin, st) * 0.55;
     yMax = Math.max(yMax, st) * 1.5;
-    const X = (k) => L + (pw * Math.log(k / kMin)) / Math.log(kMax / kMin);
+    const X = (k) => L + (pw * Math.log(k / ks[0])) / Math.log(kMax / ks[0]);
     const Y = (b) => T + ph * (1 - Math.log(b / yMin) / Math.log(yMax / yMin));
 
     g.font = '12px monospace';
@@ -588,7 +580,7 @@ function mount(root) {
       g.fillText(bytesText(yv).replace('.00', ''), L - 8, yy);
     }
     for (const kt of [0.001, 0.01, 0.1, 1, 10, 100, 1000]) {
-      if (kt > kMax) continue;
+      if (kt < ks[0] || kt > kMax) continue;
       const xx = X(kt);
       g.beginPath();
       g.moveTo(xx, T);
@@ -623,7 +615,7 @@ function mount(root) {
     g.lineWidth = 2.2;
     trace(cv);
 
-    const cx = X(Math.max(kMin, Math.min(kMax, K)));
+    const cx = X(K);
     g.strokeStyle = GRAY;
     g.setLineDash([2, 3]);
     g.beginPath();

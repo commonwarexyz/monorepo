@@ -145,6 +145,10 @@ O’Grady</a></div>
         acknowledgment in one round trip to its chosen operator. That
         response carries a receipt the recipient can verify locally and
         retain as evidence, while settlement happens later.</p>
+        <p>Payments made through the same operator settle together,
+        netting what each account sent and received across all its
+        counterparties. Reaching a new recipient needs no separate
+        channel or route through funded intermediaries.</p>
         <p>Suppose a payer, <span class="math inline">a</span>, has 100
         and wants to pay 20 to a recipient, <span
         class="math inline">b</span>, with 40. The payer signs a request
@@ -427,15 +431,15 @@ O’Grady</a></div>
         successor payments can proceed while the predecessor remains
         challengeable. Importing predecessor credits into each account’s
         live serving state can also overlap those payments.</p>
-        <p>What makes this safe is an asymmetry. When an account rolls
-        over, the operator carries forward its preserved head:
-        everything it started with, minus every accepted debit, plus
-        every credit already imported. Debits ended at the rollover, so
-        the predecessor credit still in flight can only add to that head
-        later, never subtract. Writing <span
-        class="math inline">\widetilde B_a</span> for the preserved head
-        and <span class="math inline">\rho_a</span> for the credit in
-        flight, the exact predecessor close is</p>
+        <p>For an account with no boundary operations, an asymmetry
+        makes this safe. When an account rolls over, the operator
+        carries forward its preserved head: everything it started with,
+        minus every accepted debit, plus every credit already imported.
+        Debits ended at the rollover, so the predecessor credit still in
+        flight can only add to that head later, never subtract. Writing
+        <span class="math inline">\widetilde B_a</span> for the
+        preserved head and <span class="math inline">\rho_a</span> for
+        the credit in flight, the exact predecessor close is</p>
         <p><span class="math display">
         \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
         </span></p>
@@ -473,9 +477,10 @@ O’Grady</a></div>
         <p>The live balance is not monotone, since successor payments
         spend it down. The one-sidedness is all on the predecessor’s
         side: completion can add missing credit but can never discover
-        another accepted debit. Boundary operations and credit imports
-        obey the same rule: the live head is only ever adjusted, never
-        overwritten.</p>
+        another accepted debit. Accounts with boundary operations must
+        reflect their full admitted outcome before they can spend in the
+        successor epoch. Closed accounts are absent from that successor
+        state.</p>
         <p>Rollover changes only live serving state, without changing
         the evidence required for finalization. The close still produces
         the canonical rows, state root, and public corpus, and a
@@ -915,9 +920,10 @@ O’Grady</a></div>
         class="math inline">\mathsf{HigherAckDebit}</span>). A retained
         dual-signed endpoint carries a cumulative debit above the public
         terminal debit, a different countersigned body at the committed
-        terminal sequence number, or an equal endpoint at a strictly
-        later sequence. A retained <span class="math inline">R</span> at
-        <span class="math inline">n_a=2</span> with <span
+        terminal sequence number, or the same cumulative debit at a
+        strictly later sequence. A retained <span
+        class="math inline">R</span> at <span
+        class="math inline">n_a=2</span> with <span
         class="math inline">D_a=35</span> is one. A bare payer
         authorization is insufficient, since only the countersignature
         proves operator acknowledgment.</p></li>
@@ -979,13 +985,17 @@ O’Grady</a></div>
         class="math inline">Q</span> needs no operator approval. Once
         queued or included in an admitted close, it resolves through
         clean finalization or hard-fault settlement.</p>
-        <p>Queueing authenticates <span class="math inline">Q</span> and
-        requires an account opening under the finalized root and every
-        pending successor root. The account must be active at each root,
-        with enough balance for <span class="math inline">x</span> in
-        the exact-amount case. The next registered close must include
-        <span class="math inline">Q</span> in its sealed boundary and
-        commit the corresponding account row.</p>
+        <p>The chain accepts queue submissions only while no epoch is
+        registered. The settlement integration must ensure valid
+        independent requests are eventually accepted between
+        registrations. Queueing authenticates <span
+        class="math inline">Q</span> and requires an account opening
+        under the finalized root and every pending successor root. The
+        account must be active at each root, with enough balance for
+        <span class="math inline">x</span> in the exact-amount case. The
+        next registered close must include <span
+        class="math inline">Q</span> in its sealed boundary and commit
+        the corresponding account row.</p>
         <p>An operator-carried authorization enters the sealed boundary
         at registration instead. It is validated against the same
         finalized root, destination rules, and notice window (the
@@ -1023,11 +1033,11 @@ O’Grady</a></div>
         projection and <span
         class="math inline">\mathsf{ChangeRoot}_e</span> opening. The
         chain keys replay protection by claim kind, finalized batch, and
-        position in the corresponding tree, so no recipient list or
-        all-payout multiproof enters settlement and no post-deadline
-        crank fans payments out. Withdrawal claim size is the
-        destination plus the amount and one logarithmic opening,
-        measured below.</p>
+        position in the corresponding tree, so neither finalization nor
+        an individual claim needs a global recipient list or all-payout
+        multiproof, and no post-deadline crank fans payments out.
+        Withdrawal claim size is the destination plus the amount and one
+        logarithmic opening, measured below.</p>
         <p>What makes the exit credible is that custody never leaves the
         chain early. Let <span class="math inline">R_z</span> be the
         reserve for finalized but unclaimed withdrawals and external
@@ -1083,8 +1093,10 @@ O’Grady</a></div>
         <h2 id="the-close-follows-accounts-and-edges">The Close Follows
         Accounts and Edges</h2>
         <p>The <a
-        href="https://github.com/commonwarexyz/monorepo/pull/4664">implementation
-        and benchmarks are in #4664</a>.</p>
+        href="https://github.com/commonwarexyz/monorepo/pull/4664">protocol
+        primitives and benchmarks are in #4664</a>. Applications supply
+        the operator and wallet services, including durable storage,
+        retries, and live credit reconciliation.</p>
         <p>Every profile below uses a 100-validator committee and 256
         slices. Prepare, deal, and seal share one adaptive 16-worker
         pool (AWS c8a.4xlarge), while certificate, challenge, and
@@ -1403,16 +1415,17 @@ O’Grady</a></div>
         </div>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
-        <p>The operator’s online work scales with payments: it verifies,
-        durably commits, and signs every one of the <span
-        class="math inline">T</span> payments it accepts. The close has
-        no per-payment term. Writing <span class="math inline">U</span>
-        for unchanged live leaves, <span class="math inline">A</span>
-        for changed rows, <span class="math inline">E</span> for edge
-        entries, <span class="math inline">W</span> for withdrawal
-        outputs, <span class="math inline">S</span> for proof slices,
-        and <span class="math inline">M</span> for the largest committed
-        vector length, its authenticated corpus is</p>
+        <p>The operator processes every one of the <span
+        class="math inline">T</span> payments it accepts, sharing
+        signature checks, durable recording, and countersigning across
+        each batch. The close has no per-payment term. Writing <span
+        class="math inline">U</span> for unchanged live leaves, <span
+        class="math inline">A</span> for changed rows, <span
+        class="math inline">E</span> for edge entries, <span
+        class="math inline">W</span> for withdrawal outputs, <span
+        class="math inline">S</span> for proof slices, and <span
+        class="math inline">M</span> for the largest committed vector
+        length, its authenticated corpus is</p>
         <p><span class="math display">
         \text{payments }T
         \quad\longrightarrow\quad
@@ -1433,13 +1446,14 @@ O’Grady</a></div>
         size follows the integer widths described above. Acceptance
         reserves room per account and per edge, never per payment.</p>
         <p>Figure 6 compares the state update (the posted close) with
-        the data used to validate a close. Each sender signs one batch,
-        and each sender-recipient pair carries one unit payment. All
-        accounts remain live, with no deposits, withdrawals, or external
-        payouts. This workload differs from the measured fixture above,
-        which credits 512 recipients.</p>
+        compact validation data. Validators reconstruct the full proof
+        slices from these downloads and their retained state. Each
+        sender signs one batch, and each sender-recipient pair carries
+        one unit payment. All accounts remain live, with no deposits,
+        withdrawals, or external payouts. This workload differs from the
+        measured fixture above, which credits 512 recipients.</p>
         <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive data-size calculator. Sliders set live accounts, average recipients per account, and validators. Results show the state update, one set of validation data, the largest validator download, and total sent to validators per close.">
-          <noscript>At one million accounts each paying its next neighbor, the state update is 73 MB. Validation data, counted once with a separate proof per slice, is 170 MB. The largest validator download is 114 MB, and the total sent to 100 validators is 11.3 GB. Enable JavaScript to change the workload.</noscript>
+          <noscript>At one million accounts each paying its next neighbor, the state update is 73 MB. Compact validation data, counted once with a separate proof per slice, is 170 MB. The largest validator download is 114 MB, and the total sent to 100 validators is 11.3 GB. Enable JavaScript to change the workload.</noscript>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
