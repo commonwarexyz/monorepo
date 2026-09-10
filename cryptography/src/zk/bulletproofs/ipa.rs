@@ -132,8 +132,8 @@
 //! was an invaluable reference when implementing and documenting this module.
 
 use crate::transcript::{Summary, Transcript};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space, powers},
     synthetic::Synthetic,

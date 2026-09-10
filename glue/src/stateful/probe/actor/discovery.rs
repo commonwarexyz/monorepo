@@ -1,8 +1,7 @@
 use super::service::Service;
 use crate::stateful::probe::{mailbox::Message, sample::Sample, wire};
-use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Decode, Encode, Error as CodecError, ReadExt};
+use commonware_codec::{Buf, Decode, Encode, Error as CodecError, ReadExt};
 use commonware_consensus::{
     Epochable,
     marshal::core::Variant,

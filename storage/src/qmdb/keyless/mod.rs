@@ -73,7 +73,7 @@ pub use compact::{
     Config as CompactConfig, Db as CompactDb, MerkleizedBatch as CompactMerkleizedBatch,
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
-pub use operation::Operation;
+pub use operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Operation};
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]

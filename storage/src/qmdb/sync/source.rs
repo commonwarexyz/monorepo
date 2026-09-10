@@ -4,9 +4,10 @@ use crate::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
     qmdb::{self, operation::Committable, sync::ServeError},
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _, Write,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _,
+    Write,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -574,7 +575,7 @@ pub(crate) mod tests {
         merkle::mmr,
         translator::{OneCap, TwoCap},
     };
-    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
+    use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
     use commonware_runtime::{Runner as _, deterministic};
@@ -865,10 +866,10 @@ pub(crate) mod tests {
         1u8.write(&mut malformed); // Boundary tag
         Location::<mmr::Family>::new(10).write(&mut malformed);
         Location::<mmr::Family>::new(10).write(&mut malformed); // start == size
-        assert!(Request::<mmr::Family>::decode(&malformed[..]).is_err());
+        assert!(Request::<mmr::Family>::decode(malformed).is_err());
 
         let bad_tag = [7u8];
-        assert!(Request::<mmr::Family>::decode(&bad_tag[..]).is_err());
+        assert!(Request::<mmr::Family>::decode(Copying(&bad_tag)).is_err());
     }
 
     /// Requests are map keys, so equality and ordering must separate every distinct request.
@@ -965,7 +966,7 @@ pub(crate) mod tests {
         assert!(R::decode_cfg(response.encode(), &(1, ())).is_ok());
 
         // Unknown tag.
-        assert!(R::decode_cfg(&[9u8][..], &(1, ())).is_err());
+        assert!(R::decode_cfg(Copying(&[9u8]), &(1, ())).is_err());
     }
 
     /// A source behind a lock reaches the source and reports its error.

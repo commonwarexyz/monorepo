@@ -158,7 +158,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                     let key = key_for_slot(round % TABLE_SIZE, 0x30 + round as u8);
                     let value = 300 + round as i32;
                     (freezer, _) = freezer
-                        .put(key.clone(), value)
+                        .put(key.clone(), &value)
                         .await
                         .expect("filler put failed");
                     baseline.push((key, value));
@@ -180,7 +180,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                 let key = baseline_key(slot);
                 let value = 100 + slot as i32;
                 (freezer, _) = freezer
-                    .put(key.clone(), value)
+                    .put(key.clone(), &value)
                     .await
                     .expect("baseline put failed");
                 baseline.push((key, value));
@@ -219,7 +219,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
 
             let candidate_cursors = match phase_input.path {
                 WritePath::Put => {
-                    let updated = freezer.put(baseline_key(0), 900).await;
+                    let updated = freezer.put(baseline_key(0), &900).await;
                     let (freezer, updated_cursor) = match updated {
                         Ok(result) => result,
                         Err(_) => {
@@ -239,7 +239,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
                             .expect("write faults configured")
                             .failure_rate = Probability::new(1, 1).unwrap();
                     }
-                    let inserted = freezer.put(candidate_key(), 901).await;
+                    let inserted = freezer.put(candidate_key(), &901).await;
                     let (freezer, inserted_cursor) = match inserted {
                         Ok(result) => result,
                         Err(_) => {
@@ -303,7 +303,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         let sentinel = sentinel_key();
         let mut expected = baseline;
         (freezer, _) = freezer
-            .put(sentinel.clone(), 999)
+            .put(sentinel.clone(), &999)
             .await
             .expect("post-recovery put failed");
         expected.push((sentinel, 999));

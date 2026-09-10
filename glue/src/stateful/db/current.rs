@@ -483,11 +483,7 @@ mod tests {
             assert_eq!(guard.get(&key).await.unwrap(), Some(value));
 
             let proof = guard.exclusion_proof(&missing).await.unwrap();
-            assert!(OrderedFixedDb::verify_exclusion_proof(
-                &missing,
-                &proof,
-                &guard.root(),
-            ));
+            assert!(proof.verify::<Sha256>(&missing, &guard.root()));
         });
     }
 
@@ -597,11 +593,7 @@ mod tests {
             assert_eq!(guard.get(&key).await.unwrap(), Some(value));
 
             let proof = guard.exclusion_proof(&missing).await.unwrap();
-            assert!(OrderedVariableDb::verify_exclusion_proof(
-                &missing,
-                &proof,
-                &guard.root(),
-            ));
+            assert!(proof.verify::<Sha256>(&missing, &guard.root()));
         });
     }
 }

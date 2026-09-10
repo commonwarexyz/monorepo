@@ -255,13 +255,12 @@ impl Plan {
                 let mut buf = Vec::new();
                 bitmap.write(&mut buf);
 
-                let mut cursor = std::io::Cursor::new(buf.clone());
+                let mut cursor = Bytes::from(buf.clone());
                 let decoded = Bitmap::read_cfg(&mut cursor, &(..=MAX_CONTAINERS).into()).unwrap();
                 assert_eq!(bitmap.len(), decoded.len());
                 assert_eq!(bitmap, decoded);
 
-                let decoded2 =
-                    Bitmap::decode_cfg(Bytes::from(buf), &(..=MAX_CONTAINERS).into()).unwrap();
+                let decoded2 = Bitmap::decode_cfg(buf, &(..=MAX_CONTAINERS).into()).unwrap();
                 assert_eq!(bitmap, decoded2);
 
                 let encoded2 = decoded.encode();

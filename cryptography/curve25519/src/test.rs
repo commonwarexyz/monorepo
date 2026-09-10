@@ -22,15 +22,19 @@
 #[cfg(test)]
 mod vectors;
 
+/// ZIP215 point encodings shared with the curve property tests.
+#[cfg(test)]
+pub(crate) const ZIP215_POINTS: [[u8; 32]; 14] = vectors::ZIP215_POINTS;
+
 use crate::{
     key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
     signing::{BatchVerifier, Signature, SigningKey, VerifyingKey},
 };
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::DecodeExt as _;
+use commonware_codec::{Copying, DecodeExt as _};
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{FuzzRng, union_unique};
 use ed25519_consensus::SigningKey as ConsensusSigningKey;
 
@@ -142,7 +146,7 @@ struct SecretBytes([u8; 32]);
 
 impl Arbitrary<'_> for SecretBytes {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let bytes = if u.ratio(3, 4)? {
+        let bytes = if u.ratio(1, 4)? {
             *u.choose(&INTERESTING_SECRET_BYTES)?
         } else {
             u.arbitrary()?
@@ -181,7 +185,7 @@ impl Arbitrary<'_> for EncodedPoint {
             6 => [0xff; 32],
             7 => {
                 let SecretBytes(seed) = u.arbitrary()?;
-                SigningKey::decode(seed.as_slice())
+                SigningKey::decode(Copying(&seed))
                     .unwrap()
                     .verifying_key()
                     .as_ref()
@@ -248,7 +252,7 @@ struct Signing {
 impl Signing {
     fn run(self) {
         let SecretBytes(seed) = self.seed;
-        let signing_key = SigningKey::decode(seed.as_slice()).unwrap();
+        let signing_key = SigningKey::decode(Copying(&seed)).unwrap();
         let consensus_key = ConsensusSigningKey::from(seed);
         assert_eq!(
             signing_key.verifying_key().as_ref(),
@@ -290,7 +294,7 @@ impl KeyExchange {
             "key exchange: {self:#?}",
         );
 
-        let public_key = ExchangePublicKey::decode(public_key_bytes.as_slice()).unwrap();
+        let public_key = ExchangePublicKey::decode(Copying(&public_key_bytes)).unwrap();
         let shared = secret_key.exchange(&public_key);
         let dalek_shared = dalek_secret
             .diffie_hellman(&x25519_dalek::PublicKey::from(public_key_bytes))
@@ -316,7 +320,7 @@ impl Item {
             Some(seed) => seed,
             None => u.arbitrary()?,
         };
-        let signing_key = SigningKey::decode(seed.as_slice()).unwrap();
+        let signing_key = SigningKey::decode(Copying(&seed)).unwrap();
         let verifying_key = signing_key.verifying_key();
         let signature = signing_key.sign(&namespace, &message);
         Ok(Self {
@@ -330,14 +334,14 @@ impl Item {
     fn low_order(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let Payload { namespace, message } = u.arbitrary()?;
         let bytes = u.choose(&LOW_ORDER_ENCODINGS)?;
-        let verifying_key = VerifyingKey::decode(bytes.as_slice()).unwrap();
+        let verifying_key = VerifyingKey::decode(Copying(bytes)).unwrap();
         let mut signature = [0; 64];
         signature[..32].copy_from_slice(u.choose(&LOW_ORDER_ENCODINGS)?);
         Ok(Self {
             namespace,
             message,
             verifying_key,
-            signature: Signature::decode(signature.as_slice()).unwrap(),
+            signature: Signature::decode(Copying(&signature)).unwrap(),
         })
     }
 
@@ -360,8 +364,8 @@ impl Item {
         Ok(Self {
             namespace,
             message,
-            verifying_key: VerifyingKey::decode(verifying_key.as_slice()).unwrap(),
-            signature: Signature::decode(signature.as_slice()).unwrap(),
+            verifying_key: VerifyingKey::decode(Copying(&verifying_key)).unwrap(),
+            signature: Signature::decode(Copying(&signature)).unwrap(),
         })
     }
 
@@ -371,19 +375,19 @@ impl Item {
             1 => mutate_bytes(&mut self.message, u)?,
             2 => {
                 let EncodedPoint(bytes) = u.arbitrary()?;
-                self.verifying_key = VerifyingKey::decode(bytes.as_slice()).unwrap();
+                self.verifying_key = VerifyingKey::decode(Copying(&bytes)).unwrap();
             }
             3 => {
                 let EncodedPoint(r) = u.arbitrary()?;
                 let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
                 signature[..32].copy_from_slice(&r);
-                self.signature = Signature::decode(signature.as_slice()).unwrap();
+                self.signature = Signature::decode(Copying(&signature)).unwrap();
             }
             4 => {
                 let EncodedScalar(s) = u.arbitrary()?;
                 let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
                 signature[32..].copy_from_slice(&s);
-                self.signature = Signature::decode(signature.as_slice()).unwrap();
+                self.signature = Signature::decode(Copying(&signature)).unwrap();
             }
             _ => self.make_scalar_noncanonical(),
         }
@@ -400,12 +404,28 @@ impl Item {
     fn make_scalar_noncanonical(&mut self) {
         let mut signature: [u8; 64] = self.signature.as_ref().try_into().unwrap();
         signature[32..].copy_from_slice(&SCALAR_ORDER);
-        self.signature = Signature::decode(signature.as_slice()).unwrap();
+        self.signature = Signature::decode(Copying(&signature)).unwrap();
     }
 
     fn verify(&self) -> bool {
-        self.verifying_key
-            .verify(&self.namespace, &self.message, &self.signature)
+        let actual = self
+            .verifying_key
+            .verify(&self.namespace, &self.message, &self.signature);
+        let decoded = VerifyingKey::decode(Copying(self.verifying_key.as_ref())).unwrap();
+        assert_eq!(
+            decoded.verify(&self.namespace, &self.message, &self.signature),
+            actual,
+            "item: {self:#?}"
+        );
+
+        let signature = ed25519_consensus::Signature::try_from(self.signature.as_ref()).unwrap();
+        let expected = ed25519_consensus::VerificationKey::try_from(self.verifying_key.as_ref())
+            .is_ok_and(|key| {
+                key.verify(&signature, &union_unique(&self.namespace, &self.message))
+                    .is_ok()
+            });
+        assert_eq!(actual, expected, "item: {self:#?}");
+        actual
     }
 }
 
@@ -470,7 +490,27 @@ impl Arbitrary<'_> for Batch {
 
 impl Batch {
     fn run(self) {
-        let expected = !self.items.is_empty() && self.items.iter().all(Item::verify);
+        let mut expected = !self.items.is_empty();
+        for item in &self.items {
+            expected &= item.verify();
+        }
+        assert_eq!(self.verify(&Sequential), expected, "batch: {self:#?}");
+
+        // The fuzz target stays single-threaded, so only the unit test exercises the pool.
+        #[cfg(test)]
+        {
+            let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                .unwrap()
+                .manual();
+            assert_eq!(
+                self.verify(&strategy),
+                expected,
+                "parallel batch: {self:#?}"
+            );
+        }
+    }
+
+    fn verify(&self, strategy: &impl Strategy) -> bool {
         let mut batch = BatchVerifier::new(self.items.len());
         for item in &self.items {
             batch.add(
@@ -481,14 +521,13 @@ impl Batch {
             );
         }
         let SecretBytes(rng_seed) = self.rng_seed;
-        let actual = batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), &Sequential);
-        assert_eq!(actual, expected, "batch: {self:#?}");
+        batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), strategy)
     }
 }
 
 /// Fuzzing operations for public API invariants.
 pub mod fuzz {
-    use super::{Batch, KeyExchange, Signing};
+    use super::{Batch, Item, KeyExchange, Signing};
     use arbitrary::{Arbitrary, Unstructured};
 
     /// A public API fuzzing operation.
@@ -498,6 +537,8 @@ pub mod fuzz {
         BatchMatchesIndividual,
         /// Check that signing agrees with `ed25519-consensus`.
         SigningMatchesConsensus,
+        /// Check that verification agrees with `ed25519-consensus`.
+        VerificationMatchesConsensus,
         /// Check that key exchange agrees with `x25519-dalek`.
         KeyExchangeMatchesDalek,
     }
@@ -508,6 +549,9 @@ pub mod fuzz {
             match self {
                 Self::BatchMatchesIndividual => u.arbitrary::<Batch>()?.run(),
                 Self::SigningMatchesConsensus => u.arbitrary::<Signing>()?.run(),
+                Self::VerificationMatchesConsensus => {
+                    u.arbitrary::<Item>()?.verify();
+                }
                 Self::KeyExchangeMatchesDalek => u.arbitrary::<KeyExchange>()?.run(),
             }
             Ok(())
@@ -534,6 +578,15 @@ pub mod fuzz {
 
     #[cfg(test)]
     #[test]
+    fn minifuzz_verification_matches_consensus() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::VerificationMatchesConsensus.run(u));
+    }
+
+    #[cfg(test)]
+    #[test]
     fn minifuzz_key_exchange_matches_dalek() {
         commonware_invariants::minifuzz::Builder::default()
             .with_seed(0)
@@ -551,13 +604,18 @@ mod tests {
             WYCHEPROOF_X25519, ZIP215_POINTS,
         },
     };
-    use crate::{key_exchange::SecretKey, signing::SigningKey};
-    use commonware_codec::DecodeExt as _;
+    use crate::{
+        key_exchange::SecretKey,
+        signing::{BatchVerifier, SigningKey},
+    };
+    use commonware_codec::{Copying, DecodeExt as _};
+    use commonware_parallel::{Rayon, Sequential, Strategy};
+    use commonware_utils::{NZUsize, test_rng};
 
     #[test]
     fn rfc8032_ed25519_vectors() {
         for vector in RFC8032_ED25519 {
-            let signing_key = SigningKey::decode(vector.secret_key.as_slice()).unwrap();
+            let signing_key = SigningKey::decode(Copying(&vector.secret_key)).unwrap();
             assert_eq!(
                 signing_key.verifying_key().as_ref(),
                 vector.public_key,
@@ -570,15 +628,33 @@ mod tests {
                 "RFC 8032 test {} signature",
                 vector.name,
             );
+            let signature = Signature::decode(Copying(&vector.signature)).unwrap();
+            let cached = signing_key.verifying_key();
+            let decoded = VerifyingKey::decode(Copying(&vector.public_key)).unwrap();
+            assert!(cached.verify_raw(vector.message, &signature));
+            assert!(decoded.verify_raw(vector.message, &signature));
         }
     }
 
     #[test]
     fn wycheproof_ed25519_vectors() {
         for vector in WYCHEPROOF_ED25519 {
-            let verifying_key = VerifyingKey::decode(vector.public_key.as_slice()).unwrap();
-            let valid = Signature::decode(vector.signature)
-                .is_ok_and(|signature| verifying_key.verify_raw(vector.message, &signature));
+            let verifying_key = VerifyingKey::decode(Copying(&vector.public_key)).unwrap();
+            let valid = Signature::decode(Copying(vector.signature)).is_ok_and(|signature| {
+                let valid = verifying_key.verify_raw(vector.message, &signature);
+                let batch = || {
+                    let mut batch = BatchVerifier::new(1);
+                    batch.add_raw(vector.message, &verifying_key, &signature);
+                    batch
+                };
+                assert_eq!(
+                    batch().verify(&mut test_rng(), &Sequential),
+                    vector.valid_zip215,
+                    "sequential Wycheproof test {}",
+                    vector.tc_id
+                );
+                valid
+            });
             assert_eq!(
                 valid, vector.valid_zip215,
                 "Wycheproof Ed25519 test {}",
@@ -590,7 +666,7 @@ mod tests {
     #[test]
     fn rfc7748_x25519_vectors() {
         for vector in RFC7748_X25519 {
-            let public_key = ExchangePublicKey::decode(vector.u_coordinate.as_slice()).unwrap();
+            let public_key = ExchangePublicKey::decode(Copying(&vector.u_coordinate)).unwrap();
             let shared_secret = SecretKey::from_raw(vector.scalar)
                 .exchange(&public_key)
                 .expect("RFC 7748 output is contributory");
@@ -606,8 +682,8 @@ mod tests {
         assert_eq!(alice.public_key().as_ref(), vector.alice_public);
         assert_eq!(bob.public_key().as_ref(), vector.bob_public);
 
-        let bob_public = ExchangePublicKey::decode(vector.bob_public.as_slice()).unwrap();
-        let alice_public = ExchangePublicKey::decode(vector.alice_public.as_slice()).unwrap();
+        let bob_public = ExchangePublicKey::decode(Copying(&vector.bob_public)).unwrap();
+        let alice_public = ExchangePublicKey::decode(Copying(&vector.alice_public)).unwrap();
         let alice_shared = alice
             .exchange(&bob_public)
             .expect("RFC 7748 Bob public key is contributory");
@@ -621,7 +697,7 @@ mod tests {
     #[test]
     fn wycheproof_x25519_vectors() {
         for vector in WYCHEPROOF_X25519 {
-            let public_key = ExchangePublicKey::decode(vector.public_key.as_slice()).unwrap();
+            let public_key = ExchangePublicKey::decode(Copying(&vector.public_key)).unwrap();
             let shared_secret = SecretKey::from_raw(vector.private_key)
                 .exchange(&public_key)
                 .map(|shared_secret| *shared_secret.as_bytes());
@@ -638,22 +714,35 @@ mod tests {
         const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";
 
         let message = b"Zcash";
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let mut all_sequential = BatchVerifier::new(196);
+        let mut all_parallel = BatchVerifier::new(196);
 
         // These are the 196 ZIP215 test vectors: every pairing of the eight canonical
         // low-order encodings and their six non-canonical aliases. With s = 0, each pair
         // satisfies the cofactored verification equation for every message.
         for public_key_bytes in ZIP215_POINTS {
             for r_bytes in ZIP215_POINTS {
-                let verifying_key = VerifyingKey::decode(public_key_bytes.as_slice()).unwrap();
+                let verifying_key = VerifyingKey::decode(Copying(&public_key_bytes)).unwrap();
                 let mut signature_bytes = [0u8; 64];
                 signature_bytes[..32].copy_from_slice(&r_bytes);
-                let signature = Signature::decode(signature_bytes.as_slice()).unwrap();
+                let signature = Signature::decode(Copying(&signature_bytes)).unwrap();
 
                 assert!(
                     verifying_key.verify(NAMESPACE, message, &signature),
                     "ZIP215 vector failed for A={public_key_bytes:?}, R={r_bytes:?}",
                 );
+                let batch = || {
+                    let mut batch = BatchVerifier::new(1);
+                    batch.add(NAMESPACE, message, &verifying_key, &signature);
+                    batch
+                };
+                assert!(batch().verify(&mut test_rng(), &Sequential));
+                all_sequential.add(NAMESPACE, message, &verifying_key, &signature);
+                all_parallel.add(NAMESPACE, message, &verifying_key, &signature);
             }
         }
+        assert!(all_sequential.verify(&mut test_rng(), &Sequential));
+        assert!(all_parallel.verify(&mut test_rng(), &parallel));
     }
 }

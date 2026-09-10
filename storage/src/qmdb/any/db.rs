@@ -29,6 +29,11 @@ use std::{collections::HashMap, sync::Arc};
 /// keys plus `(global key index, position)` pairs for page-cache misses.
 type ShardReads<T> = (Vec<Option<T>>, Vec<(usize, u64)>);
 
+/// Whether two `(key index, position)` candidates share a position.
+const fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
+    a.1 == b.1
+}
+
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
 
@@ -212,7 +217,7 @@ where
                 panic!("location does not reference update operation. loc={loc}");
             };
             if data.key() == key {
-                result = Some(data.value().clone());
+                result = Some(data.into_value());
                 break;
             }
         }
@@ -227,16 +232,16 @@ where
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
-        self.get_many_map(keys, |data, _| data.value().clone())
-            .await
+        self.get_many_map(keys, |data, _| data.into_value()).await
     }
 
-    /// Like [`Self::get_many`] but maps each matched update through `map`, which also
-    /// receives the committed location the update was read from.
+    /// Like [`Self::get_many`] but maps each matched update through `map`, which takes the
+    /// update by value along with the committed location it was read from. A key repeated in
+    /// `keys` receives a clone of its update in every slot but the last.
     pub(crate) async fn get_many_map<T: Send>(
         &self,
         keys: &[&U::Key],
-        map: impl Fn(&U, Location<F>) -> T + Send + Sync,
+        map: impl Fn(U, Location<F>) -> T + Send + Sync,
     ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -280,11 +285,15 @@ where
         misses.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&misses);
         let ops = self.log.read_many(&positions).await?;
+        assert_eq!(
+            ops.len(),
+            positions.len(),
+            "read_many returns one operation per position"
+        );
         Self::match_read_ops(
             keys,
             &misses,
-            &positions,
-            |i| Some(&ops[i]),
+            ops.into_iter().map(Some),
             &map,
             &mut results,
             |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
@@ -299,7 +308,7 @@ where
     fn resolve_cached<T: Send>(
         &self,
         keys: &[&U::Key],
-        map: &(impl Fn(&U, Location<F>) -> T + Send + Sync),
+        map: &(impl Fn(U, Location<F>) -> T + Send + Sync),
         base: usize,
     ) -> ShardReads<T> {
         // Probe the in-memory index. Each key may map to multiple locations due to hash
@@ -313,13 +322,17 @@ where
         let positions = Self::dedup_positions(&candidates);
 
         let served = self.log.try_read_many_sync(&positions);
+        assert_eq!(
+            served.len(),
+            positions.len(),
+            "try_read_many_sync returns one slot per position"
+        );
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         let mut misses: Vec<(usize, u64)> = Vec::new();
         Self::match_read_ops(
             keys,
             &candidates,
-            &positions,
-            |i| served[i].as_ref(),
+            served.into_iter(),
             map,
             &mut results,
             |key_idx, pos| misses.push((base + key_idx, pos)),
@@ -330,44 +343,50 @@ where
     /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
     fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
         let mut positions = Vec::with_capacity(candidates.len());
-        for &(_, pos) in candidates {
-            if positions.last() != Some(&pos) {
-                positions.push(pos);
-            }
-        }
+        positions.extend(candidates.chunk_by(same_position).map(|group| group[0].1));
         positions
     }
 
-    /// Match operations read for deduplicated `positions` back to their position-sorted
-    /// `(key index, position)` candidates, filling each unresolved key slot whose operation
-    /// carries its exact key. `op` returns the operation read for a deduplicated position
-    /// index, or `None` when the page cache could not serve it, which is reported to `on_miss`
-    /// with the candidate's key index and position.
-    fn match_read_ops<'o, T>(
+    /// Match the operations read for the deduplicated positions of position-sorted
+    /// `(key index, position)` candidates back to those candidates, filling each unresolved key
+    /// slot whose operation carries its exact key. `ops` yields one slot per deduplicated
+    /// position, in order: the operation read there, or `None` when the page cache could not
+    /// serve it, which is reported to `on_miss` with each candidate's key index and position.
+    fn match_read_ops<T>(
         keys: &[&U::Key],
         candidates: &[(usize, u64)],
-        positions: &[u64],
-        op: impl Fn(usize) -> Option<&'o Operation<F, U>>,
-        map: &impl Fn(&U, Location<F>) -> T,
+        ops: impl Iterator<Item = Option<Operation<F, U>>>,
+        map: &impl Fn(U, Location<F>) -> T,
         results: &mut [Option<T>],
         mut on_miss: impl FnMut(usize, u64),
-    ) where
-        F: 'o,
-        U: 'o,
-    {
-        let mut op_idx = 0;
-        for &(key_idx, pos) in candidates {
-            while positions[op_idx] < pos {
-                op_idx += 1;
-            }
-            match op(op_idx) {
-                Some(Operation::Update(data)) => {
-                    if results[key_idx].is_none() && data.key() == keys[key_idx] {
-                        results[key_idx] = Some(map(data, Location::new(pos)));
-                    }
+    ) {
+        for (group, op) in candidates.chunk_by(same_position).zip(ops) {
+            let pos = group[0].1;
+            let Some(op) = op else {
+                for &(key_idx, _) in group {
+                    on_miss(key_idx, pos);
                 }
-                Some(_) => panic!("location does not reference update operation. loc={pos}"),
-                None => on_miss(key_idx, pos),
+                continue;
+            };
+            let Operation::Update(data) = op else {
+                panic!("location does not reference update operation. loc={pos}");
+            };
+
+            // The candidates sharing this position match the update only for repeated input
+            // keys. Defer each match so every slot but the last takes a clone and the last
+            // takes the update itself.
+            let loc = Location::new(pos);
+            let mut pending = None;
+            for &(key_idx, _) in group {
+                if results[key_idx].is_some() || data.key() != keys[key_idx] {
+                    continue;
+                }
+                if let Some(prev) = pending.replace(key_idx) {
+                    results[prev] = Some(map(data.clone(), loc));
+                }
+            }
+            if let Some(last) = pending {
+                results[last] = Some(map(data, loc));
             }
         }
     }

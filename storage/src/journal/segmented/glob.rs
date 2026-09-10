@@ -28,6 +28,7 @@
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::{Context, journal::Error};
+use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
@@ -148,9 +149,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let value = if self.compression.is_some() {
             let decompressed =
                 decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
-            V::decode_cfg(decompressed.as_ref(), &self.codec_config).map_err(Error::Codec)?
+            V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
         } else {
-            V::decode_cfg(compressed_data, &self.codec_config).map_err(Error::Codec)?
+            // Share one Bytes owner instead of boxing the pooled IoBuf owner for every field
+            V::decode_cfg(Bytes::from(buf.slice(..data_len)), &self.codec_config)
+                .map_err(Error::Codec)?
         };
 
         Ok(value)
@@ -466,6 +469,35 @@ mod tests {
             let glob = glob.sync(1).await.expect("Failed to sync");
             let retrieved = glob.get(1, offset, size).await.expect("Failed to get");
             assert_eq!(retrieved, value);
+
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_glob_get_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (..).into(),
+                write_buffer: NZUsize!(1024),
+            };
+            let glob: Glob<_, Bytes> = Glob::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to init glob");
+
+            // Append a value that stays in the buffered tip
+            let value = Bytes::from(vec![7u8; 32]);
+            let (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
+
+            // Two live reads decode views of the same tip buffer
+            let a = glob.get(1, offset, size).await.expect("Failed to get");
+            let b = glob.get(1, offset, size).await.expect("Failed to get");
+            assert_eq!(a, value);
+            assert_eq!(b, value);
+            assert_eq!(a.as_ptr(), b.as_ptr());
 
             glob.destroy().await.expect("Failed to destroy");
         });

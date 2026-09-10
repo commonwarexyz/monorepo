@@ -2,9 +2,9 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{any::value::ValueEncoding, operation::Committable},
 };
-use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use std::fmt;
 
 pub(crate) mod fixed;
@@ -12,9 +12,12 @@ pub(crate) mod update;
 pub(crate) mod variable;
 pub use update::Update;
 
-pub(crate) const DELETE_CONTEXT: u8 = 0xD1;
-pub(crate) const UPDATE_CONTEXT: u8 = 0xD2;
-pub(crate) const COMMIT_CONTEXT: u8 = 0xD3;
+/// Wire tag for [Operation::Delete].
+pub const DELETE_CONTEXT: u8 = 0xD1;
+/// Wire tag for [Operation::Update].
+pub const UPDATE_CONTEXT: u8 = 0xD2;
+/// Wire tag for [Operation::CommitFloor].
+pub const COMMIT_CONTEXT: u8 = 0xD3;
 
 pub type Ordered<F, K, V> = Operation<F, update::Ordered<K, V>>;
 pub type Unordered<F, K, V> = Operation<F, update::Unordered<K, V>>;
@@ -213,7 +216,7 @@ mod tests {
         let mut buf: Vec<u8> = op.encode().to_vec();
         assert!(buf.len() > 1 + 1 + u64::SIZE + u64::SIZE);
         *buf.last_mut().unwrap() = 0x01;
-        assert!(Op::decode_cfg(buf.as_ref(), &()).is_err());
+        assert!(Op::decode_cfg(buf, &()).is_err());
     }
 
     #[test]

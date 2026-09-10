@@ -1,7 +1,7 @@
 use crate::merkle::{Family, Location};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::range::NonEmptyRange;
 
 /// Target state to sync to.
@@ -99,9 +99,9 @@ where
 mod tests {
     use super::*;
     use crate::merkle::mmr::Family as MmrFamily;
+    use bytes::Bytes;
     use commonware_cryptography::sha256;
     use commonware_utils::non_empty_range;
-    use std::io::Cursor;
 
     fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
         Target {
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(buffer.len(), target.encode_size());
 
         // Deserialize
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         let deserialized = Target::read(&mut cursor).unwrap();
 
         // Verify
@@ -139,7 +139,7 @@ mod tests {
         Location::<MmrFamily>::new(100).write(&mut buffer); // start
         Location::<MmrFamily>::new(50).write(&mut buffer); // end (< start = invalid)
 
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         assert!(matches!(
             Target::<MmrFamily, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
@@ -152,10 +152,23 @@ mod tests {
         Location::<MmrFamily>::new(100).write(&mut buffer);
         Location::<MmrFamily>::new(100).write(&mut buffer);
 
-        let mut cursor = Cursor::new(buffer);
+        let mut cursor = Bytes::from(buffer);
         assert!(matches!(
             Target::<MmrFamily, sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
+        ));
+    }
+
+    #[test]
+    fn test_sync_target_read_outside_location_domain() {
+        let mut buffer = Vec::new();
+        sha256::Digest::from([42; 32]).write(&mut buffer);
+        Location::<MmrFamily>::new(0).write(&mut buffer);
+        Location::<MmrFamily>::new(*MmrFamily::MAX_LEAVES + 1).write(&mut buffer);
+
+        assert!(matches!(
+            Target::<MmrFamily, sha256::Digest>::read(&mut Bytes::from(buffer)),
+            Err(CodecError::Invalid("Location", "value exceeds MAX_LEAVES"))
         ));
     }
 

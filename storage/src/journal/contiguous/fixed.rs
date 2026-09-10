@@ -145,7 +145,8 @@ use crate::{
         durability::Barrier,
     },
 };
-use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
+use bytes::Bytes;
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Writer},
@@ -1405,10 +1406,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(group[0], items_per_blob);
         let first_position = first_in_blob(self.bounds.start, blob, items_per_blob)?;
-        let offsets = group
-            .iter()
-            .map(|&pos| Inner::<E, A>::items_to_bytes(pos - first_position))
-            .collect::<Result<Vec<u64>, _>>()?;
+        let mut offsets = Vec::with_capacity(group.len());
+        for &pos in group {
+            offsets.push(Inner::<E, A>::items_to_bytes(pos - first_position)?);
+        }
         Ok((blob, offsets))
     }
 
@@ -1434,12 +1435,12 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         // which serves page-cache and tip-buffer hits under a single lock acquisition and reads only
         // true misses from the blob (concurrently).
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * A::SIZE];
+        let mut buf = vec![0u8; positions.len() * A::SIZE];
 
         // The buffer is pre-sized for every position, so each group can own a disjoint slice and
         // all groups can read concurrently.
         let mut reads = Vec::new();
-        let mut remaining_buf = reusable_buf.as_mut_slice();
+        let mut remaining_buf = buf.as_mut_slice();
         for group in positions.chunk_by(|a, b| {
             super::position_to_blob(*a, items_per_blob)
                 == super::position_to_blob(*b, items_per_blob)
@@ -1449,10 +1450,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 .blobs
                 .get(blob_num)
                 .expect("positions in bounds map to a retained blob");
-            let (buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
+            let (group_buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
             remaining_buf = rest;
             reads.push(async move {
-                blob.read_many_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
+                blob.read_many_into(group_buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
                     .await
             });
         }
@@ -1462,9 +1463,9 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
-        #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-        for slice in reusable_buf.chunks_exact(A::SIZE) {
-            result.push(A::decode(slice).map_err(Error::Codec)?);
+        let mut bytes = Bytes::from(buf);
+        for _ in positions {
+            result.push(A::decode((&mut bytes).take(A::SIZE)).map_err(Error::Codec)?);
         }
 
         self.metrics.cache_hits.inc_by(hits);
@@ -1545,7 +1546,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                 }
                 // A decode failure declines to a miss: the async completion re-reads the
                 // item and bubbles the failure as [Error::Codec], like every async read path.
-                if let Ok(item) = A::decode(slice) {
+                if let Ok(item) = A::decode(Copying(slice)) {
                     out[base + idx] = Some(item);
                     hits += 1;
                 }
@@ -1599,7 +1600,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         }
         let buf = &mut scratch[..A::SIZE];
         let item = if blob.try_read_sync_into(buf, offset) {
-            A::decode(&buf[..]).ok()
+            A::decode(Copying(buf)).ok()
         } else {
             None
         };
@@ -1751,7 +1752,7 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::Contiguous as _;
+    use crate::{journal::contiguous::Contiguous as _, utils::codec::View};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1789,6 +1790,43 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_read_preserves_owned_byte_fields() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+            (journal, _) = journal.append(&View::new(7)).await.unwrap();
+            let decoded = journal.try_read_sync(0).unwrap();
+            (journal, _) = journal.append(&View::new(8)).await.unwrap();
+            let next = journal.try_read_sync(1).unwrap();
+            journal.destroy().await.unwrap();
+            assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+            assert_eq!(next.bytes.as_ref(), &8u64.to_be_bytes());
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_batch_read_preserves_owned_byte_fields() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+            for i in 0..5 {
+                (journal, _) = journal.append(&View::new(i)).await.unwrap();
+            }
+            let decoded = journal.read_many(&[0, 2, 3, 4]).await.unwrap();
+            let probed = journal.try_read_many_sync(&[0, 2, 3, 4]);
+            journal.destroy().await.unwrap();
+            for (value, expected) in decoded.iter().zip([0u64, 2, 3, 4]) {
+                assert_eq!(value.bytes.as_ref(), &expected.to_be_bytes());
+                value.assert_shared();
+            }
+            for (value, expected) in probed.iter().zip([0u64, 2, 3, 4]) {
+                let value = value.as_ref().expect("probe should hit after read_many");
+                assert_eq!(value.bytes.as_ref(), &expected.to_be_bytes());
+            }
+        });
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::{
     simplex::elector::{self, Terms},
     types::Round,
 };
+use bytes::Bytes;
 use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
     Digest, Hasher as _,
@@ -93,7 +94,7 @@ impl<S> Scheme<S> {
 
                 // `Lazy` lets us reject undecodable byte patterns before asking
                 // the wrapped scheme whether the mutated attestation verifies.
-                let lazy = Lazy::deferred(&mut corrupted.as_slice(), ());
+                let lazy = Lazy::deferred(&mut Bytes::from(corrupted), ());
                 let attestation = Attestation {
                     signer,
                     signature: lazy.clone(),
