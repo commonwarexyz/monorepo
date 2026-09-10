@@ -13,8 +13,8 @@
 //!   whether an entry is still active or stale.
 //! - Stale entries are expected and cheap to skip, which keeps bookkeeping overhead low
 //!   when timeout expirations are rare.
-//! - Expiry entries carry waiter slot plus scheduled tick identity so callers can safely
-//!   ignore stale entries after slot reuse.
+//! - Expiry entries carry full waiter generations so callers can safely ignore stale
+//!   entries after slot reuse. Each registration has at most one deadline.
 //! - Buckets are drained in place, so inner `Vec` capacity is retained and reused across
 //!   cycles to reduce allocations.
 //! - Reusing an inactive bucket clears its stale entries without releasing capacity.
@@ -37,27 +37,6 @@ use std::{
 /// treated as an opaque counter.
 pub type Tick = u64;
 
-/// Entry yielded when a wheel bucket expires.
-///
-/// Includes waiter identity and target tick.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TimeoutEntry {
-    /// Stable waiter identity to inspect.
-    pub waiter_id: WaiterId,
-    /// Tick the waiter was originally scheduled for.
-    pub target_tick: Tick,
-}
-
-impl TimeoutEntry {
-    /// Pair a registration's identity with its scheduled tick.
-    const fn new(waiter_id: WaiterId, target_tick: Tick) -> Self {
-        Self {
-            waiter_id,
-            target_tick,
-        }
-    }
-}
-
 /// Single-level (non-hierarchical) hashed timing wheel used for deadline tracking.
 pub struct TimeoutWheel {
     /// Bitmask used to map ticks to slot indices.
@@ -66,7 +45,7 @@ pub struct TimeoutWheel {
     ///
     /// A slot is chosen by `tick & slot_mask`. Multiple target ticks can map to
     /// the same slot over time, and each slot bucket may contain multiple entries.
-    buckets: Vec<Vec<TimeoutEntry>>,
+    buckets: Vec<Vec<WaiterId>>,
     /// Occupancy bitset for buckets that contain any entries (active or stale).
     occupied: Vec<u64>,
     /// Number of occupied bucket slots currently represented in `occupied`.
@@ -242,7 +221,7 @@ impl TimeoutWheel {
         }
 
         // Append timeout candidate, stale entries are filtered by caller on drain.
-        self.buckets[slot].push(TimeoutEntry::new(id, target_tick));
+        self.buckets[slot].push(id);
         self.active_deadlines += 1;
 
         // Track active deadlines per slot to support fast min recomputation.
@@ -320,7 +299,7 @@ impl TimeoutWheel {
     ///
     /// When no active deadlines exist, this still advances `current_tick` and may
     /// purge stale occupied buckets.
-    pub fn advance(&mut self, now: Instant) -> Option<Vec<TimeoutEntry>> {
+    pub fn advance(&mut self, now: Instant) -> Option<Vec<WaiterId>> {
         let elapsed = now.saturating_duration_since(self.start);
         let now_tick = Self::duration_to_nanos_saturating(elapsed) / self.tick_nanos;
 
@@ -408,7 +387,7 @@ impl TimeoutWheel {
     ///
     /// For each set slot in the occupied bitset, invokes `drain` with that slot's
     /// bucket and clears occupancy metadata.
-    fn drain_occupied_buckets(&mut self, mut drain: impl FnMut(&mut Vec<TimeoutEntry>)) {
+    fn drain_occupied_buckets(&mut self, mut drain: impl FnMut(&mut Vec<WaiterId>)) {
         for word_index in 0..self.occupied.len() {
             let mut word = self.occupied[word_index];
             if word == 0 {
@@ -440,7 +419,7 @@ impl TimeoutWheel {
     ///
     /// This reads occupancy at word granularity, clears occupied bits for the
     /// drained range, and appends drained buckets into `expired`.
-    fn drain_occupied_range(&mut self, start: usize, end: usize, expired: &mut Vec<TimeoutEntry>) {
+    fn drain_occupied_range(&mut self, start: usize, end: usize, expired: &mut Vec<WaiterId>) {
         if start >= end {
             return;
         }
@@ -570,7 +549,7 @@ mod tests {
     }
 
     /// Advance to a fixture tick, returning any drained candidates.
-    fn advance(wheel: &mut TimeoutWheel, tick: Tick) -> Vec<TimeoutEntry> {
+    fn advance(wheel: &mut TimeoutWheel, tick: Tick) -> Vec<WaiterId> {
         wheel.advance(now_for_tick(wheel, tick)).unwrap_or_default()
     }
 
@@ -651,10 +630,7 @@ mod tests {
         wheel.schedule(waiter_id(0, 0), 4);
         assert_eq!(wheel.next_deadline(), Some(now_for_tick(&wheel, 4)));
         assert!(advance(&mut wheel, 3).is_empty());
-        assert_eq!(
-            advance(&mut wheel, 4),
-            vec![TimeoutEntry::new(waiter_id(0, 0), 4)]
-        );
+        assert_eq!(advance(&mut wheel, 4), vec![waiter_id(0, 0)]);
         wheel.remove(4);
         assert_eq!(wheel.next_deadline(), None);
     }
@@ -680,10 +656,7 @@ mod tests {
         assert_eq!(wheel.next_deadline(), Some(deadline));
         assert!(wheel.advance(now + Duration::from_millis(6)).is_none());
         assert_eq!(wheel.next_deadline(), Some(deadline));
-        assert_eq!(
-            advance(&mut wheel, target),
-            vec![TimeoutEntry::new(waiter_id(0, 0), target)]
-        );
+        assert_eq!(advance(&mut wheel, target), vec![waiter_id(0, 0)]);
         wheel.remove(target);
     }
 
@@ -705,10 +678,7 @@ mod tests {
         wheel.schedule(waiter_id(0, 0), 5);
         assert!(advance(&mut wheel, 4).is_empty());
         assert_eq!(wheel.next_deadline(), Some(now_for_tick(&wheel, 5)));
-        assert_eq!(
-            advance(&mut wheel, 5),
-            vec![TimeoutEntry::new(waiter_id(0, 0), 5)]
-        );
+        assert_eq!(advance(&mut wheel, 5), vec![waiter_id(0, 0)]);
         wheel.remove(5);
     }
 
@@ -722,19 +692,13 @@ mod tests {
         // New registrations can join a later bucket between service turns.
         assert!(advance(&mut wheel, 1).is_empty());
         wheel.schedule(waiter_id(3, 0), 5);
-        assert_eq!(
-            advance(&mut wheel, 2),
-            vec![TimeoutEntry::new(waiter_id(1, 0), 2)]
-        );
+        assert_eq!(advance(&mut wheel, 2), vec![waiter_id(1, 0)]);
         wheel.remove(2);
         assert_eq!(wheel.next_deadline(), Some(now_for_tick(&wheel, 5)));
 
         assert_eq!(
             advance(&mut wheel, 5),
-            vec![
-                TimeoutEntry::new(waiter_id(2, 0), 5),
-                TimeoutEntry::new(waiter_id(3, 0), 5)
-            ]
+            vec![waiter_id(2, 0), waiter_id(3, 0)]
         );
 
         // Draining returns candidates. Each active registration still needs removal.
@@ -775,11 +739,7 @@ mod tests {
         // One advance crosses slot zero and drains both the tail and head ranges.
         assert_eq!(
             advance(&mut wheel, 33),
-            vec![
-                TimeoutEntry::new(waiter_id(1, 0), 31),
-                TimeoutEntry::new(waiter_id(3, 0), 33),
-                TimeoutEntry::new(waiter_id(2, 0), 33),
-            ]
+            vec![waiter_id(1, 0), waiter_id(3, 0), waiter_id(2, 0),]
         );
         wheel.remove(31);
         wheel.remove(33);
@@ -797,20 +757,13 @@ mod tests {
         // Cross a bitset word boundary, leaving a later bit in that word untouched.
         assert_eq!(
             advance(&mut wheel, 65),
-            vec![
-                TimeoutEntry::new(waiter_id(63, 0), 63),
-                TimeoutEntry::new(waiter_id(64, 0), 64),
-                TimeoutEntry::new(waiter_id(65, 0), 65),
-            ]
+            vec![waiter_id(63, 0), waiter_id(64, 0), waiter_id(65, 0),]
         );
         for tick in [63, 64, 65] {
             wheel.remove(tick);
         }
         assert_eq!(wheel.next_deadline(), Some(now_for_tick(&wheel, 100)));
-        assert_eq!(
-            advance(&mut wheel, 100),
-            vec![TimeoutEntry::new(waiter_id(100, 0), 100)]
-        );
+        assert_eq!(advance(&mut wheel, 100), vec![waiter_id(100, 0)]);
         wheel.remove(100);
     }
 
@@ -823,14 +776,8 @@ mod tests {
 
             // Advancing by a full revolution or more drains every occupied bucket.
             let mut expired = advance(&mut wheel, tick);
-            expired.sort_unstable_by_key(|entry| entry.target_tick);
-            assert_eq!(
-                expired,
-                vec![
-                    TimeoutEntry::new(waiter_id(2, 0), 5),
-                    TimeoutEntry::new(waiter_id(1, 0), 20)
-                ]
-            );
+            expired.sort_unstable_by_key(|id| id.0.index);
+            assert_eq!(expired, vec![waiter_id(1, 0), waiter_id(2, 0)]);
             wheel.remove(5);
             wheel.remove(20);
             assert_eq!(wheel.occupied_slots, 0);
@@ -838,10 +785,7 @@ mod tests {
 
             // Reuse the wheel immediately after draining it.
             wheel.schedule(waiter_id(2, 1), tick + 1);
-            assert_eq!(
-                advance(&mut wheel, tick + 1),
-                vec![TimeoutEntry::new(waiter_id(2, 1), tick + 1)]
-            );
+            assert_eq!(advance(&mut wheel, tick + 1), vec![waiter_id(2, 1)]);
             wheel.remove(tick + 1);
         }
     }
@@ -869,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reused_slot_preserves_registration_and_tick() {
+    fn test_reused_slot_preserves_registration_identity() {
         let mut wheel = wheel(Duration::from_millis(100));
         let old = waiter_id(7, 0);
         let current = waiter_id(7, 1);
@@ -877,11 +821,8 @@ mod tests {
         wheel.remove(5);
         wheel.schedule(current, 10);
 
-        // Lazy removal preserves the old identity and tick beside the replacement.
-        assert_eq!(
-            advance(&mut wheel, 10),
-            vec![TimeoutEntry::new(old, 5), TimeoutEntry::new(current, 10)]
-        );
+        // Lazy removal preserves the old identity beside the replacement.
+        assert_eq!(advance(&mut wheel, 10), vec![old, current]);
 
         // The caller rejects the old candidate and removes only the live expiry.
         wheel.remove(10);
@@ -910,7 +851,7 @@ mod tests {
         );
 
         let expired = advance(&mut wheel, 1034);
-        assert!(expired.contains(&TimeoutEntry::new(waiter_id(1024, 0), 1034)));
+        assert!(expired.contains(&waiter_id(1024, 0)));
         wheel.remove(1034);
         assert!(advance(&mut wheel, 1035).is_empty());
         assert_eq!(wheel.occupied_slots, 0);
@@ -935,15 +876,12 @@ mod tests {
         // Once the bucket is inactive, reuse discards stale records but keeps its storage.
         let current = waiter_id(0, 1);
         wheel.schedule(current, 10);
-        assert_eq!(wheel.buckets[slot], vec![TimeoutEntry::new(current, 10)]);
+        assert_eq!(wheel.buckets[slot], vec![current]);
         assert_eq!(wheel.buckets[slot].capacity(), capacity);
         assert_eq!(wheel.occupied_slots, 1);
         assert_eq!(wheel.active_deadlines, 1);
 
-        assert_eq!(
-            advance(&mut wheel, 10),
-            vec![TimeoutEntry::new(current, 10)]
-        );
+        assert_eq!(advance(&mut wheel, 10), vec![current]);
         wheel.remove(10);
         assert_eq!(wheel.occupied_slots, 0);
         assert_eq!(wheel.active_deadlines, 0);

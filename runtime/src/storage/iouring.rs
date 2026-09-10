@@ -342,7 +342,6 @@ impl crate::Blob for Blob {
         let output = Operation::register(Request::ReadAt(ReadAtRequest {
             file: self.file.clone(),
             offset,
-            len,
             read: 0,
             buf: io_buf,
             cache,
@@ -402,7 +401,6 @@ impl crate::Blob for Blob {
         let output = Operation::register(Request::WriteAt(WriteAtRequest {
             file: self.file.clone(),
             offset,
-            written: 0,
             write: bufs.into(),
             state,
             cache,

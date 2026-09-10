@@ -7,7 +7,7 @@
 //!   blocking in `submit_and_wait`.
 //! - Producers wake only the currently armed wait target.
 //! - A dedicated "wake signalled" bit coalesces repeated wake attempts.
-//! - Out-of-band wake requests use [`Waker::wake`].
+//! - Producers complete requested signaling with [`Waker::wake`] after unlocking.
 //! - Wake CQEs are acknowledged with [`Waker::acknowledge`].
 //!
 //! The packed atomic state combines:
@@ -63,13 +63,11 @@ const WAITING_MASK: u32 = WAITING_ON_FUTEX_BIT | WAITING_ON_EVENTFD_BIT;
 const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
-/// Maximum live published-minus-processed gap that keeps modular order directional.
-const HALF_SUBMISSION_SEQUENCE_DOMAIN: u32 = SUBMISSION_SEQ_MASK.div_ceil(2);
 
 /// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
-/// wake if producers publish new work or request an out-of-band notification.
+/// wake from a producer completing its publication signal.
 pub struct ArmGuard<'a> {
     /// Wake source to disarm when the guard is dropped.
     waker: &'a Waker,
@@ -105,20 +103,19 @@ impl Drop for ArmGuard<'_> {
 /// the loop blocks only if the same snapshot still shows no latched wake and carries
 /// the exact `submitted_seq == processed_seq` snapshot the loop armed against.
 ///
-/// The live published-minus-processed gap must remain below half the sequence
-/// domain. A mailbox has at most one published batch in its shared inbox and one
-/// transferred batch awaiting its processed increment, independently of message
-/// count. This makes the modular delta `submitted_seq - processed_seq`
-/// directional: a nonzero delta smaller than half the domain means publication
-/// is ahead. No bound on the number of messages in a batch is needed.
+/// Transferring a batch acquires the inbox mutex before acknowledging its
+/// publication. The owner's subsequent sequence reads cannot precede that
+/// publication. At each pending check, only the shared inbox can hold an
+/// unacknowledged batch, so unequal sequences mean work remains pending even
+/// across counter wrap. No bound on the number of messages in a batch is needed.
 ///
 /// Blocking follows an arm-and-recheck protocol:
-/// - The loop first checks for a published-ahead delta, then arms a wait target.
+/// - The loop first checks for pending publication, then arms a wait target.
 /// - The loop blocks only if the post-arm snapshot still looks idle after that
 ///   same atomic state transition.
 /// - Submitters signal the currently armed wait target exactly once.
-/// - Out-of-band notifications latch one wake even while unarmed, so the next
-///   arm-and-recheck cycle skips blocking once.
+/// - A delayed signal may latch a wake while unarmed, causing the next
+///   arm-and-recheck cycle to skip blocking once.
 ///
 /// This makes submissions racing with the sleep transition observable either by
 /// sequence mismatch in the loop or by a futex/eventfd wakeup.
@@ -157,7 +154,7 @@ struct WakerInner {
 /// Internal hybrid futex/eventfd wake source for the io_uring loop.
 ///
 /// - Publish submissions from producers via [`Waker::publish`]
-/// - Wake without publishing via [`Waker::wake`]
+/// - Complete publication signaling after unlocking via [`Waker::wake`]
 /// - Test whether published work is still pending via [`Waker::pending`]
 /// - Park in the fully-idle path via [`Waker::park_idle`]
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
@@ -217,19 +214,14 @@ impl Waker {
         })
     }
 
-    /// Latch one pending wake and, if a target is currently armed, wake it.
+    /// Complete signaling requested by [`Self::publish`] after releasing the inbox.
     ///
-    /// The first caller to set `WAKE_SIGNALLED_BIT` in an epoch performs the
-    /// wake. Subsequent callers do nothing until the loop disarms and clears
-    /// the bit.
-    ///
-    /// All claimed wakes flow through this path, whether they come from
-    /// producers signaling after publication or from an out-of-band caller
-    /// such as a runtime stop notification.
+    /// The batch may already be consumed and the wait target may have changed.
+    /// The first caller to set `WAKE_SIGNALLED_BIT` in the current epoch performs
+    /// the wake. Later callers do nothing until the loop disarms and clears it.
+    /// This coalesces delayed signals from previously consumed batches.
     pub fn wake(&self) {
-        // Publish the notification before signaling. The owner's disarm
-        // acquire then observes the state that caused an out-of-band wake,
-        // even when no mailbox batch advanced the sequence.
+        // Claim one signal for the target observed by this atomic transition.
         let prev = self
             .inner
             .state
@@ -284,15 +276,11 @@ impl Waker {
     /// of that drained sequence.
     #[inline]
     pub fn pending(&self, processed_seq: u32) -> bool {
-        // Pair this `Acquire` with publication's `Release`. The outstanding
-        // batch count stays below half the packed sequence domain, so a
-        // non-zero modular delta smaller than that half-range unambiguously
-        // means `published_seq` is ahead of `processed_seq`.
+        // Pair this `Acquire` with publication's `Release` before inbox transfer.
         let published_seq =
             (self.inner.state.load(Ordering::Acquire) >> STATE_BITS) & SUBMISSION_SEQ_MASK;
 
-        let delta = published_seq.wrapping_sub(processed_seq) & SUBMISSION_SEQ_MASK;
-        delta != 0 && delta < HALF_SUBMISSION_SEQUENCE_DOMAIN
+        published_seq != (processed_seq & SUBMISSION_SEQ_MASK)
     }
 
     /// Park while idle until notification or the optional absolute deadline.
@@ -302,9 +290,8 @@ impl Waker {
     /// not count as a quick notification wake for adaptive spinning. Every
     /// return clears the armed wait state, including skipped sleeps.
     pub fn park_idle(&self, processed_seq: u32, deadline: Option<Instant>) -> Option<Duration> {
-        // Arming only updates the packed wake state machine. It does not
-        // publish queue memory or consume any out-of-band wake publication, so
-        // `Relaxed` is sufficient on this RMW.
+        // Arming changes only wait state; the inbox mutex owns message
+        // visibility. The atomic snapshot alone decides whether to block.
         let prev = self
             .inner
             .state
@@ -340,9 +327,8 @@ impl Waker {
     /// normal idle path. A latched wake or sequence mismatch rejects sleeping
     /// and requires the owner to recheck its work.
     pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
-        // Arming only updates the packed wake state machine. It does not
-        // publish queue memory or consume any out-of-band wake publication, so
-        // `Relaxed` is sufficient on this RMW.
+        // Arming changes only wait state; the inbox mutex owns message
+        // visibility. The atomic snapshot alone decides whether to block.
         let prev = self
             .inner
             .state
@@ -580,7 +566,7 @@ impl Waker {
     /// The caller must pass the exact post-arm snapshot from the same atomic
     /// transition that set `WAITING_ON_FUTEX_BIT`. `FUTEX_WAIT` only blocks
     /// while the word still equals that value, which closes the race between
-    /// arming idle sleep and a concurrent publish or out-of-band wake.
+    /// arming idle sleep and a concurrent publication or delayed signal.
     ///
     /// Returns to the loop on `EINTR`, preserving the absolute deadline for the
     /// next parking attempt. Treats `EAGAIN` as "state already changed before
@@ -929,32 +915,22 @@ pub mod tests {
     }
 
     #[test]
-    fn test_pending_uses_directional_half_range_compare() {
-        // Verify `pending()` only reports work when the published sequence is
-        // directionally ahead within the half-range window.
-        let waker = Waker::new().expect("eventfd creation should succeed");
+    fn test_pending_tracks_publication_across_wrap() {
+        for start in [0, SUBMISSION_SEQ_MASK] {
+            let waker = Waker::new().expect("eventfd creation should succeed");
+            waker
+                .inner
+                .state
+                .store(start << STATE_BITS, Ordering::Relaxed);
+            let mut processed = start;
+            assert!(!waker.pending(processed));
 
-        // A one-step published-ahead delta is pending for `processed_seq = 0`,
-        // but not once the loop has caught up.
-        waker.inner.state.store(1 << STATE_BITS, Ordering::Relaxed);
-        assert!(waker.pending(0));
-        assert!(!waker.pending(1));
-
-        // A visible published sequence that lags behind `processed_seq` must
-        // not be treated as pending work.
-        waker.inner.state.store(0, Ordering::Relaxed);
-        assert!(!waker.pending(1));
-
-        // Exactly half the domain is ambiguous and therefore not directional.
-        waker.inner.state.store(
-            HALF_SUBMISSION_SEQUENCE_DOMAIN << STATE_BITS,
-            Ordering::Relaxed,
-        );
-        assert!(!waker.pending(0));
-
-        // Wrapping by one still counts as a published-ahead delta.
-        waker.inner.state.store(0, Ordering::Relaxed);
-        assert!(waker.pending(SUBMISSION_SEQ_MASK));
+            assert!(!waker.publish());
+            assert!(waker.pending(processed));
+            processed = processed.wrapping_add(1);
+            assert!(!waker.pending(processed));
+            assert!(!waker.pending(processed & SUBMISSION_SEQ_MASK));
+        }
     }
 
     #[test]
@@ -1555,9 +1531,13 @@ mod loom_tests {
             let mut received = Vec::new();
             let mut scratch = Vec::new();
             while received.len() < 2 {
+                let published = submitted_seq(&waker);
+                assert!((published.wrapping_sub(processed) & SUBMISSION_SEQ_MASK) <= 1);
                 if scratch.is_empty() && waker.pending(processed) {
-                    let mut inbox = inbox.lock().unwrap();
-                    std::mem::swap(&mut *inbox, &mut scratch);
+                    {
+                        let mut inbox = inbox.lock().unwrap();
+                        std::mem::swap(&mut *inbox, &mut scratch);
+                    }
                     if !scratch.is_empty() {
                         processed = processed.wrapping_add(1) & SUBMISSION_SEQ_MASK;
                     }
@@ -1611,7 +1591,7 @@ mod loom_tests {
                 let mut inbox = inbox.lock().unwrap();
                 std::mem::swap(&mut inbox.1, &mut scratch);
             }
-            let processed = 1;
+            let mut processed = 1;
             assert!(!waker.pending(processed));
             let first = scratch.remove(0);
             let arm = waker.arm(processed);
@@ -1642,10 +1622,20 @@ mod loom_tests {
                 inbox.0 = false;
                 std::mem::take(&mut inbox.1)
             };
+            if !detached.is_empty() {
+                processed += 1;
+            }
+            assert!(!waker.pending(processed));
+            {
+                let mut inbox = inbox.lock().unwrap();
+                inbox.0 = false;
+                assert!(std::mem::take(&mut inbox.1).is_empty());
+            }
+            assert!(!waker.pending(processed));
             drop(arm);
             let rejected = producer.join().unwrap();
-            let accepted = usize::from(rejected.is_none());
-            assert_eq!(submitted_seq(&waker), processed + accepted as u32);
+            assert_eq!(processed, 1 + u32::from(rejected.is_none()));
+            assert_eq!(submitted_seq(&waker), processed);
             detached.push(first);
             detached.append(&mut scratch);
             detached.extend(rejected);
@@ -1716,7 +1706,7 @@ mod loom_tests {
 
     #[test]
     fn test_wake_clear_wait_pairing() {
-        // `wake` is used by out-of-band callers such as runtime shutdown. It
+        // Exercise wake/clear ordering directly, without a mailbox prefix. It
         // must publish the caller's earlier state change to the loop even though
         // it does not advance the submitted sequence.
         //
@@ -1846,8 +1836,7 @@ mod loom_tests {
     fn test_wake_clear_wait_pairing_when_armed() {
         // When an out-of-band wake lands in an armed eventfd epoch, the loop
         // resumes without any sequence progress. `clear_wait()` must still
-        // acquire the notifier's earlier state change before the loop checks for
-        // disconnect or shutdown state after waking.
+        // acquire the notifier's earlier state change before reading its payload.
         loom::model(|| {
             let waker = Waker::new().unwrap();
             let queued = Arc::new(QueuedRequest::empty());
@@ -2033,9 +2022,8 @@ mod loom_tests {
     #[test]
     fn test_sequence_wraparound() {
         // Preload the sequence to the last representable value, then publish
-        // twice so the visible sequence wraps through zero to one. The
-        // half-range modular `pending()` check must remain directional across
-        // that boundary.
+        // twice so the visible sequence wraps through zero to one. Pending
+        // publication must remain observable across that boundary.
         loom::model(|| {
             let waker = Waker::new().unwrap();
             waker

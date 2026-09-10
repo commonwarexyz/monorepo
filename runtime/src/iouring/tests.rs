@@ -1505,7 +1505,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         tree.clone(),
                     );
                     tree.register(handle.aborter().unwrap());
-                    let task = Task::boxed(future);
+                    let task: BoxedTask = Box::pin(future);
                     if matches!(placement, Placement::Foreign) {
                         let origin = context.origin.clone();
                         thread::spawn(move || assert!(Tasks::register(&origin, task).is_ok()))
@@ -2025,55 +2025,52 @@ fn test_callback_generated_work_prevents_parking() {
 
 #[test]
 fn test_final_callbacks_finish_before_tls_removal() {
-    /// Extend shutdown cleanup from each destructor, then panic at the chain's end.
-    struct Chain {
-        /// Number of additional callbacks to leave in the next deferred batch.
-        remaining: usize,
-        /// Count every callback, including the final one that panics.
-        drops: Arc<AtomicUsize>,
-    }
+    /// Observe final timer disposal through the registered waker's destructor.
+    struct Callback(Arc<AtomicUsize>);
 
     // This waker owns a reentrant destructor, which Waker::noop cannot model.
     #[allow(clippy::manual_noop_waker)]
-    impl Wake for Chain {
+    impl Wake for Callback {
         fn wake(self: Arc<Self>) {}
     }
 
-    impl Drop for Chain {
+    impl Drop for Callback {
         fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::SeqCst);
             let local = Local::current().expect("callback ran after TLS removal");
-            if self.remaining == 0 {
-                panic!("terminal callback panic");
-            }
+            assert!(local.try_borrow_mut().unwrap().closing);
 
-            // Each destructor generates another ownership batch. No Local
-            // reference escapes shutdown or postpones its final destruction.
-            local
-                .borrow_mut()
-                .deferred
-                .drops
-                .push(Waker::from(Arc::new(Self {
-                    remaining: self.remaining - 1,
-                    drops: self.drops.clone(),
-                })));
+            // Public callbacks cannot register another timer on a closed worker.
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                Pin::new(&mut sleep).poll(&mut TaskContext::from_waker(Waker::noop()))
+            }))
+            .expect_err("sleep must reject polling after worker closure");
+            assert_eq!(
+                extract_panic_message(&*panic),
+                "io_uring sleep polled after its worker closed"
+            );
+
+            // The outer assertion must observe successful validation even when
+            // the runtime contains this callback's deliberate secondary panic.
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("terminal callback panic");
         }
     }
 
     let drops = Arc::new(AtomicUsize::new(0));
     let observed = drops.clone();
-
+    let mut escaped = None;
     let result = catch_unwind(AssertUnwindSafe(|| {
-        Runner::new(config()).start(|_| async move {
-            Local::current()
-                .unwrap()
-                .borrow_mut()
-                .deferred
-                .drops
-                .push(Waker::from(Arc::new(Chain {
-                    remaining: 8,
-                    drops,
-                })));
+        Runner::new(config()).start(|_| async {
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            let waker = Waker::from(Arc::new(Callback(drops)));
+            assert!(
+                Pin::new(&mut sleep)
+                    .poll(&mut TaskContext::from_waker(&waker))
+                    .is_pending()
+            );
+            drop(waker);
+            escaped = Some(sleep);
             panic!("primary root panic");
         });
     }));
@@ -2082,7 +2079,8 @@ fn test_final_callbacks_finish_before_tls_removal() {
         extract_panic_message(&*result.unwrap_err()),
         "primary root panic"
     );
-    assert_eq!(observed.load(Ordering::SeqCst), 9);
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+    drop(escaped);
 }
 
 #[test]

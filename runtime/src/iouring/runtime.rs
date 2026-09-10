@@ -103,12 +103,12 @@
 //! destruction on one-off threads can follow registration release.
 
 use super::{
-    driver::{Driver, ServiceOutcome},
+    driver::Driver,
     mailbox::{Mailbox, Message},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, TimerId, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
-    task::{BoxedTask, Running, Target, Task, TaskWaker, Tasks},
+    task::{BoxedTask, Running, Target, TaskWaker, Tasks},
     timeout::TimeoutWheel,
     waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
@@ -743,7 +743,7 @@ impl crate::Spawner for Context {
             parent.register(aborter);
         }
 
-        let task = Task::boxed(future);
+        let task: BoxedTask = Box::pin(future);
         let result = if let Some(active) = active {
             shared.launch(task, active);
             Ok(())
@@ -1477,8 +1477,9 @@ impl Worker {
             drop(waker);
         }
 
-        // Escaped handles can outlive task disposal. Detach their ordinary I/O
-        // observers and clear sleep registrations before draining retained work.
+        // Close every ordinary observer and timer before running callbacks.
+        // Admission is closed, so subsequent handle drops find no registration
+        // to detach. Only driver service can produce further deferred work.
         {
             let mut local = self.local.borrow_mut();
             let Local {
@@ -1494,7 +1495,7 @@ impl Worker {
         self.callbacks();
 
         // Retained writes and syncs still need to finish. Cancelled operations
-        // and their cancellation acknowledgements must also retire before exit.
+        // retain their resources until their own completion arrives.
         loop {
             // A retained write may still be queued without an SQE in flight.
             // Service must stage that work before we consider waiting for a CQE.
@@ -1503,14 +1504,6 @@ impl Worker {
 
             let mut local = self.local.borrow_mut();
 
-            // Callbacks can enqueue another batch. Keep TLS installed until
-            // all deferred work and kernel completions have been handled.
-            if !local.deferred.is_empty() {
-                continue;
-            }
-
-            // An operation can finish before its cancellation acknowledgement.
-            // The driver's empty check includes both kinds of outstanding work.
             if local.driver.as_ref().unwrap().is_empty() {
                 break;
             }
@@ -1550,11 +1543,10 @@ impl Worker {
     }
 
     /// Apply a bounded batch of messages, taking another mailbox batch when needed.
-    /// `woke` records a wake CQE. The publication sequence also detects messages
-    /// received while the worker was busy and had no kernel wait armed.
-    fn messages(&mut self, mailbox: &Arc<Mailbox>, woke: bool) {
+    /// The publication sequence records accepted work independently of signaling.
+    fn messages(&mut self, mailbox: &Arc<Mailbox>) {
         if self.inbox.is_empty()
-            && (woke || mailbox.waker.pending(self.processed_seq))
+            && mailbox.waker.pending(self.processed_seq)
             && mailbox.take(&mut self.inbox)
         {
             // Count transfer once, not each message application. Reversing
@@ -1569,9 +1561,10 @@ impl Worker {
             };
             match message {
                 Message::Spawn(task) => {
-                    if let Err(task) = Tasks::register(&Arc::downgrade(mailbox), task) {
-                        Panics::contain(|| drop(task));
-                    }
+                    self.local
+                        .borrow_mut()
+                        .tasks
+                        .insert(task, Arc::downgrade(mailbox));
                 }
                 Message::Wake(target) => {
                     let mut local = self.local.borrow_mut();
@@ -1587,8 +1580,8 @@ impl Worker {
     }
 
     /// Service the ring and timers using one time sample, collecting callbacks.
-    /// Reports wake CQEs and whether kernel service was deferred to an idle wait.
-    fn service(&mut self, defer_kernel_service: bool) -> ServiceOutcome {
+    /// Returns whether kernel service was deferred to an idle wait.
+    fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
         local.now = Instant::now();
         let Local {
@@ -1689,11 +1682,11 @@ impl Worker {
             let defer = !self.local.borrow().is_ready()
                 && self.inbox.is_empty()
                 && !mailbox.waker.pending(self.processed_seq);
-            let service = self.service(defer);
+            let kernel_deferred = self.service(defer);
 
             // Apply foreign messages and completion callbacks before considering
             // a wait. Any tasks they make ready will be polled on the next turn.
-            self.messages(&mailbox, service.woke);
+            self.messages(&mailbox);
             self.callbacks();
             if self.panics.first.is_some() {
                 return None;
@@ -1705,7 +1698,7 @@ impl Worker {
                 let mut local = self.local.borrow_mut();
                 (
                     local.is_ready(),
-                    local.driver.as_ref().unwrap().needs_kernel_service(),
+                    !local.driver.as_ref().unwrap().is_empty(),
                     local.driver.as_ref().unwrap().has_pending_submissions(),
                     local.next_deadline(),
                 )
@@ -1718,7 +1711,7 @@ impl Worker {
                 || !self.inbox.is_empty()
                 || mailbox.waker.pending(self.processed_seq)
             {
-                if (service.kernel_deferred && needs_kernel) || (defer && pending_submissions) {
+                if (kernel_deferred && needs_kernel) || (defer && pending_submissions) {
                     // An idle turn must stage work introduced by its callbacks.
                     // A wake alone needs catch-up only if GETEVENTS was deferred.
                     self.service(false);
@@ -1731,7 +1724,7 @@ impl Worker {
             // at this actual idle boundary after any elapsed callback time.
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
-                if service.kernel_deferred && needs_kernel {
+                if kernel_deferred && needs_kernel {
                     self.service(false);
                     self.callbacks();
                 }
@@ -1741,8 +1734,8 @@ impl Worker {
             #[cfg(test)]
             tests::before_park();
 
-            // Outstanding operations and cancellations need the ring wait to run
-            // deferred kernel work. A futex wake alone cannot advance their I/O.
+            // Unfinished requests need the ring wait to run deferred kernel work.
+            // A futex wake alone cannot advance their I/O.
             if needs_kernel {
                 let result = self
                     .local
@@ -1929,7 +1922,7 @@ impl crate::Runner for Runner {
                     execution: Execution::default(),
                 })
             },
-            Some(Task::boxed(process.collect(Sleep::new))),
+            Some(Box::pin(process.collect(Sleep::new))),
             Some(tasks),
         )
         .and_then(|(mut worker, output)| {

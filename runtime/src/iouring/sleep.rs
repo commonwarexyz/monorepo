@@ -15,7 +15,6 @@ use super::{
     mailbox::{Mailbox, Message},
     runtime::Local,
     slab::{Id, Slab},
-    timeout::TimeoutWheel,
 };
 use std::{
     cmp::Reverse,
@@ -55,7 +54,10 @@ pub struct Sleep {
 }
 
 impl Sleep {
-    /// Establish a relative deadline, clamping the duration to [`TimeoutWheel::MAX_TIMEOUT`].
+    /// Fallback duration when the requested deadline exceeds `Instant`'s range.
+    const OVERFLOW_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+
+    /// Establish a relative deadline, using a far-future fallback on overflow.
     ///
     /// Zero sleeps take the ready path without reading a clock or accessing TLS.
     pub fn new(duration: Duration) -> Self {
@@ -63,9 +65,10 @@ impl Sleep {
             return Self { state: State::Done };
         }
 
-        let deadline = Instant::now()
-            .checked_add(duration.min(TimeoutWheel::MAX_TIMEOUT))
-            .expect("sleep deadline clamped to TimeoutWheel::MAX_TIMEOUT is not representable");
+        let now = Instant::now();
+        let deadline = now
+            .checked_add(duration)
+            .unwrap_or_else(|| now + Self::OVERFLOW_TIMEOUT);
 
         Self {
             state: State::Unregistered { deadline },
@@ -118,69 +121,53 @@ impl Future for Sleep {
             ),
         };
 
-        let mut cloned_waker = None;
-        loop {
-            let mut local = owner.borrow_mut();
+        let mut local = owner.borrow_mut();
+        assert!(
+            !local.closing,
+            "io_uring sleep polled after its worker closed"
+        );
 
-            // A waker clone can reenter and close the worker between passes.
-            assert!(
-                !local.closing,
-                "io_uring sleep polled after its worker closed"
-            );
-
-            // Expiry removes the registration before waking the task. Use the
-            // retained deadline to recognize completion even if the slot is gone.
-            if deadline <= local.now {
-                this.state = State::Done;
-
-                // If expiry has not removed the registration, detach its waker
-                // here. A clone that raced expiry also needs deferred destruction.
-                if let Some(timer_id) = registered
-                    && let Some(waker) = local.timers.cancel(timer_id)
-                {
-                    local.deferred.drops.push(waker);
-                }
-                local.deferred.drops.extend(cloned_waker);
-
-                return Poll::Ready(());
-            }
-
-            // An equivalent waker needs no clone or replacement.
-            if cloned_waker.is_none()
-                && registered.is_some_and(|id| local.timers.will_wake(id, cx.waker()))
+        // Expiry removes the registration before waking the task. Use the
+        // retained deadline to recognize completion even if the slot is gone.
+        if deadline <= local.now {
+            this.state = State::Done;
+            if let Some(timer_id) = registered
+                && let Some(waker) = local.timers.cancel(timer_id)
             {
-                return Poll::Pending;
+                local.deferred.drops.push(waker);
             }
+            return Poll::Ready(());
+        }
 
-            let Some(waker) = cloned_waker.take() else {
-                // Cloning can reenter deadline service or panic. Retain the
-                // registration identity and recheck expiry before refreshing.
-                drop(local);
-                cloned_waker = Some(cx.waker().clone());
-                continue;
-            };
-
-            if let Some(timer_id) = registered {
-                // Refresh only the observer, leaving the deadline and heap record
-                // in place. The displaced waker is dropped after this borrow.
-                let old = local
-                    .timers
-                    .refresh(timer_id, waker)
-                    .expect("live io_uring sleeper registration missing");
-                local.deferred.drops.push(old);
-            } else {
-                // Register after cloning succeeds, so a clone panic cannot leave
-                // a timer behind without a cancellation identity in this future.
-                let timer_id = local.timers.insert(deadline, waker);
-                this.state = State::Registered {
-                    mailbox: Arc::downgrade(&local.mailbox),
-                    timer_id,
-                    deadline,
-                };
-            }
-
+        if registered.is_some_and(|id| local.timers.will_wake(id, cx.waker())) {
             return Poll::Pending;
         }
+
+        // Worker service cannot run during this poll. Clone outside its borrow,
+        // retaining the cancellation identity if the callback panics.
+        drop(local);
+        let waker = cx.waker().clone();
+        let mut local = owner.borrow_mut();
+        if let Some(timer_id) = registered {
+            // Refresh only the observer, leaving the deadline and heap record
+            // in place. The displaced waker is dropped after this borrow.
+            let old = local
+                .timers
+                .refresh(timer_id, waker)
+                .expect("live io_uring sleeper registration missing");
+            local.deferred.drops.push(old);
+        } else {
+            // Register after cloning succeeds, so a clone panic cannot leave
+            // a timer behind without a cancellation identity in this future.
+            let timer_id = local.timers.insert(deadline, waker);
+            this.state = State::Registered {
+                mailbox: Arc::downgrade(&local.mailbox),
+                timer_id,
+                deadline,
+            };
+        }
+
+        Poll::Pending
     }
 }
 
@@ -346,7 +333,21 @@ mod tests {
     }
 
     #[test]
-    fn test_far_future_sleep_clamps_the_deadline() {
+    fn test_representable_sleep_preserves_requested_duration() {
+        let duration = Duration::from_secs(31 * 365 * 24 * 60 * 60);
+        let before = Instant::now();
+        let sleep = Sleep::new(duration);
+        let after = Instant::now();
+        let State::Unregistered { deadline } = sleep.state else {
+            panic!("positive sleep must retain a deadline");
+        };
+
+        assert!(deadline >= before + duration);
+        assert!(deadline <= after + duration);
+    }
+
+    #[test]
+    fn test_overflowing_sleep_uses_far_future_deadline() {
         let before = Instant::now();
         let sleep = Sleep::new(Duration::MAX);
         let after = Instant::now();
@@ -354,8 +355,8 @@ mod tests {
             panic!("positive sleep must retain a deadline");
         };
 
-        assert!(deadline >= before + TimeoutWheel::MAX_TIMEOUT);
-        assert!(deadline <= after + TimeoutWheel::MAX_TIMEOUT);
+        assert!(deadline >= before + Sleep::OVERFLOW_TIMEOUT);
+        assert!(deadline <= after + Sleep::OVERFLOW_TIMEOUT);
     }
 
     #[test]

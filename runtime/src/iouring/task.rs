@@ -21,7 +21,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Weak},
-    task::{Context, Poll, Wake, Waker},
+    task::{Wake, Waker},
 };
 
 /// Root or spawned task selected by a routing waker.
@@ -81,30 +81,6 @@ pub struct TaskId(Id);
 
 /// Pinned future owned by the scheduler until completion or cancellation.
 pub type BoxedTask = Pin<Box<dyn Future<Output = ()> + Send>>;
-
-/// Pinned task with a separate poll entry point for its execution wrapper.
-pub struct Task<F> {
-    /// Future pinned in place with the enclosing task until destruction.
-    future: F,
-}
-
-impl<F: Future<Output = ()> + Send + 'static> Task<F> {
-    /// Allocate the task and erase its concrete type for scheduling.
-    pub fn boxed(future: F) -> BoxedTask {
-        Box::pin(Self { future })
-    }
-}
-
-impl<F: Future<Output = ()> + Send + 'static> Future for Task<F> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        // SAFETY: The pinned Task allocation owns `future`. Neither this type
-        // nor its scheduler moves the field after pinning, and destruction runs
-        // in place. This projection grants exclusive access only for this poll.
-        unsafe { self.map_unchecked_mut(|task| &mut task.future) }.poll(cx)
-    }
-}
 
 /// Scheduling state changed exclusively by the owning worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -340,7 +316,7 @@ mod tests {
 
     /// Insert a pending task without a live worker or mailbox.
     fn insert(tasks: &mut Tasks) -> TaskId {
-        tasks.insert(Task::boxed(pending()), Weak::new())
+        tasks.insert(Box::pin(pending()), Weak::new())
     }
 
     #[test]
@@ -500,7 +476,7 @@ mod tests {
         let ids = [(); 4].map(|_| {
             let guard = DropCount(drops.clone());
             tasks.insert(
-                Task::boxed(async move {
+                Box::pin(async move {
                     let _guard = guard;
                     pending::<()>().await;
                 }),

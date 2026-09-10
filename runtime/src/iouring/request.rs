@@ -534,11 +534,9 @@ pub struct ReadAtRequest {
     pub file: Arc<Held>,
     /// Starting file offset for the logical read.
     pub offset: u64,
-    /// Total number of bytes requested.
-    pub len: usize,
     /// Bytes already read into `buf`.
     pub read: usize,
-    /// Destination buffer owned by the request.
+    /// Fixed-length destination buffer owned by the request.
     pub buf: IoBufMut,
     /// Page-cache policy for this request.
     pub cache: Cache,
@@ -548,13 +546,15 @@ impl ReadAtRequest {
     /// Build the next positioned read SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
+        let len = self.buf.len();
         assert!(
-            self.read <= self.len && self.len <= self.buf.capacity(),
-            "read_at invariant violated: need read <= len <= capacity"
+            self.read <= len,
+            "read_at progress exceeds destination length"
         );
-        // SAFETY: buf is an IoBufMut with stable memory. read <= len <= capacity.
+
+        // SAFETY: buf owns stable memory with read <= buf.len() <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
-        let remaining = self.len - self.read;
+        let remaining = len - self.read;
         let offset = self.offset + self.read as u64;
         let rw_flags = self.cache.rw_flag();
         opcode::Read::new(fd, ptr, scalar_len(remaining))
@@ -572,13 +572,13 @@ impl ReadAtRequest {
             CqeResult::Cancelled | CqeResult::Error(_) => Some(Err(Error::ReadFailed)),
             CqeResult::Zero => Some(Err(Error::BlobInsufficientLength)),
             CqeResult::Positive(n) => {
-                let remaining = self.len - self.read;
+                let remaining = self.buf.len() - self.read;
                 assert!(
                     n <= remaining,
                     "read CQE exceeds requested length: n={n} remaining={remaining}"
                 );
                 self.read += n;
-                if self.read >= self.len {
+                if self.read >= self.buf.len() {
                     Some(Ok(()))
                 } else {
                     None
@@ -669,10 +669,8 @@ fn on_sync_cqe(state: WaiterState, result: i32) -> Option<Result<(), Error>> {
 pub struct WriteAtRequest {
     /// File used by the current write SQE.
     pub file: Arc<Held>,
-    /// Starting file offset for the logical write.
+    /// File offset for the next write SQE.
     pub offset: u64,
-    /// Bytes already written successfully.
-    pub written: usize,
     /// Write cursor and buffers that still need to be written.
     pub write: WriteBuffers,
     /// Current write and durability phase.
@@ -699,14 +697,13 @@ impl WriteAtRequest {
         }
 
         let fd = Fd(self.file.as_raw_fd());
-        let file_offset = self.offset + self.written as u64;
         let rw_flags = self.rw_flags();
         match &mut self.write {
             WriteBuffers::Single { buf, offset } => {
                 let bytes = &buf.as_ref()[*offset..];
                 let ptr = bytes.as_ptr();
                 opcode::Write::new(fd, ptr, scalar_len(bytes.len()))
-                    .offset(file_offset)
+                    .offset(self.offset)
                     .rw_flags(rw_flags)
                     .build()
             }
@@ -720,7 +717,7 @@ impl WriteAtRequest {
                 let iovecs_len = fill_iovecs(bufs, *chunk, *offset, iovecs);
 
                 opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len)
-                    .offset(file_offset)
+                    .offset(self.offset)
                     .rw_flags(rw_flags)
                     .build()
             }
@@ -741,8 +738,8 @@ impl WriteAtRequest {
                 Some(Err(Error::WriteFailed))
             }
             CqeResult::Positive(n) => {
-                self.written += n;
                 self.write.advance(n);
+                self.offset += n as u64;
                 if self.write.is_complete() {
                     if self.state == WriteAtState::WritingBeforeSync {
                         // All batches must finish before the trailing sync starts.
@@ -823,8 +820,6 @@ impl ConnectRequest {
 pub struct PollRequest {
     /// Descriptor retained until readiness completes or cancellation retires.
     pub fd: Arc<TcpListener>,
-    /// Native poll flags identifying the readiness event of interest.
-    pub flags: u32,
     /// Absolute deadline for this readiness observation.
     pub deadline: Option<Instant>,
 }
@@ -832,7 +827,7 @@ pub struct PollRequest {
 impl PollRequest {
     /// Build one readiness SQE, leaving multishot mode disabled.
     fn build_sqe(&self) -> SqueueEntry {
-        opcode::PollAdd::new(Fd(self.fd.as_raw_fd()), self.flags).build()
+        opcode::PollAdd::new(Fd(self.fd.as_raw_fd()), libc::POLLIN as u32).build()
     }
 
     /// Treat readiness as a hint, allowing the caller to retry the actual syscall.
@@ -912,9 +907,8 @@ mod tests {
         ReadAtRequest {
             file: make_file_fd(),
             offset: 0,
-            len: 5,
             read: 0,
-            buf: IoBufMut::with_capacity(5),
+            buf: IoBufMut::zeroed(5),
             cache,
         }
     }
@@ -924,7 +918,6 @@ mod tests {
         WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
-            written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
             cache,
@@ -944,7 +937,6 @@ mod tests {
     fn make_poll_request() -> PollRequest {
         PollRequest {
             fd: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
-            flags: libc::POLLIN as u32,
             deadline: None,
         }
     }
@@ -1263,12 +1255,11 @@ mod tests {
             recv.offset = progress;
             recv.len = len;
             assert!(catch_unwind(AssertUnwindSafe(|| recv.build_sqe())).is_err());
-
-            let mut read = make_read_request(Cache::Enabled);
-            read.read = progress;
-            read.len = len;
-            assert!(catch_unwind(AssertUnwindSafe(|| read.build_sqe())).is_err());
         }
+
+        let mut read = make_read_request(Cache::Enabled);
+        read.read = 6;
+        assert!(catch_unwind(AssertUnwindSafe(|| read.build_sqe())).is_err());
     }
 
     #[test]
@@ -1497,8 +1488,7 @@ mod tests {
             let trailing_sync = state == WriteAtState::WritingBeforeSync;
             let mut write = WriteAtRequest {
                 file: make_file_fd(),
-                offset: 0,
-                written: 0,
+                offset: 17,
                 write: IoBufs::from(buf.clone()).into(),
                 state,
                 cache: Cache::Enabled,
@@ -1513,7 +1503,7 @@ mod tests {
             assert_eq!(write.write.remaining_len(), 2);
             assert_eq!(write.build_sqe().get_opcode(), opcode::Write::CODE as u32);
             let mut result = write.on_cqe(ACTIVE, 2);
-            assert_eq!(write.written, len);
+            assert_eq!(write.offset, 17 + len as u64);
             assert!(write.write.is_complete());
 
             if trailing_sync {
@@ -1577,7 +1567,6 @@ mod tests {
         let mut request = WriteAtRequest {
             file: make_file_fd(),
             offset: 0,
-            written: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::WritingSync,
             cache: Cache::Disabled(dont_cache_supported.clone()),

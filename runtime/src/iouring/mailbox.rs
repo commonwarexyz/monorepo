@@ -118,7 +118,7 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::{task::Task, waker::tests::eventfd_count};
+    use crate::iouring::waker::tests::eventfd_count;
     use std::{
         future::pending,
         sync::{
@@ -154,7 +154,7 @@ mod tests {
             mailbox: Arc::downgrade(mailbox),
             dropped: dropped.clone(),
         };
-        let task = Task::boxed(async move {
+        let task = Box::pin(async move {
             let _guard = guard;
             pending::<()>().await;
         });
@@ -172,10 +172,10 @@ mod tests {
 
         // Multiple messages share one publication and retain their send order.
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
-        assert!(mailbox.send(Message::Spawn(Task::boxed(pending()))).is_ok());
+        assert!(mailbox.send(Message::Spawn(Box::pin(pending()))).is_ok());
         assert!(mailbox.waker.pending(0));
-        assert!(!mailbox.waker.pending(1));
         assert!(mailbox.take(&mut scratch));
+        assert!(!mailbox.waker.pending(1));
         assert!(matches!(
             scratch.as_slice(),
             [Message::Wake(Target::Root), Message::Spawn(_)]
@@ -184,10 +184,10 @@ mod tests {
         // A new batch remains pending while the worker drains its scratch.
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
         assert!(mailbox.waker.pending(1));
-        assert!(!mailbox.waker.pending(2));
 
         scratch.clear();
         assert!(mailbox.take(&mut scratch));
+        assert!(!mailbox.waker.pending(2));
         assert!(matches!(scratch.as_slice(), [Message::Wake(Target::Root)]));
 
         scratch.clear();

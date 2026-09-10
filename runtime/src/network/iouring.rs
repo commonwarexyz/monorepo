@@ -271,7 +271,6 @@ impl crate::Listener for Listener {
 
             let output = Operation::register(Request::Poll(PollRequest {
                 fd: self.inner.clone(),
-                flags: libc::POLLIN as u32,
                 deadline: Some(Instant::now() + self.read_write_timeout),
             }))
             .await
@@ -427,8 +426,6 @@ pub struct Stream {
     buffer: IoBufMut,
     /// Current read position in the buffer.
     buffer_pos: usize,
-    /// Number of valid bytes in the buffer.
-    buffer_len: usize,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
@@ -442,7 +439,6 @@ impl Stream {
             poisoned: false,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
-            buffer_len: 0,
             pool,
         }
     }
@@ -484,21 +480,19 @@ impl Stream {
     }
 
     /// Fills the internal buffer by reading from the socket via io_uring.
-    async fn fill_buffer(&mut self, deadline: Instant) -> Result<usize, Error> {
+    async fn fill_buffer(&mut self, deadline: Instant) -> Result<(), Error> {
         self.buffer_pos = 0;
-        self.buffer_len = 0;
 
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
         let (buffer, read) = self.submit_recv(buffer, 0, len, false, deadline).await?;
         self.buffer = buffer;
-        self.buffer_len = read;
 
-        // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
-        unsafe { self.buffer.set_len(self.buffer_len) };
+        // SAFETY: The successful receive initialized the first `read` bytes.
+        unsafe { self.buffer.set_len(read) };
 
-        Ok(self.buffer_len)
+        Ok(())
     }
 }
 
@@ -520,7 +514,7 @@ impl crate::Stream for Stream {
 
             while bytes_received < len {
                 // First drain any buffered data
-                let buffered = self.buffer_len - self.buffer_pos;
+                let buffered = self.buffer.len() - self.buffer_pos;
                 if buffered > 0 {
                     let to_copy = std::cmp::min(buffered, len - bytes_received);
                     owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
@@ -561,7 +555,7 @@ impl crate::Stream for Stream {
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
-        let buffered = self.buffer_len - self.buffer_pos;
+        let buffered = self.buffer.len() - self.buffer_pos;
         let len = std::cmp::min(buffered, max_len);
         &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]
     }
