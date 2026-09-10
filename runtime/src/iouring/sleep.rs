@@ -1,20 +1,15 @@
-//! Owner-local deadlines for sleeping tasks.
+//! Worker-local deadlines for sleeping tasks.
 //!
-//! Sleep registrations are independent of ring waiters and admission capacity.
-//! The worker services this minimum heap on busy turns and includes its earliest
-//! deadline when choosing either a timed futex wait or a ring wait. A saturated
-//! ring therefore cannot prevent local timeouts from waking their tasks.
+//! Sleepers use a deadline heap independent of ring capacity. The worker expires
+//! due timers on each turn and uses the earliest deadline to bound its waits.
 //!
-//! [`Timers`] owns one replaceable waker per registration in a growable slab.
-//! A full-width [`TimerId`] distinguishes reused slots from delayed foreign
-//! cancellation messages and stale heap entries. Generation exhaustion retires
-//! the slot permanently. Cancellation removes the registration immediately,
-//! leaving only its numeric heap entry for lazy pruning or bounded compaction.
+//! [`Timers`] stores wakers in a slab. Generations reject stale heap records and
+//! delayed cancellation messages after a slot is reused. Cancellation removes
+//! the waker immediately, leaving its heap record for lazy pruning or compaction.
 //!
-//! The worker calls these methods under its local borrow. Waker replacement,
-//! expiry, cancellation, and closure always return owned wakers or append them
-//! to caller-owned action storage. Waking and destruction happen only after
-//! releasing that borrow, with the worker's normal cleanup panic isolation.
+//! Registered sleeps must be polled on their owning worker, but may be dropped
+//! on any thread. Wakers are cloned, invoked, and dropped outside worker borrows.
+//! Timer methods return displaced wakers or append them to deferred storage.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -35,48 +30,54 @@ use std::{
 
 /// Ownership held by a sleep between polls.
 enum State {
-    /// Absolute monotonic deadline established at creation.
-    Unregistered { deadline: Instant },
+    /// Sleep that has not needed a timer registration yet.
+    Unregistered {
+        /// Absolute monotonic deadline established at creation.
+        deadline: Instant,
+    },
     /// Registration bound to the worker selected by the first pending poll.
     Registered {
         /// Weak identity used for affinity checks and foreign cancellation.
         mailbox: Weak<Mailbox>,
-        /// Full-width registration identity.
+        /// Slot identity used to refresh or cancel the timer.
         timer_id: TimerId,
-        /// Original deadline, independent of the registration's lifetime.
+        /// Retained deadline so polling can detect expiry after the timer is removed.
         deadline: Instant,
     },
     /// Immediate or completed sleep, requiring no worker access.
     Done,
 }
 
-/// Concrete sleep future that never consumes an io_uring waiter slot.
-pub(super) struct Sleep {
+/// Sleep future.
+pub struct Sleep {
     /// Deadline or registration retained without any local reference.
     state: State,
 }
 
 impl Sleep {
-    /// Establish a relative deadline, clamping far-future sleeps to 30 years.
+    /// Establish a relative deadline, clamping the duration to [`TimeoutWheel::MAX_TIMEOUT`].
     ///
     /// Zero sleeps take the ready path without reading a clock or accessing TLS.
-    pub(super) fn new(duration: Duration) -> Self {
+    pub fn new(duration: Duration) -> Self {
         if duration.is_zero() {
             return Self { state: State::Done };
         }
+
         let deadline = Instant::now()
             .checked_add(duration.min(TimeoutWheel::MAX_TIMEOUT))
-            .expect("30-year sleep deadline is not representable");
+            .expect("sleep deadline clamped to TimeoutWheel::MAX_TIMEOUT is not representable");
+
         Self {
             state: State::Unregistered { deadline },
         }
     }
 
-    /// Convert a wall-clock deadline once, preserving already elapsed readiness.
-    pub(super) fn until(deadline: SystemTime) -> Self {
+    /// Convert a wall-clock deadline once, completing immediately if it has passed.
+    pub fn until(deadline: SystemTime) -> Self {
         let duration = deadline
             .duration_since(SystemTime::now())
             .unwrap_or_default();
+
         Self::new(duration)
     }
 }
@@ -86,16 +87,19 @@ impl Future for Sleep {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
+
+        // The first pending poll selects the worker. Later polls must preserve
+        // that affinity, even if the deadline has already passed.
         let (owner, deadline, registered) = match &this.state {
             State::Done => return Poll::Ready(()),
             State::Unregistered { deadline } => {
-                // A first poll can occur after a long synchronous user action.
-                // Check fresh time here so an already elapsed sleep never waits
-                // for the loop's older cached sample to catch up.
+                // Synchronous work may have made the worker's cached time stale.
+                // An elapsed first poll needs neither a worker nor a registration.
                 if *deadline <= Instant::now() {
                     this.state = State::Done;
                     return Poll::Ready(());
                 }
+
                 (
                     runtime::current().expect("io_uring sleep requires a current worker"),
                     *deadline,
@@ -107,56 +111,74 @@ impl Future for Sleep {
                 timer_id,
                 deadline,
             } => (
+                // Check affinity before changing the identity needed by Drop.
                 runtime::bound(mailbox).expect("io_uring sleep polled after its worker closed"),
                 *deadline,
                 Some(*timer_id),
             ),
         };
-        let mut incoming = None;
+
+        let mut cloned_waker = None;
         loop {
             let mut local = owner.borrow_mut();
+
+            // A waker clone can reenter and close the worker between passes.
             assert!(
                 !local.closing,
                 "io_uring sleep polled after its worker closed"
             );
+
+            // Expiry removes the registration before waking the task. Use the
+            // retained deadline to recognize completion even if the slot is gone.
             if deadline <= local.now {
                 this.state = State::Done;
+
+                // If expiry has not removed the registration, detach its waker
+                // here. A clone that raced expiry also needs deferred destruction.
                 if let Some(timer_id) = registered
                     && let Some(waker) = local.timers.cancel(timer_id)
                 {
                     local.deferred.drops.push(waker);
                 }
-                if let Some(incoming) = incoming {
-                    local.deferred.drops.push(incoming);
-                }
+                local.deferred.drops.extend(cloned_waker);
+
                 return Poll::Ready(());
             }
-            if incoming.is_none()
+
+            // An equivalent waker needs no clone or replacement.
+            if cloned_waker.is_none()
                 && registered.is_some_and(|id| local.timers.will_wake(id, cx.waker()))
             {
                 return Poll::Pending;
             }
-            let Some(incoming) = incoming.take() else {
+
+            let Some(waker) = cloned_waker.take() else {
                 // Cloning can reenter deadline service or panic. Retain the
                 // registration identity and recheck expiry before refreshing.
                 drop(local);
-                incoming = Some(cx.waker().clone());
+                cloned_waker = Some(cx.waker().clone());
                 continue;
             };
+
             if let Some(timer_id) = registered {
+                // Refresh only the observer, leaving the deadline and heap record
+                // in place. The displaced waker is dropped after this borrow.
                 let old = local
                     .timers
-                    .refresh(timer_id, incoming)
+                    .refresh(timer_id, waker)
                     .expect("live io_uring sleeper registration missing");
                 local.deferred.drops.push(old);
             } else {
-                let timer_id = local.timers.insert(deadline, incoming);
+                // Register after cloning succeeds, so a clone panic cannot leave
+                // a timer behind without a cancellation identity in this future.
+                let timer_id = local.timers.insert(deadline, waker);
                 this.state = State::Registered {
                     mailbox: Arc::downgrade(&local.mailbox),
                     timer_id,
                     deadline,
                 };
             }
+
             return Poll::Pending;
         }
     }
@@ -168,100 +190,80 @@ impl Drop for Sleep {
             mailbox, timer_id, ..
         } = mem::replace(&mut self.state, State::Done)
         {
+            // Cancel directly on the owning worker, or send it a mailbox message
+            // from another thread. If expiry already removed the timer, its old
+            // ID cannot cancel a new registration that reused the slot.
             runtime::cancel(&mailbox, Message::CancelTimer(timer_id));
         }
     }
 }
 
-/// Full-width identity for one sleeper registration.
+/// Generational identity for one sleeper registration.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) struct TimerId(Id);
-
-/// Live deadline and the sleeping caller's latest waker.
-struct Registration {
-    /// Absolute monotonic deadline, fixed when the sleep is created.
-    deadline: Instant,
-    /// Waker to detach when the deadline expires or the caller cancels.
-    waker: Waker,
-}
+pub struct TimerId(Id);
 
 /// Growable timer registrations and their earliest-first deadline heap.
 #[derive(Default)]
-pub(super) struct Timers {
-    /// Slots owned exclusively by this worker.
-    entries: Slab<Registration>,
+pub struct Timers {
+    /// Latest waker for each live registration.
+    entries: Slab<Waker>,
     /// Deadline records, including lazily removed stale registrations.
     deadlines: BinaryHeap<Reverse<(Instant, TimerId)>>,
 }
 
 impl Timers {
-    /// Create an empty timer queue without allocating storage.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Register a future deadline using a waker cloned before borrowing Local.
-    ///
-    /// Already elapsed sleeps complete in their first poll without registration.
-    /// Repeated pending polls refresh this registration instead of inserting a
-    /// second timer or changing the original absolute deadline.
-    pub fn insert(&mut self, deadline: Instant, waker: Waker) -> TimerId {
-        let id = TimerId(self.entries.insert(Registration { deadline, waker }));
+    /// Register a fixed deadline and a waker cloned outside the worker borrow.
+    fn insert(&mut self, deadline: Instant, waker: Waker) -> TimerId {
+        let id = TimerId(self.entries.insert(waker));
         self.deadlines.push(Reverse((deadline, id)));
         id
     }
 
     /// Whether a live registration already holds an equivalent observer.
-    pub fn will_wake(&self, id: TimerId, waker: &Waker) -> bool {
+    fn will_wake(&self, id: TimerId, waker: &Waker) -> bool {
         self.entries
             .get(id.0)
-            .is_some_and(|entry| entry.waker.will_wake(waker))
+            .is_some_and(|current| current.will_wake(waker))
     }
 
     /// Refresh a registered sleeper's waker and return the displaced waker.
     ///
-    /// A missing registration returns the incoming waker untouched. The sleep
-    /// future first checks its deadline and worker closure, so a missing live
-    /// registration after those checks is an invariant failure.
-    pub fn refresh(&mut self, id: TimerId, waker: Waker) -> Result<Waker, Waker> {
-        let Some(registration) = self.entries.get_mut(id.0) else {
+    /// A missing registration returns the incoming waker untouched.
+    fn refresh(&mut self, id: TimerId, waker: Waker) -> Result<Waker, Waker> {
+        let Some(current) = self.entries.get_mut(id.0) else {
             return Err(waker);
         };
-        Ok(std::mem::replace(&mut registration.waker, waker))
+        Ok(mem::replace(current, waker))
     }
 
     /// Remove a live registration and return its waker for deferred destruction.
     ///
     /// A delayed cancellation for an expired or recycled timer is harmless.
     pub fn cancel(&mut self, id: TimerId) -> Option<Waker> {
-        if !self.contains(id) {
-            return None;
-        }
-        let waker = self.remove(id.0.index);
+        let waker = self.entries.remove(id.0)?;
         self.compact();
         Some(waker)
     }
 
     /// Remove every due timer and append its waker for deferred invocation.
-    ///
-    /// The worker supplies the same monotonic sample used by its operation and
-    /// admission deadline service. All removals commit before any task can be
-    /// woken or register another timer.
     pub fn expire(&mut self, now: Instant, wakes: &mut Vec<Waker>) {
         while let Some(deadline) = self.next_deadline() {
             if deadline > now {
                 break;
             }
+
+            // next_deadline pruned stale records, so this ID still owns a waker.
             let Reverse((_, id)) = self.deadlines.pop().unwrap();
-            wakes.push(self.remove(id.0.index));
+            wakes.push(self.entries.remove(id.0).unwrap());
         }
+
         self.compact();
     }
 
     /// Return the earliest live deadline, pruning stale heap heads.
     pub fn next_deadline(&mut self) -> Option<Instant> {
         while let Some(&Reverse((deadline, id))) = self.deadlines.peek() {
-            if self.contains(id) {
+            if self.entries.get(id.0).is_some() {
                 return Some(deadline);
             }
             self.deadlines.pop();
@@ -270,42 +272,30 @@ impl Timers {
     }
 
     /// Remove every registration at worker closure and detach its waker.
-    ///
-    /// Closure owns registration cleanup even when a sleep future escapes its
-    /// worker. The caller drops each detached waker after releasing Local.
     pub fn clear(&mut self, drops: &mut Vec<Waker>) {
         drops.reserve(self.entries.len());
         for index in 0..self.entries.slots() {
-            if self.entries.id_at(index).is_some() {
-                drops.push(self.remove(index));
+            if let Some(id) = self.entries.id_at(index) {
+                drops.push(self.entries.remove(id).unwrap());
             }
         }
         self.deadlines.clear();
     }
 
-    /// Validate both presence and the complete slot generation.
-    fn contains(&self, id: TimerId) -> bool {
-        self.entries.get(id.0).is_some()
-    }
-
-    /// Retire a live slot without invoking its waker.
-    fn remove(&mut self, index: usize) -> Waker {
-        let id = self.entries.id_at(index).expect("removing a free timer");
-        self.entries.remove(id).unwrap().waker
-    }
-
     /// Rebuild once stale entries exceed both 64 and the live timer count.
     fn compact(&mut self) {
+        // Each live registration has exactly one heap record. Cancellation
+        // leaves that record behind, so the difference counts stale records.
         let stale = self.deadlines.len() - self.entries.len();
         if stale <= 64 || stale <= self.entries.len() {
             return;
         }
+
+        // A registration's deadline never changes. Generations alone reject
+        // records left by earlier registrations in reused slots.
         let entries = &self.entries;
-        self.deadlines.retain(|&Reverse((deadline, id))| {
-            entries
-                .get(id.0)
-                .is_some_and(|entry| entry.deadline == deadline)
-        });
+        self.deadlines
+            .retain(|&Reverse((_, id))| entries.get(id.0).is_some());
         self.deadlines.shrink_to_fit();
     }
 }
@@ -313,16 +303,21 @@ impl Timers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::slab::tests::set_generation;
+    use crate::{
+        Runner as _,
+        iouring::{Runner, operation::tests::Reentrant},
+        utils::{extract_panic_message, reschedule},
+    };
+    use futures::{FutureExt as _, poll};
     use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::{AtomicUsize, Ordering},
         task::Wake,
-        time::Duration,
+        thread,
     };
 
+    /// Count invocations without scheduling a task.
+    #[derive(Default)]
     struct Counter(AtomicUsize);
 
     impl Wake for Counter {
@@ -332,77 +327,98 @@ mod tests {
     }
 
     #[test]
-    fn zero_and_elapsed_sleeps_are_ready_without_a_worker() {
-        let mut zero = Sleep::new(Duration::ZERO);
-        let mut elapsed = Sleep::until(SystemTime::UNIX_EPOCH);
+    fn test_elapsed_sleeps_are_ready_without_a_worker() {
         let mut cx = Context::from_waker(Waker::noop());
-        assert!(Pin::new(&mut zero).poll(&mut cx).is_ready());
-        assert!(Pin::new(&mut elapsed).poll(&mut cx).is_ready());
-        assert!(matches!(zero.state, State::Done));
-        assert!(matches!(elapsed.state, State::Done));
-    }
 
-    #[test]
-    fn overdue_first_poll_does_not_require_timer_registration() {
-        let mut sleep = Sleep {
-            state: State::Unregistered {
-                deadline: Instant::now(),
+        // The last case has a deadline that passed between creation and polling.
+        for mut sleep in [
+            Sleep::new(Duration::ZERO),
+            Sleep::until(SystemTime::UNIX_EPOCH),
+            Sleep {
+                state: State::Unregistered {
+                    deadline: Instant::now(),
+                },
             },
-        };
-        let mut cx = Context::from_waker(Waker::noop());
-        assert!(Pin::new(&mut sleep).poll(&mut cx).is_ready());
-        assert!(matches!(sleep.state, State::Done));
+        ] {
+            assert!(sleep.poll_unpin(&mut cx).is_ready());
+            assert!(matches!(sleep.state, State::Done));
+        }
     }
 
     #[test]
-    fn far_future_sleep_creation_clamps_the_monotonic_deadline() {
+    fn test_far_future_sleep_clamps_the_deadline() {
         let before = Instant::now();
         let sleep = Sleep::new(Duration::MAX);
         let after = Instant::now();
         let State::Unregistered { deadline } = sleep.state else {
             panic!("positive sleep must retain a deadline");
         };
+
         assert!(deadline >= before + TimeoutWheel::MAX_TIMEOUT);
         assert!(deadline <= after + TimeoutWheel::MAX_TIMEOUT);
     }
 
     #[test]
-    fn due_timers_are_removed_before_deferred_wakes() {
+    fn test_expiry_removes_due_timers_before_waking() {
         let now = Instant::now();
         let later = now + Duration::from_secs(1);
-        let counter = Arc::new(Counter(AtomicUsize::new(0)));
-        let mut timers = Timers::new();
+        let counter = Arc::new(Counter::default());
+        let mut timers = Timers::default();
+        assert_eq!(timers.next_deadline(), None);
+
+        // Insert out of order, including two timers due at exactly the same time.
         let future = timers.insert(later, Waker::from(counter.clone()));
         let due = timers.insert(now, Waker::from(counter.clone()));
+        let also_due = timers.insert(now, Waker::from(counter.clone()));
         let mut wakes = Vec::new();
         timers.expire(now, &mut wakes);
-        assert_eq!(wakes.len(), 1);
-        assert!(!timers.contains(due));
-        assert!(timers.contains(future));
+
+        assert_eq!(wakes.len(), 2);
+        assert!(timers.cancel(due).is_none());
+        assert!(timers.cancel(also_due).is_none());
+        assert!(timers.entries.get(future.0).is_some());
         assert_eq!(timers.next_deadline(), Some(later));
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
-        wakes.pop().unwrap().wake();
-        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+
+        // Repeating expiry cannot enqueue the same wake twice.
+        timers.expire(now, &mut wakes);
+        assert_eq!(wakes.len(), 2);
+
+        for waker in wakes.drain(..) {
+            waker.wake();
+        }
+        assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+
         timers.expire(later, &mut wakes);
         assert_eq!(timers.next_deadline(), None);
         assert_eq!(timers.entries.len(), 0);
+        assert_eq!(wakes.len(), 1);
         wakes.pop().unwrap().wake();
-        assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 3);
     }
 
     #[test]
-    fn repeated_poll_refreshes_only_the_waker() {
+    fn test_refresh_replaces_only_the_waker() {
         let now = Instant::now();
-        let first = Arc::new(Counter(AtomicUsize::new(0)));
-        let second = Arc::new(Counter(AtomicUsize::new(0)));
-        let mut timers = Timers::new();
+        let first = Arc::new(Counter::default());
+        let second = Arc::new(Counter::default());
+        let mut timers = Timers::default();
         let id = timers.insert(now, Waker::from(first.clone()));
-        let displaced = timers.refresh(id, Waker::from(second.clone())).unwrap();
+        let replacement = Waker::from(second.clone());
+        assert!(!timers.will_wake(id, &replacement));
+
+        let displaced = timers.refresh(id, replacement.clone()).unwrap();
+
+        // Refresh returns the old observer without dropping it, and leaves
+        // exactly one record for the original deadline.
         assert_eq!(Arc::strong_count(&first), 2);
+        assert!(timers.will_wake(id, &replacement));
         assert_eq!(timers.entries.len(), 1);
         assert_eq!(timers.deadlines.len(), 1);
+        assert_eq!(timers.next_deadline(), Some(now));
         drop(displaced);
         assert_eq!(Arc::strong_count(&first), 1);
+
         let mut wakes = Vec::new();
         timers.expire(now, &mut wakes);
         wakes.pop().unwrap().wake();
@@ -411,87 +427,224 @@ mod tests {
     }
 
     #[test]
-    fn timer_count_is_independent_of_ring_capacity() {
-        let now = Instant::now();
-        let mut timers = Timers::new();
-        for _ in 0..1024 {
-            timers.insert(now, Waker::noop().clone());
-        }
-        let mut wakes = Vec::new();
-        timers.expire(now, &mut wakes);
-        assert_eq!(wakes.len(), 1024);
-        assert_eq!(timers.entries.len(), 0);
-        assert_eq!(timers.next_deadline(), None);
-    }
-
-    #[test]
-    fn stale_ids_and_heap_entries_do_not_cancel_reused_slots() {
+    fn test_stale_ids_and_deadlines_preserve_reused_slots() {
         let now = Instant::now();
         let later = now + Duration::from_secs(1);
-        let mut timers = Timers::new();
+        let mut timers = Timers::default();
         let old = timers.insert(now, Waker::noop().clone());
-        drop(timers.cancel(old));
-        let current = timers.insert(later, Waker::noop().clone());
+        assert!(timers.cancel(old).is_some());
+        let current_waker = Waker::from(Arc::new(Counter::default()));
+        let current = timers.insert(later, current_waker.clone());
+
         assert_eq!(old.0.index, current.0.index);
         assert_ne!(old.0.generation, current.0.generation);
         assert!(timers.cancel(old).is_none());
-        assert!(timers.refresh(old, Waker::noop().clone()).is_err());
+        assert!(!timers.will_wake(old, &current_waker));
+
+        // A stale refresh returns the incoming waker instead of replacing
+        // or dropping either observer.
+        let waker = Waker::from(Arc::new(Counter::default()));
+        let rejected = timers.refresh(old, waker.clone()).unwrap_err();
+        assert!(rejected.will_wake(&waker));
+        assert!(timers.will_wake(current, &current_waker));
+
+        // Pruning the old heap head must not expire the new registration.
         assert_eq!(timers.next_deadline(), Some(later));
         let mut wakes = Vec::new();
         timers.expire(now, &mut wakes);
         assert!(wakes.is_empty());
-        assert!(timers.contains(current));
+        assert!(timers.entries.get(current.0).is_some());
     }
 
     #[test]
-    fn generation_exhaustion_retires_the_slot() {
+    fn test_compaction_bounds_stale_deadlines() {
         let now = Instant::now();
-        let mut timers = Timers::new();
-        let id = timers.insert(now, Waker::noop().clone());
-        let exhausted = TimerId(set_generation(&mut timers.entries, id.0, u64::MAX));
-        drop(timers.cancel(exhausted));
-        let next = timers.insert(now, Waker::noop().clone());
-        assert_ne!(exhausted.0.index, next.0.index);
-        assert!(!timers.contains(exhausted));
-    }
-
-    #[test]
-    fn cancellation_churn_bounds_stale_heap_storage() {
-        let now = Instant::now();
-        let mut timers = Timers::new();
+        let later = now + Duration::from_secs(1);
+        let mut timers = Timers::default();
         let oldest = timers.insert(now, Waker::noop().clone());
+
+        // A live heap head prevents lazy pruning from cleaning up cancellations
+        // behind it. Repeated slot reuse must still keep the heap bounded.
         for _ in 0..1000 {
-            let id = timers.insert(now + Duration::from_secs(1), Waker::noop().clone());
-            drop(timers.cancel(id));
+            let id = timers.insert(later, Waker::noop().clone());
+            assert!(timers.cancel(id).is_some());
             assert!(timers.deadlines.len() <= timers.entries.len() + 64);
         }
+
         assert_eq!(timers.entries.slots(), 2);
         assert_eq!(timers.next_deadline(), Some(now));
-        drop(timers.cancel(oldest));
+        assert!(timers.cancel(oldest).is_some());
         assert_eq!(timers.next_deadline(), None);
+
+        // More than 64 stale records can remain when live timers outnumber
+        // them. Expiring those live timers must also trigger compaction.
+        for _ in 0..128 {
+            timers.insert(now, Waker::noop().clone());
+        }
+        let future = timers.insert(later, Waker::noop().clone());
+        for _ in 0..65 {
+            let id = timers.insert(later + Duration::from_secs(1), Waker::noop().clone());
+            assert!(timers.cancel(id).is_some());
+        }
+        assert_eq!(timers.deadlines.len(), 128 + 1 + 65);
+
+        // The future timer keeps the stale records behind a live heap head.
+        let mut wakes = Vec::new();
+        timers.expire(now, &mut wakes);
+        assert_eq!(wakes.len(), 128);
+        assert_eq!(timers.deadlines.len(), 1);
+        assert!(timers.entries.get(future.0).is_some());
     }
 
     #[test]
-    fn far_future_deadline_and_closure_detach_wakers() {
+    fn test_clear_detaches_wakers_and_preserves_reuse() {
         let now = Instant::now();
-        let far_future = now
-            .checked_add(Duration::from_secs(30 * 365 * 24 * 60 * 60))
-            .unwrap();
-        let counter = Arc::new(Counter(AtomicUsize::new(0)));
-        let mut timers = Timers::new();
-        let id = timers.insert(far_future, Waker::from(counter.clone()));
-        let mut actions = Vec::new();
-        timers.expire(now, &mut actions);
-        assert!(actions.is_empty());
-        assert_eq!(timers.next_deadline(), Some(far_future));
-        timers.clear(&mut actions);
-        assert_eq!(actions.len(), 1);
+        let later = now + Duration::from_secs(1);
+        let counter = Arc::new(Counter::default());
+        let mut timers = Timers::default();
+
+        // Leave a vacant slot before the live timer and a stale heap record.
+        let cancelled = timers.insert(now, Waker::noop().clone());
+        let id = timers.insert(later, Waker::from(counter.clone()));
+        assert!(timers.cancel(cancelled).is_some());
+
+        // Clear must append to existing deferred work without invoking callbacks.
+        let mut drops = vec![Waker::noop().clone()];
+        timers.clear(&mut drops);
+        timers.clear(&mut drops);
+        assert_eq!(drops.len(), 2);
+        assert!(timers.deadlines.is_empty());
         assert_eq!(timers.next_deadline(), None);
         assert_eq!(timers.entries.len(), 0);
-        assert!(timers.cancel(id).is_none());
         assert_eq!(Arc::strong_count(&counter), 2);
         assert_eq!(counter.0.load(Ordering::Relaxed), 0);
-        drop(actions);
+        drop(drops);
         assert_eq!(Arc::strong_count(&counter), 1);
+
+        let reused = timers.insert(now, Waker::noop().clone());
+        assert_eq!(reused.0.index, id.0.index);
+        assert!(timers.cancel(id).is_none());
+        assert_eq!(timers.next_deadline(), Some(now));
+    }
+
+    #[test]
+    fn test_waker_refresh_and_clone_panic_preserve_cancellation() {
+        Runner::default().start(|_| async {
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            let first = Arc::new(Reentrant::default());
+            let first_waker = first.waker();
+            assert!(
+                sleep
+                    .poll_unpin(&mut Context::from_waker(&first_waker))
+                    .is_pending()
+            );
+            let State::Registered { timer_id, .. } = sleep.state else {
+                panic!("sleep did not register");
+            };
+            let owner = runtime::current().unwrap();
+
+            // A successful replacement keeps the timer's identity and defers
+            // destruction of its previous waker until after the worker borrow.
+            let second = Arc::new(Reentrant::default());
+            let second_waker = second.waker();
+            assert!(
+                sleep
+                    .poll_unpin(&mut Context::from_waker(&second_waker))
+                    .is_pending()
+            );
+            assert!(owner.borrow().timers.will_wake(timer_id, &second_waker));
+            assert_eq!(first.drops.load(Ordering::Relaxed), 0);
+            reschedule().await;
+            assert_eq!(first.drops.load(Ordering::Relaxed), 1);
+
+            // Trying to restore the first observer now panics during cloning.
+            // The second observer and the cancellation identity must survive.
+            first
+                .panic_callback
+                .store(Reentrant::CLONE, Ordering::Relaxed);
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                let _ = sleep.poll_unpin(&mut Context::from_waker(&first_waker));
+            }))
+            .expect_err("changed sleep observer must clone");
+            assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
+            assert!(owner.borrow().timers.will_wake(timer_id, &second_waker));
+
+            drop(sleep);
+            assert!(owner.borrow().timers.entries.get(timer_id.0).is_none());
+
+            // Cancellation also defers destruction of the installed waker.
+            assert_eq!(second.drops.load(Ordering::Relaxed), 0);
+            reschedule().await;
+            assert_eq!(second.drops.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn test_foreign_drop_cancels_registration() {
+        for poll_first in [false, true] {
+            Runner::default().start(|_| async {
+                let mut sleep = Sleep::new(Duration::from_secs(60));
+                assert!(poll!(&mut sleep).is_pending());
+                let State::Registered { timer_id, .. } = sleep.state else {
+                    panic!("sleep did not register");
+                };
+                let owner = runtime::current().unwrap();
+
+                thread::spawn(move || {
+                    if poll_first {
+                        let panic = catch_unwind(AssertUnwindSafe(|| {
+                            sleep.poll_unpin(&mut Context::from_waker(Waker::noop()))
+                        }))
+                        .expect_err("registered sleep must reject a foreign poll");
+                        assert_eq!(
+                            extract_panic_message(&*panic),
+                            "registered io_uring handle polled outside its owning worker"
+                        );
+                    }
+
+                    // A rejected foreign poll must retain the cancellation ID.
+                    drop(sleep);
+                })
+                .join()
+                .unwrap();
+
+                // Foreign destruction sends a message. Only worker service
+                // removes the registration and its deferred waker.
+                assert!(owner.borrow().timers.entries.get(timer_id.0).is_some());
+                reschedule().await;
+                assert!(owner.borrow().timers.entries.get(timer_id.0).is_none());
+            });
+        }
+    }
+
+    #[test]
+    fn test_worker_closure_releases_escaped_sleep() {
+        let counter = Arc::new(Counter::default());
+        let (mut sleep,) = Runner::default().start(|_| async {
+            let mut sleep = Sleep::new(Duration::from_secs(60));
+            let waker = Waker::from(counter.clone());
+            assert!(
+                sleep
+                    .poll_unpin(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            (sleep,)
+        });
+
+        // Shutdown owns cleanup even though the registered future escaped.
+        assert_eq!(Arc::strong_count(&counter), 1);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+
+        // Sleep has no error output. Polling after closure must panic rather
+        // than report that an unelapsed deadline completed.
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            sleep.poll_unpin(&mut Context::from_waker(Waker::noop()))
+        }))
+        .expect_err("registered sleep must reject polling after closure");
+        assert!(
+            extract_panic_message(&*panic)
+                .starts_with("io_uring sleep polled after its worker closed")
+        );
+        drop(sleep);
     }
 }

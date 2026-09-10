@@ -203,7 +203,7 @@ pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> 
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::{
         Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _,
@@ -230,21 +230,21 @@ mod tests {
     /// RawWaker exposes clone and drop as well as wake, so every callback can
     /// check for an outstanding worker borrow or inject a panic.
     #[derive(Default)]
-    struct Reentrant {
+    pub struct Reentrant {
         /// Number of cloned wakers, including clones that panic.
         clones: AtomicUsize,
         /// Number of consuming and borrowed wakes.
         wakes: AtomicUsize,
         /// Number of waker destructors invoked.
-        drops: AtomicUsize,
+        pub drops: AtomicUsize,
         /// Callback that should panic once, or zero when no panic is armed.
-        panic_callback: AtomicUsize,
+        pub panic_callback: AtomicUsize,
         /// Optional action run while cloning, outside any worker borrow.
         on_clone: Option<fn()>,
     }
 
     impl Reentrant {
-        const CLONE: usize = 1;
+        pub const CLONE: usize = 1;
         const WAKE: usize = 2;
         const DROP: usize = 3;
 
@@ -308,7 +308,7 @@ mod tests {
         const VTABLE: RawWakerVTable =
             RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop);
 
-        fn waker(self: &Arc<Self>) -> Waker {
+        pub fn waker(self: &Arc<Self>) -> Waker {
             let raw = RawWaker::new(Arc::into_raw(self.clone()).cast(), &Self::VTABLE);
             // SAFETY: The vtable consistently owns or borrows one Arc reference
             // and Reentrant contains only thread-safe atomic state.
@@ -495,40 +495,6 @@ mod tests {
                 assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
             });
         }
-    }
-
-    #[test]
-    fn test_sleep_clone_panic_preserves_registration_cancellation() {
-        runner().start(|_| async {
-            let mut sleep = Sleep::new(Duration::from_secs(60));
-            let registered = Arc::new(Reentrant::default());
-            let registered_waker = registered.waker();
-            assert!(
-                sleep
-                    .poll_unpin(&mut Context::from_waker(&registered_waker))
-                    .is_pending()
-            );
-
-            // A failed replacement must leave the old timer registration
-            // available for cancellation.
-            let callbacks = Arc::new(Reentrant::default());
-            callbacks
-                .panic_callback
-                .store(Reentrant::CLONE, Ordering::Relaxed);
-            let waker = callbacks.waker();
-            let panic = catch_unwind(AssertUnwindSafe(|| {
-                let _ = sleep.poll_unpin(&mut Context::from_waker(&waker));
-            }))
-            .expect_err("changed sleep observer must clone");
-            assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
-
-            drop(sleep);
-
-            // Cancellation hands the timer's cloned waker back to the worker
-            // for deferred destruction.
-            reschedule().await;
-            assert_eq!(registered.drops.load(Ordering::Relaxed), 1);
-        });
     }
 
     #[test]
