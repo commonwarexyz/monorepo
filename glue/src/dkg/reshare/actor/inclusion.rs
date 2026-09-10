@@ -1555,7 +1555,12 @@ mod tests {
     }
 
     fn stalled_blocks() -> Blocks<TestBlock> {
-        Blocks::new(Height::new(8), |_| None, |_| futures::future::pending())
+        Blocks::new(
+            Height::new(8),
+            NZUsize!(8),
+            |_| None,
+            |_| futures::future::pending(),
+        )
     }
 
     fn gated_blocks(
@@ -1568,6 +1573,7 @@ mod tests {
         let started = Arc::new(Mutex::new(Some(started)));
         let source = Blocks::new(
             source.tip(),
+            NZUsize!(8),
             |_| None,
             move |height| {
                 let source = source.clone();
@@ -2422,6 +2428,7 @@ mod tests {
             let observed = acquired.clone();
             let blocks = Blocks::new(
                 source.tip(),
+                NZUsize!(8),
                 move |height| metadata.digest(height),
                 move |height| {
                     observed.lock().push(height);

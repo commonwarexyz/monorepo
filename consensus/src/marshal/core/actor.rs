@@ -278,7 +278,7 @@ where
                 finalized_height,
                 processed_height,
             },
-            Mailbox::new(sender, config.max_pending_acks),
+            Mailbox::new(sender, config.max_pending_acks, config.max_repair),
             floor,
         )
     }

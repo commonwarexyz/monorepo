@@ -59,13 +59,6 @@ where
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block
     }
-
-    fn from_application_block(
-        block: Self::ApplicationBlock,
-        _payload: Self::Commitment,
-    ) -> Self::Block {
-        Arc::new(block)
-    }
 }
 
 impl<B, K> Buffer<Standard<B>> for buffered::Mailbox<K, B>

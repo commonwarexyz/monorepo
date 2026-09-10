@@ -96,6 +96,7 @@ pub(crate) fn blocks(
     let encoded = Arc::new(encoded);
     marshal::blocks::Blocks::new(
         tip,
+        NZUsize!(8),
         move |height| digests.get(&height).copied(),
         move |height| {
             let encoded = encoded.get(&height).cloned();

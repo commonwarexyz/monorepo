@@ -49,8 +49,8 @@ pub enum Error {
 /// block bodies and do not start requests. Each [`range`](Self::range) owns its
 /// cursor and bounds both pending acquisitions and completed bodies awaiting
 /// consumption. Marshal separately schedules forward prefetch for the whole
-/// requested range within its configured capacity. Dropping a range cancels
-/// its remaining demand.
+/// requested range within its shared capacity. Each range's window is additional
+/// to that capacity. Dropping a range cancels its remaining demand.
 pub struct Blocks<B: Block> {
     tip: Height,
     digest: Arc<DigestAt<B>>,
@@ -97,6 +97,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let marshal = self.clone();
         let mut blocks = Blocks::new(
             parent_height,
+            self.max_repair,
             move |height| digest_at(height).map(V::commitment_to_inner),
             move |height| {
                 let commitment = commitment_at(height);
@@ -142,8 +143,8 @@ impl<B: Block> Blocks<B> {
     /// arrive, and return `None` only when acquisition can no longer complete.
     /// The closures must share their metadata and must not retain block bodies.
     ///
-    /// A range holds at most eight pending or buffered body acquisitions by default.
-    pub fn new<D, F, Fut>(tip: Height, digest: D, fetch: F) -> Self
+    /// Each range holds at most `prefetch` pending or buffered body acquisitions.
+    pub fn new<D, F, Fut>(tip: Height, prefetch: NonZeroUsize, digest: D, fetch: F) -> Self
     where
         D: Fn(Height) -> Option<B::Digest> + Send + Sync + 'static,
         F: Fn(Height) -> Fut + Send + Sync + 'static,
@@ -170,7 +171,7 @@ impl<B: Block> Blocks<B> {
             digest,
             fetch,
             demand: None,
-            prefetch: 8,
+            prefetch: prefetch.get(),
         }
     }
 
@@ -188,12 +189,6 @@ impl<B: Block> Blocks<B> {
             return None;
         }
         (self.digest)(height)
-    }
-
-    /// Sets the maximum combined number of pending and buffered blocks per range.
-    pub const fn with_prefetch(mut self, prefetch: NonZeroUsize) -> Self {
-        self.prefetch = prefetch.get();
-        self
     }
 
     /// Acquires an inclusive range in increasing height order.
@@ -362,10 +357,15 @@ mod tests {
             .collect()
     }
 
-    fn pending_source(blocks: &[TestBlock], requests: Requests) -> Blocks<TestBlock> {
+    fn pending_source(
+        blocks: &[TestBlock],
+        prefetch: NonZeroUsize,
+        requests: Requests,
+    ) -> Blocks<TestBlock> {
         let digests: Arc<[_]> = blocks.iter().map(Digestible::digest).collect();
         Blocks::new(
             blocks.last().unwrap().height(),
+            prefetch,
             move |height| digests.get(height.get() as usize).copied(),
             move |height| {
                 let (sender, receiver) = oneshot::channel();
@@ -385,6 +385,7 @@ mod tests {
                 let observed = digests.clone();
                 let source = Blocks::new(
                     Height::new(3),
+                    NZUsize!(8),
                     move |height| resident.then(|| commitments[height.get() as usize]),
                     move |height| {
                         let parent = height
@@ -418,6 +419,7 @@ mod tests {
             let observed = digests.clone();
             let source = Blocks::new(
                 Height::new(2),
+                NZUsize!(8),
                 |_| None,
                 move |height| {
                     let block = CountedBlock {
@@ -446,7 +448,7 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(12);
             let requests = Requests::default();
-            let source = pending_source(&blocks, requests.clone()).with_prefetch(NZUsize!(3));
+            let source = pending_source(&blocks, NZUsize!(3), requests.clone());
             let source_clone = source.clone();
             let mut range = source.range(Height::zero()..=Height::new(11));
             assert!(requests.lock().is_empty());
@@ -504,7 +506,7 @@ mod tests {
             type TestMessage = Message<harness::S, Standard<TestBlock>>;
             let (sender, mut receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(16));
-            let marshal = Mailbox::new(sender, NZUsize!(1));
+            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
             let blocks = chain(10);
             let commitments: Arc<[_]> = blocks[4..].iter().map(Digestible::digest).collect();
             let source = marshal.blocks(Height::new(9), commitments.clone());
@@ -552,7 +554,7 @@ mod tests {
                     Error::Unavailable => unreachable!(),
                 };
                 let requests = Requests::default();
-                let source = pending_source(&blocks, requests.clone());
+                let source = pending_source(&blocks, NZUsize!(8), requests.clone());
                 let mut range = source.range(Height::new(1)..=Height::new(3));
                 assert!(range.next().now_or_never().is_none());
                 requests
@@ -575,6 +577,7 @@ mod tests {
             let observed = requests.clone();
             let source = Blocks::new(
                 Height::new(u64::MAX),
+                NZUsize!(8),
                 |_| None,
                 move |height| {
                     *observed.lock() += 1;
@@ -591,7 +594,7 @@ mod tests {
             assert_eq!(*requests.lock(), 1);
 
             let requests = Requests::default();
-            let source = pending_source(&chain(2), requests.clone());
+            let source = pending_source(&chain(2), NZUsize!(8), requests.clone());
             let mut outside = source.range(Height::zero()..=Height::new(u64::MAX));
             assert_eq!(
                 outside.next().await.unwrap().unwrap_err(),

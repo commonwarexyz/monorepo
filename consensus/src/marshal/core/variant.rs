@@ -100,12 +100,6 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Converts a working block to a shared application block without copying the payload.
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock>;
-
-    /// Reconstructs a working block from an application block and trusted payload.
-    fn from_application_block(
-        block: Self::ApplicationBlock,
-        payload: Self::Commitment,
-    ) -> Self::Block;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different

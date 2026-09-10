@@ -94,13 +94,6 @@ where
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block.inner_shared()
     }
-
-    fn from_application_block(
-        block: Self::ApplicationBlock,
-        payload: Self::Commitment,
-    ) -> Self::Block {
-        Arc::new(CodedBlock::new_trusted(block, payload))
-    }
 }
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>

@@ -339,6 +339,7 @@ mod tests {
             let source = mocks::blocks([parent.clone()]);
             let blocks = Blocks::new(
                 parent.height(),
+                NZUsize!(8),
                 |_| None,
                 move |height| {
                     let gate = gate.clone();
@@ -394,6 +395,7 @@ mod tests {
             let gate = gate.shared();
             let blocks = Blocks::new(
                 parent.height(),
+                NZUsize!(8),
                 |_| None,
                 move |height| {
                     let gate = gate.clone();

@@ -81,10 +81,6 @@ impl<T: Blocks> Blocks for Recording<T> {
         Ok(self)
     }
 
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        self.inner.missing_items(start, max)
-    }
-
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         self.inner.next_gap(value)
     }

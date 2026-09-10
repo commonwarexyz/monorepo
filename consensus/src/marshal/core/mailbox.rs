@@ -243,7 +243,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
 
     fn stale(&self, current: Option<Height>) -> bool {
         match self {
-            // Height-targeted reads below the floor can never be served
+            // Best-effort reads may be discarded below a requested prune height.
             Self::GetInfo {
                 identifier: Identifier::Height(height),
                 ..
@@ -252,8 +252,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Height(height),
                 ..
             }
-            | Self::GetFinalization { height, .. }
-            | Self::AwaitFinalized { height, .. } => Some(*height) < current,
+            | Self::GetFinalization { height, .. } => Some(*height) < current,
             // Durability acks cannot be dropped: callers depend on them
             Self::Proposed { .. } | Self::Verified { .. } | Self::Certified { .. } => false,
             // Digest and latest lookups are not bound to a specific height
@@ -267,6 +266,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             | Self::GetProcessedHeight { .. } => false,
             Self::Acquire { .. }
+            | Self::AwaitFinalized { .. }
             | Self::Prefetch { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
@@ -442,14 +442,20 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
+    pub(in crate::marshal) max_repair: NonZeroUsize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
+    pub(crate) const fn new(
+        sender: Sender<Message<S, V>>,
+        max_pending_acks: NonZeroUsize,
+        max_repair: NonZeroUsize,
+    ) -> Self {
         Self {
             sender,
             max_pending_acks: max_pending_acks.get(),
+            max_repair,
         }
     }
 
@@ -533,8 +539,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// The lease retains commitment metadata. Marshal bounds the combined number of active
     /// prefetches and speculative bodies awaiting consumption. Prefetch is best effort: local
-    /// availability fulfills demand. Explicit acquisitions are owned by their callers and
-    /// are independent of the prefetch bound. Use [Self::acquire] to obtain a body.
+    /// availability fulfills demand, and an explicit acquisition takes over shared work
+    /// and retires its prefetch demand. Explicit acquisitions are owned by their callers
+    /// and are independent of the prefetch bound. Use [Self::acquire] to obtain a body.
     ///
     /// Keep the returned receiver alive while the demand is needed; drop it to release
     /// unused demand. The receiver does not deliver a value and should not be awaited.
@@ -950,7 +957,8 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
+            let mailbox =
+                Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1), NZUsize!(8));
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();
@@ -1302,13 +1310,13 @@ mod tests {
     }
 
     #[test]
-    fn finalized_body_waits_obey_pruning_and_cancellation() {
+    fn finalized_body_waits_preserve_actor_prune_decisions() {
         let mut overflow = pending();
-        let (stale_response, mut stale_receiver) = oneshot::channel();
+        let (older_response, mut older_receiver) = oneshot::channel();
         let (closed_response, closed_receiver) = oneshot::channel();
         let (current_response, mut current_receiver) = oneshot::channel();
         for (height, response) in [
-            (4, stale_response),
+            (4, older_response),
             (5, closed_response),
             (5, current_response),
         ] {
@@ -1324,17 +1332,20 @@ mod tests {
         drop(closed_receiver);
         <TestMessage as Policy>::handle(&mut overflow, prune(5));
         assert!(matches!(
-            stale_receiver.try_recv(),
-            Err(TryRecvError::Closed)
+            older_receiver.try_recv(),
+            Err(TryRecvError::Empty)
         ));
         assert!(matches!(
             current_receiver.try_recv(),
             Err(TryRecvError::Empty)
         ));
         let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 2);
+        assert_eq!(drained.len(), 3);
         assert!(
-            matches!(drained[1], TestMessage::AwaitFinalized { height, .. } if height == Height::new(5))
+            matches!(drained[1], TestMessage::AwaitFinalized { height, .. } if height == Height::new(4))
+        );
+        assert!(
+            matches!(drained[2], TestMessage::AwaitFinalized { height, .. } if height == Height::new(5))
         );
     }
 }

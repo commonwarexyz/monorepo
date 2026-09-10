@@ -89,8 +89,11 @@ where
 
     /// Maximum combined number of speculative fetches and prefetched bodies.
     ///
-    /// Also bounds each prefetch and resolver batch. Explicit acquisitions are owned by
-    /// their callers and are not limited by this setting.
+    /// Also bounds each prefetch and resolver batch. Sources from
+    /// [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an additional
+    /// window of this size for pending acquisitions and buffered bodies.
+    /// Direct acquisitions remain owned by their callers and are not limited by
+    /// the shared speculative capacity.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,

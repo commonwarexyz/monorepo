@@ -19,8 +19,8 @@
 //!   can be covered by one storage sync.
 //!
 //! Verification jobs are polled independently and scoped to their callers.
-//! Verification-owned lazy recovery shares [`Application::apply`] by block
-//! digest. Proposal recovery remains actor-owned.
+//! Proposal and verification recovery share [`Application::apply`] by block
+//! digest while each verification retains its own application verdict.
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
@@ -200,7 +200,7 @@ where
     verified: bool,
 }
 
-/// Speculative state shared by independently-polled verification jobs.
+/// Speculative state shared by proposals and independent verification jobs.
 ///
 /// During finalization, the winning batch remains available as a branch parent
 /// while a clone is applied. `finalizing_compatible` admits late state only
@@ -286,7 +286,7 @@ where
     }
 }
 
-/// In-progress verification replays keyed by acquired block digest.
+/// In-progress batch reconstruction keyed by acquired block digest.
 ///
 /// Each key identifies a [`CertifiableBlock`] and its embedded context.
 #[derive(Clone)]
@@ -297,7 +297,7 @@ struct ReplayFlights<D: Copy + Ord> {
 #[derive(Clone, Copy)]
 struct ReplayTracking<'a, D: Copy + Ord> {
     flights: &'a ReplayFlights<D>,
-    progress: &'a VerificationProgress<D>,
+    progress: Option<&'a VerificationProgress<D>>,
 }
 
 impl<D: Copy + Ord> Default for ReplayFlights<D> {
@@ -661,7 +661,7 @@ where
         }
     }
 
-    /// Returns whether every verification-owned replay has released its owner.
+    /// Returns whether every replay has released its owner.
     pub(super) fn replays_idle(&self) -> bool {
         self.replays.is_empty()
     }
@@ -809,7 +809,17 @@ where
         C: Cancellation,
     {
         self.execution
-            .prepare_batches(&mut self.app, context, blocks, parent, cancellation, None)
+            .prepare_batches(
+                &mut self.app,
+                context,
+                blocks,
+                parent,
+                cancellation,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: None,
+                },
+            )
             .await
     }
 
@@ -835,7 +845,17 @@ where
         C: Cancellation,
     {
         self.execution
-            .rebuild_pending(&mut self.app, context, blocks, target, cancellation, None)
+            .rebuild_pending(
+                &mut self.app,
+                context,
+                blocks,
+                target,
+                cancellation,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: None,
+                },
+            )
             .await
     }
 
@@ -1307,7 +1327,9 @@ where
             match self.claim_replay(replay.flights, digest) {
                 ReplayClaim::Ready => return Ok(()),
                 ReplayClaim::Owner(owner) => {
-                    replay.progress.replaying(digest, parent, round);
+                    if let Some(progress) = replay.progress {
+                        progress.replaying(digest, parent, round);
+                    }
                     let result = self
                         .replay_block(
                             app,
@@ -1323,7 +1345,9 @@ where
                     return result;
                 }
                 ReplayClaim::Wait(mut waiter) => {
-                    replay.progress.replaying(digest, parent, round);
+                    if let Some(progress) = replay.progress {
+                        progress.replaying(digest, parent, round);
+                    }
                     let Some(completion) =
                         await_or_cancel(cancellation, &mut waiter.completion).await
                     else {
@@ -1345,10 +1369,8 @@ where
 
     /// Ensures parent state exists and forks batches for speculative execution.
     ///
-    /// Verification supplies replay tracking to share reconstruction by block
-    /// digest, while proposals reconstruct independently. `fork_batches`
-    /// revalidates the parent after reconstruction in case finalization
-    /// advanced meanwhile.
+    /// Reconstruction is shared by block digest. `fork_batches` revalidates
+    /// the parent after reconstruction in case finalization advanced meanwhile.
     async fn prepare_batches<C>(
         &self,
         app: &mut A,
@@ -1356,7 +1378,7 @@ where
         blocks: Blocks<A::Block>,
         parent: Arc<A::Block>,
         cancellation: &mut C,
-        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
+        replay: ReplayTracking<'_, PendingDigest<A, E>>,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError>
     where
         C: Cancellation,
@@ -1388,7 +1410,7 @@ where
         blocks: Blocks<A::Block>,
         target: Arc<A::Block>,
         cancellation: &mut C,
-        replay: Option<ReplayTracking<'_, PendingDigest<A, E>>>,
+        replay: ReplayTracking<'_, PendingDigest<A, E>>,
     ) -> Result<(), PrepareBatchesError>
     where
         C: Cancellation,
@@ -1462,13 +1484,8 @@ where
                 return Err(PrepareBatchesError::Invalid);
             }
             expected = Anchor::from(block.as_ref());
-            if let Some(replay) = replay {
-                self.replay_block_shared(app, context, target_digest, block, cancellation, replay)
-                    .await?;
-            } else if !self.state.lock().pending.contains_key(&expected.digest) {
-                self.replay_block(app, context, target_digest, block, cancellation)
-                    .await?;
-            }
+            self.replay_block_shared(app, context, target_digest, block, cancellation, replay)
+                .await?;
             depth += 1;
         }
         self.update_pending_metric();
@@ -2050,6 +2067,7 @@ mod tests {
             let selected = metadata.clone();
             Blocks::new(
                 target.height(),
+                NZUsize!(8),
                 move |height| selected.get(&height).copied(),
                 move |height| {
                     let block = metadata
@@ -2081,6 +2099,7 @@ mod tests {
             let (tip, digest, parent) = (target.height(), target.digest(), target.parent());
             Blocks::new(
                 tip,
+                NZUsize!(1),
                 move |height| {
                     if height == tip {
                         Some(digest)
@@ -2096,7 +2115,6 @@ mod tests {
                     async move { block.map(Arc::new) }
                 },
             )
-            .with_prefetch(NZUsize!(1))
         }
     }
 
@@ -2690,7 +2708,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2704,7 +2722,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2785,7 +2803,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2799,7 +2817,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -2871,7 +2889,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -2937,7 +2955,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -3063,7 +3081,7 @@ mod tests {
                 &mut owner_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &owner_progress,
+                    progress: Some(&owner_progress),
                 },
             ));
             assert!(futures::poll!(&mut owner).is_pending());
@@ -3077,7 +3095,7 @@ mod tests {
                 &mut waiter_cancellation,
                 ReplayTracking {
                     flights: &replays,
-                    progress: &waiter_progress,
+                    progress: Some(&waiter_progress),
                 },
             ));
             assert!(futures::poll!(&mut waiter).is_pending());
@@ -3222,6 +3240,7 @@ mod tests {
             let provider = harness.provider.clone();
             let blocks = Blocks::new(
                 target_height,
+                NZUsize!(8),
                 move |height| match height {
                     height if height == first_height => Some(first_digest),
                     height if height == target_height => Some(target_digest),
@@ -3285,6 +3304,7 @@ mod tests {
                 let provider = harness.provider.clone();
                 let blocks = Blocks::new(
                     target_height,
+                    NZUsize!(8),
                     move |height| {
                         if !resident_metadata && height != target_height {
                             return None;
@@ -3344,6 +3364,7 @@ mod tests {
             let provider = harness.provider.clone();
             let blocks = Blocks::new(
                 tip,
+                NZUsize!(8),
                 move |height| (height == tip).then_some(digest),
                 move |height| {
                     let digest = provider
@@ -3387,6 +3408,7 @@ mod tests {
             let tip = second.height();
             let blocks = Blocks::new(
                 tip,
+                NZUsize!(8),
                 move |height| (height == tip).then_some(selected),
                 move |_| {
                     let block = provider.fetch_by_digest(selected);
@@ -3423,6 +3445,7 @@ mod tests {
             let selected = canonical.digest();
             let blocks = Blocks::new(
                 target.height(),
+                NZUsize!(8),
                 |_| None,
                 move |_| {
                     let block = provider.fetch_by_digest(selected);
@@ -3454,6 +3477,7 @@ mod tests {
             harness.processor.clear_pending();
             let blocks = Blocks::new(
                 Height::zero(),
+                NZUsize!(8),
                 |_| None,
                 |_| async { panic!("source below the target must not be fetched") },
             );
@@ -3683,10 +3707,10 @@ mod tests {
                     first_provider.source(&block2),
                     Arc::new(block2.clone()),
                     &mut first_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &first_replays,
-                        progress: &first_progress,
-                    }),
+                        progress: Some(&first_progress),
+                    },
                 ));
                 select! {
                     result = &mut first => panic!("first rebuild completed before replay gate: {result:?}"),
@@ -3699,10 +3723,10 @@ mod tests {
                     second_provider.source(&block2),
                     Arc::new(block2.clone()),
                     &mut second_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &second_replays,
-                        progress: &second_progress,
-                    }),
+                        progress: Some(&second_progress),
+                    },
                 ));
                 let mut third = Box::pin(third_execution.rebuild_pending(
                     &mut third_app,
@@ -3710,10 +3734,10 @@ mod tests {
                     third_provider.source(&block3),
                     Arc::new(block3),
                     &mut third_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &third_replays,
-                        progress: &third_progress,
-                    }),
+                        progress: Some(&third_progress),
+                    },
                 ));
                 let mut fourth = Box::pin(fourth_execution.rebuild_pending(
                     &mut fourth_app,
@@ -3721,10 +3745,10 @@ mod tests {
                     fourth_provider.source(&block2),
                     Arc::new(block2),
                     &mut fourth_cancellation,
-                    Some(ReplayTracking {
+                    ReplayTracking {
                         flights: &fourth_replays,
-                        progress: &fourth_progress,
-                    }),
+                        progress: Some(&fourth_progress),
+                    },
                 ));
                 let mut waiters_registered = false;
                 for _ in 0..100 {
@@ -4136,8 +4160,12 @@ mod tests {
     fn range_read_cancels_when_response_dropped() {
         deterministic::Runner::default().start(|_context| async move {
             let (mut response, receiver) = oneshot::channel::<bool>();
-            let source =
-                Blocks::<Block>::new(Height::new(1), |_| None, |_| futures::future::pending());
+            let source = Blocks::<Block>::new(
+                Height::new(1),
+                NZUsize!(8),
+                |_| None,
+                |_| futures::future::pending(),
+            );
             let mut range = source.range(Height::new(1)..=Height::new(1));
             drop(receiver);
 

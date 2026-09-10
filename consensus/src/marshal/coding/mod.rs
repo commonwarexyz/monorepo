@@ -107,7 +107,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
+    use commonware_resolver::{Delivery, Fetch, Resolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
         utils::reschedule,
@@ -206,9 +206,7 @@ mod tests {
             parent: Arc<CodingB>,
             blocks: Blocks<CodingB>,
         ) -> bool {
-            let mut range = blocks
-                .with_prefetch(NZUsize!(1))
-                .range(Height::zero()..=parent.height());
+            let mut range = blocks.range(Height::zero()..=parent.height());
             let mut last = None;
             while let Some(block) = range.next().await {
                 let Ok(block) = block else {
@@ -223,13 +221,11 @@ mod tests {
     }
 
     type CodingFetchRecord = Fetch<handler::Key<TestCommitment>, handler::Annotation>;
-    type CodingTargetedFetch = (handler::Key<TestCommitment>, NonEmptyVec<K>);
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
     #[derive(Clone, Default)]
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
-        targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
         sender: Option<mailbox::Sender<handler::Message<TestCommitment>>>,
@@ -242,7 +238,6 @@ mod tests {
                 handler::Receiver::new(receiver),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
-                    targeted: Arc::new(Mutex::new(Vec::new())),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
                     sender: Some(sender),
@@ -312,10 +307,6 @@ mod tests {
         fn fetches(&self) -> Vec<CodingFetchRecord> {
             self.fetches.lock().clone()
         }
-
-        fn targeted(&self) -> Vec<CodingTargetedFetch> {
-            self.targeted.lock().clone()
-        }
     }
 
     impl Resolver for RecordingResolver {
@@ -344,33 +335,6 @@ mod tests {
             &mut self,
             _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for RecordingResolver {
-        type PublicKey = K;
-
-        fn fetch_targeted(
-            &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            self.targeted.lock().push((fetch.into().key, targets));
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            let mut targeted = self.targeted.lock();
-            for (fetch, targets) in fetches {
-                targeted.push((fetch.into().key, targets));
-            }
             Feedback::Ok
         }
     }
@@ -1014,10 +978,6 @@ mod tests {
                     .any(|fetch| fetch.key == handler::Key::Block(commitment)),
                 "missing candidate verification must acquire the exact commitment"
             );
-            assert!(
-                resolver.targeted().is_empty(),
-                "missing candidate verify must not issue targeted fetches"
-            );
             drop(verify_rx);
         });
     }
@@ -1093,10 +1053,6 @@ mod tests {
                 buffer.subscription_count() > 0,
                 "missing candidate should register a local buffer wait"
             );
-            assert!(
-                resolver.targeted().is_empty(),
-                "missing candidate certify must not issue targeted fetches"
-            );
         });
     }
 
@@ -1170,10 +1126,6 @@ mod tests {
                     ) if *requested == commitment
                 )),
                 "certify should recover a pending verify by exact commitment"
-            );
-            assert!(
-                resolver.targeted().is_empty(),
-                "certify recovery must not issue targeted fetches"
             );
         });
     }

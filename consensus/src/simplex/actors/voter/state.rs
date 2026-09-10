@@ -1224,7 +1224,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 continue;
             }
 
-            if let Err(err) = self.visit_ancestry(proposal.parent, |_| {}) {
+            // The candidate's notarization anchors every parent link to its selected branch.
+            if let Err(err) = self.visit_ancestry(proposal.view(), |_| {}) {
                 if let AncestryError::Missing(missing) = err {
                     match self.ancestry_waiters.entry(missing) {
                         Entry::Vacant(entry) => {
@@ -4685,6 +4686,85 @@ mod tests {
             let finalization = build_finalization(&verifier, &schemes, &proposal);
             assert!(state.add_finalization(finalization).0);
             assert!(state.forwardable_proposal(view).is_some());
+        });
+    }
+
+    #[test]
+    fn certification_repairs_conflicting_optimistic_parent() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+            let local = fetch_proposal(1, 0, 130);
+            assert!(state.set_proposal(local.view(), local.clone()));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert!(state.verified(local.view()));
+            assert!(state.construct_notarize(local.view()).is_some());
+
+            let quorum = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let selected = fetch_proposal(1, 0, 131);
+            let candidate = fetch_proposal(6, 1, 132);
+            assert!(state.add_nullification(build_nullification(
+                &verifier,
+                &quorum,
+                Rnd::new(Epoch::new(9), View::new(2)),
+            )));
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &quorum, &candidate))
+                    .0
+            );
+            assert!(state.certification_parent_ready(&candidate).is_ok());
+
+            let (ready, fetches) = state.certify_candidates();
+            assert!(
+                ready.is_empty(),
+                "local A cannot supply notarized C's parent"
+            );
+            assert_eq!(fetches.len(), 1);
+            assert_eq!(fetches[0].proposal, candidate.view());
+            assert_eq!(fetches[0].view, selected.view());
+            let (ready, fetches) = state.certify_candidates();
+            assert!(ready.is_empty());
+            assert!(fetches.is_empty());
+            assert_eq!(
+                state
+                    .views
+                    .get_mut(&candidate.view())
+                    .unwrap()
+                    .try_certify(),
+                Some(candidate.clone()),
+            );
+
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &quorum, &selected))
+                    .0
+            );
+            assert!(state.explicit_ancestry_payload(selected.view()).is_none());
+            let (ready, fetches) = state.certify_candidates();
+            assert!(fetches.is_empty());
+            assert!(ready.contains(&candidate));
+            assert_eq!(
+                state.ancestry(candidate.parent).unwrap().as_ref(),
+                &[test_genesis(), selected.payload],
+            );
+            assert!(state.certified(candidate.view(), true).is_some());
+            let (ready, fetches) = state.certify_candidates();
+            assert!(ready.is_empty());
+            assert!(fetches.is_empty());
         });
     }
 

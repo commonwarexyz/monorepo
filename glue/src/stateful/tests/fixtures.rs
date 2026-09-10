@@ -50,6 +50,7 @@ pub(crate) fn blocks<B: Block>(tip: Height, bodies: &[Arc<B>]) -> Blocks<B> {
     let digests = entries.clone();
     Blocks::new(
         tip,
+        NZUsize!(8),
         move |height| digests.get(&height).map(|(digest, _)| *digest),
         move |height| {
             let block = entries.get(&height).and_then(|(_, body)| body.upgrade());

@@ -575,6 +575,7 @@ mod tests {
         simplex::mocks::scheme as scheme_mocks,
         types::Height,
     };
+    use commonware_cryptography::{Digestible as _, sha256::Digest};
     use commonware_macros::select;
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Name, Runner as _, Spawner as _,
@@ -586,9 +587,10 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::poll;
+    use futures::{StreamExt as _, poll};
     use std::{
         collections::VecDeque,
+        future::Future,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -875,6 +877,546 @@ mod tests {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
+        }
+    }
+
+    struct ReplayCall {
+        digest: Digest,
+        release: Option<oneshot::Sender<()>>,
+        active: bool,
+        completed: bool,
+    }
+
+    struct ReplayAttempt {
+        calls: Arc<Mutex<Vec<ReplayCall>>>,
+        index: usize,
+    }
+
+    impl Drop for ReplayAttempt {
+        fn drop(&mut self) {
+            self.calls.lock()[self.index].active = false;
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct OverlapApp {
+        calls: Arc<Mutex<Vec<ReplayCall>>>,
+        verified: Arc<Mutex<Vec<Digest>>>,
+        finalized: Arc<Mutex<Vec<Height>>>,
+        proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
+    }
+
+    impl OverlapApp {
+        fn assert_replay(
+            &self,
+            block: &TestBlock,
+            started: usize,
+            active: usize,
+            cancelled: usize,
+        ) {
+            let calls = self.calls.lock();
+            let calls: Vec<_> = calls
+                .iter()
+                .filter(|call| call.digest == block.digest())
+                .collect();
+            assert_eq!(
+                calls.len(),
+                started,
+                "duplicate replay started for {:?}",
+                block.height()
+            );
+            assert_eq!(calls.iter().filter(|call| call.active).count(), active);
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| !call.active && !call.completed)
+                    .count(),
+                cancelled
+            );
+        }
+
+        fn release(&self, block: &TestBlock) {
+            let release = self
+                .calls
+                .lock()
+                .iter_mut()
+                .find(|call| call.digest == block.digest() && call.active)
+                .expect("replay must be active")
+                .release
+                .take()
+                .unwrap();
+            release.send(()).expect("replay must still own its gate");
+        }
+    }
+
+    impl Application<deterministic::Context> for OverlapApp {
+        type SigningScheme = TestScheme;
+        type Context = <TestApp as Application<deterministic::Context>>::Context;
+        type Block = TestBlock;
+        type Databases = TestDatabases;
+        type Captured = Height;
+        type Provider = ();
+        type Input = ();
+
+        fn sync_targets(block: &Self::Block) -> u64 {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            TestBlock::new(0, 0)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
+            _batches: TestUnmerkleized,
+            _input: Input<Self::Input, Self::Provider>,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            let gate = self.proposal_gate.lock().take();
+            if let Some(mut gate) = gate {
+                let _ = gate.started.send(());
+                let _ = (&mut gate.release).await;
+            }
+            Some(Proposed {
+                block: TestBlock::child(&parent, 10),
+                merkleized: TestMerkleized,
+            })
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: Arc<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
+            _batches: TestUnmerkleized,
+        ) -> Option<TestMerkleized> {
+            self.verified.lock().push(block.digest());
+            (block.digest() != Digest::from([13; 32])).then_some(TestMerkleized)
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: TestUnmerkleized,
+        ) -> Option<TestMerkleized> {
+            let (release, released) = oneshot::channel();
+            let index = {
+                let mut calls = self.calls.lock();
+                let index = calls.len();
+                calls.push(ReplayCall {
+                    digest: block.digest(),
+                    release: Some(release),
+                    active: true,
+                    completed: false,
+                });
+                index
+            };
+            let attempt = ReplayAttempt {
+                calls: self.calls.clone(),
+                index,
+            };
+            released.await.expect("test must release a live replay");
+            attempt.calls.lock()[index].completed = true;
+            Some(TestMerkleized)
+        }
+
+        async fn capture(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: &TestMerkleized,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) -> Height {
+            block.height()
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            height: Height,
+            _readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+        ) {
+            self.finalized.lock().push(height);
+        }
+    }
+
+    // The fixture retains only weak bodies and its batches are immediately ready.
+    // A completed fetch at height one followed by a Pending actor poll places the
+    // caller at its replay decision.
+    fn observed_replay_source(bodies: &[Arc<TestBlock>]) -> (Blocks<TestBlock>, Arc<AtomicUsize>) {
+        let source = fixtures::blocks(bodies.last().unwrap().height(), bodies);
+        let metadata = source.clone();
+        let ready = Arc::new(AtomicUsize::new(0));
+        let observed = ready.clone();
+        let blocks = Blocks::new(
+            source.tip(),
+            NZUsize!(8),
+            move |height| metadata.digest(height),
+            move |height| {
+                let source = source.clone();
+                let observed = observed.clone();
+                async move {
+                    let block = source.range(height..=height).next().await.unwrap().unwrap();
+                    if height == Height::new(1) {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Some(block)
+                }
+            },
+        );
+        (blocks, ready)
+    }
+
+    async fn drive_processing<T>(
+        processing: &mut (impl Future<Output = ()> + Unpin),
+        request: impl Future<Output = T>,
+    ) -> T {
+        select! {
+            _ = processing => panic!("processing unexpectedly stopped"),
+            result = request => result,
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum OverlapEnd {
+        Complete,
+        CancelWaiter,
+        CancelOwner,
+        CancelLaterOwner,
+        FinalizeComplete,
+        FinalizeCancelProposal,
+    }
+
+    fn proposal_replay_overlap(proposal_first: bool, end: OverlapEnd) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let finalize = matches!(
+                end,
+                OverlapEnd::FinalizeComplete | OverlapEnd::FinalizeCancelProposal
+            );
+            let genesis = Arc::new(TestBlock::new(0, 0));
+            let a = Arc::new(TestBlock::child(&genesis, 1));
+            let b = Arc::new(TestBlock::child(&a, 2));
+            let bodies = [genesis.clone(), a.clone(), b.clone()];
+            let second_parent = if finalize {
+                Arc::new(TestBlock::child(&b, 3))
+            } else {
+                b.clone()
+            };
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(
+                &mut signing,
+                b"_COMMONWARE_GLUE_TEST_PROPOSAL_REPLAY_OVERLAP",
+                1,
+            )
+            .schemes[0]
+                .clone();
+            let marshal = fixtures::marshal_fixture_with_finalized_block(
+                context.child("marshal"),
+                "proposal-replay-overlap",
+                scheme,
+                &genesis,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let (proposal_gate, mut proposal_started, proposal_release) = application_gate();
+            let app = OverlapApp {
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                ..Default::default()
+            };
+            let control = FlushControl::default();
+            let processor = Processor::new(
+                app.clone(),
+                Shared::new("test", TestDb::gated(control.clone())),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mut mailbox = Mailbox::new(sender);
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox,
+                processor,
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let mut actor = Box::pin(processing.start());
+            let (proposal_source, proposal_ready) = observed_replay_source(&bodies);
+            let (first_source, first_ready) = observed_replay_source(&bodies);
+            let mut second_bodies = bodies.to_vec();
+            if finalize {
+                second_bodies.push(second_parent.clone());
+            }
+            let (second_source, second_ready) = observed_replay_source(&second_bodies);
+            let mut proposer = mailbox.clone();
+            let mut first_verifier = mailbox.clone();
+            let mut second_verifier = mailbox.clone();
+            let first_block = Arc::new(TestBlock::child(&b, 11));
+            let second_block = Arc::new(TestBlock::child(&second_parent, 12));
+            let mut proposal = Some(Box::pin(proposer.propose(
+                (
+                    context.child("proposal"),
+                    TestBlock::child(&b, 10).context(),
+                ),
+                b.clone(),
+                proposal_source,
+                (),
+            )));
+            let mut first = Some(Box::pin(first_verifier.verify(
+                (context.child("first_verify"), first_block.context()),
+                first_block.clone(),
+                b.clone(),
+                first_source,
+            )));
+            let mut second = Some(Box::pin(second_verifier.verify(
+                (context.child("second_verify"), second_block.context()),
+                second_block.clone(),
+                second_parent.clone(),
+                second_source,
+            )));
+
+            if proposal_first {
+                assert!(poll!(proposal.as_mut().unwrap()).is_pending());
+            } else {
+                assert!(poll!(first.as_mut().unwrap()).is_pending());
+            }
+            assert!(poll!(&mut actor).is_pending());
+            app.assert_replay(&a, 1, 1, 0);
+            if proposal_first {
+                assert_eq!(proposal_ready.load(Ordering::SeqCst), 1);
+                assert!(poll!(first.as_mut().unwrap()).is_pending());
+            } else {
+                assert_eq!(first_ready.load(Ordering::SeqCst), 1);
+                assert!(poll!(proposal.as_mut().unwrap()).is_pending());
+            }
+            assert!(poll!(&mut actor).is_pending());
+            assert_eq!(proposal_ready.load(Ordering::SeqCst), 1);
+            assert_eq!(first_ready.load(Ordering::SeqCst), 1);
+            app.assert_replay(&a, 1, 1, 0);
+            assert!(poll!(second.as_mut().unwrap()).is_pending());
+            assert!(poll!(&mut actor).is_pending());
+            assert_eq!(second_ready.load(Ordering::SeqCst), 1);
+            app.assert_replay(&a, 1, 1, 0);
+            assert!(app.verified.lock().is_empty());
+
+            let mut acknowledgements = Vec::new();
+            if finalize {
+                for block in [&a, &b] {
+                    let (ack, waiter) = Exact::handle();
+                    let _ = mailbox.report(Update::Block(block.clone(), ack));
+                    acknowledgements.push(Box::pin(waiter));
+                }
+                assert!(poll!(&mut actor).is_pending());
+                assert!(app.finalized.lock().is_empty());
+                assert_eq!(control.applied.load(Ordering::Relaxed), 0);
+                assert!(control.flushes.lock().is_empty());
+                for waiter in &mut acknowledgements {
+                    assert!(poll!(waiter).is_pending());
+                }
+            }
+
+            if matches!(end, OverlapEnd::CancelLaterOwner) {
+                app.release(&a);
+                assert!(poll!(&mut actor).is_pending());
+                app.assert_replay(&a, 1, 0, 0);
+                app.assert_replay(&b, 1, 1, 0);
+            }
+            match end {
+                OverlapEnd::CancelWaiter => {
+                    if proposal_first {
+                        drop(second.take());
+                    } else {
+                        drop(proposal.take());
+                    }
+                }
+                OverlapEnd::CancelOwner | OverlapEnd::CancelLaterOwner => {
+                    if proposal_first {
+                        drop(proposal.take());
+                    } else {
+                        drop(first.take());
+                    }
+                }
+                _ => {}
+            }
+            assert!(poll!(&mut actor).is_pending());
+            let later = matches!(end, OverlapEnd::CancelLaterOwner);
+            let cancelled_owner =
+                matches!(end, OverlapEnd::CancelOwner | OverlapEnd::CancelLaterOwner);
+            let target = if later { &b } else { &a };
+            app.assert_replay(
+                target,
+                1 + usize::from(cancelled_owner),
+                1,
+                usize::from(cancelled_owner),
+            );
+            app.release(target);
+            assert!(poll!(&mut actor).is_pending());
+            if !later {
+                app.assert_replay(&b, 1, 1, 0);
+                app.release(&b);
+                assert!(poll!(&mut actor).is_pending());
+            }
+
+            if proposal.is_some() {
+                assert!(poll!(&mut proposal_started).is_ready());
+                if finalize {
+                    app.assert_replay(&second_parent, 1, 1, 0);
+                    assert!(app.finalized.lock().is_empty());
+                    assert_eq!(control.applied.load(Ordering::Relaxed), 0);
+                    for waiter in &mut acknowledgements {
+                        assert!(poll!(waiter).is_pending());
+                    }
+                }
+                if matches!(end, OverlapEnd::FinalizeCancelProposal) {
+                    drop(proposal.take());
+                } else {
+                    proposal_release
+                        .send(())
+                        .expect("proposal must remain independent of verification");
+                    let block = drive_processing(&mut actor, proposal.take().unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(block, TestBlock::child(&b, 10));
+                }
+            }
+            if let Some(first) = first {
+                assert!(drive_processing(&mut actor, first).await);
+            }
+            if finalize {
+                assert!(poll!(&mut actor).is_pending());
+                app.assert_replay(&second_parent, 1, 1, 0);
+                assert!(poll!(second.as_mut().unwrap()).is_pending());
+                app.release(&second_parent);
+            }
+            if let Some(second) = second {
+                assert!(drive_processing(&mut actor, second).await);
+            }
+            assert!(poll!(&mut actor).is_pending());
+            app.assert_replay(
+                &a,
+                1 + usize::from(cancelled_owner && !later),
+                0,
+                usize::from(cancelled_owner && !later),
+            );
+            app.assert_replay(&b, 1 + usize::from(later), 0, usize::from(later));
+
+            // A new candidate forks the completed prefix without acquiring or applying it.
+            // Its independent negative verdict must not inherit the successful callers' verdicts.
+            let rejected = Arc::new(TestBlock::child(&b, 13));
+            let (source, ready) = observed_replay_source(&bodies);
+            let mut verifier = mailbox.clone();
+            assert!(
+                !drive_processing(
+                    &mut actor,
+                    verifier.verify(
+                        (context.child("cached_verify"), rejected.context()),
+                        rejected.clone(),
+                        b.clone(),
+                        source,
+                    )
+                )
+                .await
+            );
+            assert_eq!(ready.load(Ordering::SeqCst), 0);
+            {
+                let verified = app.verified.lock();
+                for (block, expected) in [
+                    (
+                        &first_block,
+                        usize::from(proposal_first || !cancelled_owner),
+                    ),
+                    (
+                        &second_block,
+                        usize::from(!proposal_first || !matches!(end, OverlapEnd::CancelWaiter)),
+                    ),
+                ] {
+                    assert_eq!(
+                        verified
+                            .iter()
+                            .filter(|digest| **digest == block.digest())
+                            .count(),
+                        expected
+                    );
+                }
+                assert_eq!(
+                    verified
+                        .iter()
+                        .filter(|digest| **digest == rejected.digest())
+                        .count(),
+                    1
+                );
+            }
+
+            if finalize {
+                assert!(poll!(&mut actor).is_pending());
+                assert_eq!(app.finalized.lock().as_slice(), &[a.height(), b.height()]);
+                assert_eq!(control.applied.load(Ordering::Relaxed), 2);
+                for waiter in &mut acknowledgements {
+                    assert!(poll!(waiter).is_pending());
+                }
+                for waiter in acknowledgements {
+                    assert!(poll!(&mut actor).is_pending());
+                    assert_eq!(control.flushes.lock().len(), 1);
+                    let release = control.flushes.lock().remove(0);
+                    release
+                        .send(Ok(()))
+                        .expect("durability barrier must remain active");
+                    drive_processing(&mut actor, waiter)
+                        .await
+                        .expect("durable prefix must be acknowledged");
+                }
+            }
+            drop(actor);
+            drop(marshal.guards);
+        });
+    }
+
+    #[test]
+    fn proposal_replay_overlap_proposal_first() {
+        proposal_replay_overlap(true, OverlapEnd::Complete);
+    }
+
+    #[test]
+    fn proposal_replay_overlap_verifier_first() {
+        proposal_replay_overlap(false, OverlapEnd::Complete);
+    }
+
+    #[test]
+    fn proposal_replay_overlap_waiter_cancellation() {
+        for proposal_first in [true, false] {
+            proposal_replay_overlap(proposal_first, OverlapEnd::CancelWaiter);
+        }
+    }
+
+    #[test]
+    fn proposal_replay_overlap_owner_cancellation() {
+        for proposal_first in [true, false] {
+            proposal_replay_overlap(proposal_first, OverlapEnd::CancelOwner);
+        }
+    }
+
+    #[test]
+    fn proposal_replay_overlap_partial_prefix_cancellation() {
+        for proposal_first in [true, false] {
+            proposal_replay_overlap(proposal_first, OverlapEnd::CancelLaterOwner);
+        }
+    }
+
+    #[test]
+    fn proposal_replay_overlap_fifo_finalization() {
+        for end in [
+            OverlapEnd::FinalizeComplete,
+            OverlapEnd::FinalizeCancelProposal,
+        ] {
+            proposal_replay_overlap(true, end);
         }
     }
 

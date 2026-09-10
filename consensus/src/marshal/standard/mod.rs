@@ -88,7 +88,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Manager as _, Receiver as _, Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
+    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
     use commonware_runtime::{
         Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
         deterministic, utils::reschedule,
@@ -109,7 +109,7 @@ mod tests {
         sync::Mutex,
         vec::NonEmptyVec,
     };
-    use futures::StreamExt as _;
+    use futures::{FutureExt as _, StreamExt as _};
     use std::{
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
         sync::{
@@ -2433,10 +2433,6 @@ mod tests {
                     "{kind:?}: unavailable candidate verification must fetch its exact commitment"
                 );
                 assert!(
-                    resolver.targeted_is_empty(),
-                    "{kind:?}: unavailable candidate verification must not issue targeted fetches"
-                );
-                assert!(
                     matches!(
                         verify.try_recv(),
                         Err(commonware_utils::channel::oneshot::error::TryRecvError::Empty)
@@ -2523,10 +2519,6 @@ mod tests {
                 assert!(
                     buffer.commitment_subscription_count() > 0,
                     "{kind:?}: unavailable candidate certification must register a local wait"
-                );
-                assert!(
-                    resolver.targeted_is_empty(),
-                    "{kind:?}: certification must not issue targeted fetches"
                 );
             });
         }
@@ -4243,9 +4235,6 @@ mod tests {
         }
     }
 
-    /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
-    type TargetedFetch = (handler::Key<D>, NonEmptyVec<PublicKey>);
-
     /// Recorded `fetch` call on the [`RecordingResolver`].
     type FetchRecord = Fetch<handler::Key<D>, handler::Annotation>;
 
@@ -4257,7 +4246,6 @@ mod tests {
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
         active_fetches: Arc<Mutex<Vec<FetchRecord>>>,
-        targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         retains: Arc<Mutex<usize>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
@@ -4272,7 +4260,6 @@ mod tests {
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     active_fetches: Arc::new(Mutex::new(Vec::new())),
-                    targeted: Arc::new(Mutex::new(Vec::new())),
                     retains: Arc::new(Mutex::new(0)),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
@@ -4327,10 +4314,6 @@ mod tests {
             self.active_fetches.lock().clone()
         }
 
-        fn targeted_is_empty(&self) -> bool {
-            self.targeted.lock().is_empty()
-        }
-
         fn retain_count(&self) -> usize {
             *self.retains.lock()
         }
@@ -4373,33 +4356,6 @@ mod tests {
                 .lock()
                 .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
             *self.retains.lock() += 1;
-            Feedback::Ok
-        }
-    }
-
-    impl TargetedResolver for RecordingResolver {
-        type PublicKey = PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            self.targeted.lock().push((fetch.into().key, targets));
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            let mut targeted = self.targeted.lock();
-            for (fetch, targets) in fetches {
-                targeted.push((fetch.into().key, targets));
-            }
             Feedback::Ok
         }
     }
@@ -7424,10 +7380,6 @@ mod tests {
             Ok(self)
         }
 
-        fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-            self.inner.missing_items(start, max)
-        }
-
         fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
             self.inner.next_gap(value)
         }
@@ -7479,10 +7431,6 @@ mod tests {
             id: commonware_storage::archive::Identifier<'_, Self::BlockDigest>,
         ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
             self.inner.get(id).await
-        }
-
-        async fn has(&self, height: Height) -> Result<bool, Self::Error> {
-            self.inner.has(height).await
         }
 
         async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
@@ -8313,6 +8261,181 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_ranges_use_max_repair_with_parked_leases() {
+        const LENGTH: u64 = 10;
+        for max_repair in [NZUsize!(1), NZUsize!(3)] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let partition = format!("range-window-{max_repair}");
+                let (finalizations, stored) = prunable_finalized_stores(&context, &partition).await;
+                let mut config = test_config(
+                    &context,
+                    &partition,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                );
+                config.max_repair = max_repair;
+                let (actor, mailbox, _) =
+                    Actor::init(context.child("actor"), finalizations, stored, config).await;
+                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let (application, started) = HoldingBlockReporter::new();
+                let _actor = actor.start(
+                    application,
+                    RecordingBuffer::default(),
+                    (resolver_rx, resolver.clone()),
+                );
+                assert_eq!(started.await.unwrap(), Height::zero());
+                let _ = mailbox.get_processed_height().await;
+
+                // An unrelated lease occupies the shared speculative capacity.
+                // The selected range must use its own window of max_repair bodies.
+                let parked: Arc<[_]> = (0..max_repair.get())
+                    .map(|index| Sha256::hash(&[b"parked dependency", &index.to_be_bytes()]))
+                    .collect();
+                let parked_keys: Vec<_> = parked.iter().copied().map(handler::Key::Block).collect();
+                let mut lease = mailbox.prefetch(parked, 0..max_repair.get());
+                wait_until(&context, Duration::from_secs(1), "parked prefetch", || {
+                    resolver.active_fetches().len() == max_repair.get()
+                })
+                .await;
+
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let mut selected = vec![genesis.digest()];
+                let blocks: Vec<_> = (1..=LENGTH)
+                    .map(|height| {
+                        let block =
+                            make_raw_block(*selected.last().unwrap(), Height::new(height), height);
+                        selected.push(block.digest());
+                        block
+                    })
+                    .collect();
+                let source = mailbox.blocks(Height::new(LENGTH), selected.into());
+                let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
+                assert!(range.next().now_or_never().is_none());
+                let _ = mailbox.get_processed_height().await;
+
+                let fetched_keys = || {
+                    resolver
+                        .fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>()
+                };
+                let mut expected = parked_keys.clone();
+                expected.extend(
+                    blocks[..max_repair.get()]
+                        .iter()
+                        .map(|block| handler::Key::Block(block.digest())),
+                );
+                assert_eq!(fetched_keys(), expected);
+                assert_eq!(
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+
+                // Completed positions still occupy the window until the head
+                // is consumed, even when their bodies arrive in reverse order.
+                for block in blocks[1..max_repair.get()].iter().rev() {
+                    let fetch = resolver
+                        .active_fetches()
+                        .into_iter()
+                        .find(|fetch| fetch.key == handler::Key::Block(block.digest()))
+                        .expect("selected request missing");
+                    deliver_acquisition_test_block(&resolver, fetch, block).await;
+                    assert!(range.next().now_or_never().is_none());
+                    let _ = mailbox.get_processed_height().await;
+                    assert_eq!(fetched_keys(), expected);
+                }
+
+                assert!(range.next().now_or_never().is_none());
+                let _ = mailbox.get_processed_height().await;
+                assert_eq!(fetched_keys(), expected);
+
+                let head = &blocks[0];
+                let fetch = resolver
+                    .active_fetches()
+                    .into_iter()
+                    .find(|fetch| fetch.key == handler::Key::Block(head.digest()))
+                    .expect("head request missing");
+                deliver_acquisition_test_block(&resolver, fetch, head).await;
+                assert_eq!(range.next().await.unwrap().unwrap().digest(), head.digest());
+                let _ = mailbox.get_processed_height().await;
+                assert_eq!(fetched_keys(), expected);
+
+                for block in &blocks[1..max_repair.get()] {
+                    assert_eq!(
+                        range
+                            .next()
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap()
+                            .unwrap()
+                            .digest(),
+                        block.digest()
+                    );
+                }
+                assert!(range.next().now_or_never().is_none());
+                let next_key = handler::Key::Block(blocks[max_repair.get()].digest());
+                wait_until(
+                    &context,
+                    Duration::from_secs(1),
+                    "range window advances",
+                    || {
+                        resolver
+                            .active_fetches()
+                            .iter()
+                            .any(|fetch| fetch.key == next_key)
+                    },
+                )
+                .await;
+                let _ = mailbox.get_processed_height().await;
+                expected.extend(
+                    blocks[max_repair.get()..2 * max_repair.get()]
+                        .iter()
+                        .map(|block| handler::Key::Block(block.digest())),
+                );
+                assert_eq!(fetched_keys(), expected);
+
+                drop(range);
+                wait_until(
+                    &context,
+                    Duration::from_secs(1),
+                    "range cancellation preserves parked lease",
+                    || {
+                        resolver
+                            .active_fetches()
+                            .iter()
+                            .map(|fetch| fetch.key)
+                            .collect::<Vec<_>>()
+                            == parked_keys
+                    },
+                )
+                .await;
+                assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+                let _ = mailbox.get_processed_height().await;
+                drop(lease);
+                wait_until(
+                    &context,
+                    Duration::from_secs(1),
+                    "parked lease cancellation",
+                    || resolver.active_fetches().is_empty(),
+                )
+                .await;
+                let _ = mailbox.get_processed_height().await;
+                assert_eq!(fetched_keys(), expected);
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_parked_local_range_bounds_body_reads() {
         const PARTITION: &str = "parked-local-range-body-reads";
         const LENGTH: u64 = 64;
@@ -8337,12 +8460,13 @@ mod tests {
             }
             let stored = Recording::new(stored, |block: &Arc<B>| Arc::as_ptr(block).addr());
             let operations = stored.ops();
-            let config = test_config(
+            let mut config = test_config(
                 &context,
                 PARTITION,
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
             );
+            config.max_repair = NZUsize!(BODY_WINDOW);
             assert!(LENGTH as usize > config.max_repair.get());
             let (actor, mailbox, _) =
                 Actor::init(context.child("actor"), finalizations, stored, config).await;
@@ -8364,9 +8488,7 @@ mod tests {
             operations.lock().clear();
 
             let expected = selected[1];
-            let source = mailbox
-                .blocks(Height::new(LENGTH), selected.into())
-                .with_prefetch(NZUsize!(BODY_WINDOW));
+            let source = mailbox.blocks(Height::new(LENGTH), selected.into());
             let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
             let first = range.next().await.unwrap().unwrap();
             assert_eq!(first.digest(), expected);
@@ -9263,6 +9385,106 @@ mod tests {
                 other => panic!("expected Recipients::Some, got {other:?}"),
             }
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_rejected_overflow_prune_preserves_canonical_waiters() {
+        for prune_first in [true, false] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |mut context| async move {
+                    const PREFIX: &str = "rejected-overflow-prune";
+                    let Fixture { schemes, .. } =
+                        bls12381_threshold_vrf::fixture::<V, _>(
+                            &mut context, NAMESPACE, NUM_VALIDATORS,
+                        );
+                    let (finalizations, blocks) =
+                        prunable_finalized_stores(&context, PREFIX).await;
+                    let mut config = test_config(
+                        &context,
+                        PREFIX,
+                        ConstantProvider::new(schemes[0].clone()),
+                        NZUsize!(1),
+                    );
+                    config.mailbox_size = NZUsize!(1);
+                    let (actor, mut mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                        context.child("actor"), finalizations, blocks, config,
+                    ).await;
+                    assert_eq!(floor.height(), None);
+
+                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                    let height = Height::new(1);
+                    let round = Round::new(Epoch::zero(), View::new(1));
+                    let block = make_raw_block(genesis.digest(), height, 100);
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
+                        &schemes,
+                        QUORUM,
+                    );
+
+                    // The actor has not started, so this live request fills ready capacity.
+                    let ready = mailbox.acquire(genesis.digest());
+                    if prune_first {
+                        mailbox.prune(Height::new(10));
+                    }
+                    let mut direct = mailbox.finalized(height);
+                    let source = mailbox.blocks(height, Arc::from([]));
+                    let mut range = source.range(height..=height);
+                    let mut read = Box::pin(range.next());
+                    let early = read.as_mut().now_or_never();
+                    let mut canceled = mailbox.finalized(Height::new(10));
+                    assert!(matches!(canceled.try_recv(), Err(TryRecvError::Empty)));
+                    drop(canceled);
+                    if !prune_first {
+                        mailbox.prune(Height::new(10));
+                    }
+
+                    let (resolver_rx, resolver) =
+                        RecordingResolver::holding(context.child("resolver"));
+                    let _actor = actor.start_unbuffered(
+                        Application::<B>::manual_ack(),
+                        (resolver_rx, resolver),
+                    );
+
+                    // This read follows the overflowed prune in the actor mailbox.
+                    assert!(mailbox.get_verified(round).await.is_none());
+                    assert_eq!(ready.await.unwrap().digest(), genesis.digest());
+                    assert_eq!(mailbox.get_processed_height().await, None);
+                    assert_eq!(
+                        mailbox.get_block(Height::zero()).await.unwrap().digest(),
+                        genesis.digest(),
+                    );
+                    assert!(mailbox.get_block(height).await.is_none());
+                    assert!(mailbox.get_finalization(height).await.is_none());
+                    let direct_before = direct.try_recv();
+                    let canonical_before = early.or_else(|| read.as_mut().now_or_never());
+
+                    assert!(mailbox.verified(round, block.clone()).await);
+                    assert!(mailbox.get_block(height).await.is_none());
+                    StandardHarness::report_finalization(&mut mailbox, finalization).await;
+                    assert_eq!(
+                        mailbox.get_finalization(height).await.unwrap().proposal.payload,
+                        block.digest(),
+                    );
+                    assert_eq!(
+                        mailbox.get_block(height).await.unwrap().digest(),
+                        block.digest(),
+                    );
+                    assert_eq!(mailbox.get_processed_height().await, None);
+
+                    assert!(
+                        canonical_before.is_none(),
+                        "canonical request terminated before finalization (prune_first={prune_first}): {canonical_before:?}",
+                    );
+                    assert!(
+                        matches!(direct_before, Err(TryRecvError::Empty)),
+                        "live finalized waiter closed before finalization (prune_first={prune_first})",
+                    );
+                    assert_eq!(direct.await.unwrap().digest(), block.digest());
+                    assert_eq!(read.await.unwrap().unwrap().digest(), block.digest());
+                    assert!(range.next().await.is_none());
+                },
+            );
+        }
     }
 
     /// `Prune` for a height above the floor must be rejected (warn + continue)

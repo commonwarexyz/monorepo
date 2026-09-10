@@ -27,8 +27,8 @@ struct Lease<C> {
 
 /// Speculative commitment demand with a shared bound on active fetches and unconsumed bodies.
 ///
-/// Leases register metadata for an entire range. Fulfillment retires all demand for
-/// that commitment; only a subsequent lease can enqueue it again.
+/// Leases register metadata for an entire range. Fulfillment or transfer to an explicit
+/// caller retires all demand for that commitment; only a subsequent lease can enqueue it again.
 pub(super) struct Acquisitions<V: Variant> {
     capacity: usize,
     entries: BTreeMap<V::Commitment, Demand<V>>,
@@ -137,7 +137,7 @@ impl<V: Variant> Acquisitions<V> {
             .is_some_and(|demand| matches!(demand.phase, Phase::Active))
     }
 
-    /// Retires best-effort demand after availability has been established.
+    /// Retires demand covered by local availability or an explicit caller.
     pub(super) fn satisfied(&mut self, commitment: V::Commitment) {
         self.remove(&commitment);
     }

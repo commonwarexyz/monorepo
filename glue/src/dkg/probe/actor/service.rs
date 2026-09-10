@@ -112,9 +112,13 @@ where
                 }
             },
             _ = retry => {
+                // Processed progress remains authoritative after old certificates are pruned.
                 let epoch = pending.expect("retry requires a pending epoch");
                 let height = self.epocher.last(epoch).expect("active epoch is covered");
-                if self.marshal.get_finalization(height).await.is_some() {
+                if self.marshal.get_finalization(height).await.is_some()
+                    || self.marshal.get_processed_height().await
+                        .is_some_and(|processed| processed >= height)
+                {
                     pending = None;
                 } else {
                     Self::request_boundary(epoch, Recipients::All, &mut sender);
@@ -142,8 +146,8 @@ where
                                 commonware_p2p::block!(self.blocker, peer, "invalid boundary finalization");
                                 continue;
                             }
-                            // The certificate binds the round and commitment; its block supplies
-                            // the height. Discovery ends only when marshal stores the boundary.
+                            // The certificate binds the round and commitment; marshal establishes
+                            // its height when the committed block arrives.
                             self.marshal.report(Activity::Finalization(finalization));
                             continue;
                         }
