@@ -609,7 +609,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     /// Build one replay state for each data blob touched by `range`.
     async fn replay_states(
         &self,
-        range: core::ops::Range<u64>,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Vec<ReplayState<'a, E::Blob, V>>, Error> {
@@ -1044,7 +1044,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
 
     async fn replay_range(
         &self,
-        range: core::ops::Range<u64>,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
@@ -2228,7 +2228,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
-        range: core::ops::Range<u64>,
+        range: Range<u64>,
     ) -> Result<Self, Error> {
         Ok(Self(Inner::init_sync(context, cfg, range).await?))
     }

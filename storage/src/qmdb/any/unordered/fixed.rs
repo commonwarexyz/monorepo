@@ -162,7 +162,7 @@ pub(crate) mod test {
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
-    use core::num::NonZeroUsize;
+    use core::{num::NonZeroUsize, ops::Range};
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
     use std::{
@@ -621,7 +621,7 @@ pub(crate) mod test {
         db: AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> (AnyTestGeneric<F>, std::ops::Range<GenericLocation<F>>) {
+    ) -> (AnyTestGeneric<F>, Range<GenericLocation<F>>) {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -933,7 +933,7 @@ pub(crate) mod test {
     impl<C: Contiguous<Item: Sync>> Contiguous for FailingReads<C> {
         type Item = C::Item;
 
-        fn bounds(&self) -> std::ops::Range<u64> {
+        fn bounds(&self) -> Range<u64> {
             self.0.bounds()
         }
 
@@ -963,7 +963,7 @@ pub(crate) mod test {
 
         fn replay_range(
             &self,
-            range: std::ops::Range<u64>,
+            range: Range<u64>,
             buffer: NonZeroUsize,
             read_options: ReadOptions,
         ) -> impl Future<
