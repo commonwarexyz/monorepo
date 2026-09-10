@@ -42,10 +42,6 @@ Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. 
     height: auto;
     width: 100%;
   }
-  .clearing-ring-assignment {
-    max-width: 440px;
-    margin: 0 auto;
-  }
   .clearing-benchmark-table {
     overflow-x: auto;
   }
@@ -356,11 +352,11 @@ The transpose length $\ell_e$ closes a wedge: slice openings prove membership bu
 Before the chain queues a close for finalization, the operator disseminates each validator's dealing. Slice $s$ of $S$ is held by the $q$ consecutive validators starting at $\lfloor ns/S\rfloor$ around the validator ring, so the window slides with the slice index. A validator's assigned slices therefore form at most two contiguous spans, and the accumulator start states and range openings travel once per span rather than once per slice.
 
 ```{=html}
-<img class="clearing-benchmark-plot clearing-ring-assignment" src="/imgs/clearing-ring-assignment.svg" alt="Four validators on a ring. Slice 1 is held by validators 1, 2, and 3; slice 2 shifts the window to 2, 3, and 0. Below, a four-by-four assignment grid shows three holders per slice. Validators 0 and 1 hold two spans of slices at the wrap; validators 2 and 3 hold one span.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-ring-assignment.svg" alt="Sixteen validators on a ring with eleven-holder windows for slices 0, 5, and 10. Beside the ring, sixteen rows show each validator's assigned slices as one span, or two at the wrap.">
 ```
 
 ::: {.image-caption}
-Figure 3: With four validators and four slices, each slice has three holders. Sliding the holder window gives each validator one contiguous span of slices, or two at the wrap.
+Figure 3: With sixteen validators and sixteen slices, each slice has eleven holders. The holder window slides around the ring (left); each validator's assigned slices form one span, or two at the wrap (right).
 :::
 
 Sealing is not a totals-only check. A validator authenticates every assigned span: the coverage and state ranges in its slices, every changed-account equation and settlement output, every terminal payer-signed endpoint and vector, its transpose interval, and the accumulator, prefix, and state transitions at every covered boundary. It verifies each slice's combined operator countersignature and checks every distinct payer authorization across the dealing in one randomized batch. The terminal boundary then binds the vector lengths, deposits, withdrawals, external payouts, payment conservation, the multiset equality between the two edge orderings, and successor liability. Having checked all of that, the validator retains the evidence through the challenge deadline and only then seals the shared commitment. The assignments cover the complete corpus.
@@ -714,20 +710,6 @@ Withdrawal claims scale with the claimed close's own withdrawal count $W$, never
 </div>
 ```
 
-## A Bajillion Payments, One Settlement
-
-The operator still processes every accepted payment. The close summarizes their effects in one row per changed account and one cumulative vector entry per sender-recipient pair in the epoch.
-
-```{=html}
-<div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
-  <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
-  <span aria-hidden="true">&rarr;</span>
-  <div><strong>1 cumulative entry</strong><span>Total amount + payment count</span></div>
-</div>
-```
-
-Repeated payments between those pairs update the existing entries without adding rows or entries. Their encoded integers can grow wider as amounts and counts increase, so a fixed record count does not mean a fixed byte count.
-
 Figure 6 estimates the operator's data sent to validators for one close. A dealing contains the account changes, cumulative payment entries, and proofs a validator needs for its assigned slices, using the prior state it already retains. The calculator averages these downloads across validators; total operator egress is their sum.
 
 Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
@@ -752,6 +734,20 @@ Accounts and pairs are limited to $2^{24}$; recipients per sender are capped at 
 
 </details>
 
-A preconfirmation cannot arrive in less than one round trip to the operator that serializes spending, and a close cannot quietly drop a payment: it must agree with every acknowledgment a holder retains, or the retained evidence proves the fault.
+## A Bajillion Payments, One Settlement
+
+The operator still processes every accepted payment. Settlement combines their effects into one close: one row per changed account and one cumulative entry per sender-recipient pair.
+
+```{=html}
+<div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
+  <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
+  <span aria-hidden="true">&rarr;</span>
+  <div><strong>1 cumulative entry</strong><span>Total amount + payment count</span></div>
+</div>
+```
+
+Account-level clearing compresses repetition: more payments between the same pairs share the same settlement records. Their totals and counts may take more bytes as they grow, but the close never carries the payment history.
+
+A preconfirmation is as fast as the trust model allows: one round trip to the operator that serializes spending. The close must agree with every acknowledgment a holder retains, or that evidence proves the fault. The state needed for recovery must remain available even if the operator disappears.
 
 When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.

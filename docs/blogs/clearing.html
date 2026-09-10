@@ -168,10 +168,6 @@ O’Grady</a></div>
             height: auto;
             width: 100%;
           }
-          .clearing-ring-assignment {
-            max-width: 440px;
-            margin: 0 auto;
-          }
           .clearing-benchmark-table {
             overflow-x: auto;
           }
@@ -824,11 +820,12 @@ O’Grady</a></div>
         validator’s assigned slices therefore form at most two
         contiguous spans, and the accumulator start states and range
         openings travel once per span rather than once per slice.</p>
-        <img class="clearing-benchmark-plot clearing-ring-assignment" src="/imgs/clearing-ring-assignment.svg" alt="Four validators on a ring. Slice 1 is held by validators 1, 2, and 3; slice 2 shifts the window to 2, 3, and 0. Below, a four-by-four assignment grid shows three holders per slice. Validators 0 and 1 hold two spans of slices at the wrap; validators 2 and 3 hold one span.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-ring-assignment.svg" alt="Sixteen validators on a ring with eleven-holder windows for slices 0, 5, and 10. Beside the ring, sixteen rows show each validator's assigned slices as one span, or two at the wrap.">
         <div class="image-caption">
-        <p>Figure 3: With four validators and four slices, each slice
-        has three holders. Sliding the holder window gives each
-        validator one contiguous span of slices, or two at the wrap.</p>
+        <p>Figure 3: With sixteen validators and sixteen slices, each
+        slice has eleven holders. The holder window slides around the
+        ring (left); each validator’s assigned slices form one span, or
+        two at the wrap (right).</p>
         </div>
         <p>Sealing is not a totals-only check. A validator authenticates
         every assigned span: the coverage and state ranges in its
@@ -1427,21 +1424,6 @@ O’Grady</a></div>
           </tbody>
         </table>
         </div>
-        <h2 id="a-bajillion-payments-one-settlement">A Bajillion
-        Payments, One Settlement</h2>
-        <p>The operator still processes every accepted payment. The
-        close summarizes their effects in one row per changed account
-        and one cumulative vector entry per sender-recipient pair in the
-        epoch.</p>
-        <div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
-          <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
-          <span aria-hidden="true">&rarr;</span>
-          <div><strong>1 cumulative entry</strong><span>Total amount + payment count</span></div>
-        </div>
-        <p>Repeated payments between those pairs update the existing
-        entries without adding rows or entries. Their encoded integers
-        can grow wider as amounts and counts increase, so a fixed record
-        count does not mean a fixed byte count.</p>
         <p>Figure 6 estimates the operator’s data sent to validators for
         one close. A dealing contains the account changes, cumulative
         payment entries, and proofs a validator needs for its assigned
@@ -1489,10 +1471,26 @@ O’Grady</a></div>
         repeated delivery of slices shared by several validators. They
         exclude transport overhead and other protocol messages.</p>
         </details>
-        <p>A preconfirmation cannot arrive in less than one round trip
-        to the operator that serializes spending, and a close cannot
-        quietly drop a payment: it must agree with every acknowledgment
-        a holder retains, or the retained evidence proves the fault.</p>
+        <h2 id="a-bajillion-payments-one-settlement">A Bajillion
+        Payments, One Settlement</h2>
+        <p>The operator still processes every accepted payment.
+        Settlement combines their effects into one close: one row per
+        changed account and one cumulative entry per sender-recipient
+        pair.</p>
+        <div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
+          <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
+          <span aria-hidden="true">&rarr;</span>
+          <div><strong>1 cumulative entry</strong><span>Total amount + payment count</span></div>
+        </div>
+        <p>Account-level clearing compresses repetition: more payments
+        between the same pairs share the same settlement records. Their
+        totals and counts may take more bytes as they grow, but the
+        close never carries the payment history.</p>
+        <p>A preconfirmation is as fast as the trust model allows: one
+        round trip to the operator that serializes spending. The close
+        must agree with every acknowledgment a holder retains, or that
+        evidence proves the fault. The state needed for recovery must
+        remain available even if the operator disappears.</p>
         <p>When the close is clean, those involved keep the receipts.
         The settlement chain only keeps the change.</p>
         <div id="footer-placeholder"></div>

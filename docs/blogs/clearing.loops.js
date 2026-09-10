@@ -96,8 +96,6 @@ function makeLine(x0, y0, x1, y1, styleName) {
     stroke: style.stroke,
     'stroke-width': style.width,
     'stroke-linecap': 'round',
-    'stroke-dasharray': length,
-    'stroke-dashoffset': length,
     opacity: 0,
   });
   const ux = (x1 - x0) / (length || 1);
@@ -117,7 +115,8 @@ function makeLine(x0, y0, x1, y1, styleName) {
     length,
     set(frac) {
       line.setAttribute('opacity', frac === 0 ? 0 : style.opacity);
-      line.setAttribute('stroke-dashoffset', length * (1 - frac));
+      line.setAttribute('x2', x0 + (x1 - x0) * frac);
+      line.setAttribute('y2', y0 + (y1 - y0) * frac);
       head.setAttribute('opacity', frac > 0.97 ? style.opacity : 0);
     },
   };
