@@ -10,19 +10,19 @@
 
 use super::{
     sleep::TimerId,
-    task::{Runnable, Target},
+    task::{BoxedTask, Target},
     waiter::WaiterId,
     waker::Waker,
 };
 use commonware_utils::sync::Mutex;
-use std::{mem, pin::Pin};
+use std::mem;
 
 /// Owned work delivered to the worker without borrowing its local state.
 pub enum Message {
     /// Wake the root future or a task.
     Wake(Target),
     /// Place a spawned task on this worker.
-    Spawn(Pin<Box<dyn Runnable>>),
+    Spawn(BoxedTask),
     /// Stop observing an admitted operation or retained result.
     Orphan(WaiterId),
     /// Cancel a timer whose sleep future was dropped.

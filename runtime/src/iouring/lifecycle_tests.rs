@@ -78,14 +78,14 @@ fn shutdown_cancels_tasks_before_destruction() {
                         tree.clone(),
                     );
                     tree.register(handle.aborter().unwrap());
-                    let cell = Task::boxed(future);
+                    let task = Task::boxed(future);
                     if placement == 1 {
                         let origin = context.origin.clone();
-                        thread::spawn(move || assert!(task::register(&origin, cell).is_ok()))
+                        thread::spawn(move || assert!(Tasks::register(&origin, task).is_ok()))
                             .join()
                             .unwrap();
                     } else {
-                        assert!(task::register(&context.origin, cell).is_ok());
+                        assert!(Tasks::register(&context.origin, task).is_ok());
                     }
                     handles.push(handle);
                     receivers.push(ready);
@@ -532,7 +532,7 @@ fn queued_foreign_task_disposal_is_contained_at_shutdown() {
         let payload = PanickingDrop(drops.clone());
         let handle = Runner::new(config().with_catch_panics(catch)).start(|context| async move {
             let remote = context.child("queued_foreign");
-            // Joining only the publisher leaves its accepted cell in the
+            // Joining only the publisher leaves its accepted task in the
             // mailbox when this root completes its first poll.
             thread::spawn(move || {
                 remote.spawn(move |_| async move {

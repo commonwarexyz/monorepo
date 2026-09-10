@@ -13,7 +13,7 @@
 //!
 //! Supervision stays in [`Context`], [`Runner`], and the shared [`Handle`]
 //! wrapper. The root is destroyed before publication closes. Worker execution
-//! then returns, allowing the runner to abort spawned tasks before their cells
+//! then returns, allowing the runner to abort spawned tasks before their futures
 //! and kernel resources are released.
 //!
 //! ```text
@@ -37,7 +37,7 @@ use super::{
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, TimerId, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
-    task::{self, Runnable, Running, Target, Task, Tasks},
+    task::{BoxedTask, Running, Target, Task, TaskWaker, Tasks},
     timeout::TimeoutWheel,
     waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
@@ -489,7 +489,7 @@ impl Drop for ActiveWorker {
 
 /// Field order disposes of rejected task and runtime owners before tracking ends.
 struct Launch {
-    task: Pin<Box<dyn Runnable>>,
+    task: BoxedTask,
     shared: Arc<Shared>,
     active: ActiveWorker,
 }
@@ -542,7 +542,7 @@ pub(super) struct Shared {
 
 impl Shared {
     /// Transfer an admitted task and its cleanup responsibility to a new thread.
-    fn launch(self: &Arc<Self>, task: Pin<Box<dyn Runnable>>, active: ActiveWorker) {
+    fn launch(self: &Arc<Self>, task: BoxedTask, active: ActiveWorker) {
         let payload = Launch {
             task,
             shared: self.clone(),
@@ -625,7 +625,7 @@ impl crate::Spawner for Context {
             };
             Some(active)
         } else {
-            if !task::is_open(&origin) {
+            if !Tasks::is_open(&origin) {
                 return Handle::closed(metric);
             }
             None
@@ -639,18 +639,18 @@ impl crate::Spawner for Context {
         if let Some(aborter) = handle.aborter() {
             parent.register(aborter);
         }
-        let cell = Task::boxed(future);
+        let task = Task::boxed(future);
         let result = if let Some(active) = active {
-            shared.launch(cell, active);
+            shared.launch(task, active);
             Ok(())
         } else {
-            task::register(&origin, cell)
+            Tasks::register(&origin, task)
         };
-        if let Err(cell) = result {
+        if let Err(task) = result {
             // Rejection after closure follows the caller's panic boundary.
             // Cancel descendants and finish metrics before destroying captures.
             parent.abort();
-            drop(cell);
+            drop(task);
         }
         handle
     }
@@ -857,7 +857,7 @@ type SyncResult = (oneshot::Sender<Result<(), Error>>, Result<(), Error>);
 pub(super) struct Local {
     /// Ring owner, retained through synchronous waits and kernel retirement.
     pub(super) driver: Option<Driver>,
-    /// Concrete task cells and FIFO ready tokens.
+    /// Spawned tasks and FIFO ready tokens.
     pub(super) tasks: Tasks,
     /// Sleeper registrations and deadlines.
     pub(super) timers: Timers,
@@ -1009,17 +1009,22 @@ pub(super) fn current() -> Option<Rc<RefCell<Local>>> {
         .flatten()
 }
 
+/// Return the current worker if it owns `mailbox`, including during shutdown.
+#[inline(always)]
+pub(super) fn owner(mailbox: &Weak<Mailbox>) -> Option<Rc<RefCell<Local>>> {
+    let local = current()?;
+    let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
+    matches.then_some(local)
+}
+
 /// Resolve the owning worker for a registered operation or sleep.
 ///
 /// With no matching current worker, returns [`Error::Closed`] if the owner has
 /// closed, and panics otherwise. The caller checks whether a matching worker is
 /// closing before accessing its registrations.
 pub(super) fn bound(mailbox: &Weak<Mailbox>) -> Result<Rc<RefCell<Local>>, Error> {
-    if let Some(local) = current() {
-        let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
-        if matches {
-            return Ok(local);
-        }
+    if let Some(local) = owner(mailbox) {
+        return Ok(local);
     }
     if mailbox.upgrade().is_none_or(|mailbox| !mailbox.is_open()) {
         return Err(Error::Closed);
@@ -1032,19 +1037,35 @@ pub(super) fn bound(mailbox: &Weak<Mailbox>) -> Result<Rc<RefCell<Local>>, Error
 /// Accepts only [`Message::Orphan`] and [`Message::CancelTimer`]. A worker whose
 /// mailbox is closed or gone has already taken responsibility for cleanup.
 pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
-    if let Some(local) = current() {
+    if let Some(local) = owner(mailbox) {
         let mut local = local.borrow_mut();
-        if ptr::eq(Arc::as_ptr(&local.mailbox), mailbox.as_ptr()) {
-            match message {
-                Message::Orphan(id) => local.orphan(id),
-                Message::CancelTimer(id) => local.cancel_timer(id),
-                _ => unreachable!("invalid cancellation message"),
-            }
-            return;
+        match message {
+            Message::Orphan(id) => local.orphan(id),
+            Message::CancelTimer(id) => local.cancel_timer(id),
+            _ => unreachable!("invalid cancellation message"),
         }
+        return;
     }
     if let Some(mailbox) = mailbox.upgrade() {
         let _ = mailbox.send(message);
+    }
+}
+
+/// Run a task poll or destructor, returning `None` if it panics.
+///
+/// Cancellation can destroy the user future during polling, so both paths need
+/// this boundary. The caller must release worker borrows before invoking it.
+fn contain<T>(f: impl FnOnce() -> T) -> Option<T> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(output) => Some(output),
+        Err(panic) => {
+            // Payload destruction can also run user code. A secondary panic
+            // cannot escape this task boundary or replace a worker failure.
+            if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(panic))) {
+                mem::forget(secondary);
+            }
+            None
+        }
     }
 }
 
@@ -1193,7 +1214,7 @@ impl Worker {
         self.deferred.run(&mut self.panics);
     }
 
-    /// Close publication after root destruction, retaining accepted task cells.
+    /// Close publication after root destruction, retaining accepted tasks.
     fn begin_close(&mut self) {
         let mailbox = {
             let mut local = self.local.borrow_mut();
@@ -1205,7 +1226,7 @@ impl Worker {
             self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
         }
         // Keep accepted tasks alive until the caller has cancelled them and
-        // cleanup can destroy their cells outside the local borrow.
+        // cleanup can destroy their futures outside the local borrow.
         self.inbox.extend(messages);
     }
 
@@ -1219,12 +1240,12 @@ impl Worker {
         let retirement = RetirementGuard;
         self.begin_close();
         for message in self.inbox.drain(..) {
-            task::contain(|| drop(message));
+            contain(|| drop(message));
         }
         let mut tasks = Vec::new();
         self.local.borrow_mut().tasks.clear(&mut tasks);
-        for Running { cell, waker, .. } in tasks {
-            task::contain(|| drop(cell));
+        for Running { task, waker, .. } in tasks {
+            contain(|| drop(task));
             drop(waker);
         }
         {
@@ -1326,9 +1347,9 @@ impl Worker {
                 break;
             };
             match message {
-                Message::Spawn(cell) => {
-                    if let Err(cell) = task::register(&Arc::downgrade(mailbox), cell) {
-                        task::contain(|| drop(cell));
+                Message::Spawn(task) => {
+                    if let Err(task) = Tasks::register(&Arc::downgrade(mailbox), task) {
+                        contain(|| drop(task));
                     }
                 }
                 Message::Wake(target) => {
@@ -1391,9 +1412,9 @@ impl Worker {
                 };
                 // The inner wrapper handles user polling policy. This boundary
                 // also catches destruction performed by the abort wrapper.
-                let poll = task::contain(|| {
+                let poll = contain(|| {
                     running
-                        .cell
+                        .task
                         .as_mut()
                         .poll(&mut TaskContext::from_waker(&running.waker))
                 });
@@ -1401,8 +1422,8 @@ impl Worker {
                     self.local.borrow_mut().tasks.pending(running);
                 } else {
                     self.local.borrow_mut().tasks.complete(running.id);
-                    let Running { cell, waker, .. } = running;
-                    task::contain(|| drop(cell));
+                    let Running { task, waker, .. } = running;
+                    contain(|| drop(task));
                     drop(waker);
                 }
             }
@@ -1515,7 +1536,7 @@ impl Worker {
 fn run_worker<F, Fut>(
     shared: Arc<Shared>,
     build: F,
-    service: Option<Pin<Box<dyn Runnable>>>,
+    service: Option<BoxedTask>,
     interrupts: Option<Panicked>,
 ) -> Result<(Worker, Option<Fut::Output>), Panic>
 where
@@ -1532,11 +1553,11 @@ where
     let mut worker = Worker::new(local);
     let mailbox = worker.local.borrow().mailbox.clone();
     if let Some(service) = service
-        && let Err(service) = task::register(&Arc::downgrade(&mailbox), service)
+        && let Err(service) = Tasks::register(&Arc::downgrade(&mailbox), service)
     {
         worker.panics.run(|| drop(service));
     }
-    let root_waker = task::Wake::waker(Arc::downgrade(&mailbox), Target::Root);
+    let root_waker = TaskWaker::new(Arc::downgrade(&mailbox), Target::Root).into();
     // The catch owns the root, including when interrupted. Worker and TLS stay
     // outside it so root destruction can orphan operations or admit more work.
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1562,32 +1583,32 @@ where
     Ok((worker, output))
 }
 
-/// Adapt an already concrete one-off task cell to the worker's root interface.
+/// Run a one-off task as the worker's root, containing poll and disposal panics.
 struct TaskRoot {
-    /// One pinned allocation with the monomorphized execution wrapper inside.
-    cell: Option<Pin<Box<dyn Runnable>>>,
+    /// Task retained until the root is destroyed.
+    task: Option<BoxedTask>,
 }
 
 impl Future for TaskRoot {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        task::contain(|| self.cell.as_mut().unwrap().as_mut().poll(cx)).unwrap_or(Poll::Ready(()))
+        contain(|| self.task.as_mut().unwrap().as_mut().poll(cx)).unwrap_or(Poll::Ready(()))
     }
 }
 
 impl Drop for TaskRoot {
     fn drop(&mut self) {
-        task::contain(|| drop(self.cell.take()));
+        contain(|| drop(self.task.take()));
     }
 }
 
 /// Report an infrastructure failure only after that worker's mandatory cleanup.
-fn run_one_off(shared: Arc<Shared>, cell: Pin<Box<dyn Runnable>>) {
+fn run_one_off(shared: Arc<Shared>, task: BoxedTask) {
     let result = catch_unwind(AssertUnwindSafe(|| {
         // Startup may reject the builder without invoking it. Its captured root
         // retains the same disposal boundary as an executing spawned task.
-        let root = TaskRoot { cell: Some(cell) };
+        let root = TaskRoot { task: Some(task) };
         let (mut worker, output) = run_worker(shared.clone(), |_| root, None, None)?;
         worker.cleanup();
         worker.result(output)
@@ -1740,6 +1761,7 @@ mod tests {
         task::{ArcWake, waker},
     };
     use std::{
+        panic::panic_any,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
@@ -1755,8 +1777,47 @@ mod tests {
         }
     }
 
+    /// Panic payload that can raise one further panic during destruction.
+    struct PanicPayload {
+        /// Number of payloads destroyed, including an incorrectly dropped secondary payload.
+        drops: Arc<AtomicUsize>,
+        /// Whether destruction should panic with a non-panicking replacement payload.
+        panics: bool,
+    }
+
+    impl Drop for PanicPayload {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            if self.panics {
+                panic_any(Self {
+                    drops: self.drops.clone(),
+                    panics: false,
+                });
+            }
+        }
+    }
+
     fn config() -> Config {
         Config::new().with_idle_spinner(SpinnerConfig::disabled())
+    }
+
+    #[test]
+    fn test_contain_handles_panicking_payloads() {
+        assert_eq!(contain(|| 7), Some(7));
+
+        for panics in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let payload = PanicPayload {
+                drops: drops.clone(),
+                panics,
+            };
+
+            assert!(contain(|| panic_any(payload)).is_none());
+
+            // Dispose of the original payload, but leave a secondary panic's
+            // payload untouched so destruction cannot start another failure.
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+        }
     }
 
     #[test]
