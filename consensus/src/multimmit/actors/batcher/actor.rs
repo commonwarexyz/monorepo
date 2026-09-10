@@ -503,9 +503,9 @@ where
                             self.block(peer, "invalid data-availability share");
                         }
                     }
-                    Message::ObservationConsumed => {
-                        let Some(remaining) = observations_inflight.checked_sub(1) else {
-                            error!("received an observation credit with no cohort in flight");
+                    Message::ObservationsConsumed(count) => {
+                        let Some(remaining) = observations_inflight.checked_sub(count) else {
+                            error!("received more observation credits than cohorts in flight");
                             break;
                         };
                         observations_inflight = remaining;

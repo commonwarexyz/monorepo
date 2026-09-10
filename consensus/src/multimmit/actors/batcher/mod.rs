@@ -118,8 +118,8 @@ pub enum Message<P: PublicKey, V: Variant, D: Digest> {
         /// Machine-issued items for local or resolved artifacts have no source.
         sources: Vec<Option<P>>,
     },
-    /// Release one observation slot after the voter consumed a cohort.
-    ObservationConsumed,
+    /// Release observation slots after the voter consumes their cohorts.
+    ObservationsConsumed(usize),
     /// Block the authenticated senders of artifacts a later stage proved invalid.
     ///
     /// Data-availability shares are admitted on structural checks and only attributed when

@@ -35,6 +35,7 @@ use commonware_runtime::{
     deterministic::{Context as DeterministicContext, Runner as DeterministicRunner},
 };
 use commonware_utils::probability;
+use futures::FutureExt as _;
 use std::{
     collections::VecDeque,
     convert::Infallible,
@@ -264,7 +265,7 @@ fn stalled_decode_and_identification_workers_do_not_block_control() {
             while calls.spawns() <= stall_at {
                 context.sleep(Duration::from_millis(1)).await;
             }
-            assert!(mailbox.enqueue(Message::ObservationConsumed).accepted());
+            assert!(mailbox.enqueue(Message::ObservationsConsumed(1)).accepted());
             select! {
                 result = &mut task => result.expect("batcher exits after servicing control"),
                 _ = context.sleep(Duration::from_millis(10)) => {
@@ -328,7 +329,7 @@ fn saturated_observation_handoff_preserves_admitted_certificate() {
         assert!(
             harness
                 .mailbox
-                .enqueue(Message::ObservationConsumed)
+                .enqueue(Message::ObservationsConsumed(1))
                 .accepted()
         );
 
@@ -387,7 +388,7 @@ fn byzantine_replay_saturation_preserves_correct_peer_service() {
         assert!(
             harness
                 .mailbox
-                .enqueue(Message::ObservationConsumed)
+                .enqueue(Message::ObservationsConsumed(1))
                 .accepted()
         );
 
@@ -402,7 +403,7 @@ fn byzantine_replay_saturation_preserves_correct_peer_service() {
             assert!(
                 harness
                     .mailbox
-                    .enqueue(Message::ObservationConsumed)
+                    .enqueue(Message::ObservationsConsumed(1))
                     .accepted()
             );
         }
@@ -835,7 +836,7 @@ fn ingress_batches_into_full_cohorts_while_credit_is_held() {
         assert!(
             harness
                 .mailbox
-                .enqueue(Message::ObservationConsumed)
+                .enqueue(Message::ObservationsConsumed(1))
                 .accepted()
         );
         let batched = harness
@@ -1377,24 +1378,46 @@ fn saturated_observation_handoff_preserves_bounded_ingress() {
             "bounded lane admission stopped with the observation handoff: {metrics}"
         );
 
-        let first = harness
-            .observations
-            .recv()
-            .await
-            .expect("the observation mailbox was filled");
+        let first = harness.observations.recv().await.unwrap();
         assert!(!first.artifacts.is_empty());
         assert!(
             harness
                 .mailbox
-                .enqueue(Message::ObservationConsumed)
+                .enqueue(Message::ObservationsConsumed(1))
                 .accepted()
         );
-        let next = harness
-            .observations
-            .recv()
-            .await
-            .expect("a consumption credit resumed cohort delivery");
+        let next = harness.observations.recv().await.unwrap();
         assert!(!next.artifacts.is_empty());
+    });
+}
+
+#[test_traced]
+fn consumption_credit_releases_multiple_cohorts() {
+    DeterministicRunner::default().start(|context| async move {
+        let mut harness = Harness::new(&context, 36).await;
+        let mut consensus = harness.sender(1, 1).await;
+        for round in 0..2 {
+            for offset in 1..=8 {
+                consensus.send(
+                    Recipients::One(harness.me.clone()),
+                    harness
+                        .envelope(ConsensusMessage::<MinPk, Sha256Digest>::NoVote(
+                            harness.committee.novote(1, round * 8 + offset),
+                        ))
+                        .encode(),
+                    false,
+                );
+                let cohort = harness.observations.recv().await.unwrap();
+                assert_eq!(cohort.artifacts.len(), 1);
+            }
+            assert!(harness.observations.recv().now_or_never().is_none());
+            assert!(
+                harness
+                    .mailbox
+                    .enqueue(Message::ObservationsConsumed(8))
+                    .accepted()
+            );
+        }
     });
 }
 

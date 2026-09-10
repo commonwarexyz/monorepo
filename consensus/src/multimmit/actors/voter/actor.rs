@@ -2843,14 +2843,12 @@ where
             observe.follows_from(span.id());
         }
         observe.in_scope(|| self.observe_network(artifacts, sources, bytes))?;
-        for _ in 0..cohorts {
-            if !self
-                .batcher
-                .enqueue(batcher::Message::ObservationConsumed)
-                .accepted()
-            {
-                return Err(Fatal::Closed);
-            }
+        if !self
+            .batcher
+            .enqueue(batcher::Message::ObservationsConsumed(cohorts))
+            .accepted()
+        {
+            return Err(Fatal::Closed);
         }
         Ok(())
     }
