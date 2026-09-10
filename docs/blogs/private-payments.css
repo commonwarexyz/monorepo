@@ -10,7 +10,6 @@
     white-space: nowrap;
 }
 
-/* The live counter, boxed under the title. */
 .live-box {
     background: #fffbe8;
     border: 1px solid #d9251c;
@@ -31,8 +30,7 @@
 
 /* --- Widget controls ------------------------------------------------------ */
 
-.sim-stepper button,
-#controls button {
+.sim-stepper button {
     padding: 5px 8px;
     margin: 0;
     background-color: #0000ee;
@@ -43,90 +41,9 @@
     cursor: pointer;
 }
 
-.sim-stepper button:disabled,
-#controls button:disabled {
+.sim-stepper button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-}
-
-.panel {
-    margin: 10px 0;
-    padding: 12px 15px;
-    background-color: #f5f5f5;
-    border: 1px solid #ddd;
-}
-
-.control-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-}
-
-.control-row label {
-    font-size: 0.9em;
-    color: #444;
-}
-
-.control-row label.inline {
-    margin-left: 6px;
-}
-
-.control-row input[type="checkbox"].inline {
-    margin-left: 10px;
-}
-
-#controls select,
-#controls input[type="number"] {
-    font-family: monospace;
-    font-size: 0.9em;
-    padding: 4px 6px;
-    border: 1px solid #ccc;
-    background: white;
-}
-
-#controls input[type="number"] {
-    width: 4.5em;
-}
-
-.status {
-    font-size: 0.85em;
-    color: gray;
-    font-style: italic;
-    min-height: 1.2em;
-}
-
-/* --- Log table ------------------------------------------------------------ */
-
-#log {
-    margin: 10px 0 20px 0;
-    font-size: 0.9em;
-}
-
-#log th,
-#log td {
-    padding: 6px 8px;
-    white-space: nowrap;
-}
-
-#log th code,
-#log td code {
-    background-color: transparent;
-    padding: 0;
-}
-
-#log th.num,
-#log td.num {
-    text-align: right;
-}
-
-#log thead tr:first-child th[colspan] {
-    text-align: center;
-}
-
-#log td.muted {
-    color: gray;
 }
 
 /* Two small benchmark tables share a row instead of each stretching full width. */
@@ -155,53 +72,6 @@
 .table-row th,
 .table-row td {
     text-align: center;
-}
-
-/* The trees sit side by side on one time axis; each scrolls sideways on its own. */
-.tree-row {
-    display: flex;
-    overflow: hidden;
-    border: 1px solid #ddd;
-    background: white;
-    margin: 10px 0 5px 0;
-}
-
-.tree-row .tree-col {
-    flex: 1 1 0;
-    min-width: 0;
-    border-left: 1px solid #eee;
-}
-
-.tree-row .tree-col.axis {
-    flex: none;
-    border-left: 0;
-}
-
-.tree-row .tree-col.narrow {
-    flex: 0 0 27%;
-}
-
-.tree-row .tree-head {
-    font-size: 0.85em;
-    color: #444;
-    height: 1.6em;
-    line-height: 1.6em;
-    padding: 4px 8px 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.tree-row svg {
-    display: block;
-    font-family: monospace;
-}
-
-.tree-row .empty {
-    padding: 15px;
-    color: gray;
-    font-style: italic;
-    font-size: 0.9em;
 }
 
 /* --- Simulation: ecash to our construction -------------------------------- */

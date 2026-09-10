@@ -28,7 +28,7 @@
     const HANDOFF_MS = 720;
     const RECV_MIN = 3000;     // receivers claim after a random delay
     const RECV_MAX = 12000;
-    const HOT_W = 4;           // most recent nullifiers a user keeps hot, for the last step
+    const HOT_W = 4;           // largest claimed positions a user keeps hot, for the last step
 
     const START_BALANCE = 1000;
     const AMOUNT_MIN = 10, AMOUNT_MAX = 200;
@@ -98,7 +98,7 @@
         }
     }
 
-    // The three boxes under the stage. `hl` marks what changed at this step.
+    // The three stage summaries. `hl` marks what changed at this step.
     const BOXES = [
         {
             store: { v: 'bank: one balance per account', n: 'nothing per payment' },
@@ -126,17 +126,17 @@
             learn: { v: 'who acted', n: 'send/receive are indistinguishable', hl: true },
         },
         {
-            store: { v: 'validators: commitments + MMR frontier + recent roots + a nullifier per send/receive', hl: true },
+            store: { v: 'validators: commitments + MMR frontier + bounded recent roots + a nullifier per send/receive', hl: true },
             work: { v: 'verify a proof per transaction, sign one root per block', hl: true },
             learn: { v: 'who acted' },
         },
         {
-            store: { v: 'validators: commitments + MMR frontier\nusers: every nullifier received', hl: true },
+            store: { v: 'validators: commitments + MMR frontier + bounded recent roots\nusers: every claimed receipt position', hl: true },
             work: { v: 'verify a proof per transaction, sign one root per block' },
             learn: { v: 'who acted' },
         },
         {
-            store: { v: `validators: commitments + MMR\nusers: nullifier tree frontier + ${HOT_W} most recent nullifiers`, n: 'older nullifiers in cold storage', hl: true },
+            store: { v: `validators: commitments + MMR frontier + bounded recent roots\nusers: nullifier tree frontier + ${HOT_W} largest claimed positions`, n: 'smaller claimed positions in cold storage', hl: true },
             work: { v: 'verify a proof per transaction, sign one root per block' },
             learn: { v: 'who acted' },
         },
@@ -155,8 +155,8 @@
         events: [],        // {t, type, actor, pay, balance}
         balances: Object.fromEntries(ACCOUNTS.map(a => [a, START_BALANCE])),
         counts: { sends: 0, recvs: 0, unclaimed: zero(), recvBy: zero() },
-        // Nullifiers each user holds, in claim order. A nullifier is the position of the
-        // claimed receipt in the receipt log, so per user these are increasing.
+        // Nullifiers are receipt positions. The simulation schedules each user
+        // to claim in position order, so these arrays are increasing.
         nf: Object.fromEntries(ACCOUNTS.map(a => [a, []])),
         com: {},           // current account commitment per account (random-looking)
         hit: {},           // last balance change per account: {t, type}, for the flash on its bar
@@ -282,6 +282,16 @@
         prev.addEventListener('click', () => setStep(step - 1));
         next.addEventListener('click', () => setStep(step + 1));
 
+        const copy = h('div', 'sim-copy', mount);
+        const boxes = h('div', 'sim-counters', mount);
+        const boxEls = ['storage', 'validator work', 'validators learn'].map(k => {
+            const b = h('div', 'sim-counter', boxes);
+            const key = h('span', 'k', b); key.textContent = k;
+            const v = h('div', 'v', b);
+            const n = h('div', 'n', b);
+            return { b, v, n };
+        });
+
         // Stage.
         const stage = h('div', 'sim-stage', mount);
         const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, class: 'sim-svg' }, stage);
@@ -387,21 +397,10 @@
                 case 3: return 'Balances are replaced by commitments (the hex tags), each rewritten when its account acts. The nullifier set is unchanged: one entry per receive.';
                 case 4: return 'One nullifier per send or receive now, real for receives and a dummy for sends, so the set grows twice as fast.';
                 case 5: return `Left: the receipt MMR. Receipts accumulate in perfect binary trees and validators only need to store the peaks (dots) to extend the tree. Right: the nullifier set, still held by validators and still growing with every transaction.`;
-                case 6: return `Validators only store the MMR frontier and delegate nullifier storage to users. Each user keeps a sparse Merkle tree keyed by receipt position (leaf labels): a leaf is set once the receipt at that position is claimed. Positions only grow, so every insertion lands to the right of the last one.`;
-                default: return `Each user freezes its tree below a threshold: the frozen prefix is summarized by its frontier (blue), only the ${HOT_W} most recently claimed positions stay hot (red), and everything else moves to cold storage (faded). Nothing changes for the ledger.`;
+                case 6: return `Validators keep commitments, the MMR frontier, and bounded recent roots, and delegate nullifier storage to users. Each user keeps a sparse Merkle tree keyed by receipt position (leaf labels): a leaf is set once the receipt at that position is claimed. In this example, users claim receipts in position order.`;
+                default: return `Each user freezes its tree below a threshold: the frozen prefix is summarized by its frontier (blue), only the ${HOT_W} largest claimed positions stay hot (red), and everything else moves to cold storage (faded). Nothing changes for the ledger.`;
             }
         });
-
-        // Boxes and copy.
-        const boxes = h('div', 'sim-counters', mount);
-        const boxEls = ['storage', 'validator work', 'validators learn'].map(k => {
-            const b = h('div', 'sim-counter', boxes);
-            const key = h('span', 'k', b); key.textContent = k;
-            const v = h('div', 'v', b);
-            const n = h('div', 'n', b);
-            return { b, v, n };
-        });
-        const copy = h('div', 'sim-copy', mount);
 
         function setStep(i) {
             step = clamp(i, 0, N - 1);
@@ -659,8 +658,9 @@
         // A user's nullifier tree: a sparse Merkle tree keyed by receipt position. The leaf of
         // position p is set once the user has claimed the receipt at p. The tree spans every
         // position the log has issued so far (`space`), so its depth grows with the log, not
-        // with the user's activity. Positions only grow, so each insertion lands to the right
-        // of every earlier one and touches a single root-to-leaf path, which ripples upward.
+        // with the user's activity. The simulation claims receipts in position order, so each
+        // insertion lands to the right of every earlier one and touches a single
+        // root-to-leaf path, which ripples upward.
         // Nodes are solid when the user stores them and hollow when their subtree is empty
         // (a default hash anyone can recompute).
         //
@@ -740,8 +740,8 @@
             c.n = n;
         }
 
-        // The threshold below which a user freezes its tree: keep the HOT_W most recent
-        // claims hot, so the frontier summarizes everything before the oldest of them.
+        // The threshold below which a user freezes its tree: keep the HOT_W largest
+        // claimed positions hot, so the frontier summarizes everything below them.
         function hotThreshold(positions) {
             return positions.length > HOT_W ? positions[positions.length - HOT_W] : 0;
         }
@@ -816,7 +816,7 @@
                     if (step === 6) {
                         label(g, cell.x + cell.w, cell.y + 11, `nullifier tree: ${c.recvBy[a]}`, 'sim-seg-label right red');
                     } else {
-                        // Hot state: the frontier of the frozen prefix plus the recent claims.
+                        // Hot state: the frontier of the frozen prefix plus the largest claimed positions.
                         const L = hotThreshold(state.nf[a]), hot = Math.min(c.recvBy[a], HOT_W);
                         const t = label(g, cell.x + cell.w, cell.y + 11, '', 'sim-seg-label right');
                         const f = el('tspan', { fill: BLUE }, t); f.textContent = `frontier: ${popcount(L)}`;
