@@ -160,6 +160,18 @@ $$
 
 The operator accepts or rejects the batch as a whole and returns one acknowledgment covering every entry. A single payment is a batch of one.
 
+## Epochs, Closes, and the Queue
+
+An epoch ends at a cut. Everything accepted before the cut belongs to epoch $e$, and the operator builds epoch $e$'s close: one row per changed account, a handful of Merkle roots over the rows and the resulting state, and the proofs that let validators check it. Later sections build that close. This one covers how it reaches the chain.
+
+The operator is Byzantine: it may halt, censor, equivocate, withhold messages, and propose arbitrary closes, but it cannot forge a payer signature. Bajillion assumes secure hashes and signatures, authenticated validator proofs of possession, at most $f$ Byzantine validators in a committee of exactly $n=3f+1$, and a correct and live settlement chain. Honest validators authenticate and durably retain their assigned share of each close before voting for it. The embedding, the chain-side integration that hosts a deployment, must keep the root bundle, public corpus, and required Merkle openings retrievable for as long as they can be challenged or claimed.
+
+A deployment starts from an authenticated account vector, and each epoch uses an onchain anchor $\mathcal A_e$. Before acknowledging any payment of epoch $e$, the operator must register the epoch onchain against the exact predecessor $\mathsf{StateRoot}$, the root the previous close produced. Registration also seals the epoch's boundary: the deposits and signed withdrawal authorizations the chain fixes for this epoch, which the close must consume exactly. An accepted registration is one immutable admission obligation. Construction, certification, and admission may retry against it through the inclusive deadline, but the first later observation permanently faults the deployment. A successor epoch can be registered and prepared while its predecessor remains challengeable.
+
+Admission checks the certificate over the close's 32-byte commitment, consuming a 164-byte root bundle and one compact terminal proof as witness data, then places the close in a FIFO queue of pending slots. Each slot waits through an inclusive challenge window ending at its deadline $\Delta_e$, and slots finalize in order from the front. A proven challenge blocks the challenged slot and every pending descendant from finalizing, while earlier pending slots keep their windows and may still finalize in order. A withdrawal carried by a close becomes claimable only after that close reaches the front and finalizes.
+
+The deployment fixes the maximum admission-delay increment and the minimum and maximum challenge duration before it accepts funds, while deposits and user-signed withdrawals carry their own deadlines. Every accepted deposit must enter an admitted close before its deadline. Settlement records each deposit's refund account and amount, so an expired unadmitted deposit is refundable by anyone without an operator, a state opening, or private evidence. A missed admission, an expired withdrawal or deposit, or a proven challenge permanently faults the deployment, freezing new work and moving every account to the recovery path in [Hard Fault](#hard-fault).
+
 ## Optimizing for Hot Accounts
 
 A single incoming counter would serialize every payment to a popular recipient. Bajillion has none: acceptance touches only the payer's side, so recipients have no state to serialize. Incoming credit stays a promise until the epoch ends, when the operator collates it. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
@@ -183,50 +195,6 @@ $$
 $b$'s three incoming payments end as the entries $(20,1)$ in $a$'s vector, $(4,1)$ in $c$'s, and $(6,1)$ in $d$'s.
 
 Credit is collated at the close instead of per payment. Each payer's vector as it stands when the epoch ends is its terminal vector (terminal means end-of-epoch throughout). The operator re-sorts the union of terminal entries by recipient and then payer into the transpose, the same entries viewed recipient-major and committed under $\mathsf{TransposeRoot}_e$, where each recipient's entries form one contiguous range. $b$'s range holds those three entries, and its sum is $b$'s credit delta: $20+4+6=30$ over 3 payments. Proving one edge never requires shipping the rest: the payer-side entry opens under its payer's signed vector root, and the recipient-side image under the transpose root.
-
-## Epochs, Closes, and the Queue
-
-An epoch ends at a cut. Everything accepted before the cut belongs to epoch $e$, and the operator builds epoch $e$'s close: one row per changed account, a handful of Merkle roots over the rows and the resulting state, and the proofs that let validators check it. Later sections build that close. This one covers how it reaches the chain.
-
-The operator is Byzantine: it may halt, censor, equivocate, withhold messages, and propose arbitrary closes, but it cannot forge a payer signature. Bajillion assumes secure hashes and signatures, authenticated validator proofs of possession, at most $f$ Byzantine validators in a committee of exactly $n=3f+1$, and a correct and live settlement chain. Honest validators authenticate and durably retain their assigned share of each close before voting for it. The embedding, the chain-side integration that hosts a deployment, must keep the root bundle, public corpus, and required Merkle openings retrievable for as long as they can be challenged or claimed.
-
-A deployment starts from an authenticated account vector, and each epoch uses an onchain anchor $\mathcal A_e$. Before acknowledging any payment of epoch $e$, the operator must register the epoch onchain against the exact predecessor $\mathsf{StateRoot}$, the root the previous close produced. Registration also seals the epoch's boundary: the deposits and signed withdrawal authorizations the chain fixes for this epoch, which the close must consume exactly. An accepted registration is one immutable admission obligation. Construction, certification, and admission may retry against it through the inclusive deadline, but the first later observation permanently faults the deployment. A successor epoch can be registered and prepared while its predecessor remains challengeable.
-
-Admission checks the certificate over the close's 32-byte commitment, consuming a 164-byte root bundle and one compact terminal proof as witness data, then places the close in a FIFO queue of pending slots. Each slot waits through an inclusive challenge window ending at its deadline $\Delta_e$, and slots finalize in order from the front. A proven challenge blocks the challenged slot and every pending descendant from finalizing, while earlier pending slots keep their windows and may still finalize in order. A withdrawal carried by a close becomes claimable only after that close reaches the front and finalizes.
-
-The deployment fixes the maximum admission-delay increment and the minimum and maximum challenge duration before it accepts funds, while deposits and user-signed withdrawals carry their own deadlines. Every accepted deposit must enter an admitted close before its deadline. Settlement records each deposit's refund account and amount, so an expired unadmitted deposit is refundable by anyone without an operator, a state opening, or private evidence. A missed admission, an expired withdrawal or deposit, or a proven challenge permanently faults the deployment, freezing new work and moving every account to the recovery path in [Hard Fault](#hard-fault).
-
-## Streamlined Epoch Transitions
-
-After epoch $e$ is admitted and epoch $e+1$ is registered, successor payments can proceed while the predecessor remains challengeable. Importing predecessor credits into each account's live serving state can also overlap those payments.
-
-For an account with no boundary operations, an asymmetry makes this safe. When an account rolls over, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. Debits ended at the rollover, so the predecessor credit still in flight can only add to that head later, never subtract. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight, the exact predecessor close is
-
-$$
-\boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
-$$
-
-The preserved head is a floor, and a floor is safe to spend against: the operator can accept successor payments on $\widetilde B_a$ before importing the remaining predecessor credit. Reconciliation adds $\rho_a$ to the live value. It never assigns $B_a^1$ over it, which would erase successor debits already accepted.
-
-In the running example, $a\xrightarrow{20}b$ leaves the preserved head at 80 while the not-yet-imported $d\xrightarrow{5}a$ credit makes the exact close 85. If $a$ spends 20 and then 15 in the successor while the missing credit arrives between them,
-
-$$
-80-20+5-15=50=(85)-20-15.
-$$
-
-```{=html}
-<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated credit reconciliation for account a after predecessor admission and successor registration. An epoch-e send leaves a preserved head of 80. Two connected rails branch from that 80. The admitted predecessor balance is 85. The live successor rail spends 20 to reach 60, imports the remaining credit to reach 65, and spends 15 to reach 50. One vertical marker identifies the same predecessor credit of 5 in both calculations. The admitted balance never overwrites the live head.">
-  <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
-</div>
-```
-
-::: {.image-caption}
-Figure 2: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
-:::
-
-The live balance is not monotone, since successor payments spend it down. The one-sidedness is all on the predecessor's side: completion can add missing credit but can never discover another accepted debit. Accounts with boundary operations must reflect their full admitted outcome before they can spend in the successor epoch. Closed accounts are absent from that successor state.
-
-Rollover changes only live serving state, without changing the evidence required for finalization. The close still produces the canonical rows, state root, and public corpus, and a challenge against the predecessor still invalidates its pending descendants.
 
 ## One Row per Changed Account
 
@@ -311,6 +279,38 @@ $$
 The operator reuses the predecessor-state proof cache and builds the full successor BMT from the ordered leaves. Full-corpus validation independently reconstructs both trees.
 
 Beside the two state roots, the close commits one compact guard per row under $\mathsf{ChangeRoot}_e$. Challenges and external-payout claims open this tree rather than the full rows, so it exposes only what they need ([The Unavoidable Challenge](#the-unavoidable-challenge) gives its contents).
+
+## Streamlined Epoch Transitions
+
+After epoch $e$ is admitted and epoch $e+1$ is registered, successor payments can proceed while the predecessor remains challengeable. Importing predecessor credits into each account's live serving state can also overlap those payments.
+
+For an account with no boundary operations, an asymmetry makes this safe. When an account rolls over, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. Debits ended at the rollover, so the predecessor credit still in flight can only add to that head later, never subtract. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight, the exact predecessor close is
+
+$$
+\boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
+$$
+
+The preserved head is a floor, and a floor is safe to spend against: the operator can accept successor payments on $\widetilde B_a$ before importing the remaining predecessor credit. Reconciliation adds $\rho_a$ to the live value. It never assigns $B_a^1$ over it, which would erase successor debits already accepted.
+
+In the running example, $a\xrightarrow{20}b$ leaves the preserved head at 80 while the not-yet-imported $d\xrightarrow{5}a$ credit makes the exact close 85. If $a$ spends 20 and then 15 in the successor while the missing credit arrives between them,
+
+$$
+80-20+5-15=50=(85)-20-15.
+$$
+
+```{=html}
+<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated credit reconciliation for account a after predecessor admission and successor registration. An epoch-e send leaves a preserved head of 80. Two connected rails branch from that 80. The admitted predecessor balance is 85. The live successor rail spends 20 to reach 60, imports the remaining credit to reach 65, and spends 15 to reach 50. One vertical marker identifies the same predecessor credit of 5 in both calculations. The admitted balance never overwrites the live head.">
+  <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 2: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
+:::
+
+The live balance is not monotone, since successor payments spend it down. The one-sidedness is all on the predecessor's side: completion can add missing credit but can never discover another accepted debit. Accounts with boundary operations must reflect their full admitted outcome before they can spend in the successor epoch. Closed accounts are absent from that successor state.
+
+Rollover changes only live serving state, without changing the evidence required for finalization. The close still produces the canonical rows, state root, and public corpus, and a challenge against the predecessor still invalidates its pending descendants.
 
 ## Slice the Evidence
 

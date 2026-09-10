@@ -351,56 +351,6 @@ O’Grady</a></div>
         <p>The operator accepts or rejects the batch as a whole and
         returns one acknowledgment covering every entry. A single
         payment is a batch of one.</p>
-        <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
-        Accounts</h2>
-        <p>A single incoming counter would serialize every payment to a
-        popular recipient. Bajillion has none: acceptance touches only
-        the payer’s side, so recipients have no state to serialize.
-        Incoming credit stays a promise until the epoch ends, when the
-        operator collates it. A payment of <span
-        class="math inline">x</span> on the edge <span
-        class="math inline">a\rightarrow b</span> advances only that
-        edge’s entry in <span class="math inline">a</span>’s vector:</p>
-        <p><span class="math display">
-        (G_{ab},J_{ab})\longrightarrow(G_{ab}+x,J_{ab}+1),
-        \qquad
-        \text{every other entry of every other vector unchanged.}
-        </span></p>
-        <p>Payments to one hot account from different payers live in
-        disjoint vectors and never contend, so the incoming path scales
-        with the payers, not the recipient. However many payments an
-        edge carries, the epoch ends with one cumulative entry for
-        it.</p>
-        <p>Consider accounts <span class="math inline">(a,b,c,d)</span>
-        that open with balances <span
-        class="math inline">(100,40,25,35)</span> and the epoch
-        accepts</p>
-        <p><span class="math display">
-        a\xrightarrow{20}b,\quad b\xrightarrow{12}c,\quad
-        c\xrightarrow{7}d,\quad d\xrightarrow{5}a,\quad
-        c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
-        </span></p>
-        <p><span class="math inline">b</span>’s three incoming payments
-        end as the entries <span class="math inline">(20,1)</span> in
-        <span class="math inline">a</span>’s vector, <span
-        class="math inline">(4,1)</span> in <span
-        class="math inline">c</span>’s, and <span
-        class="math inline">(6,1)</span> in <span
-        class="math inline">d</span>’s.</p>
-        <p>Credit is collated at the close instead of per payment. Each
-        payer’s vector as it stands when the epoch ends is its terminal
-        vector (terminal means end-of-epoch throughout). The operator
-        re-sorts the union of terminal entries by recipient and then
-        payer into the transpose, the same entries viewed
-        recipient-major and committed under <span
-        class="math inline">\mathsf{TransposeRoot}_e</span>, where each
-        recipient’s entries form one contiguous range. <span
-        class="math inline">b</span>’s range holds those three entries,
-        and its sum is <span class="math inline">b</span>’s credit
-        delta: <span class="math inline">20+4+6=30</span> over 3
-        payments. Proving one edge never requires shipping the rest: the
-        payer-side entry opens under its payer’s signed vector root, and
-        the recipient-side image under the transpose root.</p>
         <h2 id="epochs-closes-and-the-queue">Epochs, Closes, and the
         Queue</h2>
         <p>An epoch ends at a cut. Everything accepted before the cut
@@ -459,68 +409,56 @@ O’Grady</a></div>
         deposit, or a proven challenge permanently faults the
         deployment, freezing new work and moving every account to the
         recovery path in <a href="#hard-fault">Hard Fault</a>.</p>
-        <h2 id="streamlined-epoch-transitions">Streamlined Epoch
-        Transitions</h2>
-        <p>After epoch <span class="math inline">e</span> is admitted
-        and epoch <span class="math inline">e+1</span> is registered,
-        successor payments can proceed while the predecessor remains
-        challengeable. Importing predecessor credits into each account’s
-        live serving state can also overlap those payments.</p>
-        <p>For an account with no boundary operations, an asymmetry
-        makes this safe. When an account rolls over, the operator
-        carries forward its preserved head: everything it started with,
-        minus every accepted debit, plus every credit already imported.
-        Debits ended at the rollover, so the predecessor credit still in
-        flight can only add to that head later, never subtract. Writing
-        <span class="math inline">\widetilde B_a</span> for the
-        preserved head and <span class="math inline">\rho_a</span> for
-        the credit in flight, the exact predecessor close is</p>
+        <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
+        Accounts</h2>
+        <p>A single incoming counter would serialize every payment to a
+        popular recipient. Bajillion has none: acceptance touches only
+        the payer’s side, so recipients have no state to serialize.
+        Incoming credit stays a promise until the epoch ends, when the
+        operator collates it. A payment of <span
+        class="math inline">x</span> on the edge <span
+        class="math inline">a\rightarrow b</span> advances only that
+        edge’s entry in <span class="math inline">a</span>’s vector:</p>
         <p><span class="math display">
-        \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
+        (G_{ab},J_{ab})\longrightarrow(G_{ab}+x,J_{ab}+1),
+        \qquad
+        \text{every other entry of every other vector unchanged.}
         </span></p>
-        <p>The preserved head is a floor, and a floor is safe to spend
-        against: the operator can accept successor payments on <span
-        class="math inline">\widetilde B_a</span> before importing the
-        remaining predecessor credit. Reconciliation adds <span
-        class="math inline">\rho_a</span> to the live value. It never
-        assigns <span class="math inline">B_a^1</span> over it, which
-        would erase successor debits already accepted.</p>
-        <p>In the running example, <span
-        class="math inline">a\xrightarrow{20}b</span> leaves the
-        preserved head at 80 while the not-yet-imported <span
-        class="math inline">d\xrightarrow{5}a</span> credit makes the
-        exact close 85. If <span class="math inline">a</span> spends 20
-        and then 15 in the successor while the missing credit arrives
-        between them,</p>
+        <p>Payments to one hot account from different payers live in
+        disjoint vectors and never contend, so the incoming path scales
+        with the payers, not the recipient. However many payments an
+        edge carries, the epoch ends with one cumulative entry for
+        it.</p>
+        <p>Consider accounts <span class="math inline">(a,b,c,d)</span>
+        that open with balances <span
+        class="math inline">(100,40,25,35)</span> and the epoch
+        accepts</p>
         <p><span class="math display">
-        80-20+5-15=50=(85)-20-15.
+        a\xrightarrow{20}b,\quad b\xrightarrow{12}c,\quad
+        c\xrightarrow{7}d,\quad d\xrightarrow{5}a,\quad
+        c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
         </span></p>
-        <div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated credit reconciliation for account a after predecessor admission and successor registration. An epoch-e send leaves a preserved head of 80. Two connected rails branch from that 80. The admitted predecessor balance is 85. The live successor rail spends 20 to reach 60, imports the remaining credit to reach 65, and spends 15 to reach 50. One vertical marker identifies the same predecessor credit of 5 in both calculations. The admitted balance never overwrites the live head.">
-          <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
-        </div>
-        <div class="image-caption">
-        <p>Figure 2: After predecessor admission and successor
-        registration, the admitted epoch-<span
-        class="math inline">e</span> balance is <span
-        class="math inline">80+\rho_a=85</span>, while the live
-        epoch-<span class="math inline">e+1</span> head becomes <span
-        class="math inline">80-20+\rho_a-15=50</span>. Both rails
-        account for the same predecessor credit, <span
-        class="math inline">\rho_a=5</span>. Importing that credit adds
-        to the live head and preserves every successor debit.</p>
-        </div>
-        <p>The live balance is not monotone, since successor payments
-        spend it down. The one-sidedness is all on the predecessor’s
-        side: completion can add missing credit but can never discover
-        another accepted debit. Accounts with boundary operations must
-        reflect their full admitted outcome before they can spend in the
-        successor epoch. Closed accounts are absent from that successor
-        state.</p>
-        <p>Rollover changes only live serving state, without changing
-        the evidence required for finalization. The close still produces
-        the canonical rows, state root, and public corpus, and a
-        challenge against the predecessor still invalidates its pending
-        descendants.</p>
+        <p><span class="math inline">b</span>’s three incoming payments
+        end as the entries <span class="math inline">(20,1)</span> in
+        <span class="math inline">a</span>’s vector, <span
+        class="math inline">(4,1)</span> in <span
+        class="math inline">c</span>’s, and <span
+        class="math inline">(6,1)</span> in <span
+        class="math inline">d</span>’s.</p>
+        <p>Credit is collated at the close instead of per payment. Each
+        payer’s vector as it stands when the epoch ends is its terminal
+        vector (terminal means end-of-epoch throughout). The operator
+        re-sorts the union of terminal entries by recipient and then
+        payer into the transpose, the same entries viewed
+        recipient-major and committed under <span
+        class="math inline">\mathsf{TransposeRoot}_e</span>, where each
+        recipient’s entries form one contiguous range. <span
+        class="math inline">b</span>’s range holds those three entries,
+        and its sum is <span class="math inline">b</span>’s credit
+        delta: <span class="math inline">20+4+6=30</span> over 3
+        payments. Proving one edge never requires shipping the rest: the
+        payer-side entry opens under its payer’s signed vector root, and
+        the recipient-side image under the transpose root.</p>
         <h2 id="one-row-per-changed-account">One Row per Changed
         Account</h2>
         <p>Netting each of the four accounts’ debits and credits gives
@@ -690,6 +628,68 @@ O’Grady</a></div>
         so it exposes only what they need (<a
         href="#the-unavoidable-challenge">The Unavoidable Challenge</a>
         gives its contents).</p>
+        <h2 id="streamlined-epoch-transitions">Streamlined Epoch
+        Transitions</h2>
+        <p>After epoch <span class="math inline">e</span> is admitted
+        and epoch <span class="math inline">e+1</span> is registered,
+        successor payments can proceed while the predecessor remains
+        challengeable. Importing predecessor credits into each account’s
+        live serving state can also overlap those payments.</p>
+        <p>For an account with no boundary operations, an asymmetry
+        makes this safe. When an account rolls over, the operator
+        carries forward its preserved head: everything it started with,
+        minus every accepted debit, plus every credit already imported.
+        Debits ended at the rollover, so the predecessor credit still in
+        flight can only add to that head later, never subtract. Writing
+        <span class="math inline">\widetilde B_a</span> for the
+        preserved head and <span class="math inline">\rho_a</span> for
+        the credit in flight, the exact predecessor close is</p>
+        <p><span class="math display">
+        \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
+        </span></p>
+        <p>The preserved head is a floor, and a floor is safe to spend
+        against: the operator can accept successor payments on <span
+        class="math inline">\widetilde B_a</span> before importing the
+        remaining predecessor credit. Reconciliation adds <span
+        class="math inline">\rho_a</span> to the live value. It never
+        assigns <span class="math inline">B_a^1</span> over it, which
+        would erase successor debits already accepted.</p>
+        <p>In the running example, <span
+        class="math inline">a\xrightarrow{20}b</span> leaves the
+        preserved head at 80 while the not-yet-imported <span
+        class="math inline">d\xrightarrow{5}a</span> credit makes the
+        exact close 85. If <span class="math inline">a</span> spends 20
+        and then 15 in the successor while the missing credit arrives
+        between them,</p>
+        <p><span class="math display">
+        80-20+5-15=50=(85)-20-15.
+        </span></p>
+        <div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated credit reconciliation for account a after predecessor admission and successor registration. An epoch-e send leaves a preserved head of 80. Two connected rails branch from that 80. The admitted predecessor balance is 85. The live successor rail spends 20 to reach 60, imports the remaining credit to reach 65, and spends 15 to reach 50. One vertical marker identifies the same predecessor credit of 5 in both calculations. The admitted balance never overwrites the live head.">
+          <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
+        </div>
+        <div class="image-caption">
+        <p>Figure 2: After predecessor admission and successor
+        registration, the admitted epoch-<span
+        class="math inline">e</span> balance is <span
+        class="math inline">80+\rho_a=85</span>, while the live
+        epoch-<span class="math inline">e+1</span> head becomes <span
+        class="math inline">80-20+\rho_a-15=50</span>. Both rails
+        account for the same predecessor credit, <span
+        class="math inline">\rho_a=5</span>. Importing that credit adds
+        to the live head and preserves every successor debit.</p>
+        </div>
+        <p>The live balance is not monotone, since successor payments
+        spend it down. The one-sidedness is all on the predecessor’s
+        side: completion can add missing credit but can never discover
+        another accepted debit. Accounts with boundary operations must
+        reflect their full admitted outcome before they can spend in the
+        successor epoch. Closed accounts are absent from that successor
+        state.</p>
+        <p>Rollover changes only live serving state, without changing
+        the evidence required for finalization. The close still produces
+        the canonical rows, state root, and public corpus, and a
+        challenge against the predecessor still invalidates its pending
+        descendants.</p>
         <h2 id="slice-the-evidence">Slice the Evidence</h2>
         <p>Each validator checks its assigned evidence. The evidence is
         divided into <span class="math inline">S</span> deterministic
