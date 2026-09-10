@@ -50,9 +50,12 @@ macro_rules! parity {
                 };
                 let automatic = make().merkleize(&db, Some(val(10))).await.unwrap();
                 let prepared = make().prepare(&db).await.unwrap();
-                assert_eq!(prepared.default_compaction_budget().max_moves, 2);
+                let default_budget = prepared.default_compaction_budget();
+                assert_eq!(default_budget.max_moves, 2);
                 let (prepared, first) = prepared.compact(&db, ONE).await.unwrap();
+                assert_eq!(prepared.default_compaction_budget(), default_budget);
                 let (prepared, second) = prepared.compact(&db, ONE).await.unwrap();
+                assert_eq!(prepared.default_compaction_budget(), default_budget);
                 assert_eq!((first.moved, second.moved), (1, 1));
                 assert!(second.floor > first.floor);
                 let manual = prepared.merkleize(&db, Some(val(10))).await.unwrap();
@@ -173,6 +176,7 @@ fn manual_compaction_resumes_across_inactive_pages_and_recovers() {
             .await
             .unwrap();
         assert_eq!((zero.moved, zero.scanned, *zero.floor), (0, 0, 0));
+        assert!(!zero.exhausted);
         let (prepared, zero) = prepared
             .compact(
                 &db,
@@ -184,6 +188,7 @@ fn manual_compaction_resumes_across_inactive_pages_and_recovers() {
             .await
             .unwrap();
         assert_eq!((zero.moved, zero.scanned), (0, 0));
+        assert!(!zero.exhausted);
         let (prepared, gap) = prepared
             .compact(
                 &db,
@@ -310,6 +315,47 @@ fn manual_compaction_rejects_changed_database() {
             .await
             .unwrap();
         let (db, _) = db.apply_batch(other).await.unwrap();
+        assert!(matches!(
+            first.compact(&db, ONE).await,
+            Err(Error::StaleBatch)
+        ));
+        assert!(matches!(
+            second.merkleize(&db, None).await,
+            Err(Error::StaleBatch)
+        ));
+    });
+}
+
+#[test]
+fn manual_compaction_rejects_applied_parent() {
+    let runner = deterministic::Runner::default();
+    runner.start(|context| async move {
+        let db = UnorderedVariableDb::init(
+            context.child("db"),
+            variable_config::<OneCap>("applied-parent", &context),
+        )
+        .await
+        .unwrap();
+        let parent = db
+            .new_batch()
+            .write(key(1), Some(val(1)))
+            .merkleize(&db, None)
+            .await
+            .unwrap();
+        let first = parent
+            .new_batch::<Sha256>()
+            .write(key(2), Some(val(2)))
+            .prepare(&db)
+            .await
+            .unwrap();
+        let second = parent
+            .new_batch::<Sha256>()
+            .write(key(2), Some(val(2)))
+            .prepare(&db)
+            .await
+            .unwrap();
+        let (second, _) = second.compact(&db, ONE).await.unwrap();
+        let (db, _) = db.apply_batch(parent).await.unwrap();
         assert!(matches!(
             first.compact(&db, ONE).await,
             Err(Error::StaleBatch)

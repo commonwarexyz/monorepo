@@ -279,7 +279,8 @@ where
 ///
 /// Call `UnmerkleizedBatch::prepare`, then [`Self::compact`] zero or more
 /// times before [`Self::merkleize`]. All rounds share one scan tip and emit one final CommitFloor.
-/// The database must retain the same root throughout; a change returns [`Error::StaleBatch`].
+/// The database must retain the same root throughout. Any root change, including applying an
+/// ancestor, returns [`Error::StaleBatch`].
 pub struct PreparedBatch<F, H, U, const N: usize, S: Strategy>
 where
     F: Graftable,
@@ -300,6 +301,11 @@ where
     Operation<F, U>: Codec,
 {
     /// Default per-commit move allowance, with no scan limit.
+    ///
+    /// This value is fixed at preparation and does not decrease after compaction. Each
+    /// [`Self::compact`] call uses its supplied budget independently. To split this allowance
+    /// across rounds, track the remaining moves by subtracting each round's
+    /// [`CompactionResult::moved`].
     pub const fn default_compaction_budget(&self) -> CompactionBudget {
         self.inner.default_compaction_budget()
     }

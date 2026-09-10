@@ -389,8 +389,9 @@ where
 /// Created by `UnmerkleizedBatch::prepare`. Call [`Self::compact`] zero
 /// or more times, then [`Self::merkleize`] to append one CommitFloor and compute the root.
 /// No automatic compaction occurs on this path. All rounds share the original scan tip.
-/// The database must retain the same root between preparation and finalization; a change
-/// is rejected with [`crate::qmdb::Error::StaleBatch`]. An error consumes the prepared batch.
+/// The database must retain the same root between preparation and finalization. Any root change,
+/// including applying an ancestor, is rejected with [`crate::qmdb::Error::StaleBatch`].
+/// An error consumes the prepared batch.
 pub struct PreparedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update,
@@ -1001,8 +1002,10 @@ where
 
     /// Default per-commit move allowance (`user_steps + 1`), with no scan limit.
     ///
-    /// The extra move accounts for the previous CommitFloor becoming inactive. Calling
-    /// `compact` multiple times does not add further implicit allowances.
+    /// The extra move accounts for the previous CommitFloor becoming inactive. This value is
+    /// fixed at preparation and does not decrease after compaction. Each [`Self::compact`] call
+    /// uses its supplied budget independently. To split this allowance across rounds, track the
+    /// remaining moves by subtracting each round's [`CompactionResult::moved`].
     pub const fn default_compaction_budget(&self) -> CompactionBudget {
         CompactionBudget {
             max_moves: self.user_steps + 1,
@@ -1079,6 +1082,12 @@ where
         let reserve = total_steps
             .min(total_active_keys as u64)
             .min(round_tip - scan_start) as usize;
+        // Committed candidates are active keys and the last commit. Every uncommitted
+        // operation may be a candidate, even when the batch deletes most keys.
+        let candidate_bound = (db.active_keys as u64)
+            .saturating_add(1)
+            .saturating_add(fixed_tip.saturating_sub(*db.log.size()))
+            .min(usize::MAX as u64);
         let mut moved = 0u64;
         // Key-sort the diff as one job on the strategy: candidate classification (after the
         // first floor-raise read below) is the earliest consumer that needs it sorted, so the
@@ -1123,7 +1132,7 @@ where
                 // `scan_from` tracks prefetch progress separately from `floor`, so
                 // early exit cannot leave `floor` past unprocessed candidates.
                 let limit = (total_steps - moved)
-                    .min(total_active_keys as u64)
+                    .min(candidate_bound)
                     .min(round_tip - *scan_from) as usize;
 
                 // Consume the prefetched committed prefix whole: it was gathered from the
@@ -3899,6 +3908,78 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
+    }
+
+    #[test]
+    fn compaction_batches_delete_heavy_candidates() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("compaction-deletes", &context);
+            let db = TestDb::init(context, config).await.unwrap();
+            let keys: Vec<_> = (0u64..1001)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .collect();
+            let mut seed = db.new_batch();
+            for &key in &keys {
+                seed = seed.write(key, Some(key));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let make = || {
+                keys[..1000]
+                    .iter()
+                    .fold(db.new_batch(), |batch, &key| batch.write(key, None))
+            };
+
+            for max_moves in [1001, u64::MAX] {
+                let budget = CompactionBudget {
+                    max_moves,
+                    max_scan: u64::MAX,
+                };
+                let mut reference_fills = 0;
+                let (reference, reference_progress) = make()
+                    .prepare(&db)
+                    .await
+                    .unwrap()
+                    .compact_with_floor_scan(&db, budget, None, |floor, tip, _, out| {
+                        reference_fills += 1;
+                        fill_candidates(&db.bitmap, floor, tip, 1, out)
+                    })
+                    .await
+                    .unwrap();
+                let mut fills = 0;
+                let (prepared, progress) = make()
+                    .prepare(&db)
+                    .await
+                    .unwrap()
+                    .compact_with_floor_scan(&db, budget, None, |floor, tip, limit, out| {
+                        fills += 1;
+                        fill_candidates(&db.bitmap, floor, tip, limit, out)
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(progress, reference_progress);
+                assert_eq!(progress.moved, 1);
+                assert!(progress.exhausted);
+                let reference = reference.merkleize(&db, None).await.unwrap();
+                let batch = prepared.merkleize(&db, None).await.unwrap();
+                assert_eq!(batch.root(), reference.root());
+                assert_eq!(batch.operations(), reference.operations());
+                assert!(
+                    fills <= 3,
+                    "compaction used {fills} candidate fills (single-candidate reference: {reference_fills})"
+                );
+            }
+        });
     }
 
     /// `operations()` must cover exactly the batch's own applied range and match the
