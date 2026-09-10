@@ -307,7 +307,7 @@ type Finalizations<P> = immutable::Archive<
     Sha256Digest,
     Finalization<SchemeOf<P>, Sha256Digest>,
 >;
-type FinalizedBlocks<P> = immutable::Archive<deterministic::Context, Sha256Digest, B<P>>;
+type FinalizedBlocks<P> = immutable::Archive<deterministic::Context, Sha256Digest, Arc<B<P>>>;
 type MarshalActor<P> = Actor<
     deterministic::Context,
     Standard<B<P>>,
@@ -434,7 +434,7 @@ pub(crate) async fn setup_validator<P: Simplex>(
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
-    start: Start<SchemeOf<P>, Sha256Digest, B<P>>,
+    start: Start<SchemeOf<P>, Sha256Digest, Arc<B<P>>>,
     resolver: Option<MarshalResolver<P>>,
     max_pending_acks: NonZeroUsize,
     wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,

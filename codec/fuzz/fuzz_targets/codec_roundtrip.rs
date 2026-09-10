@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use bytes::{BufMut, Bytes, BytesMut, buf::UninitSlice};
 use commonware_codec::{
-    BufsMut, Decode, DecodeExt, DecodeRangeExt, Encode, EncodeFixed, EncodeSize, Error, IsUnit,
-    RangeCfg, Read, ReadRangeExt, Write,
+    BufsMut, Copying, Decode, DecodeExt, DecodeRangeExt, Encode, EncodeFixed, EncodeSize, Error,
+    IsUnit, RangeCfg, Read, ReadRangeExt, Write,
     types::lazy::Lazy,
     varint::{SInt, UInt},
 };
@@ -95,35 +95,35 @@ fn roundtrip_socket(socket: SocketAddr) {
 fn roundtrip_ipv4(addr: Ipv4Addr) {
     let encoded = addr.encode();
     assert_eq!(addr.encode_size(), encoded.len());
-    let decoded = Ipv4Addr::decode(&mut &*encoded).expect("Failed to decode Ipv4Addr!");
+    let decoded = Ipv4Addr::decode(encoded).expect("Failed to decode Ipv4Addr!");
     assert_eq!(addr, decoded);
 }
 
 fn roundtrip_ipv6(addr: Ipv6Addr) {
     let encoded = addr.encode();
     assert_eq!(addr.encode_size(), encoded.len());
-    let decoded = Ipv6Addr::decode(&mut &*encoded).expect("Failed to decode Ipv6Addr!");
+    let decoded = Ipv6Addr::decode(encoded).expect("Failed to decode Ipv6Addr!");
     assert_eq!(addr, decoded);
 }
 
 fn roundtrip_ip_addr(addr: IpAddr) {
     let encoded = addr.encode();
     assert_eq!(addr.encode_size(), encoded.len());
-    let decoded = IpAddr::decode(&mut &*encoded).expect("Failed to decode IpAddr!");
+    let decoded = IpAddr::decode(encoded).expect("Failed to decode IpAddr!");
     assert_eq!(addr, decoded);
 }
 
 fn roundtrip_socket_v4(addr: SocketAddrV4) {
     let encoded = addr.encode();
     assert_eq!(addr.encode_size(), encoded.len());
-    let decoded = SocketAddrV4::decode(&mut &*encoded).expect("Failed to decode SocketAddrV4!");
+    let decoded = SocketAddrV4::decode(encoded).expect("Failed to decode SocketAddrV4!");
     assert_eq!(addr, decoded);
 }
 
 fn roundtrip_socket_v6(addr: SocketAddrV6) {
     let encoded = addr.encode();
     assert_eq!(addr.encode_size(), encoded.len());
-    let decoded = SocketAddrV6::decode(&mut &*encoded).expect("Failed to decode SocketAddrV6!");
+    let decoded = SocketAddrV6::decode(encoded).expect("Failed to decode SocketAddrV6!");
 
     // The codec intentionally discards flowinfo and scope_id (see codec/src/types/net.rs),
     // so we only compare ip and port, and verify flowinfo/scope_id are zeroed.
@@ -136,7 +136,7 @@ fn roundtrip_socket_v6(addr: SocketAddrV6) {
 fn roundtrip_byte_array<const N: usize>(arr: [u8; N]) {
     let encoded = arr.encode();
     assert_eq!(arr.encode_size(), encoded.len());
-    let decoded = <[u8; N]>::decode(&mut &*encoded).expect("Failed to decode byte array!");
+    let decoded = <[u8; N]>::decode(encoded).expect("Failed to decode byte array!");
     assert_eq!(arr, decoded);
 }
 
@@ -171,7 +171,7 @@ where
 {
     let encoded = v.encode();
     assert_eq!(v.encode_size(), encoded.len());
-    let decoded = T::decode(&mut &*encoded).expect("Failed to decode primitive!");
+    let decoded = T::decode(encoded).expect("Failed to decode primitive!");
     assert_eq!(v, decoded);
 }
 
@@ -179,7 +179,7 @@ where
 // TODO should combine these functions with better generics
 fn roundtrip_primitive_f32(v: f32) {
     let encoded = v.encode();
-    let decoded: f32 = f32::decode(&mut &*encoded).expect("Failed to decode f32!");
+    let decoded: f32 = f32::decode(encoded).expect("Failed to decode f32!");
     if v.is_nan() && decoded.is_nan() {
         // Ignore the NaN case
         return;
@@ -189,7 +189,7 @@ fn roundtrip_primitive_f32(v: f32) {
 
 fn roundtrip_primitive_f64(v: f64) {
     let encoded = v.encode();
-    let decoded: f64 = f64::decode(&mut &*encoded).expect("Failed to decode f64!");
+    let decoded: f64 = f64::decode(encoded).expect("Failed to decode f64!");
     if v.is_nan() && decoded.is_nan() {
         // Ignore the NaN case
         return;
@@ -352,8 +352,7 @@ fn roundtrip_varint_array(values: [u16; 4]) {
     array.write_bufs(&mut bufs);
     assert_eq!(encoded, bufs.freeze());
 
-    let decoded =
-        <[UInt<u16>; 4]>::decode(&mut &*encoded).expect("Failed to decode [UInt<u16>; 4]!");
+    let decoded = <[UInt<u16>; 4]>::decode(encoded).expect("Failed to decode [UInt<u16>; 4]!");
     assert_eq!(array, decoded);
 }
 
@@ -368,7 +367,7 @@ where
     let mut bufs = FuzzBufsMut::new();
     opt.write_bufs(&mut bufs);
     assert_eq!(encoded, bufs.freeze());
-    let decoded = Option::<T>::decode(&mut &*encoded).expect("Failed to decode Option<T>!");
+    let decoded = Option::<T>::decode(encoded).expect("Failed to decode Option<T>!");
     assert_eq!(opt, decoded);
 }
 
@@ -401,7 +400,7 @@ where
     let mut bufs = FuzzBufsMut::new();
     tuple.write_bufs(&mut bufs);
     assert_eq!(encoded, bufs.freeze());
-    let decoded = <(T1, T2)>::decode(&mut &*encoded).expect("Failed to decode tuple!");
+    let decoded = <(T1, T2)>::decode(encoded).expect("Failed to decode tuple!");
     assert_eq!(tuple, decoded);
 }
 
@@ -422,7 +421,7 @@ where
     let mut bufs = FuzzBufsMut::new();
     tuple.write_bufs(&mut bufs);
     assert_eq!(encoded, bufs.freeze());
-    let decoded = <(T1, T2, T3)>::decode(&mut &*encoded).expect("Failed to decode tuple!");
+    let decoded = <(T1, T2, T3)>::decode(encoded).expect("Failed to decode tuple!");
     assert_eq!(tuple, decoded);
 }
 
@@ -439,15 +438,15 @@ fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
         buf.put_u8(0xFF);
     }
     buf.put_u8(last_byte);
-    let _ = UInt::<u16>::decode(Bytes::from(buf.clone()));
-    let _ = UInt::<u32>::decode(Bytes::from(buf.clone()));
-    let _ = UInt::<u64>::decode(Bytes::from(buf.clone()));
-    let _ = UInt::<u128>::decode(Bytes::from(buf.clone()));
+    let _ = UInt::<u16>::decode(buf.clone());
+    let _ = UInt::<u32>::decode(buf.clone());
+    let _ = UInt::<u64>::decode(buf.clone());
+    let _ = UInt::<u128>::decode(buf.clone());
     // Also test signed varint overflow
-    let _ = SInt::<i16>::decode(Bytes::from(buf.clone()));
-    let _ = SInt::<i32>::decode(Bytes::from(buf.clone()));
-    let _ = SInt::<i64>::decode(Bytes::from(buf.clone()));
-    let _ = SInt::<i128>::decode(Bytes::from(buf));
+    let _ = SInt::<i16>::decode(buf.clone());
+    let _ = SInt::<i32>::decode(buf.clone());
+    let _ = SInt::<i64>::decode(buf.clone());
+    let _ = SInt::<i128>::decode(buf);
 }
 
 fn exercise_range_cfg(value: u8) {
@@ -481,7 +480,7 @@ fn exercise_range_cfg(value: u8) {
 
 fn exercise_zeros(bytes: &[u8], size: u8) {
     let len = bytes.len().min(usize::from(size));
-    let mut buf = &bytes[..len];
+    let mut buf = Copying(&bytes[..len]);
     let result = commonware_codec::util::ensure_zeros(&mut buf, len);
     if bytes[..len].iter().any(|byte| *byte != 0) {
         assert!(matches!(

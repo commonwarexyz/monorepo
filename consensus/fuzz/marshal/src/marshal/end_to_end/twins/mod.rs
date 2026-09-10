@@ -236,7 +236,7 @@ where
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[idx].clone()),
-                Start::Genesis(genesis_block.clone()),
+                Start::Genesis(genesis_block.clone().into()),
                 None,
                 self.max_pending_acks,
                 None,

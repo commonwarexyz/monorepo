@@ -95,7 +95,6 @@ enum Operation {
     Prune,
     Sync,
     OpCount,
-    LastCommitLoc,
     OldestRetainedLoc,
     SyncBoundary,
     Rewind {
@@ -122,7 +121,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 21 {
+        match choice % 20 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
@@ -152,10 +151,9 @@ impl<'a> Arbitrary<'a> for Operation {
             4 => Ok(Operation::Prune),
             5 => Ok(Operation::Sync),
             6 => Ok(Operation::OpCount),
-            7 => Ok(Operation::LastCommitLoc),
-            8 => Ok(Operation::OldestRetainedLoc),
-            9 => Ok(Operation::Root),
-            10 => {
+            7 => Ok(Operation::OldestRetainedLoc),
+            8 => Ok(Operation::Root),
+            9 => {
                 let start_offset = u.arbitrary()?;
                 let max_ops = u.arbitrary()?;
                 Ok(Operation::Proof {
@@ -163,7 +161,7 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            11 => {
+            10 => {
                 let size_offset = u.arbitrary()?;
                 let start_offset = u.arbitrary()?;
                 let max_ops = u.arbitrary()?;
@@ -173,8 +171,8 @@ impl<'a> Arbitrary<'a> for Operation {
                     max_ops,
                 })
             }
-            12 => Ok(Operation::SimulateFailure {}),
-            13 => {
+            11 => Ok(Operation::SimulateFailure {}),
+            12 => {
                 // Only Bad* kinds make sense here - the ancestor is guaranteed unapplied.
                 let ancestor_kind = match u.arbitrary::<bool>()? {
                     false => FloorKind::BadRegression,
@@ -182,20 +180,20 @@ impl<'a> Arbitrary<'a> for Operation {
                 };
                 Ok(Operation::BadChainedCommit { ancestor_kind })
             }
-            14 => Ok(Operation::GetMany {
+            13 => Ok(Operation::GetMany {
                 first_offset: u.arbitrary()?,
                 second_offset: u.arbitrary()?,
             }),
-            15 => Ok(Operation::BatchReads {
+            14 => Ok(Operation::BatchReads {
                 loc_offset: u.arbitrary()?,
             }),
-            16 => Ok(Operation::SyncBoundary),
-            17 => Ok(Operation::Rewind {
+            15 => Ok(Operation::SyncBoundary),
+            16 => Ok(Operation::Rewind {
                 idx: u.arbitrary()?,
             }),
-            18 => Ok(Operation::ValidateBatch),
-            19 => Ok(Operation::ToBatch),
-            20 => Ok(Operation::Strategy {
+            17 => Ok(Operation::ValidateBatch),
+            18 => Ok(Operation::ToBatch),
+            19 => Ok(Operation::Strategy {
                 values: u.arbitrary()?,
             }),
             _ => unreachable!(),
@@ -361,7 +359,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         }
                         Some(kind) => {
                             // Snapshot state; the reject must not mutate persisted state.
-                            let before_last_commit = db.last_commit_loc();
+                            let before_last_commit = db.bounds().end - 1;
                             let before_floor = db.inactivity_floor_loc();
                             let before_root = db.root();
                             let err = match db.apply_batch(merkleized).await {
@@ -371,7 +369,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             assert_bad_floor_error(&err, kind);
                             // Reopen and verify the reject persisted nothing.
                             let db = reopen(&context, suffix, &strategy, &mut restarts).await;
-                            assert_eq!(db.last_commit_loc(), before_last_commit);
+                            assert_eq!(db.bounds().end - 1, before_last_commit);
                             assert_eq!(db.inactivity_floor_loc(), before_floor);
                             assert_eq!(db.root(), before_root);
                             db
@@ -416,7 +414,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         .append(vec![1u8; 1])
                         .merkleize(&db, None, child_floor).await;
 
-                    let before_last_commit = db.last_commit_loc();
+                    let before_last_commit = db.bounds().end - 1;
                     let before_floor = db.inactivity_floor_loc();
                     let before_root = db.root();
                     let err = match db.apply_batch(child).await {
@@ -426,7 +424,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     assert_bad_floor_error(&err, kind);
                     // Reopen and verify the reject persisted nothing.
                     let db = reopen(&context, suffix, &strategy, &mut restarts).await;
-                    assert_eq!(db.last_commit_loc(), before_last_commit);
+                    assert_eq!(db.bounds().end - 1, before_last_commit);
                     assert_eq!(db.inactivity_floor_loc(), before_floor);
                     assert_eq!(db.root(), before_root);
                     db
@@ -558,12 +556,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                 }
 
                 Operation::OpCount => {
-                    assert_eq!(db.bounds().end, db.last_commit_loc() + 1);
-                    db
-                }
-
-                Operation::LastCommitLoc => {
-                    assert_eq!(db.last_commit_loc() + 1, db.bounds().end);
+                    let _ = db.bounds().end;
                     db
                 }
 

@@ -472,7 +472,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 v.write(&mut buf);
                 assert!(!buf.is_empty());
 
-                let mut cursor = std::io::Cursor::new(buf);
+                let mut cursor = bytes::Bytes::from(buf);
                 if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &(MAX_SIZE as u64)) {
                     assert_eq!(decoded.len(), v.len());
                     for i in 0..decoded.len() {

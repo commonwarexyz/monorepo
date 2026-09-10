@@ -64,12 +64,16 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    use alloc::sync::Arc;
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
+    #[cfg(feature = "std")]
+    use std::sync::Arc;
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -229,6 +233,14 @@ commonware_macros::stability_scope!(BETA {
         fn digest(&self) -> Self::Digest;
     }
 
+    impl<T: Digestible> Digestible for Arc<T> {
+        type Digest = T::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.as_ref().digest()
+        }
+    }
+
     /// An object that can produce a commitment of itself.
     pub trait Committable: Clone + Sized + Send + Sync + 'static {
         /// The type of commitment produced by this object.
@@ -297,11 +309,11 @@ mod tests {
     fn test_validate<C: PrivateKey>() {
         let private_key = C::random(test_rng());
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
+        assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
-        let result = C::PublicKey::decode(vec![0; 1024].as_ref());
+        let result = C::PublicKey::decode(vec![0; 1024]);
         assert!(result.is_err());
     }
 
@@ -562,26 +574,26 @@ mod tests {
         let mut hasher = H::default();
         hasher.update(b"hello world");
         let (hasher, digest) = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest.as_ref())).is_ok());
         assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
         // Reuse the reset hasher returned by finalize
         let mut hasher = hasher;
         hasher.update(b"hello world");
         let (hasher, digest_again) = hasher.finalize();
-        assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_again.as_ref())).is_ok());
         assert_eq!(digest, digest_again);
 
         // Hash via the one-shot API
         let digest_oneshot = H::hash(&[b"hello world"]);
-        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_oneshot.as_ref())).is_ok());
         assert_eq!(digest, digest_oneshot);
 
         // Hash different data
         let mut hasher = hasher;
         hasher.update(b"hello mars");
         let (_, digest_mars) = hasher.finalize();
-        assert!(H::Digest::decode(digest_mars.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_mars.as_ref())).is_ok());
         assert_ne!(digest, digest_mars);
     }
 

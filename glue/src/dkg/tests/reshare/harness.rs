@@ -30,7 +30,7 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
@@ -64,7 +64,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{Address, Provider, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -987,7 +987,7 @@ impl EngineDefinition for ReshareEngine {
                     *self.initial.info.output.public().public(),
                 )),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone()),
+                start: plan.marshal_start(genesis.clone().into()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),

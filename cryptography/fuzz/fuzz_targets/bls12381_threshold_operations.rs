@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{Encode, Read, ReadExt, Write};
+use commonware_codec::{Copying, Encode, Read, ReadExt};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G2, Share},
     ops::threshold,
@@ -486,9 +486,7 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::SerializeShare { share } => {
-            let mut encoded = Vec::new();
-            share.write(&mut encoded);
-            if let Ok(decoded) = Share::read(&mut encoded.as_slice()) {
+            if let Ok(decoded) = Share::read(&mut share.encode_mut()) {
                 assert_eq!(share, decoded);
             }
         }
@@ -502,22 +500,20 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::SerializePartialSignature { partial } => {
-            let mut encoded = Vec::new();
-            partial.write(&mut encoded);
-            let decoded =
-                PartialSignature::<MinSig>::read(&mut encoded.as_slice()).expect("partial decodes");
+            let decoded = PartialSignature::<MinSig>::read(&mut partial.encode_mut())
+                .expect("partial decodes");
             assert_eq!(partial, decoded);
         }
 
         FuzzOperation::SerializeSharing { sharing } => {
             let encoded = sharing.encode();
             let cfg = (NonZeroU32::new(100).unwrap(), ModeVersion::v1());
-            let decoded = Sharing::<MinSig>::read_cfg(&mut encoded.as_ref(), &cfg)
+            let decoded = Sharing::<MinSig>::read_cfg(&mut Copying(&encoded), &cfg)
                 .expect("sharing roundtrips");
             assert_eq!(sharing, decoded);
             // v0 only supports the original mode; exercise the version gate.
             let v0 = (NonZeroU32::new(100).unwrap(), ModeVersion::v0());
-            let _ = Sharing::<MinSig>::read_cfg(&mut encoded.as_ref(), &v0);
+            let _ = Sharing::<MinSig>::read_cfg(&mut Copying(&encoded), &v0);
         }
 
         FuzzOperation::PrecomputeSharing { sharing } => {

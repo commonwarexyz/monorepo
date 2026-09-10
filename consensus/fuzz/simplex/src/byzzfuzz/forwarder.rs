@@ -303,8 +303,7 @@ where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
-        let decoded =
-            Certificate::<S, Sha256Digest>::decode_cfg(&mut message.as_ref(), &cert_codec).ok();
+        let decoded = Certificate::<S, Sha256Digest>::decode_cfg(message.clone(), &cert_codec).ok();
         let Some(msg) = decoded else {
             // Undecodable: still apply the network partition (total per
             // its view) using sender_view.get(); skip proc faults

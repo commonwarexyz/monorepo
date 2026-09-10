@@ -479,7 +479,7 @@ fn run_standard_disrupter<P: Simplex>(
                 &mut oracle,
                 validator.clone(),
                 provider,
-                Start::Genesis(genesis_marshal_block.clone()),
+                Start::Genesis(genesis_marshal_block.clone().into()),
                 None,
                 MAX_PENDING_ACKS,
                 None,

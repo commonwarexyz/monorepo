@@ -2675,7 +2675,7 @@ pub(crate) fn get_signers<S: scheme::Scheme<Sha256Digest>>(
     }
 
     let encoded = certificate.encode();
-    let mut cursor = encoded.as_ref();
+    let mut cursor = encoded;
     Some(
         Signers::read_cfg(&mut cursor, &max_participants).expect("certificate signers must decode"),
     )

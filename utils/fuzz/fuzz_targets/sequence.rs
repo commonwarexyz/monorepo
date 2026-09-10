@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{DecodeExt, Encode, EncodeFixed, FixedSize};
+use commonware_codec::{Copying, DecodeExt, Encode, EncodeFixed, FixedSize};
 use commonware_utils::sequence::{FixedBytes, U32, U64, VecU64, prefixed_u64::U64 as PrefixedU64};
 use libfuzzer_sys::fuzz_target;
 
@@ -48,11 +48,11 @@ fn fuzz(input: FuzzInput) {
             let encoded: [u8; U64::SIZE] = u64_array.encode_fixed();
             assert_eq!(encoded.len(), U64::SIZE);
 
-            let decoded = U64::decode(&encoded[..]).unwrap();
+            let decoded = U64::decode(Copying(&encoded)).unwrap();
             assert_eq!(decoded, value.into());
 
             let short_data = &encoded[..encoded.len().saturating_sub(1)];
-            assert!(U64::decode(short_data).is_err());
+            assert!(U64::decode(Copying(short_data)).is_err());
 
             let back_to_u64: u64 = u64_array.clone().into();
             assert_eq!(back_to_u64, value);
@@ -76,10 +76,10 @@ fn fuzz(input: FuzzInput) {
 
         FuzzInput::TestU32 { value } => {
             let array = U32::new(value);
-            assert_eq!(value, U32::decode(array.as_ref()).unwrap().into());
+            assert_eq!(value, U32::decode(Copying(&array)).unwrap().into());
 
             let vec = array.to_vec();
-            assert_eq!(value, U32::decode(vec.as_ref()).unwrap().into());
+            assert_eq!(value, U32::decode(vec).unwrap().into());
 
             let original = U32::new(value);
             let encoded = original.encode();
@@ -128,12 +128,12 @@ fn fuzz(input: FuzzInput) {
             let encoded: [u8; PrefixedU64::SIZE] = prefixed.encode_fixed();
             assert_eq!(encoded.len(), PrefixedU64::SIZE);
 
-            let decoded = PrefixedU64::decode(&encoded[..]).unwrap();
+            let decoded = PrefixedU64::decode(Copying(&encoded)).unwrap();
             assert_eq!(decoded.prefix(), prefix);
             assert_eq!(decoded.value(), value);
 
             let short_data = &encoded[..encoded.len().saturating_sub(1)];
-            assert!(PrefixedU64::decode(short_data).is_err());
+            assert!(PrefixedU64::decode(Copying(short_data)).is_err());
 
             let bytes_array: [u8; PrefixedU64::SIZE] = encoded;
             let from_array: PrefixedU64 = bytes_array.into();
@@ -184,7 +184,7 @@ fn fuzz(input: FuzzInput) {
             // `buf.remaining() < len` error path.
             let keep = 1 + (truncate as usize % (encoded.len() - 1));
             let short = &encoded[..keep];
-            assert!(VecU64::decode(short).is_err());
+            assert!(VecU64::decode(Copying(short)).is_err());
         }
     }
 }
@@ -205,11 +205,11 @@ fn test_fixed_bytes<const N: usize>(data: &[u8]) {
         let encoded: [u8; N] = fixed.encode_fixed();
         assert_eq!(encoded.len(), N);
 
-        let decoded = FixedBytes::<N>::decode(&encoded[..]).unwrap();
+        let decoded = FixedBytes::<N>::decode(Copying(&encoded)).unwrap();
         assert_eq!(fixed.as_ref(), decoded.as_ref());
 
         let short_data = &encoded[..N - 1];
-        assert!(FixedBytes::<N>::decode(short_data).is_err());
+        assert!(FixedBytes::<N>::decode(Copying(short_data)).is_err());
     }
 }
 

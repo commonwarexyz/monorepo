@@ -525,7 +525,7 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
 }
 
 pub(crate) fn mock_block_round(contents: &Bytes) -> Option<Round> {
-    <(Round, Sha256Digest, u64)>::decode(&mut contents.as_ref())
+    <(Round, Sha256Digest, u64)>::decode(contents.clone())
         .ok()
         .map(|(round, _, _)| round)
 }

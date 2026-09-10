@@ -182,7 +182,7 @@ where
                 &mut oracle,
                 validator.clone(),
                 commonware_cryptography::certificate::ConstantProvider::new(schemes[idx].clone()),
-                Start::Genesis(genesis.clone()),
+                Start::Genesis(genesis.clone().into()),
                 resolver_override,
                 DEFAULT_MAX_PENDING_ACKS,
                 None,

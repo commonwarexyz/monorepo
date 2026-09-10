@@ -70,7 +70,7 @@ fn vote_routing(message: &IoBuf) -> Routing {
 
 /// Classify a message on the certificate channel.
 fn certificate_routing(message: &IoBuf, codec: &CertificateCfg) -> Routing {
-    Certificate::<Scheme, Digest>::decode_cfg(&mut message.as_ref(), codec)
+    Certificate::<Scheme, Digest>::decode_cfg(message.clone(), codec)
         .map_or(Routing::Undecodable, |certificate| {
             Routing::Partition(certificate.view())
         })
@@ -86,12 +86,10 @@ fn simplex_resolver_routing(message: &IoBuf, codec: &CertificateCfg) -> Routing 
     };
     match message.payload {
         ResolverPayload::Request(key) => Routing::Partition(View::new(u64::from(key))),
-        ResolverPayload::Response(bytes) => {
-            Certificate::<Scheme, Digest>::decode_cfg(&mut bytes.as_ref(), codec)
-                .map_or(Routing::Undecodable, |certificate| {
-                    Routing::Partition(certificate.view())
-                })
-        }
+        ResolverPayload::Response(bytes) => Certificate::<Scheme, Digest>::decode_cfg(bytes, codec)
+            .map_or(Routing::Undecodable, |certificate| {
+                Routing::Partition(certificate.view())
+            }),
         ResolverPayload::Error => Routing::Viewless,
     }
 }

@@ -24,7 +24,7 @@
 //!   the response payload.
 
 use crate::byzzfuzz::fault::ProcessAction;
-use commonware_codec::{Decode, DecodeExt, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Read};
 use commonware_consensus::{
     Viewable,
     simplex::{
@@ -211,7 +211,7 @@ pub fn vote_view_extractor<S: Scheme<Sha256Digest>>(
     pool: Arc<crate::byzzfuzz::observed::ObservedState>,
 ) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static {
     move |bytes: &[u8]| {
-        let v = Vote::<S, Sha256Digest>::decode(bytes).ok()?;
+        let v = Vote::<S, Sha256Digest>::decode(Copying(bytes)).ok()?;
         pool.observe_vote::<S, S::PublicKey>(&v);
         Some(v.view().get())
     }
@@ -229,7 +229,7 @@ where
     <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
 {
     move |bytes: &[u8]| {
-        let c = Certificate::<S, Sha256Digest>::decode_cfg(&mut &bytes[..], &cert_codec).ok()?;
+        let c = Certificate::<S, Sha256Digest>::decode_cfg(Copying(bytes), &cert_codec).ok()?;
         pool.observe_certificate::<S, S::PublicKey>(&c);
         Some(c.view().get())
     }
@@ -250,11 +250,11 @@ pub(crate) fn observe_resolver_wire_view<S: Scheme<Sha256Digest>>(
     cert_codec: &<S::Certificate as Read>::Cfg,
     pool: &crate::byzzfuzz::observed::ObservedState,
 ) -> Option<u64> {
-    let msg = ResolverMessage::<U64>::decode(bytes).ok()?;
+    let msg = ResolverMessage::<U64>::decode(Copying(bytes)).ok()?;
     match msg.payload {
         ResolverPayload::Request(key) => Some(u64::from(key)),
         ResolverPayload::Response(b) => {
-            let c = Certificate::<S, Sha256Digest>::decode_cfg(&mut &b[..], cert_codec).ok()?;
+            let c = Certificate::<S, Sha256Digest>::decode_cfg(b, cert_codec).ok()?;
             pool.observe_certificate::<S, S::PublicKey>(&c);
             Some(c.view().get())
         }

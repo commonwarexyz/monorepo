@@ -13,7 +13,7 @@ use commonware_storage::{
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
-            ordered::{Operation, Update},
+            ordered::{Operation, Update, span_contains},
             value::FixedEncoding,
         },
         create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
@@ -457,7 +457,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             assert_eq!(update.value, Value::new(*expected_value));
                             assert_eq!(update.next_key, Key::new(*expected_next));
                             assert!(
-                                GenericDb::<F>::span_contains(&update.key, &update.next_key, &k),
+                                span_contains(&update.key, &update.next_key, &k),
                                 "returned span does not contain the requested key",
                             );
                         }

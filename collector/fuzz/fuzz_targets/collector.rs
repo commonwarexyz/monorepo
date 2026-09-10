@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, ReadRangeExt, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, ReadRangeExt, Write,
 };
 use commonware_collector::{
     Handler, Monitor, Originator,
@@ -16,7 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Blocker, CheckedSender, LimitedSender, Receiver, Recipients};
 use commonware_runtime::{
-    Buf, BufMut, Clock, Handle, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
+    BufMut, Clock, Handle, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
 };
 use commonware_utils::{
     FuzzRng,

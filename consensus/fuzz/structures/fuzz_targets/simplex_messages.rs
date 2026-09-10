@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt, Encode, EncodeSize, FixedSize, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeSize, FixedSize, Read};
 use commonware_coding::{Config as CodingConfig, ReedSolomon};
 #[cfg(feature = "mocks")]
 use commonware_consensus::simplex::mocks::scheme as simplex_certificate_mock;
@@ -197,7 +197,7 @@ enum FuzzInput {
 }
 
 fn roundtrip_vote<S: SimplexScheme<sha256::Digest>>(data: &[u8]) {
-    if let Ok(vote) = Vote::<S, sha256::Digest>::decode(data) {
+    if let Ok(vote) = Vote::<S, sha256::Digest>::decode(Copying(data)) {
         let encoded = vote.encode();
         assert_eq!(data, encoded.as_ref());
     }
@@ -209,7 +209,7 @@ fn roundtrip_certificate<S: SimplexScheme<sha256::Digest>>(
 ) where
     S::Certificate: Read,
 {
-    if let Ok(cert) = Certificate::<S, sha256::Digest>::decode_cfg(data, cfg) {
+    if let Ok(cert) = Certificate::<S, sha256::Digest>::decode_cfg(Copying(data), cfg) {
         let encoded = cert.encode();
         assert_eq!(data, encoded.as_ref());
     }
@@ -219,7 +219,7 @@ fn roundtrip_decode<T>(data: &[u8], cfg: &T::Cfg)
 where
     T: Read + Encode + EncodeSize,
 {
-    if let Ok(value) = T::decode_cfg(data, cfg) {
+    if let Ok(value) = T::decode_cfg(Copying(data), cfg) {
         let encoded = value.encode();
         assert_eq!(encoded.len(), value.encode_size());
         assert_eq!(data, encoded.as_ref());
@@ -240,7 +240,7 @@ where
 {
     let encoded = vote.encode();
     assert_eq!(encoded.len(), vote.encode_size());
-    let decoded = Vote::<S, sha256::Digest>::decode(encoded.as_ref()).expect("valid vote");
+    let decoded = Vote::<S, sha256::Digest>::decode(Copying(encoded.as_ref())).expect("valid vote");
     assert_eq!(decoded.encode(), encoded);
 }
 
@@ -251,7 +251,7 @@ where
     let encoded = certificate.encode();
     assert_eq!(encoded.len(), certificate.encode_size());
     let decoded = Certificate::<S, sha256::Digest>::decode_cfg(
-        encoded.as_ref(),
+        Copying(encoded.as_ref()),
         &scheme.certificate_codec_config(),
     )
     .expect("valid certificate");
@@ -264,7 +264,7 @@ where
 {
     let encoded = value.encode();
     assert_eq!(encoded.len(), value.encode_size());
-    let decoded = T::decode_cfg(encoded.as_ref(), cfg).expect("valid value");
+    let decoded = T::decode_cfg(Copying(encoded.as_ref()), cfg).expect("valid value");
     assert_eq!(decoded.encode(), encoded);
 }
 
@@ -296,8 +296,8 @@ where
     assert_hash(&activity);
     let encoded = activity.encode();
     assert_eq!(encoded.len(), activity.encode_size());
-    let decoded =
-        Activity::<S, sha256::Digest>::decode_cfg(encoded.as_ref(), &cfg).expect("valid activity");
+    let decoded = Activity::<S, sha256::Digest>::decode_cfg(Copying(encoded.as_ref()), &cfg)
+        .expect("valid activity");
     assert_eq!(decoded, activity);
     assert_eq!(decoded.verified(), verified);
     assert_eq!(decoded.view(), view);
@@ -314,8 +314,8 @@ where
     let epoch = artifact.epoch();
     let encoded = artifact.encode();
     assert_eq!(encoded.len(), artifact.encode_size());
-    let decoded =
-        Artifact::<S, sha256::Digest>::decode_cfg(encoded.as_ref(), &cfg).expect("valid artifact");
+    let decoded = Artifact::<S, sha256::Digest>::decode_cfg(Copying(encoded.as_ref()), &cfg)
+        .expect("valid artifact");
     assert_eq!(decoded.view(), view);
     assert_eq!(decoded.epoch(), epoch);
     assert_eq!(decoded.encode(), encoded);
@@ -334,8 +334,8 @@ fn assert_context_roundtrip(context: Context<sha256::Digest, PublicKey>) {
     let epoch = context.epoch();
     let encoded = context.encode();
     assert_eq!(encoded.len(), context.encode_size());
-    let decoded =
-        Context::<sha256::Digest, PublicKey>::decode(encoded.as_ref()).expect("valid context");
+    let decoded = Context::<sha256::Digest, PublicKey>::decode(Copying(encoded.as_ref()))
+        .expect("valid context");
     assert_eq!(decoded, context);
     assert_eq!(decoded.view(), view);
     assert_eq!(decoded.epoch(), epoch);
@@ -853,7 +853,7 @@ where
     };
     let encoded = value.encode();
     assert_eq!(encoded.len(), value.encode_size());
-    if let Ok(decoded) = T::decode_cfg(encoded.as_ref(), cfg) {
+    if let Ok(decoded) = T::decode_cfg(Copying(encoded.as_ref()), cfg) {
         assert_eq!(decoded.encode(), encoded);
     }
 }
@@ -865,9 +865,10 @@ fn assert_arbitrary_activity_value(
     assert_hash(&activity);
     let encoded = activity.encode();
     assert_eq!(encoded.len(), activity.encode_size());
-    if let Ok(decoded) =
-        Activity::<Ed25519Scheme, sha256::Digest>::decode_cfg(encoded.as_ref(), &participants)
-    {
+    if let Ok(decoded) = Activity::<Ed25519Scheme, sha256::Digest>::decode_cfg(
+        Copying(encoded.as_ref()),
+        &participants,
+    ) {
         assert_eq!(decoded, activity);
         assert_hash(&decoded);
         assert_eq!(decoded.encode(), encoded);
@@ -1070,8 +1071,8 @@ fn commitment_surface(seed: u64, data: &[u8], minimum_shards: u16, extra_shards:
     let mut rng = TestRng::new(seed);
     let commitment = TestCommitment::random(&mut rng);
     assert_eq!(commitment.as_ref().len(), TestCommitment::SIZE);
-    let decoded =
-        TestCommitment::decode(commitment.as_ref()).expect("random commitment should decode");
+    let decoded = TestCommitment::decode(Copying(commitment.as_ref()))
+        .expect("random commitment should decode");
     assert_eq!(decoded.as_ref(), commitment.as_ref());
     assert_eq!(Deref::deref(&commitment).len(), TestCommitment::SIZE);
     let _ = format!("{commitment}");
@@ -1082,7 +1083,7 @@ fn commitment_surface(seed: u64, data: &[u8], minimum_shards: u16, extra_shards:
     );
 
     let short_len = data.len() % TestCommitment::SIZE;
-    assert!(TestCommitment::decode(&data[..short_len]).is_err());
+    assert!(TestCommitment::decode(Copying(&data[..short_len])).is_err());
 
     let mut buffer = [0u8; TestCommitment::SIZE];
     for (i, byte) in buffer.iter_mut().enumerate() {
@@ -1094,7 +1095,7 @@ fn commitment_surface(seed: u64, data: &[u8], minimum_shards: u16, extra_shards:
     buffer[config_offset..config_offset + u16::SIZE].copy_from_slice(&minimum_shards.to_be_bytes());
     buffer[config_offset + u16::SIZE..config_offset + CodingConfig::SIZE]
         .copy_from_slice(&extra_shards.to_be_bytes());
-    let decoded = TestCommitment::decode(&buffer[..]);
+    let decoded = TestCommitment::decode(Copying(&buffer[..]));
     let valid = minimum_shards != 0 && extra_shards != 0;
     assert_eq!(decoded.is_ok(), valid);
     if let Ok(decoded) = decoded {
@@ -1107,7 +1108,7 @@ fn commitment_surface(seed: u64, data: &[u8], minimum_shards: u16, extra_shards:
     }
     let mut u = arbitrary::Unstructured::new(&arbitrary);
     if let Ok(commitment) = TestCommitment::arbitrary(&mut u) {
-        let decoded = TestCommitment::decode(commitment.as_ref())
+        let decoded = TestCommitment::decode(Copying(commitment.as_ref()))
             .expect("arbitrary commitment should decode");
         assert_eq!(decoded.as_ref(), commitment.as_ref());
     }

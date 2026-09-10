@@ -215,7 +215,7 @@ where
     let cfg = CodecConfig {
         maximum_shard_size: encoded.len().max(maximum_shard_size).max(1),
     };
-    let mut buf = encoded.as_ref();
+    let mut buf = encoded;
     let _ = T::read_cfg(&mut buf, &cfg);
     let _ = shard == &shard.clone();
 }

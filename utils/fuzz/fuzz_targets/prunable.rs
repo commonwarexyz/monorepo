@@ -60,9 +60,9 @@ fn check_arbitrary_bitmap<const N: usize>(prunable: &Prunable<N>) {
     assert!(prunable.pruned_bits() <= prunable.len());
     assert!(prunable.pruned_chunks() <= prunable.chunks_len());
 
-    let encoded = prunable.encode();
-    let decoded = Prunable::<N>::read_cfg(&mut encoded.as_ref(), &u64::MAX)
-        .expect("valid encode round-trips");
+    let mut encoded = prunable.encode();
+    let decoded =
+        Prunable::<N>::read_cfg(&mut encoded, &u64::MAX).expect("valid encode round-trips");
     assert_eq!(decoded.len(), prunable.len());
     assert_eq!(decoded.pruned_chunks(), prunable.pruned_chunks());
     for b in prunable.pruned_bits()..prunable.len() {
@@ -138,10 +138,10 @@ fn fuzz_with_chunk_size<const N: usize>(operations: &[Operation]) {
             }
             Operation::Codec => {
                 // write/read_cfg round-trips preserve length, pruning, and all unpruned bits.
-                let encoded = prunable.encode();
+                let mut encoded = prunable.encode();
                 assert_eq!(encoded.len(), prunable.encode_size());
-                let decoded = Prunable::<N>::read_cfg(&mut encoded.as_ref(), &u64::MAX)
-                    .expect("valid encode");
+                let decoded =
+                    Prunable::<N>::read_cfg(&mut encoded, &u64::MAX).expect("valid encode");
                 assert_eq!(decoded.len(), prunable.len());
                 assert_eq!(decoded.pruned_chunks(), prunable.pruned_chunks());
                 for b in prunable.pruned_bits()..prunable.len() {

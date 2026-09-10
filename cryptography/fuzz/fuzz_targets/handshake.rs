@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use bytes::Bytes;
-use commonware_codec::{Encode, Read};
+use commonware_codec::{Copying, Encode, Read};
 use commonware_cryptography::{
     Signer,
     ed25519::{PrivateKey, Signature as Ed25519Signature},
@@ -105,7 +105,7 @@ where
 
 fn private_key_from_bytes(bytes: &[u8; PRIVATE_KEY_SIZE]) -> Option<PrivateKey> {
     use commonware_codec::ReadExt;
-    let mut buf = bytes.as_slice();
+    let mut buf = Copying(bytes.as_slice());
     PrivateKey::read(&mut buf).ok()
 }
 

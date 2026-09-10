@@ -5,8 +5,8 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::blst_fr;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
     msm_naive,
@@ -698,10 +698,12 @@ impl Read for G {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let bytes = <[u8; 32]>::read(buf)?;
-        let mut bytes = bytes.as_ref();
-        let x = Scalar::read_cfg(&mut bytes, &ScalarReadCfg::AllowZero)
-            .map_err(|_| CodecError::Invalid("Banderwagon", "x not a canonical field element"))?;
+        let x = Scalar::read_cfg(buf, &ScalarReadCfg::AllowZero).map_err(|err| match err {
+            CodecError::Invalid(..) => {
+                CodecError::Invalid("Banderwagon", "x not a canonical field element")
+            }
+            err => err,
+        })?;
         Self::from_x(x).ok_or(CodecError::Invalid("Banderwagon", "point not in subgroup"))
     }
 }
@@ -1018,7 +1020,7 @@ impl G {
 mod tests {
     use super::*;
     use arbitrary::Unstructured;
-    use commonware_codec::{DecodeExt, Encode, EncodeFixed};
+    use commonware_codec::{Copying, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
 
     fn arbitrary_point(u: &mut Unstructured<'_>) -> arbitrary::Result<G> {
@@ -1076,8 +1078,8 @@ mod tests {
         for (i, limb) in F::R.iter().enumerate() {
             bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
         }
-        assert!(F::decode(&bytes[..]).is_err());
-        assert!(F::decode(&[0xffu8; 32][..]).is_err());
+        assert!(F::decode(Copying(&bytes)).is_err());
+        assert!(F::decode(Copying(&[0xffu8; 32])).is_err());
     }
 
     #[test]
@@ -1267,6 +1269,32 @@ mod tests {
     }
 
     #[test]
+    fn test_read_boundaries() {
+        let point = G::generator();
+        let encoded = point.encode();
+        for len in 0..G::SIZE {
+            let mut input = encoded.slice(..len);
+            assert!(matches!(G::read(&mut input), Err(CodecError::EndOfBuffer)));
+            assert_eq!(input.len(), len);
+        }
+
+        let mut input = point.encode_mut();
+        input.put_u8(42);
+        assert_eq!(G::read(&mut input).unwrap(), point);
+        assert_eq!(input.as_ref(), &[42]);
+
+        let mut input = bytes::Bytes::from_static(&[0xff; 33]);
+        assert!(matches!(
+            G::read(&mut input),
+            Err(CodecError::Invalid(
+                "Banderwagon",
+                "x not a canonical field element"
+            ))
+        ));
+        assert_eq!(input.as_ref(), &[0xff]);
+    }
+
+    #[test]
     fn test_codec_canonical_for_twin() {
         // `P` and its quotient twin `(-x, -y)` are the same group element, so
         // they must serialize to identical bytes.
@@ -1313,8 +1341,8 @@ mod tests {
             0xd8, 0x05, 0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0xff, 0xff, 0xff,
             0x00, 0x00, 0x00, 0x01,
         ];
-        assert!(G::decode(&r_bytes[..]).is_err());
-        assert!(G::decode(&[0xffu8; 32][..]).is_err());
+        assert!(G::decode(Copying(&r_bytes)).is_err());
+        assert!(G::decode(Copying(&[0xffu8; 32])).is_err());
     }
 
     #[test]
@@ -1331,7 +1359,7 @@ mod tests {
             let num = Scalar::one() - &(x_sq * &A);
             if num != Scalar::zero() && !num.is_square() {
                 let bytes = x.encode_fixed::<32>();
-                assert!(G::decode(&bytes[..]).is_err());
+                assert!(G::decode(Copying(&bytes)).is_err());
             }
             Ok(())
         });

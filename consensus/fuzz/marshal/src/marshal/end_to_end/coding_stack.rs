@@ -11,8 +11,8 @@ use super::{
     app::{BuildableBlock, DeliveryReporter},
     twins::{PublicKeyOf, SchemeOf},
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_consensus::{
     Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay,
@@ -205,7 +205,7 @@ where
     let config = Config {
         provider: provider.clone(),
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-        start: Start::Genesis(genesis),
+        start: Start::Genesis(genesis.into()),
         mailbox_size: NZUsize!(100),
         view_retention: ViewDelta::new(10),
         max_repair: NZUsize!(10),

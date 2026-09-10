@@ -232,7 +232,7 @@ where
         let scenario = scenario.clone();
         move |origin: SplitOrigin, _recipients: &Recipients<_>, message: &IoBuf| {
             let Ok(msg) =
-                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut message.as_ref(), &codec)
+                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(message.clone(), &codec)
             else {
                 return None;
             };
@@ -260,7 +260,7 @@ where
         let scenario = scenario.clone();
         move |(sender, message): &(_, IoBuf)| {
             let Ok(msg) =
-                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(&mut message.as_ref(), &codec)
+                Certificate::<P::Scheme, Sha256Digest>::decode_cfg(message.clone(), &codec)
             else {
                 return SplitTarget::None;
             };

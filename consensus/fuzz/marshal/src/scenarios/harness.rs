@@ -581,7 +581,7 @@ where
         &self,
         node: Node,
         identifier: impl Into<Identifier<Sha256Digest>>,
-    ) -> Option<B<P>> {
+    ) -> Option<Arc<B<P>>> {
         self.mailbox(node).get_block(identifier).await
     }
 

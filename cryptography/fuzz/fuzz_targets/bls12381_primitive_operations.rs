@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{Copying, Encode, EncodeSize, Read, ReadExt};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, ScalarReadCfg, Share, SmallScalar},
     ops,
@@ -388,7 +388,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
     let bytes: [u8; 48] = u.arbitrary()?;
 
-    match G1::read(&mut bytes.as_slice()) {
+    match G1::read(&mut Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => {
             if u.arbitrary()? {
@@ -403,7 +403,7 @@ fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
 fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     let bytes: [u8; 96] = u.arbitrary()?;
 
-    match G2::read(&mut bytes.as_slice()) {
+    match G2::read(&mut Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => {
             if u.arbitrary()? {
@@ -673,27 +673,21 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::SerializeScalar { scalar } => {
-            let mut encoded = Vec::new();
-            scalar.write(&mut encoded);
             if let Ok(decoded) =
-                Scalar::read_cfg(&mut encoded.as_slice(), &ScalarReadCfg::RejectZero)
+                Scalar::read_cfg(&mut scalar.encode_mut(), &ScalarReadCfg::RejectZero)
             {
                 assert_eq!(scalar, decoded);
             }
         }
 
         FuzzOperation::SerializeG1 { point } => {
-            let mut encoded = Vec::new();
-            point.write(&mut encoded);
-            if let Ok(decoded) = G1::read(&mut encoded.as_slice()) {
+            if let Ok(decoded) = G1::read(&mut point.encode_mut()) {
                 assert_eq!(point, decoded);
             }
         }
 
         FuzzOperation::SerializeG2 { point } => {
-            let mut encoded = Vec::new();
-            point.write(&mut encoded);
-            if let Ok(decoded) = G2::read(&mut encoded.as_slice()) {
+            if let Ok(decoded) = G2::read(&mut point.encode_mut()) {
                 assert_eq!(point, decoded);
             }
         }
@@ -734,18 +728,15 @@ fn fuzz(op: FuzzOperation) {
         }
 
         FuzzOperation::SerializePrivate { private } => {
-            let mut encoded = Vec::new();
-            private.write(&mut encoded);
-            let decoded = Private::read(&mut encoded.as_slice()).expect("private decodes");
+            let decoded = Private::read(&mut private.encode_mut()).expect("private decodes");
             assert_eq!(private.expose_unwrap(), decoded.expose_unwrap());
         }
 
         FuzzOperation::SerializeShare { share } => {
             let _ = format!("{share}");
-            let mut encoded = Vec::new();
-            share.write(&mut encoded);
+            let mut encoded = share.encode_mut();
             assert_eq!(share.encode_size(), encoded.len());
-            let decoded = Share::read(&mut encoded.as_slice()).expect("share decodes");
+            let decoded = Share::read(&mut encoded).expect("share decodes");
             assert_eq!(share, decoded);
         }
 

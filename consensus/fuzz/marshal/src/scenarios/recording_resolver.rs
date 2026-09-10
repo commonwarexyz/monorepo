@@ -433,7 +433,7 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                Start::Genesis(genesis.clone()),
+                Start::Genesis(genesis.clone().into()),
                 None,
                 DEFAULT_MAX_PENDING_ACKS,
                 None,

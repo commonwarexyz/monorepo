@@ -1,6 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use bytes::BytesMut;
 use commonware_codec::{Encode, Error as CodecError, RangeCfg, Read, Write};
 use commonware_utils::{
     TryFromIterator,
@@ -248,9 +249,9 @@ fn exercise_codec(mut items: Vec<u8>) {
     items.truncate(MAX_LEN);
 
     if items.is_empty() {
-        let mut buf = Vec::new();
+        let mut buf = BytesMut::new();
         Vec::<u8>::new().write(&mut buf);
-        let result = NonEmptyVec::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(..), ()));
+        let result = NonEmptyVec::<u8>::read_cfg(&mut buf, &(RangeCfg::from(..), ()));
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
@@ -262,9 +263,9 @@ fn exercise_codec(mut items: Vec<u8>) {
     }
 
     let nev = NonEmptyVec::<u8>::try_from(items.clone()).unwrap();
-    let encoded = nev.encode();
+    let mut encoded = nev.encode();
     let decoded = NonEmptyVec::<u8>::read_cfg(
-        &mut encoded.as_ref(),
+        &mut encoded,
         &(
             RangeCfg::from(NonZeroUsize::new(1).unwrap()..=NonZeroUsize::new(MAX_LEN).unwrap()),
             (),

@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use bytes::Buf;
-use commonware_codec::{Read, Write};
+use commonware_codec::{Copying, Read, Write};
 use commonware_coding::{CodecConfig, Config, ReedSolomon, Scheme};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::Sequential;
@@ -75,7 +75,7 @@ fn decode_codeword(config: &Config, codeword: &[Vec<u8>], indexes: &[u16]) {
             index.write(&mut encoded);
             proof.write(&mut encoded);
 
-            let mut buf = encoded.as_slice();
+            let mut buf = Copying(encoded.as_slice());
             let shard = RSShard::read_cfg(
                 &mut buf,
                 &CodecConfig {

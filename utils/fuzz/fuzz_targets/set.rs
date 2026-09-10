@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Encode, RangeCfg, Read};
+use commonware_codec::{Copying, Encode, RangeCfg, Read};
 use commonware_utils::{
     N3f1, TryFromIterator,
     ordered::{BiMap, Error as OrderedError, Map, Quorum, Set},
@@ -193,7 +193,7 @@ fn fuzz(input: FuzzInput) {
             // items are strictly sorted and unique.
             let encoded = items.encode();
             let cfg = (RangeCfg::from(..), ());
-            let decoded = Set::<u32>::read_cfg(&mut encoded.as_ref(), &cfg);
+            let decoded = Set::<u32>::read_cfg(&mut Copying(&encoded), &cfg);
 
             let mut sorted_unique = items.clone();
             sorted_unique.sort();
@@ -278,7 +278,7 @@ fn fuzz(input: FuzzInput) {
             payload.extend_from_slice(values.encode().as_ref());
 
             let cfg = (RangeCfg::from(..), (), ());
-            let decoded = BiMap::<u32, u64>::read_cfg(&mut payload.as_slice(), &cfg);
+            let decoded = BiMap::<u32, u64>::read_cfg(&mut Copying(&payload), &cfg);
 
             let unique_values: BTreeSet<u64> = values.iter().copied().collect();
             let has_dup_values = unique_values.len() != values.len();

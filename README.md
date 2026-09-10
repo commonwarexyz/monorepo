@@ -84,6 +84,8 @@ RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 
 The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
 
+x86-64 SIMD extensions (AVX2, AVX-512) are detected at runtime. AArch64 builds assume NEON.
+
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 
 ## Licensing

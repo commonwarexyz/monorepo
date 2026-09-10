@@ -4,7 +4,7 @@ mod common;
 
 use arbitrary::{Arbitrary, Unstructured};
 use common::{arbitrary_minpk_signature, arbitrary_minsig_signature};
-use commonware_codec::{EncodeSize, ReadExt, Write};
+use commonware_codec::{Encode, EncodeSize, ReadExt};
 use commonware_cryptography::bls12381::{
     primitives::{
         group::Private,
@@ -271,13 +271,12 @@ fn fuzz(op: FuzzOperation) {
             )
             .expect("encryption should succeed");
 
-            let mut encoded = Vec::new();
-            commonware_codec::Write::write(&ciphertext, &mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             if tamper_index < encoded.len() {
                 encoded[tamper_index] ^= tamper_value;
             }
 
-            if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded.as_slice()) {
+            if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded) {
                 let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinPk>(&signature, &tampered);
             }
@@ -304,13 +303,12 @@ fn fuzz(op: FuzzOperation) {
             )
             .expect("encryption should succeed");
 
-            let mut encoded = Vec::new();
-            commonware_codec::Write::write(&ciphertext, &mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             if tamper_index < encoded.len() {
                 encoded[tamper_index] ^= tamper_value;
             }
 
-            if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded.as_slice()) {
+            if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded) {
                 let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinSig>(&signature, &tampered);
             }
@@ -320,13 +318,9 @@ fn fuzz(op: FuzzOperation) {
             signature,
             ciphertext,
         } => {
-            let mut encoded = Vec::new();
-            ciphertext.write(&mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             assert_eq!(ciphertext.encode_size(), encoded.len());
-            assert_eq!(
-                Ciphertext::<MinPk>::read(&mut encoded.as_slice()).unwrap(),
-                ciphertext
-            );
+            assert_eq!(Ciphertext::<MinPk>::read(&mut encoded).unwrap(), ciphertext);
             let _ = decrypt::<MinPk>(&signature, &ciphertext);
         }
 
@@ -334,11 +328,10 @@ fn fuzz(op: FuzzOperation) {
             signature,
             ciphertext,
         } => {
-            let mut encoded = Vec::new();
-            ciphertext.write(&mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             assert_eq!(ciphertext.encode_size(), encoded.len());
             assert_eq!(
-                Ciphertext::<MinSig>::read(&mut encoded.as_slice()).unwrap(),
+                Ciphertext::<MinSig>::read(&mut encoded).unwrap(),
                 ciphertext
             );
             let _ = decrypt::<MinSig>(&signature, &ciphertext);

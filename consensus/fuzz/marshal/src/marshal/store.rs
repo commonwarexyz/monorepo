@@ -63,7 +63,7 @@ async fn setup_prunable_validator_cert_mock(
     let config = Config {
         provider,
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-        start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+        start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
         mailbox_size: NZUsize!(100),
         view_retention: ViewDelta::new(10),
         max_repair: NZUsize!(10),
@@ -368,7 +368,7 @@ fn make_finalization(block: &B, schemes: &[CertScheme]) -> Finalization<CertSche
     Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential).unwrap()
 }
 
-fn assert_returned_block(block: &B, returned: B, label: &str) {
+fn assert_returned_block(block: &B, returned: &B, label: &str) {
     assert_eq!(
         returned.digest(),
         block.digest(),
@@ -474,7 +474,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                         mailbox.get_block(block.height()).await
                     };
                     if let Some(returned) = returned {
-                        assert_returned_block(block, returned, "GetBlock");
+                        assert_returned_block(block, &returned, "GetBlock");
                     }
                 }
                 StoreOp::GetInfo { block_idx, latest } => {
@@ -536,7 +536,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                 }
                 StoreOp::DirectPutBlock { block_idx } => {
                     let block = canonical[block_index(block_idx)].clone();
-                    direct_blocks = StoreBlocks::put(direct_blocks, block)
+                    direct_blocks = StoreBlocks::put(direct_blocks, &block)
                         .await
                         .expect("direct block put failed");
                 }
@@ -562,7 +562,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                     }
                     .expect("direct block get failed");
                     if let Some(returned) = returned {
-                        assert_returned_block(block, returned, "DirectGetBlock");
+                        assert_returned_block(block, &returned, "DirectGetBlock");
                     }
                 }
                 StoreOp::DirectPruneBlocks { block_idx } => {
@@ -586,7 +586,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                         direct_finalizations,
                         block.height(),
                         block.digest(),
-                        finalizations[block_index(block_idx)].clone(),
+                        &finalizations[block_index(block_idx)],
                     )
                     .await
                     .expect("direct finalization put failed");

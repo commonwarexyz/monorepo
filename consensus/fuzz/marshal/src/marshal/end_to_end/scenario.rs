@@ -560,7 +560,7 @@ pub fn run_scenario<P: Simplex>(
                 &mut oracle,
                 validator.clone(),
                 provider,
-                Start::Genesis(genesis_marshal_block.clone()),
+                Start::Genesis(genesis_marshal_block.clone().into()),
                 None,
                 DEFAULT_MAX_PENDING_ACKS,
                 Some(node),

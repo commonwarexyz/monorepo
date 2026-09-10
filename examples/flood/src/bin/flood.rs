@@ -51,7 +51,7 @@ fn main() {
         .into_iter()
         .map(|host| {
             let key = from_hex(&host.name).expect("Could not parse host key");
-            let key = PublicKey::decode(key.as_ref()).expect("Peer key is invalid");
+            let key = PublicKey::decode(key).expect("Peer key is invalid");
             (key, host.ip)
         })
         .collect();
@@ -65,7 +65,7 @@ fn main() {
     // Parse config
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
+    let key = PrivateKey::decode(key).expect("Private key is invalid");
     let public_key = key.public_key();
 
     // Initialize runtime
@@ -119,7 +119,7 @@ fn main() {
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
             let key = from_hex(bootstrapper).expect("Could not parse bootstrapper key");
-            let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
+            let key = PublicKey::decode(key).expect("Bootstrapper key is invalid");
             let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)

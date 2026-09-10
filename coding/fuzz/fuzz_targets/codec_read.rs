@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::Read;
+use commonware_codec::{Copying, Read};
 use commonware_coding::{PhasedAsScheme, PhasedScheme, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
 use libfuzzer_sys::fuzz_target;
@@ -39,7 +39,7 @@ fn fuzz(input: FuzzInput) {
     };
 
     let mut arbitrary = Unstructured::new(&shard_bytes);
-    let mut buf = shard_bytes.as_slice();
+    let mut buf = Copying(shard_bytes.as_slice());
     match input.scheme {
         SchemeSelector::Zoda => {
             let _ = ZodaShard::read_cfg(&mut buf, &codec_config);

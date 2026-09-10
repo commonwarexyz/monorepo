@@ -37,8 +37,7 @@ pub fn resolver_view<P: simplex::Simplex, D: Digest>(
     match message.payload {
         ResolverPayload::Request(key) => Some(View::new(u64::from(key))),
         ResolverPayload::Response(bytes) => {
-            let certificate =
-                Certificate::<P::Scheme, D>::decode_cfg(&mut bytes.as_ref(), codec).ok()?;
+            let certificate = Certificate::<P::Scheme, D>::decode_cfg(bytes, codec).ok()?;
             Some(certificate.view())
         }
         ResolverPayload::Error => None,
@@ -77,8 +76,7 @@ pub(crate) fn certificate_forwarder<P: simplex::Simplex, D: Digest>(
 + 'static {
     let codec = scheme.certificate_codec_config();
     move |origin, _, message| {
-        let certificate =
-            Certificate::<P::Scheme, D>::decode_cfg(&mut message.as_ref(), &codec).ok()?;
+        let certificate = Certificate::<P::Scheme, D>::decode_cfg(message.clone(), &codec).ok()?;
         let (primary, secondary) =
             scenario.partitions(certificate.view(), term_length, participants.as_ref());
         match origin {
@@ -109,8 +107,7 @@ pub(crate) fn certificate_router<P: simplex::Simplex, D: Digest>(
 ) -> impl Fn(&(<P::Scheme as Verifier>::PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
     let codec = scheme.certificate_codec_config();
     move |(sender, message)| {
-        let Ok(certificate) =
-            Certificate::<P::Scheme, D>::decode_cfg(&mut message.as_ref(), &codec)
+        let Ok(certificate) = Certificate::<P::Scheme, D>::decode_cfg(message.clone(), &codec)
         else {
             return SplitTarget::None;
         };

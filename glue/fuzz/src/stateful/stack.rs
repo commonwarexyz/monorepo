@@ -319,7 +319,7 @@ async fn run_engine<A, EC, VS, CS, RS, BS, FS>(
             marshal::Config {
                 provider,
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone()),
+                start: plan.marshal_start(genesis.clone().into()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: MAILBOX_SIZE,
                 view_retention: VIEW_RETENTION,

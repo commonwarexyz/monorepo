@@ -14,7 +14,7 @@
 //! because `Stateful` panics deliberately on both.
 
 use super::{Ctx, Databases, Digest, PublicKey, Scheme, invariants::EngineObservations};
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::ancestry::Ancestry,
@@ -26,7 +26,7 @@ use commonware_glue::stateful::{
     Application, Input, Proposed,
     db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
 };
-use commonware_runtime::{Buf, BufMut, deterministic};
+use commonware_runtime::{BufMut, deterministic};
 use commonware_storage::{mmr::Location, qmdb::sync::Target};
 use commonware_utils::{FuzzRng, non_empty_range, range::NonEmptyRange};
 use futures::StreamExt;
