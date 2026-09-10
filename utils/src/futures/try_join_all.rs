@@ -1,7 +1,34 @@
 //! Concurrent collection with ordered results and prompt error propagation.
 
 use futures::{StreamExt as _, future::Either, stream::FuturesUnordered};
-use std::future::Future;
+use pin_project::pin_project;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+/// Attaches an index without an async block's extra storage for the inner future.
+#[pin_project]
+struct Indexed<F> {
+    #[pin]
+    future: F,
+    index: usize,
+}
+
+impl<F, T, E> Future for Indexed<F>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    type Output = Result<(usize, T), E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        this.future
+            .poll(cx)
+            .map(|result| result.map(|value| (*this.index, value)))
+    }
+}
 
 /// Preserves the selected size bound across upstream's repeated size-hint queries.
 struct Bounded<I> {
@@ -68,7 +95,7 @@ where
     // https://github.com/rust-lang/futures-rs/issues/2866
     let futures = futures
         .enumerate()
-        .map(|(index, future)| async move { future.await.map(|value| (index, value)) })
+        .map(|(index, future)| Indexed { index, future })
         .collect::<FuturesUnordered<_>>();
     Either::Right(async move {
         let mut futures = futures;
@@ -90,16 +117,13 @@ mod tests {
         future::{Either, ready},
         task::{ArcWake, waker},
     };
-    use pin_project::pin_project;
     use std::{
         cell::Cell,
-        pin::Pin,
         rc::Rc,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        task::{Context, Poll},
     };
 
     #[derive(Debug)]
