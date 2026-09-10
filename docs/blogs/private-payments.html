@@ -676,102 +676,112 @@ Vamsi Policharla</a></div>
         rests only on discrete log, and Poseidon over the BLS12-381
         scalar field. Both the receipt MMR opening and the nullifier
         tree have depth 40. As expected a send is cheaper than a receive
-        as it is just three commitment openings and range checks.
-        Receive is where the cost sits: the depth-40 MMR opening (40
-        hashes) and the sparse Merkle tree insertion (80 hashes) account
-        for 120 of its 123 hash evaluations. The operation-hiding
-        relation <span class="math inline">\mathcal
-        R_{\mathsf{op}}</span> is <em>not</em> the sum of the two: send
-        is structurally a sub-relation of receive, so the circuit
-        instantiates each shared gadget once and lets the branch bit
-        multiplex only the inputs, adding about 8.3K (Pedersen) or 1K
-        (Poseidon) constraints on top of receive.</p>
-        <table>
+        as it is just three commitment openings and range checks. In
+        receive, the depth-40 MMR opening (40 hashes) and the sparse
+        Merkle tree insertion (80 hashes) account for 120 of its 123
+        hash evaluations.</p>
+        <p>The operation-hiding relation <span
+        class="math inline">\mathcal R_{\mathsf{op}}</span> is
+        <em>not</em> the sum of the two as send is structurally a
+        sub-relation of receive, so the circuit instantiates each shared
+        gadget once and lets the branch bit multiplex only the inputs,
+        adding about 8.3K (Pedersen) or 1K (Poseidon) constraints on top
+        of receive.</p>
+        <table style="width:100%;">
         <colgroup>
-        <col style="width: 13%" />
-        <col style="width: 13%" />
-        <col style="width: 18%" />
-        <col style="width: 18%" />
-        <col style="width: 18%" />
-        <col style="width: 18%" />
+        <col style="width: 14%" />
+        <col style="width: 14%" />
+        <col style="width: 14%" />
+        <col style="width: 14%" />
+        <col style="width: 14%" />
+        <col style="width: 14%" />
+        <col style="width: 14%" />
         </colgroup>
         <thead>
         <tr>
-        <th style="text-align: left;">Circuit</th>
-        <th style="text-align: left;">Hash</th>
-        <th style="text-align: right;">R1CS</th>
-        <th style="text-align: right;">SR1CS</th>
-        <th style="text-align: right;">Prove</th>
-        <th style="text-align: right;">Verify</th>
+        <th style="text-align: center;">Circuit</th>
+        <th style="text-align: center;">Hash</th>
+        <th style="text-align: center;">R1CS</th>
+        <th style="text-align: center;">SR1CS</th>
+        <th style="text-align: center;">Prove<br>(1 thread)</th>
+        <th style="text-align: center;">Prove<br>(8 threads)</th>
+        <th style="text-align: center;">Verify</th>
         </tr>
         </thead>
         <tbody>
         <tr>
-        <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{send}}</span></td>
-        <td style="text-align: left;">Pedersen</td>
-        <td style="text-align: right;">16,109</td>
-        <td style="text-align: right;">32,227</td>
-        <td style="text-align: right;">0.93 s</td>
-        <td style="text-align: right;">794 <span
+        <td style="text-align: center;"><span
+        class="math inline">\mathcal R_{\mathsf{send}}</span></td>
+        <td style="text-align: center;">Pedersen</td>
+        <td style="text-align: center;">16,109</td>
+        <td style="text-align: center;">32,227</td>
+        <td style="text-align: center;">0.84 s</td>
+        <td style="text-align: center;">0.14 s</td>
+        <td style="text-align: center;">747 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
-        <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{recv}}</span></td>
-        <td style="text-align: left;">Pedersen</td>
-        <td style="text-align: right;">398,111</td>
-        <td style="text-align: right;">796,231</td>
-        <td style="text-align: right;">23.2 s</td>
-        <td style="text-align: right;">785 <span
+        <td style="text-align: center;"><span
+        class="math inline">\mathcal R_{\mathsf{recv}}</span></td>
+        <td style="text-align: center;">Pedersen</td>
+        <td style="text-align: center;">398,111</td>
+        <td style="text-align: center;">796,231</td>
+        <td style="text-align: center;">20.1 s</td>
+        <td style="text-align: center;">3.8 s</td>
+        <td style="text-align: center;">754 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
-        <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{op}}</span></td>
-        <td style="text-align: left;">Pedersen</td>
-        <td style="text-align: right;">406,460</td>
-        <td style="text-align: right;">812,931</td>
-        <td style="text-align: right;">23.2 s</td>
-        <td style="text-align: right;">785 <span
+        <td style="text-align: center;"><span
+        class="math inline">\mathcal R_{\mathsf{op}}</span></td>
+        <td style="text-align: center;">Pedersen</td>
+        <td style="text-align: center;">406,460</td>
+        <td style="text-align: center;">812,931</td>
+        <td style="text-align: center;">20.4 s</td>
+        <td style="text-align: center;">3.8 s</td>
+        <td style="text-align: center;">805 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
-        <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{send}}</span></td>
-        <td style="text-align: left;">Poseidon</td>
-        <td style="text-align: right;">1,647</td>
-        <td style="text-align: right;">3,303</td>
-        <td style="text-align: right;">0.14 s</td>
-        <td style="text-align: right;">780 <span
+        <td style="text-align: center;"><span
+        class="math inline">\mathcal R_{\mathsf{send}}</span></td>
+        <td style="text-align: center;">Poseidon</td>
+        <td style="text-align: center;">1,647</td>
+        <td style="text-align: center;">3,303</td>
+        <td style="text-align: center;">0.14 s</td>
+        <td style="text-align: center;">0.03 s</td>
+        <td style="text-align: center;">806 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
-        <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{recv}}</span></td>
-        <td style="text-align: left;">Poseidon</td>
-        <td style="text-align: right;">30,729</td>
-        <td style="text-align: right;">61,467</td>
-        <td style="text-align: right;">1.9 s</td>
-        <td style="text-align: right;">772 <span
+        <td style="text-align: center;"><span
+        class="math inline">\mathcal R_{\mathsf{recv}}</span></td>
+        <td style="text-align: center;">Poseidon</td>
+        <td style="text-align: center;">30,729</td>
+        <td style="text-align: center;">61,467</td>
+        <td style="text-align: center;">1.6 s</td>
+        <td style="text-align: center;">0.29 s</td>
+        <td style="text-align: center;">768 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
-        <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{op}}</span></td>
-        <td style="text-align: left;">Poseidon</td>
-        <td style="text-align: right;">31,706</td>
-        <td style="text-align: right;">63,423</td>
-        <td style="text-align: right;">1.9 s</td>
-        <td style="text-align: right;">779 <span
+        <td style="text-align: center;"><span
+        class="math inline">\mathcal R_{\mathsf{op}}</span></td>
+        <td style="text-align: center;">Poseidon</td>
+        <td style="text-align: center;">31,706</td>
+        <td style="text-align: center;">63,423</td>
+        <td style="text-align: center;">1.6 s</td>
+        <td style="text-align: center;">0.29 s</td>
+        <td style="text-align: center;">761 <span
         class="math inline">\mu</span>s</td>
         </tr>
         </tbody>
         </table>
-        <p>We note that the prover time can be halved by increasing the
-        proof size by 1 field element (32 bytes) to natively support
-        R1CS constraints in Pari. We also expect the number of
-        constraints to come down as we optimize our circuits.</p>
+        <p>Prover timings include witness generation time. We note that
+        the prover time can be halved by increasing the proof size by 1
+        field element (32 bytes) to natively support R1CS constraints in
+        Pari. We also expect the number of constraints to come down as
+        we optimize our circuits.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>

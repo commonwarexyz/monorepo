@@ -293,15 +293,17 @@ A prototype of our payment system where the NIZK is instantiated with [Pari + ba
 :::
 :::
 
-**Proving.** The circuits only use a collision-resistant hash function and we benchmark two instantiations: Pedersen hashes over Jubjub, whose security rests only on discrete log, and Poseidon over the BLS12-381 scalar field. Both the receipt MMR opening and the nullifier tree have depth 40. As expected a send is cheaper than a receive as it is just three commitment openings and range checks. Receive is where the cost sits: the depth-40 MMR opening (40 hashes) and the sparse Merkle tree insertion (80 hashes) account for 120 of its 123 hash evaluations. The operation-hiding relation $\mathcal R_{\mathsf{op}}$ is *not* the sum of the two: send is structurally a sub-relation of receive, so the circuit instantiates each shared gadget once and lets the branch bit multiplex only the inputs, adding about 8.3K (Pedersen) or 1K (Poseidon) constraints on top of receive.
+**Proving.** The circuits only use a collision-resistant hash function and we benchmark two instantiations: Pedersen hashes over Jubjub, whose security rests only on discrete log, and Poseidon over the BLS12-381 scalar field. Both the receipt MMR opening and the nullifier tree have depth 40. As expected a send is cheaper than a receive as it is just three commitment openings and range checks. In receive, the depth-40 MMR opening (40 hashes) and the sparse Merkle tree insertion (80 hashes) account for 120 of its 123 hash evaluations.
 
-| Circuit | Hash | R1CS | SR1CS | Prove | Verify |
-|:--|:--|---:|---:|---:|---:|
-| $\mathcal R_{\mathsf{send}}$ | Pedersen | 16,109 | 32,227 | 0.93 s | 794 $\mu$s |
-| $\mathcal R_{\mathsf{recv}}$ | Pedersen | 398,111 | 796,231 | 23.2 s | 785 $\mu$s |
-| $\mathcal R_{\mathsf{op}}$ | Pedersen | 406,460 | 812,931 | 23.2 s | 785 $\mu$s |
-| $\mathcal R_{\mathsf{send}}$ | Poseidon | 1,647 | 3,303 | 0.14 s | 780 $\mu$s |
-| $\mathcal R_{\mathsf{recv}}$ | Poseidon | 30,729 | 61,467 | 1.9 s | 772 $\mu$s |
-| $\mathcal R_{\mathsf{op}}$ | Poseidon | 31,706 | 63,423 | 1.9 s | 779 $\mu$s |
+The operation-hiding relation $\mathcal R_{\mathsf{op}}$ is *not* the sum of the two as send is structurally a sub-relation of receive, so the circuit instantiates each shared gadget once and lets the branch bit multiplex only the inputs, adding about 8.3K (Pedersen) or 1K (Poseidon) constraints on top of receive.
 
-We note that the prover time can be halved by increasing the proof size by 1 field element (32 bytes) to natively support R1CS constraints in Pari. We also expect the number of constraints to come down as we optimize our circuits.
+| Circuit | Hash | R1CS | SR1CS | Prove<br>(1 thread) | Prove<br>(8 threads) | Verify |
+|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| $\mathcal R_{\mathsf{send}}$ | Pedersen | 16,109 | 32,227 | 0.84 s | 0.14 s | 747 $\mu$s |
+| $\mathcal R_{\mathsf{recv}}$ | Pedersen | 398,111 | 796,231 | 20.1 s | 3.8 s | 754 $\mu$s |
+| $\mathcal R_{\mathsf{op}}$ | Pedersen | 406,460 | 812,931 | 20.4 s | 3.8 s | 805 $\mu$s |
+| $\mathcal R_{\mathsf{send}}$ | Poseidon | 1,647 | 3,303 | 0.14 s | 0.03 s | 806 $\mu$s |
+| $\mathcal R_{\mathsf{recv}}$ | Poseidon | 30,729 | 61,467 | 1.6 s | 0.29 s | 768 $\mu$s |
+| $\mathcal R_{\mathsf{op}}$ | Poseidon | 31,706 | 63,423 | 1.6 s | 0.29 s | 761 $\mu$s |
+
+Prover timings include witness generation time. We note that the prover time can be halved by increasing the proof size by 1 field element (32 bytes) to natively support R1CS constraints in Pari. We also expect the number of constraints to come down as we optimize our circuits.
