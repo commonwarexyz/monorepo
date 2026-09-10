@@ -700,10 +700,10 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
         let mut known = Vec::with_capacity(self.items.len());
         for (index, item) in self.items.iter().enumerate() {
             if let Artifact::DaVote(vote) = item.artifact() {
-                valid.push(scheme.precheck_da_vote(vote));
+                valid.push(scheme.precheck_da_vote(vote).then_some(None).ok_or(()));
                 continue;
             }
-            valid.push(false);
+            valid.push(Err(()));
             batched.push(index);
             artifacts.push(item.artifact().unverified());
             known.push(
@@ -723,7 +723,7 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
         let known = known.iter().map(Vec::as_slice).collect::<Vec<_>>();
         if !artifacts.is_empty() {
             for (position, verdict) in scheme
-                .verify_artifacts_with_known::<R, H, D>(rng, &artifacts, &known, strategy)
+                .verify_artifacts_expanded::<R, H, D>(rng, &artifacts, &known, strategy)
                 .into_iter()
                 .enumerate()
             {
@@ -737,29 +737,34 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
             .zip(&self.items)
             .enumerate()
             .map(|(index, (valid, item))| {
-                if !valid {
+                let Ok(expansion) = valid else {
                     return Verdict::new(item.ticket(), false);
-                }
+                };
                 match item.artifact() {
-                    Artifact::Vqc(certificate) => {
-                        validate_vqc_with_votes::<H, V, D>(certificate, scheme.codec_config())
-                            .map_or_else(
-                                |_| Verdict::new(item.ticket(), false),
-                                |validated| {
-                                    validated_vqcs.push((index, validated));
-                                    Verdict::new(item.ticket(), true)
-                                },
-                            )
-                    }
-                    Artifact::Lqc(certificate) => {
-                        validate_lqc::<H, V, D>(certificate, scheme.codec_config()).map_or_else(
-                            |_| Verdict::new(item.ticket(), false),
-                            |validated| {
-                                validated_lqcs.push((index, validated));
-                                Verdict::new(item.ticket(), true)
-                            },
-                        )
-                    }
+                    Artifact::Vqc(certificate) => validate_vqc_with_votes::<H, V, D>(
+                        certificate,
+                        scheme.codec_config(),
+                        expansion.expect("authenticated V-QC expansion"),
+                    )
+                    .map_or_else(
+                        |_| Verdict::new(item.ticket(), false),
+                        |validated| {
+                            validated_vqcs.push((index, validated));
+                            Verdict::new(item.ticket(), true)
+                        },
+                    ),
+                    Artifact::Lqc(certificate) => validate_lqc::<H, V, D>(
+                        certificate,
+                        scheme.codec_config(),
+                        expansion.expect("authenticated L-QC expansion"),
+                    )
+                    .map_or_else(
+                        |_| Verdict::new(item.ticket(), false),
+                        |validated| {
+                            validated_lqcs.push((index, validated));
+                            Verdict::new(item.ticket(), true)
+                        },
+                    ),
                     _ => Verdict::new(item.ticket(), true),
                 }
             })

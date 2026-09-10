@@ -875,7 +875,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         {
             return None;
         }
-        let transcript =
+        let (transcript, _) =
             vqc_transcript::<V, D, H>(certificate, self.codec, &self.namespace).ok()?;
         let signature = certificate.signature()?;
         self.verify_aggregate(rng, &transcript, signature, strategy)
@@ -957,8 +957,13 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             return None;
         }
 
-        let transcript =
-            lqc_transcript::<V, D, H>(certificate, self.codec, &self.namespace).ok()?;
+        let (transcript, _) = tally_transcript::<V, D, H>(
+            certificate.leader(),
+            certificate.tally(),
+            self.codec,
+            &self.namespace,
+        )
+        .ok()?;
         let signature = certificate.signature()?;
         self.verify_aggregate(rng, &transcript, signature, strategy)
             .then(|| certificate.id::<H>())
@@ -998,6 +1003,20 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         known: &[&[Verified<'_, V, D>]],
         strategy: &impl Strategy,
     ) -> Vec<bool> {
+        self.verify_artifacts_expanded::<R, H, D>(rng, artifacts, known, strategy)
+            .into_iter()
+            .map(|result| result.is_ok())
+            .collect()
+    }
+
+    /// Returns reconstructed certificate votes only for authenticated artifacts, in input order.
+    pub(crate) fn verify_artifacts_expanded<R: CryptoRng, H: Hasher<Digest = D>, D: Digest>(
+        &self,
+        rng: &mut R,
+        artifacts: &[Unverified<'_, V, D>],
+        known: &[&[Verified<'_, V, D>]],
+        strategy: &impl Strategy,
+    ) -> Vec<Result<Option<CertificateVotes<D>>, ()>> {
         // Structural checks and claim extraction run per artifact; message construction and
         // transcript reconstruction dominate, so they parallelize.
         let inputs = artifacts
@@ -1005,20 +1024,22 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             .enumerate()
             .map(|(index, artifact)| (artifact, known.get(index).copied().unwrap_or(&[])))
             .collect::<Vec<_>>();
-        let claims: Vec<Option<Vec<Claim<'_, V>>>> = strategy
-            .map_collect_vec(&inputs, |(artifact, known)| {
-                self.artifact_claims::<H, D>(artifact, known)
-            });
+        let mut claims: Vec<_> = strategy.map_collect_vec(&inputs, |(artifact, known)| {
+            self.artifact_claims::<H, D>(artifact, known)
+        });
 
-        let mut verdicts: Vec<bool> = claims.iter().map(Option::is_some).collect();
-        let claim_count = claims.iter().filter_map(Option::as_ref).map(Vec::len).sum();
+        let claim_count = claims
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(|artifact| artifact.claims.len())
+            .sum();
         let mut owners = Vec::with_capacity(claim_count);
         let mut verifier = batch::Verifier::<V>::new(claim_count);
         for (index, set) in claims.iter().enumerate() {
             let Some(set) = set else {
                 continue;
             };
-            for claim in set {
+            for claim in &set.claims {
                 owners.push(index);
                 verifier.queue(
                     claim.signature,
@@ -1031,9 +1052,12 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             }
         }
         for invalid in verifier.verify(rng, strategy) {
-            verdicts[owners[invalid]] = false;
+            claims[owners[invalid]] = None;
         }
-        verdicts
+        claims
+            .into_iter()
+            .map(|claims| claims.map(|artifact| artifact.votes).ok_or(()))
+            .collect()
     }
 
     /// Decomposes one artifact into its pairing claims, running every structural check.
@@ -1046,8 +1070,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         &'a self,
         artifact: &Unverified<'_, V, D>,
         known: &[Verified<'_, V, D>],
-    ) -> Option<Vec<Claim<'a, V>>> {
-        match artifact {
+    ) -> Option<ArtifactClaims<'a, V, D>> {
+        let claims = match artifact {
             Unverified::TransactionBlock(block) => self
                 .producer(block.header().chain().get())
                 .is_ok_and(|producer| block.signer() == producer)
@@ -1119,9 +1143,16 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 {
                     return None;
                 }
-                let transcript =
+                let (transcript, votes) =
                     vqc_transcript::<V, D, H>(certificate, self.codec, &self.namespace).ok()?;
-                self.reduced_aggregate_claim(&transcript, certificate.signature()?, known)
+                return Some(ArtifactClaims {
+                    claims: self.reduced_aggregate_claim(
+                        &transcript,
+                        certificate.signature()?,
+                        known,
+                    )?,
+                    votes: Some(votes),
+                });
             }
             Unverified::Lqc(certificate) => {
                 if self.ensure_epoch(certificate.epoch()).is_err()
@@ -1129,11 +1160,27 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
                 {
                     return None;
                 }
-                let transcript =
-                    lqc_transcript::<V, D, H>(certificate, self.codec, &self.namespace).ok()?;
-                self.reduced_aggregate_claim(&transcript, certificate.signature()?, known)
+                let (transcript, votes) = tally_transcript::<V, D, H>(
+                    certificate.leader(),
+                    certificate.tally(),
+                    self.codec,
+                    &self.namespace,
+                )
+                .ok()?;
+                return Some(ArtifactClaims {
+                    claims: self.reduced_aggregate_claim(
+                        &transcript,
+                        certificate.signature()?,
+                        known,
+                    )?,
+                    votes: Some(votes),
+                });
             }
-        }
+        }?;
+        Some(ArtifactClaims {
+            claims,
+            votes: None,
+        })
     }
 
     /// Builds the pairing claims for an aggregate transcript after discharging every term whose
@@ -1507,6 +1554,14 @@ impl<P: PublicKey, V: Variant> Epochable for Scheme<P, V> {
     }
 }
 
+/// Ephemeral transcript reconstruction. Only designated votes contribute to safe tips;
+/// conflicting votes remain evidence for the finality pool. No-votes have no vote body.
+pub(crate) struct CertificateVotes<D: Digest> {
+    pub(crate) leader: D,
+    pub(crate) designated: Vec<(Participant, VoteBody<D>)>,
+    pub(crate) conflicting: Vec<(Participant, VoteBody<D>)>,
+}
+
 type TranscriptEntry<'a> = (Participant, &'a [u8], Bytes);
 
 /// One pairing claim extracted from an artifact: `signature` covers every term.
@@ -1517,6 +1572,11 @@ type TranscriptEntry<'a> = (Participant, &'a [u8], Bytes);
 struct Claim<'a, V: Variant> {
     signature: V::Signature,
     terms: Vec<(V::Public, &'a [u8], Bytes)>,
+}
+
+struct ArtifactClaims<'a, V: Variant, D: Digest> {
+    claims: Vec<Claim<'a, V>>,
+    votes: Option<CertificateVotes<D>>,
 }
 
 fn validate_public_material<P: PublicKey, V: Variant, D: Digest>(
@@ -1643,51 +1703,49 @@ fn verify_recovered<V: Variant>(
         .is_ok()
 }
 
-fn lqc_transcript<'a, V, D, H>(
-    certificate: &Lqc<V, D>,
+fn tally_transcript<'a, V, D, H>(
+    leader: &LeaderBlock<V, D>,
+    tally: &Tally<D>,
     config: CodecConfig,
     namespace: &'a Namespace,
-) -> Result<Vec<TranscriptEntry<'a>>, Error>
+) -> Result<(Vec<TranscriptEntry<'a>>, CertificateVotes<D>), Error>
 where
     V: Variant,
     D: Digest,
     H: Hasher<Digest = D>,
 {
-    let leader = certificate.leader();
     let leader_digest = leader.digest::<H>();
+    let mut votes = CertificateVotes {
+        leader: leader_digest,
+        designated: Vec::with_capacity(tally.signers().count()),
+        conflicting: Vec::new(),
+    };
     let mut transcript = Vec::with_capacity(config.view_quorum());
-    for signer in certificate.tally().signers().iter() {
-        let body = certificate
-            .tally()
+    for signer in tally.signers().iter() {
+        let body = tally
             .vote_with_leader_digest(leader, leader_digest, signer, config)
             .map_err(|_| Error::Transcript)?;
         let subject = Subject::vote(&body);
         transcript.push((signer, subject.namespace(namespace), subject.message()));
+        votes.designated.push((signer, body));
     }
-    Ok(transcript)
+    Ok((transcript, votes))
 }
 
 fn vqc_transcript<'a, V, D, H>(
     certificate: &Vqc<V, D>,
     config: CodecConfig,
     namespace: &'a Namespace,
-) -> Result<Vec<TranscriptEntry<'a>>, Error>
+) -> Result<(Vec<TranscriptEntry<'a>>, CertificateVotes<D>), Error>
 where
     V: Variant,
     D: Digest,
     H: Hasher<Digest = D>,
 {
     let leader = certificate.leader();
-    let leader_digest = leader.digest::<H>();
-    let mut transcript = Vec::with_capacity(config.vqc_max_messages());
-    for signer in certificate.tally().signers().iter() {
-        let body = certificate
-            .tally()
-            .vote_with_leader_digest(leader, leader_digest, signer, config)
-            .map_err(|_| Error::Transcript)?;
-        let subject = Subject::vote(&body);
-        transcript.push((signer, subject.namespace(namespace), subject.message()));
-    }
+    let (mut transcript, mut votes) =
+        tally_transcript::<V, D, H>(leader, certificate.tally(), config, namespace)?;
+    let leader_digest = votes.leader;
     for signer in certificate.novoters().iter() {
         let subject = Subject::NoVote(leader.round());
         transcript.push((signer, subject.namespace(namespace), subject.message()));
@@ -1705,6 +1763,7 @@ where
             subject.namespace(namespace),
             subject.message(),
         ));
+        votes.conflicting.push((vote.signer(), body));
     }
     transcript.sort_by_key(|(signer, _, _)| *signer);
     if !(config.view_quorum()..=config.vqc_max_messages()).contains(&transcript.len())
@@ -1712,7 +1771,7 @@ where
     {
         return Err(Error::Transcript);
     }
-    Ok(transcript)
+    Ok((transcript, votes))
 }
 
 #[cfg(test)]
@@ -1722,6 +1781,9 @@ mod tests {
         Viewable,
         multimmit::{
             config::{CodecConfig, Config, Limits},
+            machine::algebra::{
+                FinalTips, VerifiedVote, validate_lqc, validate_vqc, validate_vqc_with_votes,
+            },
             types::{
                 Anchor, BlockRef, ChainId, ChainProposal, EpochGenesis, Extension, Height,
                 Position, TipRecord,
@@ -2305,6 +2367,7 @@ mod tests {
             true, false, true, false, true, false,
         ];
         assert_eq!(individual, expected, "individual verdicts changed");
+        assert_expanded_artifacts(verifier, &artifacts, &[], &expected);
         assert_eq!(
             verifier.verify_artifacts::<_, Sha256, Digest>(
                 &mut test_rng(),
@@ -2320,6 +2383,102 @@ mod tests {
             expected,
             "parallel batched verdicts diverge from individual verification"
         );
+    }
+
+    fn assert_expanded_artifacts<V: Variant>(
+        verifier: &Scheme<Ed25519PublicKey, V>,
+        artifacts: &[Unverified<'_, V, Digest>],
+        known: &[&[Verified<'_, V, Digest>]],
+        expected: &[bool],
+    ) {
+        let results = verifier.verify_artifacts_expanded::<_, Sha256, Digest>(
+            &mut test_rng(),
+            artifacts,
+            known,
+            &Sequential,
+        );
+        assert_eq!(results.len(), artifacts.len());
+        for ((artifact, result), valid) in artifacts.iter().zip(results).zip(expected) {
+            assert_eq!(result.is_ok(), *valid);
+            let Ok(expansion) = result else {
+                continue;
+            };
+            let (leader, tally) = match artifact {
+                Unverified::Vqc(certificate) => (certificate.leader(), certificate.tally()),
+                Unverified::Lqc(certificate) => (certificate.leader(), certificate.tally()),
+                _ => {
+                    assert!(expansion.is_none());
+                    continue;
+                }
+            };
+            let expansion = expansion.expect("certificate expansion");
+            assert_eq!(expansion.leader, leader.digest::<Sha256>());
+            let designated = tally
+                .signers()
+                .iter()
+                .map(|signer| {
+                    (
+                        signer,
+                        tally
+                            .vote_with_leader_digest(
+                                leader,
+                                leader.digest::<Sha256>(),
+                                signer,
+                                verifier.codec,
+                            )
+                            .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(expansion.designated, designated);
+            let mut expected_votes = designated
+                .into_iter()
+                .map(|(signer, body)| VerifiedVote::new::<Sha256>(signer, body))
+                .collect::<Vec<_>>();
+            match artifact {
+                Unverified::Vqc(certificate) => {
+                    let conflicts = certificate
+                        .conflicting_votes()
+                        .iter()
+                        .map(|vote| {
+                            (
+                                vote.signer(),
+                                vote.vote_body(leader.round(), verifier.codec).unwrap(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(expansion.conflicting, conflicts);
+                    expected_votes.extend(
+                        conflicts
+                            .into_iter()
+                            .map(|(signer, body)| VerifiedVote::new::<Sha256>(signer, body)),
+                    );
+                    let baseline =
+                        validate_vqc::<Sha256, _, _>(certificate, verifier.codec).unwrap();
+                    let mut validated = validate_vqc_with_votes::<Sha256, _, _>(
+                        certificate,
+                        verifier.codec,
+                        expansion,
+                    )
+                    .unwrap();
+                    assert_eq!(validated.take_votes(), expected_votes);
+                    assert_eq!(validated.into_parts(), baseline.into_parts());
+                }
+                Unverified::Lqc(certificate) => {
+                    assert!(expansion.conflicting.is_empty());
+                    let baseline =
+                        FinalTips::from_lqc::<Sha256, _>(certificate, verifier.codec).unwrap();
+                    let (digest, tips, votes) =
+                        validate_lqc::<Sha256, _, _>(certificate, verifier.codec, expansion)
+                            .unwrap()
+                            .into_parts();
+                    assert_eq!(digest, leader.digest::<Sha256>());
+                    assert_eq!(tips, baseline);
+                    assert_eq!(votes, expected_votes);
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]
@@ -2867,6 +3026,12 @@ mod tests {
             .assemble_vqc_preverified::<Sha256, _>(leader.clone(), &messages, &Sequential)
             .unwrap();
         assert_eq!(preverified, certificate);
+        assert_expanded_artifacts(
+            &fixture.verifier,
+            &[Unverified::Vqc(&certificate)],
+            &[],
+            &[true],
+        );
         assert_eq!(certificate.tally().signers().count(), 3);
         assert_eq!(certificate.novoters().count(), 1);
         assert_eq!(certificate.conflicting_votes().len(), 1);
@@ -2981,6 +3146,12 @@ mod tests {
                 .is_some()
         );
 
+        assert_expanded_artifacts(
+            &fixture.verifier,
+            &[Unverified::Vqc(&certificate)],
+            &[],
+            &[true],
+        );
         let encoded = certificate.encode();
         let bounds = fixture
             .codec
@@ -3299,6 +3470,7 @@ mod tests {
             &Sequential,
         );
         assert_eq!(baseline, verdicts);
+        assert_expanded_artifacts(verifier, &artifacts, &known, &verdicts);
     }
 
     /// An honest quorum must certify from shares no pairing ever touched individually.

@@ -9,6 +9,7 @@ mod tips;
 
 use crate::multimmit::{
     config::CodecConfig,
+    scheme::bls12381_threshold::CertificateVotes,
     types::{CertificateId, ChainId, LeaderBlock, Lqc, VoteBody, Vqc},
 };
 use bytes::Bytes;
@@ -117,27 +118,28 @@ where
     V: Variant,
     D: Digest,
 {
-    validate_vqc_inner::<H, V, D>(certificate, config, false)
+    validate_vqc_inner::<H, V, D>(certificate, config, None)
 }
 
-/// Validates one exact V-QC and additionally derives every attested vote with its finality
-/// evidence, so the finality pool can observe the certificate without rebuilding or hashing.
+/// Validates one exact V-QC using its authenticated transcript expansion and derives finality
+/// evidence for every attested vote. The expansion must belong to this certificate.
 pub(crate) fn validate_vqc_with_votes<H, V, D>(
     certificate: &Vqc<V, D>,
     config: CodecConfig,
+    votes: CertificateVotes<D>,
 ) -> Result<ValidatedVqc<D>, Error>
 where
     H: Hasher<Digest = D>,
     V: Variant,
     D: Digest,
 {
-    validate_vqc_inner::<H, V, D>(certificate, config, true)
+    validate_vqc_inner::<H, V, D>(certificate, config, Some(votes))
 }
 
 fn validate_vqc_inner<H, V, D>(
     certificate: &Vqc<V, D>,
     config: CodecConfig,
-    with_votes: bool,
+    votes: Option<CertificateVotes<D>>,
 ) -> Result<ValidatedVqc<D>, Error>
 where
     H: Hasher<Digest = D>,
@@ -146,15 +148,30 @@ where
 {
     let canonical = certificate.encode();
     let id = CertificateId::new(H::hash(&[canonical.as_ref()]));
-    let leader = certificate.leader().digest::<H>();
-    let tally = certificate.tally();
-    let mut expanded = Vec::with_capacity(tally.signers().count());
-    for signer in tally.signers().iter() {
-        let body = tally
-            .vote_with_leader_digest(certificate.leader(), leader, signer, config)
-            .map_err(|_| Error::Vote)?;
-        expanded.push((signer, body));
-    }
+    let with_votes = votes.is_some();
+    let CertificateVotes {
+        leader,
+        designated: expanded,
+        conflicting,
+    } = match votes {
+        Some(votes) => votes,
+        None => {
+            let leader = certificate.leader().digest::<H>();
+            let tally = certificate.tally();
+            let mut expanded = Vec::with_capacity(tally.signers().count());
+            for signer in tally.signers().iter() {
+                let body = tally
+                    .vote_with_leader_digest(certificate.leader(), leader, signer, config)
+                    .map_err(|_| Error::Vote)?;
+                expanded.push((signer, body));
+            }
+            CertificateVotes {
+                leader,
+                designated: expanded,
+                conflicting: Vec::new(),
+            }
+        }
+    };
     let (tips, _) = VqcExtraction::from_votes::<H, V>(
         certificate.leader(),
         leader,
@@ -164,18 +181,13 @@ where
     .into_parts();
     let mut votes = Vec::new();
     if with_votes {
-        votes.reserve(expanded.len() + certificate.conflicting_votes().len());
+        votes.reserve(expanded.len() + conflicting.len());
         votes.extend(
             expanded
                 .into_iter()
+                .chain(conflicting)
                 .map(|(signer, body)| VerifiedVote::new::<H>(signer, body)),
         );
-        for conflict in certificate.conflicting_votes() {
-            let body = conflict
-                .vote_body(certificate.leader().round(), config)
-                .map_err(|_| Error::Vote)?;
-            votes.push(VerifiedVote::new::<H>(conflict.signer(), body));
-        }
     }
     Ok(ValidatedVqc {
         id,
@@ -189,6 +201,7 @@ where
 pub(crate) fn validate_lqc<H, V, D>(
     certificate: &Lqc<V, D>,
     config: CodecConfig,
+    votes: CertificateVotes<D>,
 ) -> Result<ValidatedLqc<D>, Error>
 where
     H: Hasher<Digest = D>,
@@ -196,15 +209,8 @@ where
     D: Digest,
 {
     let leader = certificate.leader();
-    let leader_digest = leader.digest::<H>();
-    let tally = certificate.tally();
-    let mut expanded = Vec::with_capacity(tally.signers().count());
-    for signer in tally.signers().iter() {
-        let body = tally
-            .vote_with_leader_digest(leader, leader_digest, signer, config)
-            .map_err(|_| Error::Vote)?;
-        expanded.push((signer, body));
-    }
+    let leader_digest = votes.leader;
+    let expanded = votes.designated;
     let prepared = tips::PreparedVotes::new_with_leader_digest::<H, V, _>(
         leader,
         leader_digest,
