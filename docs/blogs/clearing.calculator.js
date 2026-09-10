@@ -2,7 +2,8 @@
 // Accounts occupy ordered ranks distributed across key-prefix slices. Sparse senders
 // occupy the first ranks and pay the last ranks; dense senders pay their next k neighbors.
 
-const RED = '#d9251c';
+const BLUE = '#2424d4';
+const GREEN = '#2f7d3d';
 const GRAY = '#666666';
 const GRID = '#e4e4e4';
 const INK = '#111111';
@@ -268,89 +269,121 @@ function injectStyles() {
       font-size: 14px;
       line-height: 1.45;
     }
-    .clearing-calculator-row {
-      align-items: center;
+    .clearing-calculator-controls {
       display: grid;
-      gap: 6px 14px;
-      grid-template-columns: 190px 1fr 230px;
-      margin: 0 0 10px;
+      gap: 18px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
-    .clearing-calculator-row label { color: ${GRAY}; }
+    .clearing-calculator-row {
+      display: grid;
+      align-content: start;
+      gap: 8px;
+      min-width: 0;
+    }
+    .clearing-calculator-row label { color: ${INK}; font-size: 13px; }
     .clearing-calculator-row .value {
-      color: ${RED};
+      color: ${BLUE};
+      font-size: 20px;
       font-weight: 700;
-      text-align: right;
       white-space: nowrap;
     }
     .clearing-calculator-row input[type="range"] {
-      accent-color: ${RED};
+      accent-color: ${BLUE};
       margin: 0;
       width: 100%;
     }
-    .clearing-calculator canvas {
-      display: block;
-      margin: 12px 0 6px;
-      width: 100%;
-    }
-    .clearing-calculator-out {
-      border-top: 1px dashed ${GRID};
+    .clearing-calculator-row .hint { color: ${GRAY}; font-size: 12px; }
+    .clearing-calculator-activity {
+      border-bottom: 1px solid ${GRID};
+      color: ${GRAY};
       display: flex;
       flex-wrap: wrap;
-      gap: 4px 22px;
-      padding: 7px 0;
+      gap: 6px 24px;
+      font-size: 12px;
+      margin: 18px 0;
+      padding-bottom: 14px;
     }
-    .clearing-calculator-out:first-of-type { border-top: 0; }
-    .clearing-calculator-out .tag {
-      color: ${RED};
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      min-width: 130px;
-      text-transform: uppercase;
+    .clearing-calculator-activity b { color: ${INK}; }
+    .clearing-calculator-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 20px;
+      font-size: 12px;
+      color: ${GRAY};
     }
-    .clearing-calculator-out.committee { border-top: 1px solid ${GRID}; }
-    .clearing-calculator-out b { color: ${INK}; font-weight: 700; }
-    .clearing-calculator-out span { color: ${GRAY}; }
-    .clearing-calculator-out details { min-width: 0; max-width: 100%; }
-    .clearing-calculator-out details[open] { flex-basis: 100%; }
-    .clearing-calculator-out summary { color: ${GRAY}; cursor: pointer; }
-    .clearing-calculator-out summary b { border-bottom: 1px dotted ${GRAY}; }
-    .clearing-calculator-card {
-      background: white;
-      border: 1px solid ${GRID};
-      border-radius: 6px;
-      margin-top: 6px;
-      max-width: 480px;
-      padding: 10px 12px 8px;
+    .clearing-calculator-legend span { display: flex; align-items: center; gap: 7px; }
+    .clearing-calculator-legend span::before {
+      content: '';
+      width: 20px;
+      border-top: 2px solid ${BLUE};
+      flex: none;
+    }
+    .clearing-calculator-legend .evidence::before { border-color: ${GREEN}; border-top-style: dashed; }
+    .clearing-calculator-legend .state::before { border-color: ${DASH}; border-top-style: dotted; }
+    .clearing-calculator canvas {
+      display: block;
+      margin-top: 12px;
       width: 100%;
     }
-    .clearing-calculator-card .title {
-      border-bottom: 1px solid ${GRID};
-      color: ${INK};
+    .clearing-calculator-axis { color: ${GRAY}; font-size: 12px; text-align: center; }
+    .clearing-calculator-panel h3 { font-size: 14px; margin: 22px 0 10px; }
+    .clearing-calculator-out {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .clearing-calculator-out details {
+      align-self: start;
+      background: #fafafa;
+      border: 1px solid #d6d6d6;
+      border-radius: 3px;
+      min-width: 0;
+      padding: 12px 14px;
+    }
+    .clearing-calculator-out summary { color: ${INK}; cursor: pointer; font-size: 13px; list-style: revert; }
+    .clearing-calculator-out summary::-webkit-details-marker { display: revert; }
+    .clearing-calculator-out summary:focus-visible { outline: 2px solid ${BLUE}; outline-offset: 5px; }
+    .clearing-calculator-out summary b {
       display: block;
+      font-size: 22px;
       font-weight: 700;
-      margin-bottom: 6px;
-      padding-bottom: 6px;
+      margin: 5px 0;
     }
-    .clearing-calculator-card .row {
-      display: flex;
-      font-variant-numeric: tabular-nums;
-      gap: 18px;
-      justify-content: space-between;
-      padding: 2px 0;
-    }
-    .clearing-calculator-card .row .term { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
-    .clearing-calculator-card .row .amount { color: ${INK}; font-weight: 700; margin-left: auto; white-space: nowrap; }
-    .clearing-calculator-card .row .share { min-width: 38px; text-align: right; }
-    .clearing-calculator-card .note {
+    .clearing-calculator-out .reader summary b { color: ${BLUE}; }
+    .clearing-calculator-out .evidence summary b { color: ${GREEN}; }
+    .clearing-calculator-out .scope {
       color: ${GRAY};
       display: block;
       font-size: 12px;
+    }
+    .clearing-calculator-card {
+      border-top: 1px solid ${GRID};
+      color: ${GRAY};
+      font-size: 12px;
+      margin-top: 12px;
+      padding-top: 10px;
+    }
+    .clearing-calculator-card .row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      font-variant-numeric: tabular-nums;
+      gap: 8px;
+      padding: 4px 0;
+    }
+    .clearing-calculator-card .row .term { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+    .clearing-calculator-card .row .amount { color: ${INK}; font-weight: 700; white-space: nowrap; }
+    .clearing-calculator-card .row .share { text-align: right; }
+    .clearing-calculator-card .note {
+      display: block;
       padding-top: 5px;
       white-space: normal;
     }
     @media (max-width: 640px) {
-      .clearing-calculator-row { grid-template-columns: 1fr; gap: 4px; }
-      .clearing-calculator-row .value { text-align: left; }
+      .clearing-calculator-controls { grid-template-columns: 1fr; gap: 16px; }
+      .clearing-calculator-row { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
+      .clearing-calculator-row .value { font-size: 17px; text-align: right; }
+      .clearing-calculator-row input, .clearing-calculator-row .hint { grid-column: 1 / -1; }
+      .clearing-calculator-out { grid-template-columns: 1fr; }
     }
   `;
   document.head.appendChild(style);
@@ -363,36 +396,33 @@ function el(tag, attrs = {}, text) {
   return node;
 }
 
-function slider(panel, id, label, min, max, step, value) {
+function slider(panel, id, label, hint, min, max, step, value) {
   const row = el('div', { class: 'clearing-calculator-row' });
   const lab = el('label', { for: id }, label);
-  const input = el('input', { type: 'range', id, min, max, step, value });
+  const input = el('input', { type: 'range', id, min, max, step, value, 'aria-describedby': `${id}-hint` });
   const out = el('span', { class: 'value' });
-  row.append(lab, input, out);
+  const help = el('span', { class: 'hint', id: `${id}-hint` }, hint);
+  row.append(lab, out, input, help);
   panel.append(row);
-  return { input, out };
+  return { input, out, help };
 }
 
-function readout(line, label, id, withCard = false) {
-  const container = el(withCard ? 'details' : 'span');
-  const summary = withCard ? el('summary') : container;
-  summary.append(document.createTextNode(`${label} `));
+function readout(line, label, scope, id, cls = '') {
+  const container = el('details', { class: cls });
+  const summary = el('summary', {}, label);
   const value = el('b', { id });
-  summary.append(value);
-  let card = null;
-  if (withCard) {
-    card = el('div', { class: 'clearing-calculator-card' });
-    container.append(summary, card);
-  }
+  const note = el('span', { class: 'scope' }, scope);
+  summary.append(value, note);
+  const card = el('div', { class: 'clearing-calculator-card' });
+  container.append(summary, card);
   line.append(container);
-  return { value, card };
+  return { value, card, note };
 }
 
-// Fills a breakdown card: the total, one row per term with its share, and an optional note.
+// Each byte component contributes one row and its share of the displayed total.
 // A row may carry its own share text instead of a percentage of the total.
 function fillCard(card, total, rows, note) {
   card.replaceChildren();
-  card.append(el('span', { class: 'title' }, bytesText(total)));
   for (const [label, amount, share] of rows) {
     const row = el('span', { class: 'row' });
     row.append(el('span', { class: 'term' }, label));
@@ -409,32 +439,41 @@ function mount(root) {
   const panel = el('div', { class: 'clearing-calculator-panel' });
   root.append(panel);
 
-  const sN = slider(panel, 'clearing-calc-n', 'accounts N', 3, Math.log10(MAX_VECTOR_LENGTH), 0.01, 6);
-  const sK = slider(panel, 'clearing-calc-k', 'mean out-degree', -3, Math.log10(maxDegree(1e6)), 0.005, 0);
-  const sV = slider(panel, 'clearing-calc-v', 'validators n', 0.602, 3.011, 0.005, 2);
+  const controls = el('div', { class: 'clearing-calculator-controls' });
+  panel.append(controls);
+  const sN = slider(controls, 'clearing-calc-n', 'Live accounts', 'Includes accounts with no activity.', 3, Math.log10(MAX_VECTOR_LENGTH), 0.01, 6);
+  const sK = slider(controls, 'clearing-calc-k', 'Recipients per account', 'Average over all live accounts.', -3, Math.log10(maxDegree(1e6)), 0.005, 0);
+  const sV = slider(controls, 'clearing-calc-v', 'Validators', '', 0.602, 3.011, 0.005, 2);
+
+  const activity = el('div', { class: 'clearing-calculator-activity' });
+  const pairs = el('span');
+  const oE = el('b', { id: 'clearing-calc-e' });
+  pairs.append(oE, document.createTextNode(' sender-recipient pairs'));
+  const accounts = el('span');
+  const oRows = el('b', { id: 'clearing-calc-rows' });
+  accounts.append(oRows, document.createTextNode(' accounts with activity'));
+  activity.append(pairs, accounts);
+  panel.append(activity);
+
+  const legend = el('div', { class: 'clearing-calculator-legend' });
+  const stateReference = el('span', { class: 'state' });
+  legend.append(el('span', {}, 'Reader download'), el('span', { class: 'evidence' }, 'Evidence for all slices'), stateReference);
+  panel.append(legend);
 
   const canvas = el('canvas', {
     height: '360',
     role: 'img',
-    'aria-label':
-      'Log-log comparison of the posted close, dealt corpus, and retained live-state tree as mean out-degree changes.',
   });
-  panel.append(canvas);
+  panel.append(canvas, el('div', { class: 'clearing-calculator-axis' }, 'Recipients per live account (average)'));
 
-  const line = (tag, cls) => {
-    const out = el('div', { class: `clearing-calculator-out${cls ? ` ${cls}` : ''}` });
-    out.append(el('span', { class: 'tag' }, tag));
-    panel.append(out);
-    return out;
-  };
-  const perClose = line('per close');
-  const oCertified = readout(perClose, 'posted', 'clearing-calc-certified', true);
-  const oDealt = readout(perClose, 'dealt', 'clearing-calc-dealt', true);
-  const oE = readout(perClose, 'edges', 'clearing-calc-e').value;
-  const oRows = readout(perClose, 'rows', 'clearing-calc-rows').value;
-  const perCommittee = line('per committee', 'committee');
-  const oBusiest = readout(perCommittee, 'busiest dealing', 'clearing-calc-busiest', true);
-  const oEgress = readout(perCommittee, 'operator egress', 'clearing-calc-egress', true);
+  const perClose = el('div', { class: 'clearing-calculator-out' });
+  panel.append(el('h3', {}, 'Data for one close'), perClose);
+  const oPosted = readout(perClose, 'Reader download', 'One reader holding the previous state.', 'clearing-calc-certified', 'reader');
+  const oDealt = readout(perClose, 'Evidence for all slices', 'Each slice once, with its own proof.', 'clearing-calc-dealt', 'evidence');
+  const perCommittee = el('div', { class: 'clearing-calculator-out' });
+  panel.append(el('h3', {}, 'Validator traffic per close'), perCommittee);
+  const oBusiest = readout(perCommittee, 'Largest validator download', 'Maximum received by one validator.', 'clearing-calc-busiest');
+  const oEgress = readout(perCommittee, 'Total sent to validators', '', 'clearing-calc-egress');
 
   // Committee sizes snap to n = 3f + 1.
   const curV = () => {
@@ -451,9 +490,11 @@ function mount(root) {
     const sc = scenario(N, Math.pow(10, parseFloat(sK.input.value)), V.slices);
     const K = sc.E / N;
     const st = stateBmt(N);
-    sN.out.textContent = `${count(N)}  (state ${bytesText(st)})`;
-    sK.out.textContent = `${Number(K.toPrecision(3))}  (E = ${count(sc.E)})`;
-    sV.out.textContent = `${count(V.n)}  (q = ${count(V.q)}, S = ${count(V.slices)})`;
+    sN.out.textContent = count(N);
+    sK.out.textContent = Number(K.toPrecision(3));
+    sV.out.textContent = count(V.n);
+    sV.help.textContent = `${count(V.q)} holders per slice; ${count(V.slices)} slices.`;
+    stateReference.textContent = `Stored account tree: ${bytesText(st)}`;
     for (const s of [sN, sK, sV]) s.input.setAttribute('aria-valuetext', s.out.textContent);
 
     const postedParts = certified(sc);
@@ -461,35 +502,34 @@ function mount(root) {
     const posted = byteSize(postedParts);
     const dt = byteSize(dealtParts);
     const cm = committee(sc, V.n, V.q);
-    oCertified.value.textContent = bytesText(posted);
+    oPosted.value.textContent = bytesText(posted);
     oDealt.value.textContent = bytesText(dt);
     oE.textContent = count(sc.E);
     oRows.textContent = count(sc.A);
     oBusiest.value.textContent = bytesText(cm.busiest);
     oEgress.value.textContent = bytesText(cm.egress);
+    oEgress.note.textContent = `Across ${count(V.n)} validators, including replicas.`;
+    canvas.setAttribute('aria-label', `Logarithmic size comparison as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))}, the reader download is ${bytesText(posted)} and evidence for all slices is ${bytesText(dt)}. The stored account tree is ${bytesText(st)}.`);
 
-    fillCard(oCertified.card, posted, [
-      ['header + root bundle', postedParts.fixed],
-      ['rows (rank gap, seq, signature)', postedParts.rows],
-      ['outgoing vectors (lengths + entries)', postedParts.vectors],
-      ['per-slice operator aggregates', postedParts.aggregates],
+    fillCard(oPosted.card, posted, [
+      ['Header and roots', postedParts.fixed],
+      ['Account updates', postedParts.rows],
+      ['Recipient entries', postedParts.vectors],
+      ['Operator signatures', postedParts.aggregates],
     ]);
     fillCard(oDealt.card, dt, [
-      ['rows (rank gap, seq, signature)', dealtParts.rows],
-      ['outgoing entries', dealtParts.entries],
-      ['transpose groups + entries', dealtParts.transpose],
-      ['operator aggregates', dealtParts.aggregates],
-      ['witness (header, boundaries, accumulators, openings, guards)',
+      ['Account updates', dealtParts.rows],
+      ['Sender entries', dealtParts.entries],
+      ['Recipient entries', dealtParts.transpose],
+      ['Operator signatures', dealtParts.aggregates],
+      ['Slice proofs',
         dealtParts.fixed + dealtParts.boundaries + dealtParts.starts + dealtParts.openings + dealtParts.guards],
-    ], 'every slice once; states, prefixes, and endpoint bodies are derived from the retained interval');
-    fillCard(oBusiest.card, cm.busiest, [
-      ['dealt corpus', dt, ''],
-      ['busiest validator share', `x ${(cm.busiest / dt).toPrecision(2)}`, ''],
-    ], `each slice has ${count(V.q)} of ${count(V.n)} validators; each validator holds one or two spans`);
+    ], 'One copy of each slice. Full states and other derivable fields are reconstructed from retained state.');
+    oBusiest.card.textContent = `The largest of ${count(V.n)} validator downloads. Adjacent slices share a proof; each validator receives one or two spans. Each slice goes to ${count(V.q)} validators.`;
     fillCard(oEgress.card, cm.egress, [
-      ['mean dealing', cm.egress / V.n, ''],
-      ['one per validator', `x ${count(V.n)}`, ''],
-    ], 'every slice lands on q validators; each span carries one witness');
+      ['Average per validator', cm.egress / V.n, ''],
+      ['Validators', count(V.n), ''],
+    ], 'Average download multiplied by validator count. Counts evidence delivery; excludes transport overhead and other protocol messages.');
 
     const w = canvas.clientWidth || 840;
     const h = Math.max(240, Math.round(w * 0.42));
@@ -504,7 +544,7 @@ function mount(root) {
     const L = 64;
     const R = 16;
     const T = 16;
-    const Bm = 38;
+    const Bm = 26;
     const pw = w - L - R;
     const ph = h - T - Bm;
     const kMin = 0.001;
@@ -560,9 +600,6 @@ function mount(root) {
       g.textBaseline = 'top';
       g.fillText(String(kt), xx, T + ph + 8);
     }
-    g.textAlign = 'center';
-    g.fillText('mean out-degree', L + pw / 2, T + ph + 23);
-
     const trace = (vals) => {
       g.beginPath();
       for (let j = 0; j <= STEPS; j += 1) {
@@ -573,34 +610,20 @@ function mount(root) {
     };
     const ySt = Y(st);
     g.strokeStyle = DASH;
-    g.setLineDash([5, 4]);
+    g.setLineDash([2, 4]);
     g.lineWidth = 1.5;
     g.beginPath();
     g.moveTo(L, ySt);
     g.lineTo(w - R, ySt);
     g.stroke();
-    g.setLineDash([]);
-    g.strokeStyle = INK;
-    g.lineWidth = 1.6;
+    g.setLineDash([6, 3]);
+    g.strokeStyle = GREEN;
+    g.lineWidth = 2;
     trace(dv);
-    g.strokeStyle = RED;
+    g.setLineDash([]);
+    g.strokeStyle = BLUE;
     g.lineWidth = 2.2;
     trace(cv);
-
-    const labels = [
-      { y: Y(dv[STEPS]), text: 'dealt', color: INK },
-      { y: ySt, text: 'state', color: GRAY },
-      { y: Y(cv[STEPS]), text: 'posted', color: RED },
-    ].sort((a, b) => a.y - b.y);
-    for (let i = 1; i < labels.length; i += 1) {
-      if (labels[i].y - labels[i - 1].y < 14) labels[i].y = labels[i - 1].y + 14;
-    }
-    g.textAlign = 'right';
-    g.textBaseline = 'bottom';
-    for (const label of labels) {
-      g.fillStyle = label.color;
-      g.fillText(label.text, w - R - 4, label.y - 3);
-    }
 
     const cx = X(Math.max(kMin, Math.min(kMax, K)));
     g.strokeStyle = GRAY;
@@ -610,21 +633,17 @@ function mount(root) {
     g.lineTo(cx, T + ph);
     g.stroke();
     g.setLineDash([]);
-    g.fillStyle = INK;
+    g.fillStyle = GREEN;
     g.beginPath();
     g.arc(cx, Y(dt), 3, 0, 7);
     g.fill();
-    g.fillStyle = RED;
+    g.fillStyle = BLUE;
     g.strokeStyle = 'white';
     g.lineWidth = 2;
     g.beginPath();
     g.arc(cx, Y(posted), 4.5, 0, 7);
     g.fill();
     g.stroke();
-    g.fillStyle = RED;
-    g.textBaseline = Y(posted) < T + 24 ? 'top' : 'bottom';
-    g.textAlign = cx > w - 130 ? 'right' : 'left';
-    g.fillText(bytesText(posted), cx + (cx > w - 130 ? -8 : 8), Y(posted) + (Y(posted) < T + 24 ? 8 : -8));
   }
 
   for (const s of [sN, sK, sV]) s.input.addEventListener('input', draw);
