@@ -255,6 +255,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 }
             }
 
+            // Decode the frame length through the concrete buffer so its varint reads can be
+            // specialized. Keep the initial byte count for classifying a failed header read.
             let before_remaining = self.replay.remaining();
             let (item_size, varint_len) = match self.replay.read_length() {
                 Ok(result) => result,
@@ -300,6 +302,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             };
             let item_len = next_offset - self.offset;
 
+            // The header is consumed; bound decoding to this frame's payload. Use the concrete
+            // buffer so the compiler can specialize the field reads.
             match self
                 .replay
                 .decode::<V>(item_size, &self.codec_config, self.compressed)
