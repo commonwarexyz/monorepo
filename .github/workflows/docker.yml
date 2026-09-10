@@ -27,6 +27,7 @@ jobs:
     name: Prepare Bake
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     outputs:
       matrix: ${{ steps.platforms.outputs.matrix }}
@@ -34,6 +35,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Specify Target
         id: target-spec
         env:
@@ -80,6 +83,7 @@ jobs:
     name: Build Image (${{ needs.prepare.outputs.target }} - ${{ matrix.platform }})
     runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'ubuntu-22.04-arm' }}
     permissions:
+      contents: read
       packages: write
     needs:
       - prepare
@@ -88,10 +92,17 @@ jobs:
       matrix:
         platform: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           large-packages: false
+          swap-storage: false
       - name: Prepare
         run: |
           platform=${{ matrix.platform }}
@@ -138,11 +149,18 @@ jobs:
     name: Publish Manifest (${{ needs.prepare.outputs.target }})
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
     needs:
       - build
       - prepare
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Download meta bake definition
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:

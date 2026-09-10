@@ -16,7 +16,7 @@ runs:
         haskell: true
         large-packages: false
         docker-images: true
-        swap-storage: true
+        swap-storage: false
 
     # macOS Cleanup
     - name: Cleanup (macOS)
@@ -33,29 +33,6 @@ runs:
         sudo rm -rf /usr/local/.ghcup || true
         sudo rm -rf ~/Library/Android/sdk || true
         sudo rm -rf ~/Library/Caches || true
-
-    - name: Configure swap (Linux)
-      shell: bash
-      if: runner.os == 'Linux'
-      run: |
-        sudo swapoff -a
-        sudo fallocate -l 8G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        sudo swapon --show
-
-    # macOS manages swap dynamically via dynamic_pager; ensure it is running and report state.
-    - name: Configure swap (macOS)
-      shell: bash
-      if: runner.os == 'macOS'
-      run: |
-        set -euxo pipefail
-        sudo mkdir -p /private/var/vm
-        if ! pgrep -x dynamic_pager >/dev/null; then
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
-        fi
-        sysctl vm.swapusage || true
 
     - name: Show disk free (after)
       shell: bash

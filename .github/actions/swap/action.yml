@@ -1,0 +1,31 @@
+name: Configure Swap
+description: Enable swap so memory pressure can spill to disk.
+runs:
+  using: composite
+  steps:
+    # Grow swap on demand on the same volume used for Cargo builds.
+    - name: Configure swap (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends swapspace
+        sudo install -d -m 700 /mnt/swapspace
+        echo 'swappath="/mnt/swapspace"' | sudo tee /etc/swapspace.conf
+        sudo systemctl restart swapspace
+        sudo systemctl is-active swapspace
+        sudo sysctl -w vm.swappiness=60
+        sudo swapon --show
+        free -h
+
+    # macOS manages swap dynamically via dynamic_pager.
+    - name: Configure swap (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        sudo mkdir -p /private/var/vm
+        if ! pgrep -x dynamic_pager >/dev/null; then
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
+        fi
+        sysctl vm.swapusage || true
