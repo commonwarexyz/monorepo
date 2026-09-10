@@ -168,6 +168,10 @@ O’Grady</a></div>
             height: auto;
             width: 100%;
           }
+          .clearing-ring-assignment {
+            max-width: 440px;
+            margin: 0 auto;
+          }
           .clearing-benchmark-table {
             overflow-x: auto;
           }
@@ -248,17 +252,18 @@ O’Grady</a></div>
             }
           </style>
         </noscript>
-        <div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated message-sequence timeline of one accepted payment, with rows for payer a, the operator, and recipient b, and time measured in message delays. Payer a signs endpoint S paying b 20 and sends it to the operator. At one instant, with no network hop, the operator verifies S, commits atomically, moving a from 100 to 80 and the a-to-b vector entry from (0,0) to (20,1), and then countersigns acknowledgment R. The response returns to a, which retains R with the entry opening and forwards that entry receipt directly to recipient b with no operator hop.">
-          <noscript>Account a sends one signed vector endpoint to one operator and receives one countersigned response. Verification, atomic storage, and countersigning are local operator steps, and the payment is accepted at the operator's commit while the response is still in flight. Afterward, a gives the acknowledgment and its entry opening directly to b without another operator hop.</noscript>
+        <div id="clearing-fig-payment" class="clearing-loop" role="img" aria-label="Animated payment timeline with payer a, the operator, and recipient b. Payer a sends S paying b 20. The operator locally verifies, commits a's balance from 100 to 80 and the a-to-b entry from (0,0) to (20,1), then countersigns R. The receipt, R plus an entry opening, returns to a in two message delays. The payer verifies and retains it before forwarding it to b in a third delay. An optional dotted operator push delivers the same receipt directly to b in two delays.">
+          <noscript>The operator verifies, commits, and countersigns locally. Its receipt returns to payer a in two message delays. The payer verifies and retains it before forwarding it to b in a third delay. The operator may also push the same receipt directly to b, arriving in two delays.</noscript>
         </div>
         <script type="module" src="clearing.loops.js"></script>
         <div class="image-caption">
-        <p>Figure 1: Verification, acceptance, and signing happen
-        locally at the operator. The payer receives and retains the
-        acknowledgment plus the recipient’s proof before forwarding the
-        receipt. The entry’s pair tracks total amount and payment count:
-        this payment changes <span class="math inline">(0,0)</span> to
-        <span class="math inline">(20,1)</span>.</p>
+        <p>Figure 1: The operator verifies, commits, and countersigns
+        locally. The payer verifies and retains the receipt before
+        forwarding it. The dotted path is an optional operator push that
+        reaches the recipient one hop earlier. The entry records total
+        amount and payment count, changing <span
+        class="math inline">(0,0)</span> to <span
+        class="math inline">(20,1)</span>.</p>
         </div>
         <p>An epoch groups accepted payments into a close, the
         settlement package the operator builds when that epoch ends. The
@@ -433,10 +438,9 @@ O’Grady</a></div>
         must consume exactly. An accepted registration is one immutable
         admission obligation. Construction, certification, and admission
         may retry against it through the inclusive deadline, but the
-        first later observation permanently faults the deployment. The
-        <span class="math inline">\mathsf{OPEN}</span> registration slot
-        has no heartbeat. A successor epoch can be registered and
-        prepared while its predecessor remains challengeable.</p>
+        first later observation permanently faults the deployment. A
+        successor epoch can be registered and prepared while its
+        predecessor remains challengeable.</p>
         <p>Admission checks the certificate over the close’s 32-byte
         commitment, consuming a 164-byte root bundle and one compact
         terminal proof as witness data, then places the close in a FIFO
@@ -533,9 +537,8 @@ O’Grady</a></div>
         class="math inline">d</span> at <span
         class="math inline">35-5-6+7=31</span>. Gross debit equals gross
         credit at <span class="math inline">20+12+7+5+4+6=54</span>, and
-        the balances still sum to 200. That is all the payments add to
-        the close: not six payments, but the four accounts they changed,
-        one row each.</p>
+        the balances still sum to 200. The six payments change four
+        account rows, one per account.</p>
         <p><span class="math inline">a</span>’s persistent state <span
         class="math inline">X_a</span> is a balance <span
         class="math inline">B_a</span>, a cumulative debit <span
@@ -668,9 +671,8 @@ O’Grady</a></div>
         X_e=((a,100),(b,40),(c,25),(d,35))</span> and <span
         class="math inline">\mathbf
         X_{e+1}=((a,85),(b,58),(c,26),(d,31))</span>.</p>
-        <p>At a close, the operator merges the changed rows with the
-        unchanged live leaves and rebuilds both state BMTs from the
-        resulting ordered streams:</p>
+        <p>The changed rows and unchanged live leaves partition the two
+        states:</p>
         <p><span class="math display">
         \begin{aligned}
         \mathbf
@@ -681,9 +683,10 @@ O’Grady</a></div>
         A_e,\ B_a^1&gt;0}\bigr).
         \end{aligned}
         </span></p>
-        <p>Both roots are rebuilt fresh rather than maintained as a
-        versioned authenticated trie, a trade weighed at the end of the
-        post.</p>
+        <p>The operator reuses the predecessor-state proof cache and
+        builds the full successor BMT from the ordered leaves.
+        Full-corpus validation independently reconstructs both
+        trees.</p>
         <p>Beside the two state roots, the close commits one compact
         guard per row under <span
         class="math inline">\mathsf{ChangeRoot}_e</span>. Challenges and
@@ -821,17 +824,11 @@ O’Grady</a></div>
         validator’s assigned slices therefore form at most two
         contiguous spans, and the accumulator start states and range
         openings travel once per span rather than once per slice.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-ring-assignment.svg" alt="Left: sixteen validators on a ring with three quorum windows of eleven drawn as arcs for slices 0, 5, and 10; each window starts one validator later than the previous slice's. Right: a grid of slices against validators in which every column has eleven holders and every row is one contiguous span, or two when the window wraps past the last slice.">
+        <img class="clearing-benchmark-plot clearing-ring-assignment" src="/imgs/clearing-ring-assignment.svg" alt="Four validators on a ring. Slice 1 is held by validators 1, 2, and 3; slice 2 shifts the window to 2, 3, and 0. Below, a four-by-four assignment grid shows three holders per slice. Validators 0 and 1 hold two spans of slices at the wrap; validators 2 and 3 hold one span.">
         <div class="image-caption">
-        <p>Figure 3: Slice holders slide around the validator ring. With
-        <span class="math inline">n=S=16</span> validators and a quorum
-        of <span class="math inline">q=11</span>, slice <span
-        class="math inline">s</span> is held by the eleven validators
-        starting at <span class="math inline">\lfloor 16s/16\rfloor =
-        s</span>, so consecutive slices share most of their holders
-        (left). Seen per validator (right), every row is one contiguous
-        span of slices, or two when the window wraps past the last
-        slice, and every column still has exactly eleven holders.</p>
+        <p>Figure 3: With four validators and four slices, each slice
+        has three holders. Sliding the holder window gives each
+        validator one contiguous span of slices, or two at the wrap.</p>
         </div>
         <p>Sealing is not a totals-only check. A validator authenticates
         every assigned span: the coverage and state ranges in its
@@ -1066,13 +1063,10 @@ O’Grady</a></div>
         the same way: each recipient presents its <span
         class="math inline">\{\mathsf{account},\mathsf{ChangeValue}\}</span>
         projection and <span
-        class="math inline">\mathsf{ChangeRoot}_e</span> opening. The
-        chain keys replay protection by claim kind, finalized batch, and
-        position in the corresponding tree, so neither finalization nor
-        an individual claim needs a global recipient list or all-payout
-        multiproof, and no post-deadline crank fans payments out.
-        Withdrawal claim size is the destination plus the amount and one
-        logarithmic opening, measured below.</p>
+        class="math inline">\mathsf{ChangeRoot}_e</span> opening. Each
+        output can be claimed only once. Withdrawal claim size is the
+        destination plus the amount and one logarithmic opening,
+        measured below.</p>
         <p>What makes the exit credible is that custody never leaves the
         chain early. Let <span class="math inline">R_z</span> be the
         reserve for finalized but unclaimed withdrawals and external
@@ -1166,24 +1160,12 @@ O’Grady</a></div>
         a varint boundary. Every fixture send is a batch of one entry.
         Each additional recipient adds a 48-byte committed vector entry
         and its transpose image to the evidence.</p>
-        <p>Each stage is measured independently and follows the
-        pipeline: the operator prepares the roots and deals the evidence
-        into slices, each validator seals its dealing by checking and
-        retaining its slices before signing the commitment, and a holder
-        with evidence of fraud disputes the certified commitment with a
-        challenge the chain checks. The fixture builds the
-        predecessor-state proof cache before measurement. Prepare builds
-        the change, withdrawal-output, successor-state, coverage, and
-        transpose roots from the close inputs, reusing that cache. Deal
-        produces every validator’s dealing: each slice’s rows, entries,
-        and transpose entries are encoded once as a chunk, and each
-        span’s dealing is a small witness plus references to its chunks,
-        so the measured time covers every chunk and every witness. Seal
-        checks and retains the busiest validator’s dealing, verifies
-        each slice’s operator aggregate, checks the distinct payer
-        authorizations in one randomized batch, and signs the
-        commitment. Percentages in the certification rows are relative
-        to the proof-slice corpus.</p>
+        <p>Stages are measured independently. Prepare reuses the
+        predecessor-state proof cache, built beforehand, to construct
+        the close’s new roots. Deal constructs the dealings for the
+        whole committee. Seal verifies and retains the busiest
+        validator’s dealing and signs the commitment. Percentages in the
+        certification rows are relative to the proof-slice corpus.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -1393,17 +1375,14 @@ O’Grady</a></div>
         use rounded table values and hold integer widths fixed. The
         external certified package stays 101 bytes across profiles.</p>
         </div>
-        <p>In these one-entry fixtures, higher-acknowledged-debit and
-        higher-acknowledged-entry challenges grow with the changed-row
-        lookup depth: 620 to 940 and 671 to 991 bytes, checking in 0.217
-        to 0.221 ms. A higher-entry challenge also authenticates the
-        retained entry and, when present, its public terminal entry.
-        Those openings grow logarithmically with their respective
-        recipient vectors; neither requires shipping a whole batch. An
-        acknowledgment fork needs two countersigned endpoints and no
-        state opening, so it stays at 417 bytes and checks in 0.212 to
-        0.216 ms. Clean closes submit no challenge, and adjudication
-        reuses the certificate check performed at admission.</p>
+        <p>In these one-entry fixtures, debit and entry challenges grow
+        with the changed-row lookup depth. An entry challenge also
+        authenticates the retained entry and, when present, its public
+        terminal entry. Those openings grow logarithmically with their
+        respective recipient vectors. A fork needs two countersigned
+        bodies and no state opening. Clean closes submit no challenge,
+        and adjudication reuses the certificate check performed at
+        admission.</p>
         <p>Withdrawal claims scale with the claimed close’s own
         withdrawal count <span class="math inline">W</span>, never <span
         class="math inline">N</span>, because each opens only that
@@ -1462,13 +1441,7 @@ O’Grady</a></div>
         <p>Repeated payments between those pairs update the existing
         entries without adding rows or entries. Their encoded integers
         can grow wider as amounts and counts increase, so a fixed record
-        count does not mean a fixed byte count. The <a
-        href="https://github.com/commonwarexyz/monorepo/pull/4664">implementation
-        in #4664</a> also distinguishes the full authenticated corpus
-        from the posted close: unchanged state and the transpose remain
-        part of the corpus, while readers of the posted close
-        reconstruct them from their prior state and the posted
-        vectors.</p>
+        count does not mean a fixed byte count.</p>
         <p>Figure 6 estimates the operator’s data sent to validators for
         one close. A dealing contains the account changes, cumulative
         payment entries, and proofs a validator needs for its assigned
@@ -1516,13 +1489,6 @@ O’Grady</a></div>
         repeated delivery of slices shared by several validators. They
         exclude transport overhead and other protocol messages.</p>
         </details>
-        <p>Both state roots are rebuilt from ordered streams, so an
-        existing ordered database can supply their leaves. Root-only
-        construction streams bounded subtrees through parallel hashing
-        workers, holding one subtree’s buffers plus a logarithmic
-        frontier. Proof-producing assembly retains the Merkle levels
-        needed for slice openings. These builders do not maintain
-        durable authenticated paths for every pending root.</p>
         <p>A preconfirmation cannot arrive in less than one round trip
         to the operator that serializes spending, and a close cannot
         quietly drop a payment: it must agree with every acknowledgment

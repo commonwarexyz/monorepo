@@ -518,6 +518,19 @@ function buildPaymentMinimal(mount) {
     labelSize: 13.5,
   });
 
+  const push = s.arrow(xOf(1) + 8, OP_Y + 10, xOf(2) - 8, RCPT_Y - 10, {
+    at: 2.55,
+    duration: 1.05,
+    style: 'ctl',
+    label: 'optional push',
+    labelX: xOf(1.6),
+    labelY: RCPT_Y - 75,
+    labelAnchor: 'start',
+    labelSize: 13,
+  });
+  push.line.setAttribute('stroke-dasharray', '3 7');
+  s.pair(xOf(2), RCPT_Y, { at: 3.65 });
+
   s.pair(xOf(2), PAYER_Y, {
     at: 3.65,
     retained: true,
