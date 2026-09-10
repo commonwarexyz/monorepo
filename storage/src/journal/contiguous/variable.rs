@@ -723,6 +723,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             group_start = group_end;
         }
 
+        // Avoid `try_join_all`: its ordered collector can hide errors behind pending reads.
+        // Restore completed runs to their requested slots without delaying error delivery.
         let mut reads = runs
             .into_iter()
             .map(|(run_start, run_end, blob, handle)| async move {

@@ -696,7 +696,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
-        // Observe errors in completion order while keeping the family's pinned-node order.
+        // Avoid `try_join_all`: its ordered collector can hide errors behind pending reads.
+        // Track indices to preserve the family's pinned-node order without delaying errors.
         let mut reads = F::nodes_to_pin(loc)
             .enumerate()
             .map(|(index, p)| async move {

@@ -339,7 +339,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         )
         .await?;
 
-        // Observe errors in completion order while keeping operations in location order.
+        // Avoid `try_join_all`: its ordered collector can hide errors behind pending reads.
+        // Track indices to preserve location order without delaying error delivery.
         let futures = (*request.start_loc..*end_loc)
             .enumerate()
             .map(|(index, loc)| async move { log.read(loc).await.map(|op| (index, op)) });
