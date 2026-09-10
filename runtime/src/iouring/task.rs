@@ -13,7 +13,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    runtime,
+    runtime::Local,
     slab::{Id, Slab},
 };
 use std::{
@@ -54,7 +54,7 @@ impl Wake for TaskWaker {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        if let Some(local) = runtime::owner(&self.mailbox) {
+        if let Some(local) = Local::owner(&self.mailbox) {
             let mut local = local.borrow_mut();
 
             // Local wakes update readiness without a mailbox round trip.
@@ -153,7 +153,7 @@ impl Tasks {
     ///
     /// This does not reserve a place. Registration checks again after construction.
     pub fn is_open(mailbox: &Weak<Mailbox>) -> bool {
-        if let Some(local) = runtime::owner(mailbox) {
+        if let Some(local) = Local::owner(mailbox) {
             // The owning thread can check closure without locking the mailbox.
             return !local.borrow().closing;
         }
@@ -168,7 +168,7 @@ impl Tasks {
     pub fn register(mailbox: &Weak<Mailbox>, task: BoxedTask) -> Result<(), BoxedTask> {
         // The factory runs after is_open, so check acceptance again before
         // taking ownership of the constructed task.
-        if let Some(local) = runtime::owner(mailbox) {
+        if let Some(local) = Local::owner(mailbox) {
             let mut local = local.borrow_mut();
             if local.closing {
                 return Err(task);
@@ -321,7 +321,7 @@ mod tests {
         fn drop(&mut self) {
             // Count only after checking the borrow. Otherwise contain could
             // swallow a borrow panic and make the disposal test pass anyway.
-            if let Some(local) = runtime::current() {
+            if let Some(local) = Local::current() {
                 let _borrow = local.borrow_mut();
             }
             self.0.fetch_add(1, Ordering::Relaxed);

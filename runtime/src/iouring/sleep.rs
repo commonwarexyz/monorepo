@@ -13,7 +13,7 @@
 
 use super::{
     mailbox::{Mailbox, Message},
-    runtime,
+    runtime::Local,
     slab::{Id, Slab},
     timeout::TimeoutWheel,
 };
@@ -101,7 +101,7 @@ impl Future for Sleep {
                 }
 
                 (
-                    runtime::current().expect("io_uring sleep requires a current worker"),
+                    Local::current().expect("io_uring sleep requires a current worker"),
                     *deadline,
                     None,
                 )
@@ -112,7 +112,7 @@ impl Future for Sleep {
                 deadline,
             } => (
                 // Check affinity before changing the identity needed by Drop.
-                runtime::bound(mailbox).expect("io_uring sleep polled after its worker closed"),
+                Local::bound(mailbox).expect("io_uring sleep polled after its worker closed"),
                 *deadline,
                 Some(*timer_id),
             ),
@@ -193,7 +193,7 @@ impl Drop for Sleep {
             // Cancel directly on the owning worker, or send it a mailbox message
             // from another thread. If expiry already removed the timer, its old
             // ID cannot cancel a new registration that reused the slot.
-            runtime::cancel(&mailbox, Message::CancelTimer(timer_id));
+            Local::cancel(&mailbox, Message::CancelTimer(timer_id));
         }
     }
 }
@@ -541,7 +541,7 @@ mod tests {
             let State::Registered { timer_id, .. } = sleep.state else {
                 panic!("sleep did not register");
             };
-            let owner = runtime::current().unwrap();
+            let owner = Local::current().unwrap();
 
             // A successful replacement keeps the timer's identity and defers
             // destruction of its previous waker until after the worker borrow.
@@ -588,7 +588,7 @@ mod tests {
                 let State::Registered { timer_id, .. } = sleep.state else {
                     panic!("sleep did not register");
                 };
-                let owner = runtime::current().unwrap();
+                let owner = Local::current().unwrap();
 
                 thread::spawn(move || {
                     if poll_first {

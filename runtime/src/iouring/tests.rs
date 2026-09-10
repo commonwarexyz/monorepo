@@ -1,4 +1,4 @@
-//! Runtime configuration, task placement, worker admission, and cleanup tests.
+//! Runtime configuration, task placement, worker reservations, and cleanup tests.
 
 use super::{
     super::{
@@ -48,6 +48,110 @@ impl Drop for ParkGuard {
     }
 }
 
+/// One event intercepted within a selected runner's worker lifecycle.
+enum WorkerFault {
+    /// Reject thread creation after taking ownership of its launch payload.
+    Launch,
+    /// Fail ring initialization on the newly created worker thread.
+    Startup,
+    /// Pause a worker after it releases its registration.
+    AfterRelease(Box<dyn FnOnce() + Send>),
+}
+
+/// Fault state shared between a test and its one-off worker threads.
+struct WorkerFaultEntry {
+    /// Worker registry identity without retaining the runtime's shared services.
+    workers: Weak<Workers>,
+    /// Event consumed once, leaving the registration until its guard drops.
+    fault: Option<WorkerFault>,
+}
+
+/// Scoped injections indexed by registry so parallel runners cannot share faults.
+static WORKER_FAULTS: Mutex<Vec<WorkerFaultEntry>> = Mutex::new(Vec::new());
+
+/// Remove a runner's injection on scope exit, including if it was never consumed.
+struct WorkerFaultGuard(Weak<Workers>);
+
+impl Drop for WorkerFaultGuard {
+    fn drop(&mut self) {
+        let entry = {
+            let mut faults = WORKER_FAULTS.lock();
+            let index = faults
+                .iter()
+                .position(|entry| entry.workers.ptr_eq(&self.0))
+                .expect("worker fault registration missing");
+            faults.swap_remove(index)
+        };
+
+        // An unused callback can own arbitrary captures. Drop it after unlocking.
+        drop(entry);
+    }
+}
+
+/// Install a single lifecycle injection until the returned guard is dropped.
+fn inject_worker_fault(registry: &Arc<Workers>, fault: WorkerFault) -> WorkerFaultGuard {
+    let registry = Arc::downgrade(registry);
+    let mut faults = WORKER_FAULTS.lock();
+    assert!(
+        !faults.iter().any(|entry| entry.workers.ptr_eq(&registry)),
+        "worker fault already installed"
+    );
+    faults.push(WorkerFaultEntry {
+        workers: registry.clone(),
+        fault: Some(fault),
+    });
+    WorkerFaultGuard(registry)
+}
+
+/// Detach the selected event so it can run without holding the injection lock.
+fn take_worker_fault(
+    registry: &Arc<Workers>,
+    matches: impl FnOnce(&WorkerFault) -> bool,
+) -> Option<WorkerFault> {
+    let mut faults = WORKER_FAULTS.lock();
+    let entry = faults
+        .iter_mut()
+        .find(|entry| ptr::eq(entry.workers.as_ptr(), Arc::as_ptr(registry)))?;
+    if entry.fault.as_ref().is_some_and(matches) {
+        entry.fault.take()
+    } else {
+        None
+    }
+}
+
+/// Model a rejected thread destroying its payload before reporting launch failure.
+pub(super) fn before_launch(
+    payload: (BoxedTask, Arc<Shared>, ActiveWorker),
+) -> (BoxedTask, Arc<Shared>, ActiveWorker) {
+    let (_, _, active) = &payload;
+    if take_worker_fault(&active.0, |fault| matches!(fault, WorkerFault::Launch)).is_some() {
+        // Dispose before raising the injected panic so a destructor can itself
+        // panic without causing a second panic during unwinding.
+        drop(payload);
+        panic!("failed to spawn thread: injected worker launch failure");
+    }
+    payload
+}
+
+/// Reject native initialization on the selected worker before creating its ring.
+pub(super) fn before_startup(registry: &Arc<Workers>) -> std::io::Result<()> {
+    if take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some() {
+        return Err(std::io::Error::other(
+            "injected native worker initialization failure",
+        ));
+    }
+    Ok(())
+}
+
+/// Run a one-shot callback after the worker count and its lock have been released.
+pub(super) fn after_release(registry: &Arc<Workers>) {
+    if let Some(WorkerFault::AfterRelease(callback)) =
+        take_worker_fault(registry, |fault| matches!(fault, WorkerFault::AfterRelease(_)))
+    {
+        callback();
+    }
+}
+
 /// Count destruction of captures and futures across worker boundaries.
 struct DropCount(Arc<AtomicUsize>);
 
@@ -79,8 +183,8 @@ impl Drop for PanicPayload {
 
 /// Rejected future whose destructor checks that worker tracking still covers it.
 struct RejectedPayload {
-    /// Registry that must remain unlocked with one active worker during disposal.
-    registry: Arc<Registry>,
+    /// Worker registry kept unlocked with one active worker during disposal.
+    workers: Arc<Workers>,
     /// Number of times the rejected future was destroyed.
     drops: Arc<AtomicUsize>,
     /// Whether disposal also raises a failure for containment to handle.
@@ -98,7 +202,7 @@ impl Future for RejectedPayload {
 impl Drop for RejectedPayload {
     fn drop(&mut self) {
         // Taking the lock also checks that launch released it before disposal.
-        assert_eq!(self.registry.state.lock().active, 1);
+        assert_eq!(self.workers.state.lock().active, 1);
         self.drops.fetch_add(1, Ordering::SeqCst);
         assert!(!self.panic_on_drop, "rejected payload destructor failed");
     }
@@ -226,7 +330,7 @@ fn test_nested_same_directory_rejected_before_closure_and_outer_remains_usable()
         context.sleep(Duration::from_millis(1)).await;
     });
 
-    assert!(current().is_none());
+    assert!(Local::current().is_none());
 }
 
 #[test]
@@ -309,7 +413,7 @@ fn test_root_constructor_panic_drops_unpolled_tasks_and_clears_scope() {
     }));
     assert!(result.is_err());
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(current().is_none());
+    assert!(Local::current().is_none());
     assert_eq!(Runner::new(config()).start(|_| async { 9 }), 9);
 }
 
@@ -356,18 +460,18 @@ fn test_root_poll_or_drop_panic_clears_scope() {
                 "root destruction failure"
             }
         );
-        assert!(current().is_none());
+        assert!(Local::current().is_none());
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }
 
 #[test]
-fn test_root_destruction_can_admit_work_before_shutdown() {
+fn test_root_destruction_can_spawn_work_before_shutdown() {
     /// Ready root that publishes a task while its destructor still owns a context.
     struct Root {
         /// Context consumed by the destructor to register the child.
         context: Option<Context>,
-        /// Whether admission invoked the child's factory.
+        /// Whether spawning invoked the child's factory.
         invoked: Arc<AtomicBool>,
         /// Number of child captures disposed of before the runner returns.
         drops: Arc<AtomicUsize>,
@@ -411,10 +515,10 @@ fn test_root_destruction_can_admit_work_before_shutdown() {
             }
         });
 
-        // Root disposal precedes admission closure, but its child must still drain.
+        // The root can still spawn during disposal. Shutdown must drain its child.
         assert!(invoked.load(Ordering::SeqCst));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert!(current().is_none());
+        assert!(Local::current().is_none());
     }
 }
 
@@ -644,9 +748,9 @@ fn test_closed_origin_skips_local_and_foreign_factories() {
                 let mailbox = context.origin.upgrade().unwrap();
                 drop(mailbox.close());
             } else {
-                // The local admission check must see closure without consulting
+                // The local spawn check must see closure without consulting
                 // the mailbox, which remains open until worker shutdown.
-                current().unwrap().borrow_mut().closing = true;
+                Local::current().unwrap().borrow_mut().closing = true;
             }
 
             // Test the caller-local check and the foreign mailbox check separately.
@@ -701,24 +805,24 @@ fn test_closed_runner_rejects_one_off_payload_without_invoking_closure() {
 }
 
 #[test]
-fn test_admission_before_close_remains_counted_until_release() {
-    let registry = Arc::new(Registry::default());
+fn test_reservation_before_close_remains_counted_until_release() {
+    let registry = Arc::new(Workers::default());
     let worker_registry = registry.clone();
-    let (admitted, admission) = mpsc::channel();
+    let (reserved, reservation) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let worker = thread::spawn(move || {
-        let active = worker_registry.admit().unwrap();
-        admitted.send(()).unwrap();
+        let active = worker_registry.reserve().unwrap();
+        reserved.send(()).unwrap();
         released.recv_timeout(TEST_TIMEOUT).unwrap();
         drop(active);
     });
 
-    // Close only after the worker owns a lease. Closure rejects new admissions
+    // Close only after the worker owns a lease. Closure rejects new reservations
     // while retaining responsibility for this worker.
-    admission.recv_timeout(TEST_TIMEOUT).unwrap();
+    reservation.recv_timeout(TEST_TIMEOUT).unwrap();
     registry.close();
     assert_eq!(registry.state.lock().active, 1);
-    assert!(registry.admit().is_none());
+    assert!(registry.reserve().is_none());
 
     let waiting_registry = registry.clone();
     let (finished, completion) = mpsc::channel();
@@ -742,11 +846,11 @@ fn test_admission_before_close_remains_counted_until_release() {
 }
 
 #[test]
-fn test_closure_before_admission_rejects_without_tracking() {
-    let registry = Arc::new(Registry::default());
+fn test_closure_before_reservation_rejects_without_tracking() {
+    let registry = Arc::new(Workers::default());
     registry.close();
     let worker_registry = registry.clone();
-    thread::spawn(move || assert!(worker_registry.admit().is_none()))
+    thread::spawn(move || assert!(worker_registry.reserve().is_none()))
         .join()
         .unwrap();
     assert_eq!(registry.state.lock().active, 0);
@@ -787,8 +891,8 @@ fn test_shutdown_does_not_wait_for_an_unpublished_ordinary_factory() {
 }
 
 #[test]
-fn test_one_off_admission_covers_factory_construction_through_shutdown() {
-    /// Signal admission closure from ordinary-task disposal during shutdown.
+fn test_one_off_reservation_covers_factory_construction_through_shutdown() {
+    /// Signal worker registration closure while ordinary tasks are destroyed.
     struct Closing(mpsc::Sender<()>);
 
     impl Drop for Closing {
@@ -835,7 +939,7 @@ fn test_one_off_admission_covers_factory_construction_through_shutdown() {
             });
         });
 
-        // Shutdown has closed admission while the foreign factory is still blocked.
+        // Worker registration is closed while the foreign factory remains blocked.
         let (registry, publisher) = received.recv_timeout(TEST_TIMEOUT).unwrap();
         closed.recv_timeout(TEST_TIMEOUT).unwrap();
         assert!(registry.state.lock().closed);
@@ -856,7 +960,7 @@ fn test_one_off_admission_covers_factory_construction_through_shutdown() {
 }
 
 #[test]
-fn test_one_off_factory_panic_releases_admission() {
+fn test_one_off_factory_panic_releases_reservation() {
     for catch in [false, true] {
         Runner::new(config().with_catch_panics(catch)).start(|context| async move {
             for execution in [Execution::Dedicated, Execution::Shared(true)] {
@@ -1032,11 +1136,11 @@ fn test_creation_failure_destroys_payload_before_releasing_tracking() {
         Runner::new(config()).start(|context| async move {
             let drops = Arc::new(AtomicUsize::new(0));
             let payload = RejectedPayload {
-                registry: context.shared.workers.clone(),
+                workers: context.shared.workers.clone(),
                 drops: drops.clone(),
                 panic_on_drop,
             };
-            context.shared.fail_launch.store(true, Ordering::Relaxed);
+            let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Launch);
             let result = catch_unwind(AssertUnwindSafe(|| {
                 drop(
                     context
@@ -1081,7 +1185,7 @@ fn test_launch_failure_destroys_reentrant_payload_after_unlocking_registry() {
                 context: Some(context.child("reentrant")),
                 drops,
             };
-            context.shared.fail_launch.store(true, Ordering::Relaxed);
+            let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Launch);
             context
                 .child("failed_launch")
                 .shared(true)
@@ -1107,7 +1211,7 @@ fn test_creation_failure_in_caught_task_leaves_runner_usable() {
             };
             let result = caller
                 .spawn(|context| async move {
-                    context.shared.fail_launch.store(true, Ordering::Relaxed);
+                    let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Launch);
                     context
                         .child("failed_launch")
                         .dedicated()
@@ -1135,7 +1239,7 @@ fn test_worker_startup_failure_uses_configured_panic_policy() {
         for catch in [false, true] {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 Runner::new(config().with_catch_panics(catch)).start(|context| async move {
-                    context.shared.fail_startup.store(true, Ordering::Relaxed);
+                    let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
                     let worker = context.child("failed_worker");
                     let worker = if blocking {
                         worker.shared(true)
@@ -1176,11 +1280,11 @@ fn test_startup_failure_survives_rejected_payload_destructor_panic() {
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config().with_catch_panics(false)).start(|context| async move {
             let payload = RejectedPayload {
-                registry: context.shared.workers.clone(),
+                workers: context.shared.workers.clone(),
                 drops,
                 panic_on_drop: true,
             };
-            context.shared.fail_startup.store(true, Ordering::Relaxed);
+            let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
             drop(
                 context
                     .child("failed_launch")
@@ -1216,7 +1320,7 @@ fn test_service_error_preserves_completions_before_cleanup() {
         Runner::new(config()).start(|_| async move {
             *operation.lock() = Some(Operation::register(request));
             let _fault =
-                fail_after_completion(current().unwrap().borrow().driver.as_ref().unwrap());
+                fail_after_completion(Local::current().unwrap().borrow().driver.as_ref().unwrap());
 
             // Keep the observer alive beyond root destruction so cleanup must
             // preserve its terminal resources before closing ordinary observation.
@@ -1428,7 +1532,7 @@ fn test_shutdown_waits_for_workers_without_observing_late_panics() {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 Runner::new(config().with_catch_panics(false)).start(move |context| {
                     let registry = context.shared.workers.clone();
-                    let active = registry.admit().unwrap();
+                    let active = registry.reserve().unwrap();
                     let panicker = context.shared.panicker.clone();
                     let (dropped, root_dropped) = mpsc::channel();
                     let publisher = thread::spawn(move || {
@@ -1478,15 +1582,18 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
     let directory = cfg.storage_directory().clone();
     let (released, after_release) = mpsc::channel();
     let (finish, finished) = mpsc::channel();
-    let (shared, registry) = Runner::new(cfg).start(|context| async move {
+    let (shared, registry, _fault) = Runner::new(cfg).start(|context| async move {
         let shared = Arc::downgrade(&context.shared);
         let registry = context.shared.workers.clone();
-        *registry.after_release.lock() = Some(Box::new(move || {
-            // Keep the guard and thread-entry locals alive after count zero,
-            // so their destruction cannot hide a retained Shared reference.
-            let _ = released.send(());
-            let _ = finished.recv_timeout(TEST_TIMEOUT);
-        }));
+        let fault = inject_worker_fault(
+            &registry,
+            WorkerFault::AfterRelease(Box::new(move || {
+                // Keep the guard and thread-entry locals alive after count zero,
+                // so their destruction cannot hide a retained Shared reference.
+                let _ = released.send(());
+                let _ = finished.recv_timeout(TEST_TIMEOUT);
+            })),
+        );
         context
             .child("durable_worker")
             .dedicated()
@@ -1498,7 +1605,7 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
             })
             .await
             .unwrap();
-        (shared, registry)
+        (shared, registry, fault)
     });
 
     // Tracking reached zero while thread-entry locals are deliberately held alive.
@@ -1616,7 +1723,7 @@ fn test_ready_future_destructor_closes_handle_and_leaves_runner_usable() {
 
 #[test]
 fn test_contain_handles_panicking_payloads() {
-    assert_eq!(contain(|| 7), Some(7));
+    assert_eq!(Panics::contain(|| 7), Some(7));
 
     for panics in [false, true] {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -1625,7 +1732,7 @@ fn test_contain_handles_panicking_payloads() {
             panics,
         };
 
-        assert!(contain(|| panic_any(payload)).is_none());
+        assert!(Panics::contain(|| panic_any(payload)).is_none());
 
         // Dispose of the original payload, but leave a secondary panic's
         // payload untouched so destruction cannot start another failure.
@@ -1730,7 +1837,7 @@ fn test_callback_generated_work_prevents_parking() {
         fn drop(&mut self) {
             let work = self.work.take().unwrap();
             if self.remaining != 0 {
-                current()
+                Local::current()
                     .unwrap()
                     .borrow_mut()
                     .deferred
@@ -1776,7 +1883,7 @@ fn test_callback_generated_work_prevents_parking() {
                                 } else {
                                     Work::Wake(cx.waker().clone(), ready.clone())
                                 };
-                                let local = current().unwrap();
+                                let local = Local::current().unwrap();
                                 let mut local = local.borrow_mut();
                                 // Longer chains leave a fresh batch after both normal
                                 // callback passes. All progress is local to this worker.
@@ -1821,7 +1928,7 @@ fn test_final_callbacks_finish_before_tls_removal() {
     impl Drop for Chain {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::SeqCst);
-            let local = current().expect("callback ran after TLS removal");
+            let local = Local::current().expect("callback ran after TLS removal");
             if self.remaining == 0 {
                 panic!("terminal callback panic");
             }
@@ -1842,7 +1949,7 @@ fn test_final_callbacks_finish_before_tls_removal() {
     let observed = drops.clone();
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config()).start(|_| async move {
-            current()
+            Local::current()
                 .unwrap()
                 .borrow_mut()
                 .deferred
@@ -1877,7 +1984,7 @@ fn test_finished_worker_tls_can_wait_for_live_root_work() {
 
     impl Drop for OnExit {
         fn drop(&mut self) {
-            // The root awaits done_rx before returning, keeping admission open.
+            // Awaiting done_rx keeps worker registration open during TLS destruction.
             // A panic escaping this TLS destructor would abort the process.
             let context = self.context.take().unwrap();
             let release = self.release.take().unwrap();

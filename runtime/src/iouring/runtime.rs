@@ -1,35 +1,106 @@
-//! Native worker execution and runner-wide lifecycle.
+//! Worker execution and runner-wide lifecycle.
 //!
-//! One worker owns its ring, task arena, queued requests, ordinary operation
-//! results, and sleeper deadlines. Its [`Scope`] installs checked thread-local
-//! access for short transitions. Polls, callbacks, and destruction run after
-//! releasing local state. The calling thread runs the ordinary worker.
+//! The calling thread runs the ordinary worker. Dedicated and blocking tasks
+//! each get a separate thread and ring. All workers share configuration and
+//! services through [`Shared`], while execution state stays in each worker's
+//! [`Local`].
 //!
-//! [`Shared`] contains only runner-wide configuration and existing synchronized
-//! services. Dedicated and blocking tasks reserve one-off worker responsibility
-//! before their factories run, then transfer the task directly to a thread.
-//! Runner shutdown closes that registry,
-//! drains the ordinary worker, then waits for every accepted worker cleanup.
-//!
-//! Supervision stays in [`Context`], [`Runner`], and the shared [`Handle`]
-//! wrapper. The root is destroyed before publication closes. Worker execution
-//! then returns, allowing the runner to abort spawned tasks before their futures
-//! and kernel resources are released.
+//! ## State and ownership
 //!
 //! ```text
-//! spawn caller: Registry::admit -> factory -> Launch { task, Shared, active }
-//!                                                  |
-//!                                                  v
-//!                                 one-off thread: run -> cleanup -> release
+//! Context
+//!   +-- Shared (Arc) <-------------------------- Local.shared
+//!   |     +-- Config, metrics, stop/panic signals
+//!   |     +-- Network, Storage, buffer pools
+//!   |     `-- Workers <------------------------ ActiveWorker
+//!   +-- supervision tree
+//!   `-- ordinary worker's Mailbox (Weak)
 //!
-//! Runner::start thread                  one-off worker thread
-//! --------------------                 ---------------------
-//! Shared -> Registry <- responsibility  Shared
-//! Scope -> Local                        Scope -> Local
-//!          tasks, timers                          tasks, timers
-//!          Driver -> ring                         Driver -> ring
-//!                 -> requests, results                   -> requests, results
+//! Worker (one per thread)
+//!   +-- Scope --------------------------------> CURRENT (TLS)
+//!   |                                               |
+//!   +-- Rc<RefCell<Local>> <------------------------+
+//!   |     +-- Shared (Arc)
+//!   |     +-- Tasks (spawned futures and ready IDs)
+//!   |     +-- Timers (sleep registrations and deadlines)
+//!   |     +-- Driver
+//!   |     |     +-- ring (SQ/CQ)
+//!   |     |     +-- Waiters (requests and unconsumed results)
+//!   |     |     `-- ready queue, deadlines, cancellations (IDs)
+//!   |     +-- Mailbox (messages and wake source)
+//!   |     `-- Deferred (callbacks and retired owners)
+//!   +-- inbox (batch taken from Mailbox)
+//!   +-- deferred (batch detached from Local)
+//!   `-- panics (first failure retained through cleanup)
 //! ```
+//!
+//! [`Scope`] installs checked thread-local access. Task polls, callbacks, and
+//! user destructors run outside local borrows. [`Worker::callbacks`] swaps the
+//! local [`Deferred`] batch into the worker before running it, so callbacks can
+//! reenter [`Local`] and append another batch.
+//!
+//! The root is pinned separately and passed to [`Worker::drive`]. On a one-off
+//! worker, the selected task runs as that worker's root.
+//!
+//! ## Task placement
+//!
+//! Factories run on the spawning caller. Ordinary tasks always target the
+//! runner's calling-thread worker, including when spawned from another worker.
+//!
+//! ```text
+//! ordinary spawn:
+//!   check origin --> factory --> Tasks::register
+//!                                  +-- owning thread --> Tasks
+//!                                  `-- other thread --> Mailbox --> Tasks
+//!
+//! dedicated / blocking spawn:
+//!   Workers::reserve --> factory --> new thread
+//!                                      |
+//!                                      v
+//!                               Worker::run_task
+//!                                      |
+//!                                      v
+//!                               drop ActiveWorker
+//! ```
+//!
+//! [`ActiveWorker`] keeps the launch counted from before factory construction
+//! until worker cleanup and failure reporting finish. It retains only the
+//! [`Workers`] barrier, allowing that worker's [`Shared`] owners to be released first.
+//! I/O registers directly with the current worker on first poll. Mailboxes carry
+//! task spawns, wakes, and cancellation messages.
+//!
+//! Each turn polls a bounded batch of tasks and checks the root's wake flag,
+//! services I/O and timers, and applies a bounded batch of mailbox messages.
+//! Deferred callbacks run between these phases. Before parking, the worker checks
+//! readiness again because polls and callbacks can have produced more work.
+//!
+//! ## Shutdown
+//!
+//! Once the ordinary worker is running, runner exit follows this order:
+//!
+//! ```text
+//! root completes or fails
+//!   |
+//!   v
+//! destroy root (TLS and mailbox still available)
+//!   |
+//!   v
+//! close worker registry and ordinary mailbox
+//!   |
+//!   v
+//! abort spawned tasks through the supervision tree
+//!   |
+//!   v
+//! clean up ordinary worker --> wait for one-off registrations to reach zero
+//!                               |
+//!                               v
+//!                       return result or resume panic
+//! ```
+//!
+//! Work spawned by root destruction participates in shutdown. Each worker keeps
+//! TLS installed while destroying tasks, draining retained writes and syncs,
+//! retiring cancellations, and running deferred callbacks. Native thread-local
+//! destruction on one-off threads can follow registration release.
 
 use super::{
     driver::Driver,
@@ -59,8 +130,8 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     telemetry::metrics::{
-        CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered,
-        Registry as MetricsRegistry, add_attribute, raw, task::Label, validate_label,
+        CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
+        raw, task::Label, validate_label,
     },
     utils::{self, MetricHandle, Panicked, Panicker, signal::Stopper, supervision::Tree},
 };
@@ -94,6 +165,9 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
     time::{Duration, Instant, SystemTime},
 };
+
+/// Maximum task polls or mailbox messages processed before yielding to other work.
+const BATCH_SIZE: usize = 64;
 
 /// Configuration of each worker's io_uring instance and operation timing wheel.
 ///
@@ -143,7 +217,7 @@ pub struct Config {
     /// Stack size for one-off worker and Rayon threads.
     thread_stack_size: usize,
     /// Whether spawned-task panics and one-off worker failures are caught.
-    /// Task disposal escaping that wrapper is contained with either setting.
+    /// Task-disposal panics during worker execution are contained with either setting.
     catch_panics: bool,
     /// Base directory held while storage resources or requests remain alive.
     storage_directory: PathBuf,
@@ -172,13 +246,14 @@ impl Config {
             size: if cfg!(test) { 128 } else { 1024 },
             ..RingConfig::default()
         };
-        let rng = sys_rng().next_u64();
+        let suffix = sys_rng().next_u64();
+
         Self {
             ring_config,
             idle_spinner: SpinnerConfig::default(),
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
-            storage_directory: env::temp_dir().join(format!("commonware_iouring_runtime_{rng}")),
+            storage_directory: env::temp_dir().join(format!("commonware_iouring_runtime_{suffix}")),
             storage_blob_layouts: BlobLayout::ALL,
             tcp_nodelay: Some(true),
             zero_linger: true,
@@ -214,9 +289,10 @@ impl Config {
     /// failures are observed only while the root is executing. Failures in the
     /// calling-thread worker still fail the runner.
     ///
-    /// Cancellation-time and task-disposal panics escaping the user-poll wrapper
-    /// are contained with either setting. An unpublished result may resolve to
-    /// [`Error::Closed`], while an already-published result remains available.
+    /// During worker execution, cancellation-time and task-disposal panics
+    /// escaping the user-poll wrapper are contained with either setting. An
+    /// unpublished result may resolve to [`Error::Closed`], while an
+    /// already-published result remains available.
     /// Task factories execute synchronously and propagate panics to their caller.
     pub const fn with_catch_panics(mut self, catch: bool) -> Self {
         self.catch_panics = catch;
@@ -427,37 +503,44 @@ impl TaskMetrics {
     }
 }
 
-/// Admission and completion barrier for one-off worker runtime cleanup.
+/// Registration and cleanup barrier for one-off workers.
 #[derive(Default)]
-struct Registry {
+struct Workers {
+    /// Registration gate and count protected by the same lock.
     state: Mutex<WorkerCount>,
+    /// Notify shutdown when the last registered worker finishes cleanup.
     idle: Condvar,
-    #[cfg(test)]
-    after_release: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
+/// One-off workers that shutdown must still wait for.
 #[derive(Default)]
 struct WorkerCount {
+    /// Whether shutdown has stopped accepting new workers.
     closed: bool,
+    /// Accepted workers whose factories, execution, or cleanup have not finished.
     active: usize,
 }
 
-impl Registry {
-    /// Admission and counting share one lock so shutdown cannot miss a launch.
-    fn admit(self: &Arc<Self>) -> Option<ActiveWorker> {
+impl Workers {
+    /// Reserve a worker before its factory runs, unless registration has closed.
+    fn reserve(self: &Arc<Self>) -> Option<ActiveWorker> {
         let mut state = self.state.lock();
         if state.closed {
             return None;
         }
+
+        // Closing registration under this same lock cannot miss an accepted launch.
         state.active += 1;
         Some(ActiveWorker(self.clone()))
     }
 
+    /// Stop accepting workers while retaining every existing registration.
     fn close(&self) {
         self.state.lock().closed = true;
     }
 
-    /// Called after the owning worker has completed its own retirement.
+    /// Wait until every accepted worker has finished runtime cleanup.
+    /// Call after [`Self::close`] so no new reservation can extend the count.
     fn wait(&self) {
         let mut state = self.state.lock();
         while state.active != 0 {
@@ -466,8 +549,11 @@ impl Registry {
     }
 }
 
-/// Does not own Shared, so releasing this responsibility cannot retain storage.
-struct ActiveWorker(Arc<Registry>);
+/// Count an accepted worker until its runtime cleanup finishes.
+///
+/// Retains only [`Workers`], allowing Shared and its storage hold to be released
+/// before the worker count reaches zero.
+struct ActiveWorker(Arc<Workers>);
 
 impl Drop for ActiveWorker {
     fn drop(&mut self) {
@@ -477,59 +563,28 @@ impl Drop for ActiveWorker {
             self.0.idle.notify_all();
         }
         drop(state);
+
         #[cfg(test)]
-        {
-            let after_release = self.0.after_release.lock().take();
-            if let Some(after_release) = after_release {
-                after_release();
-            }
-        }
-    }
-}
-
-/// Field order disposes of rejected task and runtime owners before tracking ends.
-struct Launch {
-    task: BoxedTask,
-    shared: Arc<Shared>,
-    active: ActiveWorker,
-}
-
-impl Launch {
-    fn run(self) {
-        let Self {
-            task,
-            shared,
-            active,
-        } = self;
-        run_one_off(shared, task);
-        // Runtime cleanup, Shared destruction, and failure publication precede
-        // counter release. Native TLS destruction remains outside this boundary.
-        drop(active);
+        tests::after_release(&self.0);
     }
 }
 
 /// Runner-wide services shared by ordinary and one-off workers.
-pub(super) struct Shared {
+struct Shared {
     /// Validated configuration, immutable after startup.
     cfg: Config,
     /// User-visible metrics registry.
-    registry: MetricsRegistry,
+    registry: Registry,
     /// Task counters and running gauges.
     metrics: TaskMetrics,
     /// Aggregate active requests, updated with each worker's own count delta.
     pending_operations: Gauge,
-    /// Existing stop signal and acknowledgement state.
+    /// Stop signal and acknowledgement state.
     shutdown: Mutex<Stopper>,
     /// User task panic policy and root notification.
     panicker: Panicker,
     /// Synchronized creation and closure of one-off workers.
-    workers: Arc<Registry>,
-    /// Deterministic coverage for thread-creation failure before execution.
-    #[cfg(test)]
-    fail_launch: std::sync::atomic::AtomicBool,
-    /// Deterministic coverage for native initialization failure after launch.
-    #[cfg(test)]
-    fail_startup: std::sync::atomic::AtomicBool,
+    workers: Arc<Workers>,
     /// Metered storage with its metadata lock and directory hold.
     storage: MeteredStorage<Storage>,
     /// Metered native socket adapter.
@@ -541,24 +596,16 @@ pub(super) struct Shared {
 }
 
 impl Shared {
-    /// Transfer an admitted task and its cleanup responsibility to a new thread.
+    /// Transfer a reserved worker's task and its cleanup responsibility to a new thread.
     fn launch(self: &Arc<Self>, task: BoxedTask, active: ActiveWorker) {
-        let payload = Launch {
-            task,
-            shared: self.clone(),
-            active,
-        };
+        // Capture the whole tuple so a failed launch destroys the task and Shared
+        // before releasing the reservation, following tuple field order.
+        let payload = (task, self.clone(), active);
+
         #[cfg(test)]
-        if self
-            .fail_launch
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
-        {
-            // Model an unstarted thread destroying its whole capture outside
-            // the registry lock, including when task destruction panics.
-            drop(payload);
-            panic!("failed to spawn thread: injected worker launch failure");
-        }
-        utils::thread::spawn(self.cfg.thread_stack_size, move || payload.run());
+        let payload = tests::before_launch(payload);
+
+        utils::thread::spawn(self.cfg.thread_stack_size, move || Worker::run_task(payload));
     }
 }
 
@@ -567,8 +614,8 @@ impl Shared {
 /// Ordinary children always target the runner's calling thread, including those
 /// spawned by dedicated and blocking tasks. Task factories run on their caller,
 /// while returned futures run on the selected worker. Resources may move between
-/// workers between I/O operations. A polled operation or registered sleep stays
-/// bound to its worker.
+/// workers between I/O operations. Registered I/O futures and sleeps stay bound
+/// to their worker. Detached sync completion handles can be awaited on any thread.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,
@@ -611,16 +658,19 @@ impl crate::Spawner for Context {
         let (_, metric) = spawn_metrics!(self);
         let parent = self.tree.clone();
         let execution = self.execution;
+
+        // Placement applies to this spawn. Children start with ordinary placement.
         self.execution = Execution::default();
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }
+
         self.tree = child;
         let shared = self.shared.clone();
         let origin = self.origin.clone();
         let active = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
-            let Some(active) = shared.workers.admit() else {
+            let Some(active) = shared.workers.reserve() else {
                 return Handle::closed(metric);
             };
             Some(active)
@@ -630,15 +680,19 @@ impl crate::Spawner for Context {
             }
             None
         };
+
         // User construction runs on the caller with no runtime borrow or lock.
-        // An admitted one-off remains counted through construction and launch,
+        // A reserved one-off remains counted through construction and launch,
         // including when the factory unwinds or shutdown closes the registry.
         let future = f(self);
         let (future, handle) =
             Handle::init(future, metric, shared.panicker.clone(), parent.clone());
+
+        // Attach cancellation before another worker can begin polling the task.
         if let Some(aborter) = handle.aborter() {
             parent.register(aborter);
         }
+
         let task = Task::boxed(future);
         let result = if let Some(active) = active {
             shared.launch(task, active);
@@ -646,6 +700,7 @@ impl crate::Spawner for Context {
         } else {
             Tasks::register(&origin, task)
         };
+
         if let Err(task) = result {
             // Rejection after closure follows the caller's panic boundary.
             // Cancel descendants and finish metrics before destroying captures.
@@ -854,23 +909,26 @@ impl crate::BufferPooler for Context {
 type SyncResult = (oneshot::Sender<Result<(), Error>>, Result<(), Error>);
 
 /// Mutable execution state accessed only by its owning worker thread.
-pub(super) struct Local {
-    /// Ring owner, retained through synchronous waits and kernel retirement.
-    pub(super) driver: Option<Driver>,
+///
+/// Polls and callbacks obtain this state through [`Self::current`]. They release
+/// each borrow before running user code, including waker methods and destructors.
+pub struct Local {
+    /// Ring owner, taken only after kernel retirement so it can be dropped unborrowed.
+    pub driver: Option<Driver>,
     /// Spawned tasks and FIFO ready tokens.
-    pub(super) tasks: Tasks,
+    pub tasks: Tasks,
     /// Sleeper registrations and deadlines.
-    pub(super) timers: Timers,
+    pub timers: Timers,
     /// Reject new registration while allowing idempotent cancellation.
-    pub(super) closing: bool,
+    pub closing: bool,
     /// Shared monotonic sample for the current service turn.
-    pub(super) now: Instant,
-    /// Root notification, taken before a root poll and never cleared afterward.
-    pub(super) root_ready: bool,
+    pub now: Instant,
+    /// Root wake flag, taken before each root poll so a wake during the poll is kept.
+    pub root_ready: bool,
     /// Strong mailbox ownership retained through kernel retirement.
-    pub(super) mailbox: Arc<Mailbox>,
-    /// Ownership detached from local transitions before callbacks run.
-    pub(super) deferred: Deferred,
+    pub mailbox: Arc<Mailbox>,
+    /// Callbacks and retired owners collected while Local is borrowed.
+    pub deferred: Deferred,
     /// Runner configuration, metrics, and shared adapters.
     shared: Arc<Shared>,
     /// This worker's contribution currently included in the aggregate gauge.
@@ -881,14 +939,8 @@ impl Local {
     /// Construct a ring on the thread that will own all its submissions.
     fn new(shared: Arc<Shared>) -> std::io::Result<Self> {
         #[cfg(test)]
-        if shared
-            .fail_startup
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
-        {
-            return Err(std::io::Error::other(
-                "injected native worker initialization failure",
-            ));
-        }
+        tests::before_startup(&shared.workers)?;
+
         let mailbox = Arc::new(Mailbox::new()?);
         let now = Instant::now();
         let driver = Driver::new(
@@ -897,6 +949,7 @@ impl Local {
             mailbox.waker.clone(),
             now,
         )?;
+
         Ok(Self {
             driver: Some(driver),
             tasks: Tasks::default(),
@@ -911,12 +964,68 @@ impl Local {
         })
     }
 
+    /// Return the worker installed on this thread, including during cleanup.
+    /// Returns `None` when no worker is installed or its TLS key has been destroyed.
+    pub fn current() -> Option<Rc<RefCell<Self>>> {
+        // Escaped wakers can run from native TLS destructors after this key is gone.
+        CURRENT
+            .try_with(|current| current.borrow().clone())
+            .ok()
+            .flatten()
+    }
+
+    /// Return the current worker if it owns `mailbox`, including during shutdown.
+    #[inline(always)]
+    pub fn owner(mailbox: &Weak<Mailbox>) -> Option<Rc<RefCell<Self>>> {
+        let local = Self::current()?;
+        // The weak reference preserves allocation identity without retaining a worker.
+        let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
+        matches.then_some(local)
+    }
+
+    /// Resolve the owning worker for a registered operation or sleep.
+    ///
+    /// With no matching current worker, returns [`Error::Closed`] if the owner has
+    /// closed, and panics otherwise. The caller checks whether a matching worker is
+    /// closing before accessing its registrations.
+    pub fn bound(mailbox: &Weak<Mailbox>) -> Result<Rc<RefCell<Self>>, Error> {
+        if let Some(local) = Self::owner(mailbox) {
+            return Ok(local);
+        }
+
+        // A closed owner has already assumed cleanup responsibility. Polling
+        // elsewhere while that owner is live violates worker affinity.
+        if mailbox.upgrade().is_none_or(|mailbox| !mailbox.is_open()) {
+            return Err(Error::Closed);
+        }
+        panic!("registered io_uring handle polled outside its owning worker");
+    }
+
+    /// Release an operation or timer on its worker, directly or through its mailbox.
+    ///
+    /// Accepts only [`Message::Orphan`] and [`Message::CancelTimer`]. A worker whose
+    /// mailbox is closed or gone has already taken responsibility for cleanup.
+    pub fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
+        if let Some(local) = Self::owner(mailbox) {
+            // Owner-local drops also reach this path after the mailbox has closed.
+            let mut local = local.borrow_mut();
+            match message {
+                Message::Orphan(id) => local.orphan(id),
+                Message::CancelTimer(id) => local.cancel_timer(id),
+                _ => unreachable!("invalid cancellation message"),
+            }
+            return;
+        }
+
+        if let Some(mailbox) = mailbox.upgrade() {
+            // If closure wins the race, worker cleanup will release the registration.
+            let _ = mailbox.send(message);
+        }
+    }
+
     /// Detach observation without running callbacks under the local borrow.
-    pub(super) fn orphan(&mut self, id: WaiterId) {
-        self.driver
-            .as_mut()
-            .expect("driver present during orphaning")
-            .orphan(id, &mut self.deferred);
+    pub fn orphan(&mut self, id: WaiterId) {
+        self.driver.as_mut().unwrap().orphan(id, &mut self.deferred);
     }
 
     /// Remove a sleep registration and defer destruction of its waker.
@@ -991,76 +1100,9 @@ impl Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         CURRENT.with(|current| {
+            // Worker still owns Local, so clearing TLS cannot destroy it under this borrow.
             current.borrow_mut().take();
         });
-    }
-}
-
-/// Return the current worker for a short owner-local transition.
-pub(super) fn current() -> Option<Rc<RefCell<Local>>> {
-    CURRENT
-        .try_with(|current| current.borrow().clone())
-        .ok()
-        .flatten()
-}
-
-/// Return the current worker if it owns `mailbox`, including during shutdown.
-#[inline(always)]
-pub(super) fn owner(mailbox: &Weak<Mailbox>) -> Option<Rc<RefCell<Local>>> {
-    let local = current()?;
-    let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
-    matches.then_some(local)
-}
-
-/// Resolve the owning worker for a registered operation or sleep.
-///
-/// With no matching current worker, returns [`Error::Closed`] if the owner has
-/// closed, and panics otherwise. The caller checks whether a matching worker is
-/// closing before accessing its registrations.
-pub(super) fn bound(mailbox: &Weak<Mailbox>) -> Result<Rc<RefCell<Local>>, Error> {
-    if let Some(local) = owner(mailbox) {
-        return Ok(local);
-    }
-    if mailbox.upgrade().is_none_or(|mailbox| !mailbox.is_open()) {
-        return Err(Error::Closed);
-    }
-    panic!("registered io_uring handle polled outside its owning worker");
-}
-
-/// Release an operation or timer on its worker, directly or through its mailbox.
-///
-/// Accepts only [`Message::Orphan`] and [`Message::CancelTimer`]. A worker whose
-/// mailbox is closed or gone has already taken responsibility for cleanup.
-pub(super) fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
-    if let Some(local) = owner(mailbox) {
-        let mut local = local.borrow_mut();
-        match message {
-            Message::Orphan(id) => local.orphan(id),
-            Message::CancelTimer(id) => local.cancel_timer(id),
-            _ => unreachable!("invalid cancellation message"),
-        }
-        return;
-    }
-    if let Some(mailbox) = mailbox.upgrade() {
-        let _ = mailbox.send(message);
-    }
-}
-
-/// Run a task poll or destructor, returning `None` if it panics.
-///
-/// Cancellation can destroy the user future during polling, so both paths need
-/// this boundary. The caller must release worker borrows before invoking it.
-fn contain<T>(f: impl FnOnce() -> T) -> Option<T> {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(output) => Some(output),
-        Err(panic) => {
-            // Payload destruction can also run user code. A secondary panic
-            // cannot escape this task boundary or replace a worker failure.
-            if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(panic))) {
-                mem::forget(secondary);
-            }
-            None
-        }
     }
 }
 
@@ -1079,6 +1121,24 @@ struct Panics {
 }
 
 impl Panics {
+    /// Run a task poll or destructor, returning `None` if it panics.
+    ///
+    /// Cancellation can destroy the user future during polling, so both paths need
+    /// this boundary. The caller must release worker borrows before invoking it.
+    fn contain<T>(f: impl FnOnce() -> T) -> Option<T> {
+        match catch_unwind(AssertUnwindSafe(f)) {
+            Ok(output) => Some(output),
+            Err(panic) => {
+                // Payload destruction can also run user code. A secondary panic
+                // cannot escape this task boundary or replace a worker failure.
+                if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(panic))) {
+                    mem::forget(secondary);
+                }
+                None
+            }
+        }
+    }
+
     /// Run a callback without letting its panic interrupt cleanup.
     fn run(&mut self, f: impl FnOnce()) {
         if let Err(panic) = catch_unwind(AssertUnwindSafe(f)) {
@@ -1117,28 +1177,27 @@ impl Drop for RetirementGuard {
     }
 }
 
-/// Reusable typed callback storage detached from Local before invocation.
+/// Callbacks and resources detached from Local before running user code.
+///
+/// A worker alternates two batches so callbacks can append to Local without
+/// borrowing the batch currently being drained. Each vector retains its capacity.
 #[derive(Default)]
-pub(super) struct Deferred {
+pub struct Deferred {
     /// Notifications for tasks observing completed local transitions.
-    pub(super) wakes: Vec<Waker>,
+    pub wakes: Vec<Waker>,
     /// Wakers whose registrations were replaced or cancelled.
-    pub(super) drops: Vec<Waker>,
+    pub drops: Vec<Waker>,
     /// Results whose observation has ended.
-    pub(super) outputs: Vec<RequestOutput>,
+    pub outputs: Vec<RequestOutput>,
     /// Buffers and descriptors no longer used by the kernel.
-    pub(super) resources: Vec<RetiredResources>,
+    pub resources: Vec<RetiredResources>,
     /// Detached durable-sync publications.
-    pub(super) sync_results: Vec<SyncResult>,
+    pub sync_results: Vec<SyncResult>,
 }
 
 impl Deferred {
-    /// Transfer pending ownership without executing callbacks under Local.
-    const fn take(&mut self, local: &mut Local) {
-        mem::swap(self, &mut local.deferred);
-    }
-
-    pub(super) const fn is_empty(&self) -> bool {
+    /// Whether the batch contains no callbacks or owners to release.
+    pub const fn is_empty(&self) -> bool {
         self.wakes.is_empty()
             && self.drops.is_empty()
             && self.outputs.is_empty()
@@ -1146,7 +1205,8 @@ impl Deferred {
             && self.sync_results.is_empty()
     }
 
-    /// Run each callback independently, preserving later mandatory cleanup.
+    /// Run each callback independently, retaining failures until cleanup finishes.
+    /// The caller must release all Local borrows before invoking this method.
     fn run(&mut self, panics: &mut Panics) {
         for waker in self.wakes.drain(..) {
             panics.run(|| waker.wake());
@@ -1160,6 +1220,8 @@ impl Deferred {
         for resources in self.resources.drain(..) {
             panics.run(|| drop(resources));
         }
+
+        // Publish detached sync results after releasing the completed requests' owners.
         for (sender, output) in self.sync_results.drain(..) {
             panics.run(|| {
                 let _ = sender.send(output);
@@ -1168,19 +1230,23 @@ impl Deferred {
     }
 }
 
-/// Worker cleanup owner, installed before exposing the thread-local scope.
+/// Execute one thread's tasks and own its state through shutdown.
+///
+/// Constructed before installing TLS so unwinding always has a cleanup owner.
+/// Keeps callback execution outside [`Local`] borrows and retains failures until
+/// all kernel-visible work has retired.
 struct Worker {
     /// Local state retained until its driver has drained and been destroyed.
     local: Rc<RefCell<Local>>,
     /// Cleared only after local cleanup, including during an unexpected unwind.
     scope: Option<Scope>,
-    /// Reusable deferred callback batches.
+    /// Callback batch detached from Local and reused after draining.
     deferred: Deferred,
     /// First poll, infrastructure, or callback failure.
     panics: Panics,
     /// Retained mailbox batch, reversed once so bounded pops remain FIFO.
     inbox: Vec<Message>,
-    /// Number of whole mailbox batches transferred to owner-local storage.
+    /// Mailbox publication sequence acknowledged when whole batches enter the inbox.
     processed_seq: u32,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
@@ -1203,13 +1269,104 @@ impl Worker {
         worker
     }
 
+    /// Create a worker and drive a stack-pinned root, retaining the worker for cleanup.
+    ///
+    /// The optional service task runs alongside the root. Only the ordinary worker
+    /// receives `interrupts` and closes runner-wide reservations when its root exits.
+    ///
+    /// Root construction, execution, and destruction share a panic boundary.
+    /// Startup errors return directly. Later failures are retained in the worker
+    /// so the caller can cancel accepted tasks and clean up with TLS still installed.
+    fn run<F, Fut>(
+        shared: Arc<Shared>,
+        build: F,
+        service: Option<BoxedTask>,
+        interrupts: Option<Panicked>,
+    ) -> Result<(Self, Option<Fut::Output>), Panic>
+    where
+        F: FnOnce(&Arc<Mailbox>) -> Fut,
+        Fut: Future,
+    {
+        // Only the owning runner listens for failures from other workers.
+        let owning_runner = interrupts.is_some();
+        let local = Local::new(shared.clone()).map_err(|error| -> Panic {
+            Box::new(format!(
+                "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
+            ))
+        })?;
+        let mut worker = Self::new(local);
+        let mailbox = worker.local.borrow().mailbox.clone();
+
+        // Register the background service as an ordinary task before constructing
+        // the separately polled root.
+        if let Some(service) = service
+            && let Err(service) = Tasks::register(&Arc::downgrade(&mailbox), service)
+        {
+            worker.panics.run(|| drop(service));
+        }
+        let root_waker = TaskWaker::new(Arc::downgrade(&mailbox), Target::Root).into();
+
+        // The catch owns the root, including when interrupted. Worker and TLS stay
+        // outside it so root destruction can orphan operations or spawn more work.
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let root = build(&mailbox);
+            match interrupts {
+                Some(interrupts) => worker.drive(pin!(interrupts.interrupt(root)), &root_waker),
+                None => worker.drive(pin!(root), &root_waker),
+            }
+        }));
+        let output = match result {
+            Ok(Ok(value)) => Some(value),
+            Ok(Err(panic)) | Err(panic) => {
+                worker.panics.retain(panic);
+                None
+            }
+        };
+
+        // Include work spawned by root destruction in the shutdown barrier.
+        if owning_runner {
+            shared.workers.close();
+        }
+        worker.begin_close();
+        drop(root_waker);
+        Ok((worker, output))
+    }
+
+    /// Execute a reserved task on this thread and report failures after cleanup.
+    /// The payload owns the task, shared services, and worker reservation in drop order.
+    fn run_task(payload: (BoxedTask, Arc<Shared>, ActiveWorker)) {
+        // Declare the reservation first so unwinding also releases it last.
+        let active = payload.2;
+        let shared = payload.1;
+        let task = payload.0;
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // Startup may reject the builder without invoking it. Its captured
+            // root keeps the same disposal boundary as an executing spawned task.
+            let root = TaskRoot { task: Some(task) };
+            let (mut worker, output) = Self::run(shared.clone(), |_| root, None, None)?;
+            worker.cleanup();
+            worker.result(output)
+        }));
+        if let Err(panic) = result.unwrap_or_else(Err) {
+            shared.panicker.notify(panic);
+        }
+
+        // Runtime cleanup, Shared destruction, and failure publication precede
+        // counter release. Native TLS destruction remains outside this boundary.
+        drop(shared);
+        drop(active);
+    }
+
     /// Detach one callback batch and run it outside the local borrow.
     fn callbacks(&mut self) {
-        self.deferred.take(&mut self.local.borrow_mut());
+        // Reuse the emptied batch while callbacks collect more work in Local.
+        mem::swap(&mut self.deferred, &mut self.local.borrow_mut().deferred);
         self.deferred.run(&mut self.panics);
     }
 
-    /// Close publication after root destruction, retaining accepted tasks.
+    /// Close local registration and mailbox publication, retaining accepted tasks.
+    /// Repeated calls leave the worker closed and preserve its existing inbox.
     fn begin_close(&mut self) {
         let mailbox = {
             let mut local = self.local.borrow_mut();
@@ -1220,29 +1377,40 @@ impl Worker {
         if !messages.is_empty() {
             self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
         }
+
         // Keep accepted tasks alive until the caller has cancelled them and
-        // cleanup can destroy their futures outside the local borrow.
+        // cleanup can destroy their futures outside the local borrow. Shutdown
+        // only disposes of these messages, so no FIFO reversal is needed here.
         self.inbox.extend(messages);
     }
 
     /// Cancel observers and finish all kernel-visible work before releasing TLS.
+    /// Retains callback failures until cleanup finishes. An infrastructure failure
+    /// before kernel retirement aborts the process through [`RetirementGuard`].
     fn cleanup(&mut self) {
         if self.finished {
             return;
         }
+
         // Protect every retirement transition, including observer removal
         // before the first drain turn, against unexpected infrastructure unwind.
         let retirement = RetirementGuard;
         self.begin_close();
+
+        // Closing the driver and timer table below subsumes queued cancellations.
+        // Spawn messages still own futures, which must be destroyed unborrowed.
         for message in self.inbox.drain(..) {
-            contain(|| drop(message));
+            Panics::contain(|| drop(message));
         }
+
+        // Destroy tasks before closing I/O, letting their futures detach observers.
         let mut tasks = Vec::new();
         self.local.borrow_mut().tasks.clear(&mut tasks);
         for Running { task, waker, .. } in tasks {
-            contain(|| drop(task));
+            Panics::contain(|| drop(task));
             drop(waker);
         }
+
         {
             let mut local = self.local.borrow_mut();
             let Local {
@@ -1257,9 +1425,8 @@ impl Worker {
         }
         self.callbacks();
 
-        // Any unexpected infrastructure unwind during retirement must abort
-        // before a request can release memory still referenced by the kernel.
-        // Arbitrary callbacks are isolated outside each short driver borrow.
+        // Retained writes and syncs still need to finish. Cancelled operations
+        // and their cancellation acknowledgements must also retire before exit.
         loop {
             {
                 let mut local = self.local.borrow_mut();
@@ -1278,15 +1445,17 @@ impl Worker {
                 local.update_pending();
             }
             self.callbacks();
+
             let mut local = self.local.borrow_mut();
             // Callbacks can enqueue another batch. Keep TLS installed until
-            // both ownership lanes and kernel retirement reach quiescence.
+            // all deferred work and kernel completions have been handled.
             if !local.deferred.is_empty() || !self.deferred.is_empty() {
                 continue;
             }
             if local.driver.as_ref().unwrap().is_empty() {
                 break;
             }
+
             let deadline = local.next_deadline();
             // Parking only enters the kernel and invokes no user callbacks.
             // Keeping the driver in Local preserves the cleanup owner on unwind.
@@ -1298,6 +1467,9 @@ impl Worker {
             drop(local);
             parked.expect("io_uring shutdown wait failed");
         }
+
+        // No SQE can reference request resources now. Driver destruction can
+        // unwind normally, and TLS remains available until that destruction ends.
         mem::forget(retirement);
         let driver = self.local.borrow_mut().driver.take();
         self.panics.run(|| drop(driver));
@@ -1313,20 +1485,13 @@ impl Worker {
             self.panics.run(|| drop(output));
             return Err(panic);
         }
+
         Ok(output.expect("worker root ended without an output or failure"))
     }
-}
 
-impl Drop for Worker {
-    fn drop(&mut self) {
-        self.cleanup();
-        // During an existing unwind the outer one-off boundary reports the
-        // primary failure. Panics drops any secondary cleanup payload safely.
-    }
-}
-
-impl Worker {
-    /// Apply at most one bounded slice of a retained foreign batch.
+    /// Apply a bounded batch of messages, taking another mailbox batch when needed.
+    /// `woke` records a wake CQE. The publication sequence also detects messages
+    /// received while the worker was busy and had no kernel wait armed.
     fn messages(&mut self, mailbox: &Arc<Mailbox>, woke: bool) {
         if self.inbox.is_empty()
             && (woke || mailbox.waker.pending(self.processed_seq))
@@ -1337,14 +1502,15 @@ impl Worker {
             self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
             self.inbox.reverse();
         }
-        for _ in 0..64 {
+
+        for _ in 0..BATCH_SIZE {
             let Some(message) = self.inbox.pop() else {
                 break;
             };
             match message {
                 Message::Spawn(task) => {
                     if let Err(task) = Tasks::register(&Arc::downgrade(mailbox), task) {
-                        contain(|| drop(task));
+                        Panics::contain(|| drop(task));
                     }
                 }
                 Message::Wake(target) => {
@@ -1360,13 +1526,16 @@ impl Worker {
         }
     }
 
-    /// Service the ring and all local deadline sources using one time sample.
+    /// Service the ring and timers using one time sample, collecting callbacks.
+    /// Returns whether a wake CQE requests an inbox check. `defer_kernel_service`
+    /// allows the next ring wait to run deferred kernel work during an idle turn.
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
         local.now = Instant::now();
         let Local {
             now,
             driver,
+            timers,
             deferred,
             ..
         } = &mut *local;
@@ -1375,50 +1544,56 @@ impl Worker {
             .unwrap()
             .service(*now, defer_kernel_service, deferred);
         let woke = result.expect("io_uring driver service failed");
-        let Local {
-            timers,
-            now,
-            deferred,
-            ..
-        } = &mut *local;
+        // Timer expiry only queues wakers. Callbacks run after this borrow ends.
         timers.expire(*now, &mut deferred.wakes);
         local.update_pending();
         woke
     }
 
     /// Drive tasks and one separately pinned root through bounded service turns.
+    /// Returns on root completion or worker failure. The caller destroys the root
+    /// before closing registration and cleaning up the worker.
     fn drive<Fut: Future>(
         &mut self,
         mut root: Pin<&mut Fut>,
         root_waker: &Waker,
     ) -> Result<Fut::Output, Panic> {
-        let mailbox = self.local.borrow().mailbox.clone();
-        let spinner_cfg = self.local.borrow().shared.cfg.idle_spinner.clone();
+        let (mailbox, spinner_cfg) = {
+            let local = self.local.borrow();
+            (local.mailbox.clone(), local.shared.cfg.idle_spinner.clone())
+        };
         let mut spinner = Spinner::new(&spinner_cfg, || mailbox.waker.pending(self.processed_seq));
         let max_spin =
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
+
         loop {
             if let Some(panic) = self.panics.take() {
                 return Err(panic);
             }
-            for _ in 0..64 {
+
+            // Bound task polling so a self-waking task cannot starve the root,
+            // mailbox, or ring service.
+            for _ in 0..BATCH_SIZE {
                 let Some(mut running) = self.local.borrow_mut().tasks.take() else {
                     break;
                 };
+
                 // The inner wrapper handles user polling policy. This boundary
                 // also catches destruction performed by the abort wrapper.
-                let poll = contain(|| {
+                let poll = Panics::contain(|| {
                     running
                         .task
                         .as_mut()
                         .poll(&mut TaskContext::from_waker(&running.waker))
                 });
                 if matches!(poll, Some(Poll::Pending)) {
+                    // Restore the task, retaining any notification received during its poll.
                     self.local.borrow_mut().tasks.pending(running);
                 } else {
+                    // Retire its ID before disposal can trigger a delayed wake.
                     self.local.borrow_mut().tasks.complete(running.id);
                     let Running { task, waker, .. } = running;
-                    contain(|| drop(task));
+                    Panics::contain(|| drop(task));
                     drop(waker);
                 }
             }
@@ -1446,6 +1621,8 @@ impl Worker {
                 }
             }
 
+            // An apparently idle turn can combine kernel service with the wait.
+            // Work discovered below must service the kernel before polling again.
             let defer = !self.local.borrow().is_ready()
                 && self.inbox.is_empty()
                 && !mailbox.waker.pending(self.processed_seq);
@@ -1456,6 +1633,8 @@ impl Worker {
                 return Err(panic);
             }
 
+            // Callbacks and messages can submit I/O or make tasks runnable, so
+            // the pre-service idle decision alone is not enough to permit parking.
             let (ready, needs_kernel, pending_submissions, deadline) = {
                 let mut local = self.local.borrow_mut();
                 (
@@ -1478,6 +1657,7 @@ impl Worker {
                 }
                 continue;
             }
+
             // Busy turns use only service's time sample. Take a fresh sample
             // at this actual idle boundary after any elapsed callback time.
             let now = Instant::now();
@@ -1500,6 +1680,8 @@ impl Worker {
                     .unwrap()
                     .park(self.processed_seq, deadline);
                 if !result.expect("io_uring kernel wait failed") {
+                    // A rejected wait may not have entered the kernel. Complete
+                    // its deferred service obligation before another polling turn.
                     self.service(false);
                     self.callbacks();
                 }
@@ -1519,59 +1701,12 @@ impl Worker {
     }
 }
 
-/// Drive a stack-pinned root, retaining its worker for caller-owned shutdown.
-///
-/// Root construction, execution, and destruction share an ordinary catch scope.
-/// Publication then closes, retaining accepted tasks until the caller cancels
-/// them and runs cleanup with TLS still installed.
-fn run_worker<F, Fut>(
-    shared: Arc<Shared>,
-    build: F,
-    service: Option<BoxedTask>,
-    interrupts: Option<Panicked>,
-) -> Result<(Worker, Option<Fut::Output>), Panic>
-where
-    F: FnOnce(&Arc<Mailbox>) -> Fut,
-    Fut: Future,
-{
-    // Only the owning runner listens for failures from other workers.
-    let owning_runner = interrupts.is_some();
-    let local = Local::new(shared.clone()).map_err(|error| -> Panic {
-        Box::new(format!(
-            "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
-        ))
-    })?;
-    let mut worker = Worker::new(local);
-    let mailbox = worker.local.borrow().mailbox.clone();
-    if let Some(service) = service
-        && let Err(service) = Tasks::register(&Arc::downgrade(&mailbox), service)
-    {
-        worker.panics.run(|| drop(service));
+impl Drop for Worker {
+    fn drop(&mut self) {
+        // Cleanup still runs during unwinding. Panics leaks any unclaimed
+        // payload so its destruction cannot replace the original failure.
+        self.cleanup();
     }
-    let root_waker = TaskWaker::new(Arc::downgrade(&mailbox), Target::Root).into();
-    // The catch owns the root, including when interrupted. Worker and TLS stay
-    // outside it so root destruction can orphan operations or admit more work.
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let root = build(&mailbox);
-        match interrupts {
-            Some(interrupts) => worker.drive(pin!(interrupts.interrupt(root)), &root_waker),
-            None => worker.drive(pin!(root), &root_waker),
-        }
-    }));
-    let output = match result {
-        Ok(Ok(value)) => Some(value),
-        Ok(Err(panic)) | Err(panic) => {
-            worker.panics.retain(panic);
-            None
-        }
-    };
-    // Include work admitted by root destruction in the shutdown barrier.
-    if owning_runner {
-        shared.workers.close();
-    }
-    worker.begin_close();
-    drop(root_waker);
-    Ok((worker, output))
 }
 
 /// Run a one-off task as the worker's root, containing poll and disposal panics.
@@ -1584,37 +1719,24 @@ impl Future for TaskRoot {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        contain(|| self.task.as_mut().unwrap().as_mut().poll(cx)).unwrap_or(Poll::Ready(()))
+        // A contained cancellation or disposal panic ends the task so the worker
+        // can proceed with I/O cleanup.
+        Panics::contain(|| self.task.as_mut().unwrap().as_mut().poll(cx)).unwrap_or(Poll::Ready(()))
     }
 }
 
 impl Drop for TaskRoot {
     fn drop(&mut self) {
-        contain(|| drop(self.task.take()));
-    }
-}
-
-/// Report an infrastructure failure only after that worker's mandatory cleanup.
-fn run_one_off(shared: Arc<Shared>, task: BoxedTask) {
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        // Startup may reject the builder without invoking it. Its captured root
-        // retains the same disposal boundary as an executing spawned task.
-        let root = TaskRoot { task: Some(task) };
-        let (mut worker, output) = run_worker(shared.clone(), |_| root, None, None)?;
-        worker.cleanup();
-        worker.result(output)
-    }));
-    if let Err(panic) = result.unwrap_or_else(Err) {
-        shared.panicker.notify(panic);
+        Panics::contain(|| drop(self.task.take()));
     }
 }
 
 /// Native io_uring runner executing ordinary tasks on its calling thread.
 ///
-/// The root future need not be Send. Spawned futures are Send before placement,
-/// then exclusively polled and destroyed by their selected worker. The runner
-/// waits for one-off runtime cleanup and retained writes and syncs before
-/// returning or resuming a panic. Native thread-local destruction may follow.
+/// The root future need not be Send. Spawned futures are transferred to their
+/// selected worker before polling. The runner waits for one-off runtime cleanup
+/// and retained writes and syncs before returning or resuming a panic. Native
+/// thread-local destruction may follow.
 pub struct Runner {
     /// Settings validated before any runtime resources are created.
     cfg: Config,
@@ -1641,9 +1763,11 @@ impl crate::Runner for Runner {
         F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
+        // Reject nesting and invalid settings before acquiring storage or threads.
         Scope::assert_vacant();
         self.cfg.validate();
-        let mut registry = MetricsRegistry::new();
+
+        let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
         let metrics = TaskMetrics::new(&mut runtime_registry);
         let pending_operations = runtime_registry.register(
@@ -1660,6 +1784,7 @@ impl crate::Runner for Runner {
             self.cfg.resolved_storage_buffer_pool_config(),
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
+
         let storage = Storage::new(
             StorageConfig {
                 storage_directory: self.cfg.storage_directory.clone(),
@@ -1690,6 +1815,7 @@ impl crate::Runner for Runner {
             &mut runtime_registry,
         );
         let (panicker, tasks) = Panicker::new(self.cfg.catch_panics);
+
         let shared = Arc::new(Shared {
             cfg: self.cfg,
             registry,
@@ -1697,23 +1823,23 @@ impl crate::Runner for Runner {
             pending_operations,
             shutdown: Mutex::new(Stopper::default()),
             panicker,
-            workers: Arc::new(Registry::default()),
-            #[cfg(test)]
-            fail_launch: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
-            fail_startup: std::sync::atomic::AtomicBool::new(false),
+            workers: Arc::new(Workers::default()),
             storage,
             network,
             network_buffer_pool,
             storage_buffer_pool,
         });
+
         let label = Label::root();
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
         let metric = MetricHandle::new(shared.metrics.tasks_running.get_or_create(&label).clone());
         let tree = Tree::root();
         let context_shared = shared.clone();
         let context_tree = tree.clone();
-        let output = run_worker(
+
+        // Context construction needs the ordinary mailbox, and the root factory
+        // needs TLS installed so it can synchronously spawn or register work.
+        let output = Worker::run(
             shared.clone(),
             move |mailbox| {
                 f(Context {
@@ -1729,8 +1855,13 @@ impl crate::Runner for Runner {
             Some(tasks),
         )
         .and_then(|(mut worker, output)| {
+            // The root is gone and publication is closed. Abort ordinary and
+            // one-off tasks before waiting for their workers to finish cleanup.
             worker.panics.run(|| tree.abort());
             worker.cleanup();
+
+            // One-off cleanup may depend on resources released by local task
+            // disposal or I/O retirement, so drain this worker first.
             shared.workers.wait();
             worker.result(output)
         });

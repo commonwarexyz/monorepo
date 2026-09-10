@@ -11,7 +11,7 @@
 use super::{
     mailbox::{Mailbox, Message},
     request::{Request, RequestOutput, SyncRequest},
-    runtime::{self, Local},
+    runtime::Local,
     waiter::{Observation, Observer, WaiterId},
 };
 use crate::Error;
@@ -52,7 +52,7 @@ impl Operation {
     /// remains lazy. The request is transferred before this handle is awaited.
     /// A closing worker returns a handle that resolves to [`Error::Closed`].
     pub fn register(request: Request) -> Self {
-        let owner = runtime::current().expect("io_uring I/O requires a current worker");
+        let owner = Local::current().expect("io_uring I/O requires a current worker");
         let mut local = owner.borrow_mut();
 
         if local.closing {
@@ -95,7 +95,7 @@ impl Operation {
         if let State::Waiting { mailbox, waiter_id } = mem::replace(&mut self.state, State::Done) {
             // Orphaning also releases an already completed result. The driver
             // decides whether unfinished work must continue.
-            runtime::cancel(&mailbox, Message::Orphan(waiter_id));
+            Local::cancel(&mailbox, Message::Orphan(waiter_id));
         }
     }
 }
@@ -116,7 +116,7 @@ impl Future for Operation {
             }
             State::Done => panic!("io_uring operation polled after completion"),
         };
-        let owner = match runtime::bound(mailbox) {
+        let owner = match Local::bound(mailbox) {
             Ok(owner) => owner,
             Err(error) => {
                 this.release();
@@ -182,7 +182,7 @@ impl Drop for Operation {
 /// Dropping the receiver leaves the sync running. A closing worker rejects the
 /// request and publishes [`Error::Closed`] through the receiver.
 pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> {
-    let owner = runtime::current().expect("io_uring sync requires a current worker");
+    let owner = Local::current().expect("io_uring sync requires a current worker");
     let (sender, receiver) = oneshot::channel();
     let mut local = owner.borrow_mut();
     if local.closing {
@@ -260,7 +260,7 @@ pub mod tests {
         }
 
         fn check_local() {
-            if let Some(local) = runtime::current() {
+            if let Some(local) = Local::current() {
                 // A callback under an outstanding Local borrow fails here.
                 let _borrow = local.borrow_mut();
             }
@@ -357,7 +357,7 @@ pub mod tests {
     /// Service the worker until every request and cancellation CQE retires.
     async fn drained() {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !runtime::current()
+        while !Local::current()
             .unwrap()
             .borrow()
             .driver
@@ -399,7 +399,7 @@ pub mod tests {
     fn test_worker_closure_rejects_registration_and_polling() {
         for during_clone in [false, true] {
             let callbacks = Arc::new(Reentrant {
-                on_clone: Some(|| runtime::current().unwrap().borrow_mut().closing = true),
+                on_clone: Some(|| Local::current().unwrap().borrow_mut().closing = true),
                 ..Default::default()
             });
 
@@ -413,7 +413,7 @@ pub mod tests {
                 // Closure can precede polling or happen while a waker clone
                 // temporarily releases the worker borrow.
                 if !during_clone {
-                    runtime::current().unwrap().borrow_mut().closing = true;
+                    Local::current().unwrap().borrow_mut().closing = true;
                 }
                 assert!(matches!(
                     operation.poll_unpin(&mut cx),
@@ -433,7 +433,7 @@ pub mod tests {
                 let handle = blob.start_sync().await;
                 assert!(matches!(handle.await, Err(Error::Closed)));
                 assert!(
-                    runtime::current()
+                    Local::current()
                         .unwrap()
                         .borrow()
                         .driver
@@ -450,7 +450,7 @@ pub mod tests {
         for sleep_first in [false, true] {
             let callbacks = Arc::new(Reentrant {
                 on_clone: Some(|| {
-                    let owner = runtime::current().unwrap();
+                    let owner = Local::current().unwrap();
                     let mut local = owner.borrow_mut();
                     local.now += Duration::from_secs(120);
                     let Local {
@@ -628,7 +628,7 @@ pub mod tests {
             let mut retained_local = None;
             let panic = catch_unwind(AssertUnwindSafe(|| {
                 runner().start(|_| async {
-                    retained_local = runtime::current();
+                    retained_local = Local::current();
                     let mut operation = if callback == Reentrant::WAKE {
                         send(fd.clone())
                     } else {
@@ -658,7 +658,7 @@ pub mod tests {
             let local = retained_local.unwrap();
             let local = local.borrow();
             assert!(local.driver.is_none());
-            assert!(runtime::current().is_none());
+            assert!(Local::current().is_none());
             assert_eq!(Arc::strong_count(&fd), 1);
             assert_eq!(Arc::strong_count(&callbacks), 1);
         }
