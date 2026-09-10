@@ -102,6 +102,7 @@ jobs:
         uses: ./.github/actions/swap
       - name: Clear disk space
         uses: ./.github/actions/disk
+        background: true
       - name: Prepare
         run: |
           platform=${{ matrix.platform }}
@@ -117,6 +118,8 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Wait for disk cleanup
+        wait-all:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - name: Build
