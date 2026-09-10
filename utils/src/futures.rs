@@ -193,7 +193,15 @@ impl<F: Future> Future for OptionFuture<F> {
     }
 }
 
-/// A consuming mutation's return value: the threaded value first, then any extra outputs.
+/// The result of an operation that consumes and returns a value.
+///
+/// [rebind] and [rebind_entry] restore the value and return the extra outputs:
+///
+/// | Operation returns | Value restored | Helper returns |
+/// | --- | --- | --- |
+/// | `Ok(value)` | `value` | `Ok(())` |
+/// | `Ok((value, a))` | `value` | `Ok(a)` |
+/// | `Ok((value, a, b))` | `value` | `Ok((a, b))` |
 pub trait Threaded<T> {
     /// The outputs beyond the threaded value.
     type Rest;
@@ -227,11 +235,47 @@ impl<T, A, B> Threaded<T> for (T, A, B) {
     }
 }
 
-/// Threads the value in `slot` through a consuming mutation, restoring the returned
-/// value and yielding the mutation's extra outputs.
+/// Runs an async operation with the owned value in `slot`, then restores the returned
+/// value and returns any extra outputs (see [Threaded]).
 ///
-/// On error the value stays absent, matching the contract of consuming mutators: the
-/// handle is destroyed.
+/// Use this for a field stored as `Option<T>` when a method consumes `self`. The
+/// operation must return the replacement value as the first part of its result.
+///
+/// On error, `slot` stays empty.
+///
+/// # Cancellation
+///
+/// The value is removed when this future is first polled. Dropping the future while
+/// the operation is pending leaves `slot` empty.
+///
+/// # Examples
+///
+/// Given a journal whose `append` method returns `(Self, offset, length)`, restore
+/// the journal and return the record's offset and length:
+///
+/// ```
+/// use commonware_utils::futures::rebind;
+///
+/// # #[derive(Default)]
+/// # struct Journal(Vec<u8>);
+/// # impl Journal {
+/// #     async fn append(mut self, record: &[u8]) -> Result<(Self, usize, usize), &'static str> {
+/// #         let offset = self.0.len();
+/// #         self.0.extend_from_slice(record);
+/// #         Ok((self, offset, record.len()))
+/// #     }
+/// # }
+/// # futures::executor::block_on(async {
+/// let mut journal = Some(Journal::default());
+/// // `append` consumes the journal. On success, `rebind` restores the returned
+/// // journal in the option and gives the caller `(offset, len)`.
+/// let (offset, len) = rebind(&mut journal, |journal| journal.append(b"vote"))
+///     .await
+///     .expect("append failed");
+/// assert_eq!((offset, len), (0, 4));
+/// assert!(journal.is_some());
+/// # });
+/// ```
 ///
 /// # Panics
 ///
@@ -250,11 +294,49 @@ where
     Ok(rest)
 }
 
-/// Threads the value at `key` in `map` through a consuming mutation, restoring the
-/// returned value and yielding the mutation's extra outputs.
+/// Runs an async operation with the owned value at `key`, then inserts the returned
+/// value under the original key and returns any extra outputs (see [Threaded]).
 ///
-/// On error the entry stays absent, matching the contract of consuming mutators: the
-/// handle is destroyed.
+/// Use this when a method consumes a value stored in a [BTreeMap]. The operation must
+/// return the replacement value as the first part of its result. For a value stored
+/// in an [Option], use [rebind].
+///
+/// On error, the entry stays absent.
+///
+/// # Cancellation
+///
+/// The entry is removed when this future is first polled. Dropping the future while
+/// the operation is pending leaves the entry absent.
+///
+/// # Examples
+///
+/// Given journals stored by epoch, with `append` returning `(Self, position)`,
+/// update one journal and return the new record's position:
+///
+/// ```
+/// use commonware_utils::futures::rebind_entry;
+/// use std::collections::BTreeMap;
+///
+/// # #[derive(Default)]
+/// # struct Journal(Vec<&'static str>);
+/// # impl Journal {
+/// #     async fn append(mut self, record: &'static str) -> Result<(Self, usize), &'static str> {
+/// #         let position = self.0.len();
+/// #         self.0.push(record);
+/// #         Ok((self, position))
+/// #     }
+/// # }
+/// # futures::executor::block_on(async {
+/// let mut journals = BTreeMap::from([(7, Journal::default())]);
+/// // The closure takes ownership of epoch 7's journal. On success, the returned
+/// // journal goes back under key 7 and the caller receives its new record's position.
+/// let position = rebind_entry(&mut journals, &7, |journal| journal.append("vote"))
+///     .await
+///     .expect("append failed");
+/// assert_eq!(position, 0);
+/// assert!(journals.contains_key(&7));
+/// # });
+/// ```
 ///
 /// # Panics
 ///
