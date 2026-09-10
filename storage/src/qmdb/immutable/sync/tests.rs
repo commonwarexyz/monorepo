@@ -1259,7 +1259,6 @@ mod compact_variable_mmr {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        CodecConfig,
         Sequential,
     >;
 
@@ -1300,12 +1299,11 @@ mod compact_variable_mmr {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ((0..=10000).into(), ())),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((), ((0..=10000).into(), ())),
         }
     }
 
@@ -1921,7 +1919,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -1952,7 +1949,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -1997,7 +1993,6 @@ mod compact_variable_mmb {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        CodecConfig,
         Sequential,
     >;
 
@@ -2038,12 +2033,11 @@ mod compact_variable_mmb {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ((0..=10000).into(), ())),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((), ((0..=10000).into(), ())),
         }
     }
 

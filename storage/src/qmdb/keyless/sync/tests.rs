@@ -1276,14 +1276,8 @@ mod compact_variable_mmr {
     use commonware_parallel::Sequential;
 
     type SourceDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type ClientDb = variable::CompactDb<
-        mmr::Family,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type ClientDb =
+        variable::CompactDb<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     fn source_config(
         suffix: &str,
@@ -1322,12 +1316,11 @@ mod compact_variable_mmr {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((0..=10000).into(), ()),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((0..=10000).into(), ()),
         }
     }
 
@@ -2117,7 +2110,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -2148,7 +2140,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -2176,14 +2167,8 @@ mod compact_variable_mmb {
     use commonware_parallel::Sequential;
 
     type SourceDb = variable::Db<mmb::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type ClientDb = variable::CompactDb<
-        mmb::Family,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type ClientDb =
+        variable::CompactDb<mmb::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     fn source_config(
         suffix: &str,
@@ -2222,12 +2207,11 @@ mod compact_variable_mmb {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((0..=10000).into(), ()),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((0..=10000).into(), ()),
         }
     }
 

@@ -122,7 +122,6 @@ pub(super) fn qmdb_config(
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
         },
-        commit_codec_config: (),
     };
     (db_a, db_b)
 }
