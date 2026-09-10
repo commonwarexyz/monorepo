@@ -403,8 +403,11 @@ fn stage_discharge(
     drain_validator(&mut machine, recovery.into_capabilities(), Some);
 
     let artifact = fixture.certificate.clone();
-    let id = artifact.id::<Sha256>();
-    let observed = machine.step(Input::Observe(vec![(id, artifact)])).unwrap();
+    let observed = machine
+        .step(Input::Observe(vec![
+            artifact.identify::<Sha256>(&mut Vec::new()),
+        ]))
+        .unwrap();
     let verification = observed
         .capabilities()
         .iter()
@@ -484,7 +487,7 @@ impl AllocationCases {
         let mut duplicate_machine = fabric::start(profile);
         fabric::absorb(&mut duplicate_machine, vec![Artifact::LeaderBlock(leader)]);
         fabric::absorb(&mut duplicate_machine, vec![vote.clone()]);
-        let duplicate_input = Input::Observe(vec![(vote.id::<Sha256>(), vote)]);
+        let duplicate_input = Input::Observe(vec![vote.identify::<Sha256>(&mut Vec::new())]);
 
         let (sign_machine, sign_completion) = local_sign_completion_fixture();
         let (mut release_machine, release_completion) = local_sign_completion_fixture();
@@ -686,8 +689,11 @@ fn run_ingress_admission() -> Duration {
     let _ = probe.id::<CountedSha256>();
     let identifier_hashes = take_hash_calls();
     let started = Instant::now();
-    let id = vote.id::<CountedSha256>();
-    let step = machine.step(Input::Observe(vec![(id, vote)])).unwrap();
+    let step = machine
+        .step(Input::Observe(vec![
+            vote.identify::<CountedSha256>(&mut Vec::new()),
+        ]))
+        .unwrap();
     let elapsed = started.elapsed();
     let actual_hashes = take_hash_calls();
     assert!(matches!(
@@ -732,7 +738,7 @@ fn run_observe_duplicates() -> Duration {
                 fabric::deferred_attestation(signer as u32),
             );
             let artifact = Artifact::Vote(copy);
-            (artifact.id::<Sha256>(), artifact)
+            artifact.identify::<Sha256>(&mut Vec::new())
         })
         .collect::<Vec<_>>();
     let started = Instant::now();

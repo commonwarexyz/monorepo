@@ -55,7 +55,7 @@ pub(super) struct Group<V: Variant, D: Digest> {
 
 impl<V: Variant, D: Digest> Group<V, D> {
     pub(super) fn one(artifact: IdentifiedArtifact<V, D>, received_at: SystemTime) -> Self {
-        let bytes = artifact.1.encoded_len();
+        let bytes = artifact.artifact.encoded_len();
         Self {
             first: artifact,
             first_bytes: bytes,
@@ -68,8 +68,8 @@ impl<V: Variant, D: Digest> Group<V, D> {
         [first, second]: [IdentifiedArtifact<V, D>; 2],
         received_at: SystemTime,
     ) -> Self {
-        let first_bytes = first.1.encoded_len();
-        let second_bytes = second.1.encoded_len();
+        let first_bytes = first.artifact.encoded_len();
+        let second_bytes = second.artifact.encoded_len();
         Self {
             first,
             first_bytes,
@@ -104,14 +104,14 @@ pub(super) struct Selected<P: PublicKey, V: Variant, D: Digest> {
 #[cfg(test)]
 impl<P: PublicKey, V: Variant, D: Digest> PartialEq<Artifact<V, D>> for Selected<P, V, D> {
     fn eq(&self, other: &Artifact<V, D>) -> bool {
-        self.artifact.1 == *other
+        self.artifact.artifact == *other
     }
 }
 
 #[cfg(test)]
 impl<P: PublicKey, V: Variant, D: Digest> PartialEq<Selected<P, V, D>> for Artifact<V, D> {
     fn eq(&self, other: &Selected<P, V, D>) -> bool {
-        *self == other.artifact.1
+        *self == other.artifact.artifact
     }
 }
 
@@ -376,7 +376,7 @@ mod tests {
     fn identified(
         artifact: Artifact<MinPk, Sha256Digest>,
     ) -> IdentifiedArtifact<MinPk, Sha256Digest> {
-        (artifact.id::<Sha256>(), artifact)
+        artifact.identify::<Sha256>(&mut Vec::new())
     }
 
     #[test]

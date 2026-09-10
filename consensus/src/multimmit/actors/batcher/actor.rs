@@ -11,7 +11,7 @@ use crate::{
             wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig},
         },
         config::CodecConfig,
-        machine::{Artifact, IdentifiedArtifact, VerificationCompletion, VerifyJob},
+        machine::{Artifact, VerificationCompletion, VerifyJob},
         scheme::bls12381_threshold::Scheme,
         types::CertificateId,
     },
@@ -580,14 +580,6 @@ where
         }
     }
 
-    fn identify(
-        artifact: Artifact<V, H::Digest>,
-        scratch: &mut Vec<u8>,
-    ) -> IdentifiedArtifact<V, H::Digest> {
-        let id = artifact.id_with_scratch::<H>(scratch);
-        (id, artifact)
-    }
-
     /// Performs contextual frame checks and canonical artifact identification off the actor loop.
     fn prepare(
         message: NetworkMessage<P, V, H::Digest>,
@@ -606,7 +598,7 @@ where
                     } => Ok((
                         LaneId::Consensus,
                         Group::one(
-                            Self::identify(Artifact::LeaderBlock(*block), &mut scratch),
+                            Artifact::LeaderBlock(*block).identify::<H>(&mut scratch),
                             received_at,
                         ),
                     )),
@@ -623,13 +615,10 @@ where
                             Err(InvalidIngress::ProposalParent)
                         } else {
                             let parent = Artifact::Vqc(certificate);
-                            let parent_id = parent.id_from_canonical_encoding::<H>(&scratch);
+                            let parent = parent.identify_from_canonical_encoding::<H>(&scratch);
                             let block = Artifact::LeaderBlock(*block);
-                            let block_id = block.id_with_scratch::<H>(&mut scratch);
-                            Ok((
-                                LaneId::Consensus,
-                                Group::pair([(parent_id, parent), (block_id, block)], received_at),
-                            ))
+                            let block = block.identify::<H>(&mut scratch);
+                            Ok((LaneId::Consensus, Group::pair([parent, block], received_at)))
                         }
                     }
                     message => {
@@ -639,7 +628,7 @@ where
                             .expect("non-proposal consensus messages contain one artifact");
                         Ok((
                             LaneId::Consensus,
-                            Group::one(Self::identify(artifact, &mut scratch), received_at),
+                            Group::one(artifact.identify::<H>(&mut scratch), received_at),
                         ))
                     }
                 };
@@ -654,7 +643,7 @@ where
                     peer,
                     Ok((
                         LaneId::Certificate,
-                        Group::one(Self::identify(artifact, &mut scratch), received_at),
+                        Group::one(artifact.identify::<H>(&mut scratch), received_at),
                     )),
                 )
             }
@@ -682,7 +671,7 @@ where
                         peer,
                         Ok((
                             LaneId::Data(chain),
-                            Group::one(Self::identify(artifact, &mut scratch), received_at),
+                            Group::one(artifact.identify::<H>(&mut scratch), received_at),
                         )),
                     )
                 }

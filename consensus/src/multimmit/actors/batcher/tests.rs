@@ -321,7 +321,10 @@ fn saturated_observation_handoff_preserves_admitted_certificate() {
             .recv()
             .await
             .expect("filler cohort was forwarded");
-        assert!(matches!(&filler.artifacts[0].1.1, Artifact::NoVote(_)));
+        assert!(matches!(
+            &filler.artifacts[0].1.artifact,
+            Artifact::NoVote(_)
+        ));
         assert!(
             harness
                 .mailbox
@@ -335,7 +338,7 @@ fn saturated_observation_handoff_preserves_admitted_certificate() {
             .try_recv()
             .expect("admitted certificate was preserved while the handoff was saturated");
         assert!(matches!(
-            &preserved.artifacts[0].1.1,
+            &preserved.artifacts[0].1.artifact,
             Artifact::Vqc(actual) if actual == &certificate
         ));
     });
@@ -556,7 +559,13 @@ impl Harness {
                 .recv()
                 .await
                 .expect("batcher stays running");
-            for (_, (id, artifact)) in cohort.artifacts {
+            for (_, identified) in cohort.artifacts {
+                let artifact = identified.artifact;
+                let id = identified.id;
+                assert_eq!(
+                    identified.provisions.as_slice(),
+                    artifact.provisions::<Sha256>()
+                );
                 assert_eq!(
                     id,
                     artifact.id::<Sha256>(),
@@ -678,7 +687,7 @@ fn continuously_ready_consensus_does_not_starve_other_planes() {
                 cohort
                     .artifacts
                     .into_iter()
-                    .map(|(_, (_, artifact))| artifact),
+                    .map(|(_, identified)| identified.artifact),
             );
         }
         assert!(
@@ -942,7 +951,7 @@ fn mismatched_exact_parent_forwards_no_artifacts() {
                 cohort
                     .artifacts
                     .into_iter()
-                    .map(|(_, (_, artifact))| artifact),
+                    .map(|(_, identified)| identified.artifact),
             );
         }
         assert!(
@@ -982,7 +991,7 @@ fn exact_proposal_capacity_rejection_forwards_neither_artifact() {
                 cohort
                     .artifacts
                     .into_iter()
-                    .map(|(_, (_, artifact))| artifact),
+                    .map(|(_, identified)| identified.artifact),
             );
         }
         assert!(
@@ -1000,24 +1009,18 @@ fn machine_issued_jobs(
 ) -> Vec<VerifyJob<MinPk, Sha256Digest>> {
     let identified = artifacts
         .into_iter()
-        .map(|artifact| {
-            let id = artifact.id::<Sha256>();
-            (id, artifact)
-        })
+        .map(|artifact| artifact.identify::<Sha256>(&mut Vec::new()))
         .collect::<Vec<_>>();
     let resident_bytes = identified
         .iter()
-        .map(|(id, artifact)| id.encode_size() + artifact.encode_size())
+        .map(|identified| identified.id.encode_size() + identified.artifact.encode_size())
         .sum();
     machine_issued_jobs_for(committee, identified, resident_bytes).1
 }
 
 fn machine_issued_jobs_for(
     committee: &Committee<MinPk>,
-    identified: Vec<(
-        crate::multimmit::machine::ArtifactId<Sha256Digest>,
-        Artifact<MinPk, Sha256Digest>,
-    )>,
+    identified: Vec<crate::multimmit::machine::IdentifiedArtifact<MinPk, Sha256Digest>>,
     resident_bytes: usize,
 ) -> (
     CoreState<Sha256, MinPk>,
@@ -1085,14 +1088,11 @@ fn executes_machine_issued_jobs_with_exact_tickets() {
         ];
         let identified = artifacts
             .into_iter()
-            .map(|artifact| {
-                let id = artifact.id::<Sha256>();
-                (id, artifact)
-            })
+            .map(|artifact| artifact.identify::<Sha256>(&mut Vec::new()))
             .collect::<Vec<_>>();
         let resident_bytes = identified
             .iter()
-            .map(|(id, artifact)| id.encode_size() + artifact.encode_size())
+            .map(|identified| identified.id.encode_size() + identified.artifact.encode_size())
             .sum();
 
         // Drive the production Core boundary until it issues the exact verification job.

@@ -71,7 +71,8 @@ pub fn exercise_lanes(input: &[u8]) {
                 };
                 let peer = peers[usize::from(b) % PEERS].clone();
                 let artifact = artifact(b);
-                let artifact = (artifact.id::<commonware_cryptography::Sha256>(), artifact);
+                let artifact =
+                    artifact.identify::<commonware_cryptography::Sha256>(&mut Vec::new());
                 if lanes
                     .push_group(lane, peer, Group::one(artifact, SystemTime::UNIX_EPOCH))
                     .is_ok()
@@ -81,8 +82,9 @@ pub fn exercise_lanes(input: &[u8]) {
             }
             1 => {
                 let peer = peers[usize::from(b) % PEERS].clone();
-                let artifacts = [artifact(b), artifact(b.wrapping_add(1))]
-                    .map(|artifact| (artifact.id::<commonware_cryptography::Sha256>(), artifact));
+                let artifacts = [artifact(b), artifact(b.wrapping_add(1))].map(|artifact| {
+                    artifact.identify::<commonware_cryptography::Sha256>(&mut Vec::new())
+                });
                 if lanes
                     .push_group(
                         LaneId::Consensus,

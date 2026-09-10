@@ -22,7 +22,7 @@ pub(in crate::multimmit::machine) fn cohort<H: Hasher, V: Variant>(
     Input::Observe(
         artifacts
             .into_iter()
-            .map(|artifact| (artifact.id::<H>(), artifact))
+            .map(|artifact| artifact.identify::<H>(&mut Vec::new()))
             .collect(),
     )
 }

@@ -233,7 +233,7 @@ pub(super) fn start(profile: Profile<Sha256, MinPk>) -> BenchMachine {
 pub(super) fn absorb(machine: &mut BenchMachine, cohort: Vec<BenchArtifact>) -> BenchCapabilities {
     let identified = cohort
         .into_iter()
-        .map(|artifact| (artifact.id::<Sha256>(), artifact))
+        .map(|artifact| artifact.identify::<Sha256>(&mut Vec::new()))
         .collect();
     let step = machine.step(Input::Observe(identified)).unwrap();
     let mut capabilities = BenchCapabilities::None;
@@ -567,7 +567,7 @@ where
 {
     let identified = cohort
         .into_iter()
-        .map(|artifact| (artifact.id::<Sha256>(), artifact))
+        .map(|artifact| artifact.identify::<Sha256>(&mut Vec::new()))
         .collect();
     let step = machine.step(Input::Observe(identified)).unwrap();
     let mut run = LogicalRun {

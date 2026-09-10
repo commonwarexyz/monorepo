@@ -4998,14 +4998,11 @@ fn attached_observer_matches_the_synchronous_core() {
         let _ = drive_core(&committee, &mut core);
         let identified = artifacts
             .into_iter()
-            .map(|artifact| {
-                let id = artifact.id::<Sha256>();
-                (id, artifact)
-            })
+            .map(|artifact| artifact.identify::<Sha256>(&mut Vec::new()))
             .collect::<Vec<_>>();
         let resident_bytes = identified
             .iter()
-            .map(|(id, artifact)| id.encode_size() + artifact.encode_size())
+            .map(|identified| identified.id.encode_size() + identified.artifact.encode_size())
             .sum();
         core.observe(identified, resident_bytes).unwrap();
         let _ = drive_core(&committee, &mut core);

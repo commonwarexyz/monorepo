@@ -592,14 +592,11 @@ mod size_probe {
                 Artifact::NoVote(committee.novote(0, 2)),
             ]
             .into_iter()
-            .map(|artifact| {
-                let id = artifact.id::<Sha256>();
-                (id, artifact)
-            })
+            .map(|artifact| artifact.identify::<Sha256>(&mut Vec::new()))
             .collect::<Vec<_>>();
             let resident_bytes = observed
                 .iter()
-                .map(|(id, artifact)| id.encode_size() + artifact.encode_size())
+                .map(|identified| identified.id.encode_size() + identified.artifact.encode_size())
                 .sum();
             let mut core = CoreState::fresh(profile).unwrap();
             core.start_fresh().unwrap();

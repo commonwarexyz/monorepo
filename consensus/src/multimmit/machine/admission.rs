@@ -59,8 +59,13 @@ pub enum Artifact<V: Variant, D: Digest> {
 /// An immutable atomic publication of canonical artifacts.
 pub type ArtifactBatch<V, D> = Arc<[Arc<Artifact<V, D>>]>;
 
-/// One untrusted artifact carrying the identifier its decoder already computed.
-pub type IdentifiedArtifact<V, D> = (ArtifactId<D>, Artifact<V, D>);
+/// One untrusted artifact with immutable keys derived at the same-process identification boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentifiedArtifact<V: Variant, D: Digest> {
+    pub(crate) id: ArtifactId<D>,
+    pub(crate) artifact: Artifact<V, D>,
+    pub(crate) provisions: Vec<Dependency<D>>,
+}
 
 /// One per-leader vote slot represented by an artifact before cryptographic verification.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -203,6 +208,11 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
         &self,
         encoded: &mut Vec<u8>,
     ) -> ArtifactId<D> {
+        self.write_canonical_encoding(encoded);
+        self.id_from_canonical_encoding::<H>(encoded)
+    }
+
+    fn write_canonical_encoding(&self, encoded: &mut Vec<u8>) {
         encoded.clear();
         encoded.reserve(self.encoded_len());
         match self {
@@ -218,8 +228,6 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
             Self::Lqc(value) => value.write(encoded),
         }
         debug_assert_eq!(encoded.len(), self.encoded_len());
-
-        self.id_from_canonical_encoding::<H>(encoded)
     }
 
     /// Identifies canonical bytes already encoded for this artifact.
@@ -230,6 +238,29 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
         debug_assert_eq!(encoded.len(), self.encoded_len());
         let kind = [self.kind() as u8];
         ArtifactId(H::hash(&[ARTIFACT_NAMESPACE, &kind, encoded]))
+    }
+
+    /// Prepares immutable admission keys using one canonical artifact encoding.
+    pub(crate) fn identify<H: Hasher<Digest = D>>(
+        self,
+        scratch: &mut Vec<u8>,
+    ) -> IdentifiedArtifact<V, D> {
+        self.write_canonical_encoding(scratch);
+        self.identify_from_canonical_encoding::<H>(scratch)
+    }
+
+    pub(crate) fn identify_from_canonical_encoding<H: Hasher<Digest = D>>(
+        self,
+        encoded: &[u8],
+    ) -> IdentifiedArtifact<V, D> {
+        let id = self.id_from_canonical_encoding::<H>(encoded);
+        let provisions =
+            self.provisions_with_vqc_id::<H>(|_| CertificateId::new(H::hash(&[encoded])));
+        IdentifiedArtifact {
+            id,
+            artifact: self,
+            provisions,
+        }
     }
 
     /// Returns whether this artifact may authenticate a far-future view before ancestry is resolved.
@@ -325,6 +356,13 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
     }
 
     pub(crate) fn provisions<H: Hasher<Digest = D>>(&self) -> Vec<Dependency<D>> {
+        self.provisions_with_vqc_id::<H>(Vqc::id::<H>)
+    }
+
+    fn provisions_with_vqc_id<H: Hasher<Digest = D>>(
+        &self,
+        vqc_id: impl FnOnce(&Vqc<V, D>) -> CertificateId<D>,
+    ) -> Vec<Dependency<D>> {
         match self {
             Self::LeaderBlock(block) => vec![Dependency::Leader {
                 round: block.block().round(),
@@ -332,7 +370,7 @@ impl<V: Variant, D: Digest> Artifact<V, D> {
             }],
             Self::Vqc(certificate) => {
                 vec![
-                    Dependency::Vqc(certificate.id::<H>()),
+                    Dependency::Vqc(vqc_id(certificate)),
                     Dependency::Leader {
                         round: certificate.leader().round(),
                         digest: certificate.leader().digest::<H>(),

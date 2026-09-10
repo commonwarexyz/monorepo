@@ -550,7 +550,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
         if batch
             .artifacts
             .iter()
-            .any(|(_, (_, artifact))| artifact.view_critical())
+            .any(|(_, identified)| identified.artifact.view_critical())
         {
             return (batch, None);
         }
@@ -562,7 +562,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
                 || next
                     .artifacts
                     .iter()
-                    .any(|(_, (_, artifact))| artifact.view_critical())
+                    .any(|(_, identified)| identified.artifact.view_critical())
             {
                 return (batch, Some(next));
             }
@@ -2760,7 +2760,8 @@ where
             return Err(StepError::CompletionMismatch.into());
         }
         let arrived_at = self.context.current();
-        for (_, artifact) in &artifacts {
+        for identified in &artifacts {
+            let artifact = &identified.artifact;
             if let Artifact::TransactionBlock(block) = artifact {
                 self.block_arrivals
                     .record(block.header().block_ref::<H>(), arrived_at);
@@ -2771,15 +2772,15 @@ where
             .zip(
                 artifacts
                     .iter()
-                    .map(|(_, artifact)| view_proof_kind(artifact)),
+                    .map(|identified| view_proof_kind(&identified.artifact)),
             )
             .collect::<Vec<_>>();
         // The cohort arrives with its artifacts' encoded weight already measured at admission;
         // re-deriving it here would walk every decoded certificate a second time.
         let resident_bytes = artifacts
             .iter()
-            .try_fold(artifact_bytes, |total, (id, _)| {
-                total.checked_add(id.encode_size())
+            .try_fold(artifact_bytes, |total, identified| {
+                total.checked_add(identified.id.encode_size())
             })
             .and_then(|bytes| bytes.checked_add(size_of_val(sources.as_slice())))
             .ok_or(CoreError::CapacityOverflow)?;
@@ -2787,7 +2788,7 @@ where
             artifact_bytes,
             artifacts
                 .iter()
-                .map(|(_, artifact)| artifact.encoded_len())
+                .map(|identified| identified.artifact.encoded_len())
                 .sum::<usize>(),
             "the cohort's measured weight matches its artifacts"
         );
@@ -3278,7 +3279,7 @@ mod tests {
                 let artifacts = vec![
                     (
                         committee.identities[0].clone(),
-                        (artifact.id::<Sha256>(), artifact.clone()),
+                        artifact.clone().identify::<Sha256>(&mut Vec::new()),
                     );
                     count
                 ];
@@ -3321,7 +3322,7 @@ mod tests {
                     batch
                         .artifacts
                         .iter()
-                        .map(|(_, (_, artifact))| artifact.encode_size())
+                        .map(|(_, identified)| identified.artifact.encode_size())
                         .sum::<usize>()
                 );
                 received.extend(batch.artifacts);

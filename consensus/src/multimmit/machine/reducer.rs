@@ -1651,8 +1651,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         view: View,
         artifact: Artifact<V, H::Digest>,
     ) -> Result<Step<V, H::Digest>, StepError> {
-        let id = artifact.id::<H>();
-        let step = self.observe_artifacts([(id, artifact)].into_iter(), false)?;
+        let artifact = artifact.identify::<H>(&mut Vec::new());
+        let id = artifact.id;
+        let step = self.observe_artifacts([artifact].into_iter(), false)?;
         let status = match step.status() {
             StepStatus::Observed(results) => match results.as_slice() {
                 [result] => result.status(),
@@ -2896,7 +2897,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             }
         };
 
-        for (index, (id, artifact)) in artifacts.enumerate() {
+        for (index, identified) in artifacts.enumerate() {
+            let IdentifiedArtifact {
+                id,
+                artifact,
+                provisions,
+            } = identified;
             let observation = Observation::new(cohort, index as u32);
             if let Some(rejection) = self.precheck_unidentified(&artifact) {
                 push_result(ObservationResult {
@@ -2967,7 +2973,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.views.claim(id, observation, &artifact);
             }
             self.claim_finality(id, observation, Arc::clone(&artifact))?;
-            let provisions = self.retain_provider_index(id, &artifact);
+            debug_assert_eq!(provisions, artifact.provisions::<H>());
+            let provisions = Arc::<[_]>::from(provisions);
+            self.retain_provider_index(id, &provisions);
             if dependency_slot {
                 self.dependency_slots += 1;
             }
@@ -3228,9 +3236,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         );
         self.chain
             .reject_unverified::<H>(ticket.artifact(), &artifact)?;
-        let invalid_dependency = artifact
-            .provisions::<H>()
-            .into_iter()
+        let invalid_dependency = self.artifacts[&ticket.artifact()]
+            .provisions
+            .iter()
+            .copied()
             .find(|dependency| matches!(dependency, Dependency::Vqc(_)));
         self.remove_terminal_artifact(ticket.artifact())?;
         self.rearm_failed_resolutions(failed)?;
@@ -4424,13 +4433,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 continue;
             };
             self.unindex_artifact(id, &entry.artifact);
-            if let Artifact::Vqc(certificate) = entry.artifact.as_ref() {
-                let certificate = certificate.id::<H>();
-                if self.vqcs.get(&certificate) == Some(&id) {
-                    self.vqcs.remove(&certificate);
-                }
-            }
             for provision in entry.provisions.iter() {
+                if let Dependency::Vqc(certificate) = provision
+                    && self.vqcs.get(certificate) == Some(&id)
+                {
+                    self.vqcs.remove(certificate);
+                }
                 let empty = self.providers.get_mut(provision).is_some_and(|providers| {
                     providers.remove(&id);
                     providers.is_empty()
@@ -5687,7 +5695,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let future = future_view.is_some();
         self.claim_finality(id, observation, Arc::clone(&artifact))?;
         self.validate_finality(id, observation, &artifact, None)?;
-        let provisions = self.retain_provider_index(id, &artifact);
+        let provisions = Arc::<[_]>::from(artifact.provisions::<H>());
+        self.retain_provider_index(id, &provisions);
         self.index_artifact(id, &artifact);
         self.artifacts.insert(
             id,
@@ -5717,13 +5726,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn retain_provider_index(
         &mut self,
         id: ArtifactId<H::Digest>,
-        artifact: &Arc<Artifact<V, H::Digest>>,
-    ) -> Arc<[Dependency<H::Digest>]> {
-        let provisions = Arc::<[_]>::from(artifact.provisions::<H>());
+        provisions: &[Dependency<H::Digest>],
+    ) {
         for provision in provisions.iter().copied() {
             self.providers.entry(provision).or_default().insert(id);
         }
-        provisions
     }
 
     fn fire_timer(&mut self, timer: Timer) -> Result<Step<V, H::Digest>, StepError> {

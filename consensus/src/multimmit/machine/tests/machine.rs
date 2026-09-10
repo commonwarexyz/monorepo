@@ -5286,6 +5286,75 @@ fn proposal_frontier_survives_retention_and_restart() {
 }
 
 #[test]
+fn prepared_artifact_keys_match_content() {
+    let machine = Machine::new(profile_for(Role::Observer, 6, 2));
+    let block = leader(&machine, 1);
+    let votes = (0..5)
+        .map(|signer| view_vote(&machine, &block, signer))
+        .collect::<Vec<_>>();
+    let artifacts = [
+        Artifact::Vqc(view_one_vqc(&machine)),
+        Artifact::Lqc(lqc(&machine, block.clone(), &votes)),
+        Artifact::LeaderBlock(SignedLeaderBlock::new(block, attestation(0))),
+        Artifact::NoVote(no_vote(&machine, View::new(1), 0)),
+    ];
+    let mut scratch = vec![0xff; 8192];
+    for artifact in artifacts {
+        let id = artifact.id::<Sha256>();
+        let provisions = artifact.provisions::<Sha256>();
+        let prepared = artifact.clone().identify::<Sha256>(&mut scratch);
+        assert_eq!(prepared.id, id);
+        assert_eq!(prepared.artifact, artifact);
+        assert_eq!(prepared.provisions.as_slice(), provisions);
+        assert_eq!(
+            prepared,
+            artifact.identify_from_canonical_encoding::<Sha256>(&scratch)
+        );
+    }
+}
+
+#[test]
+fn retired_vqc_provider_indexes_match_retained_artifacts() {
+    let profile = profile_with_retention(Role::Observer, 6, 2, resources(), ViewDelta::new(2));
+    let (mut machine, _) = start_profile(profile);
+    let mut first = None;
+    for view in 1..=16 {
+        let block = leader(&machine, view);
+        let messages = (0..5)
+            .map(|signer| ViewMessage::Vote(view_vote(&machine, &block, signer)))
+            .collect::<Vec<_>>();
+        let certificate = vqc(&machine, block, &messages);
+        let certificate_id = certificate.id::<Sha256>();
+        let artifact = Artifact::Vqc(certificate);
+        let id = artifact.id::<Sha256>();
+        first.get_or_insert((id, certificate_id));
+        let verification = observe(&mut machine, artifact);
+        let admitted = complete_with_step(&mut machine, &verification, true);
+        drive_poll_and_persist(&mut machine, admitted);
+        for (certificate, id) in &machine.vqcs {
+            assert!(
+                machine.artifacts[id]
+                    .provisions
+                    .contains(&Dependency::Vqc(*certificate))
+            );
+        }
+        for (dependency, providers) in &machine.providers {
+            for id in providers {
+                assert!(machine.artifacts[id].provisions.contains(dependency));
+            }
+        }
+    }
+    let (id, certificate) = first.unwrap();
+    assert!(!machine.artifacts.contains_key(&id));
+    assert!(!machine.vqcs.contains_key(&certificate));
+    assert!(
+        !machine
+            .providers
+            .contains_key(&Dependency::Vqc(certificate))
+    );
+}
+
+#[test]
 fn retired_leader_dependencies_plateau() {
     let profile = profile_with_retention(Role::Observer, 6, 2, resources(), ViewDelta::new(2));
     let (mut machine, _) = start_profile(profile);
