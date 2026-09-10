@@ -7,7 +7,6 @@ const GREEN = '#2f7d3d';
 const GRAY = '#666666';
 const GRID = '#e4e4e4';
 const INK = '#111111';
-const DASH = '#8a8a8a';
 
 // Account-key prefixes give power-of-two slices, capped at the codec's eight-bit prefix limit.
 function sliceCount(n) {
@@ -22,8 +21,6 @@ const LTHASH = 2048;
 const AGG = 48;
 const LEAF = 65;
 const GUARD = KEY + DIGEST;
-const HEADER = 32;
-const ROOTS = 164;
 const MAX_VECTOR_LENGTH = 1 << 24;
 
 function byteSize(parts) {
@@ -89,23 +86,18 @@ function dealtSpan(sc, lo, hi) {
   const first = counts[lo];
   const last = counts[hi - 1];
   const transpose = last.t1 - first.t0;
+  const before = sc.bytePrefixes[lo];
+  const after = sc.bytePrefixes[hi];
   const parts = {
     fixed: 8,
-    boundaries: varint(span + 1) + boundary(first.p0, first.c0, first.p0, first.x0),
-    rows: 0,
-    entries: 0,
-    transpose: 0,
-    aggregates: varint(span),
+    boundaries: varint(span + 1) + boundary(first.p0, first.c0, first.p0, first.x0)
+      + after.boundaries - before.boundaries,
+    rows: after.rows - before.rows,
+    entries: after.entries - before.entries,
+    transpose: after.transpose - before.transpose,
+    aggregates: varint(span) + after.aggregates - before.aggregates,
     starts: 2 * LTHASH,
   };
-  for (let i = lo; i < hi; i += 1) {
-    const c = counts[i];
-    parts.rows += c.rowBytes;
-    parts.entries += c.entryBytes;
-    parts.transpose += c.transposeBytes;
-    parts.aggregates += 1 + (c.senders > 0 ? AGG : 0);
-    parts.boundaries += boundary(c.p1, c.c1, c.p1, c.x1);
-  }
   const c = bracket(totals.rows, first.c0, last.c1);
   const p = bracket(totals.pred, first.p0, last.p1);
   parts.openings = opening(slices + 1, lo, hi)
@@ -114,15 +106,6 @@ function dealtSpan(sc, lo, hi) {
     + 2 + (transpose > 0 ? opening(totals.transpose, first.t0, last.t1 - 1) : 0);
   parts.guards = 6 + GUARD * (c.pred + c.succ) + 2 * LEAF * (p.pred + p.succ);
   return parts;
-}
-
-function certified(sc) {
-  return {
-    fixed: HEADER + ROOTS + varint(sc.A),
-    rows: sc.A + sc.gapBytes + sc.S * (1 + SIG),
-    vectors: sc.A - sc.S + sc.S * varint(sc.perSender) + sc.indexBytes + 2 * sc.E,
-    aggregates: varint(sc.slices) + sc.slices + AGG * sc.senderSlices,
-  };
 }
 
 // Sum rank gaps for changed intervals within one retained range [start, end).
@@ -136,13 +119,6 @@ function rankGapBytes(intervals, start, end) {
     bytes += varint(a - cursor) + b - a - 1;
     cursor = b;
   }
-  return bytes;
-}
-
-// Sum varint widths of every index in [0, end).
-function indexBytesBefore(end) {
-  let bytes = end;
-  for (let bound = 128; bound < end; bound *= 128) bytes += end - bound;
   return bytes;
 }
 
@@ -167,6 +143,7 @@ function scenario(N, k, slices) {
     return [outgoing, incoming, 0, 0, 0, 0, outgoing, incoming];
   };
   const counts = [];
+  const bytePrefixes = [{ rows: 0, entries: 0, transpose: 0, aggregates: 0, boundaries: 0 }];
   for (let i = 0; i < slices; i += 1) {
     const p0 = Math.floor(N * i / slices);
     const p1 = Math.floor(N * (i + 1) / slices);
@@ -175,30 +152,24 @@ function scenario(N, k, slices) {
     const senders = sendersBefore(p1) - sendersBefore(p0);
     const groups = recipientsBefore(p1) - recipientsBefore(p0);
     counts.push({
-      p0, p1, c0, c1, senders,
+      p0, p1, c0, c1,
       t0: recipientsBefore(p0) * perSender,
       t1: recipientsBefore(p1) * perSender,
-      x0: prefix(p0), x1: prefix(p1),
-      rowBytes: c1 - c0 + rankGapBytes(intervals, p0, p1) + senders * (1 + SIG),
-      entryBytes: senders * (varint(perSender) + perSender * (KEY + 2)),
-      transposeBytes: varint(groups) + groups * (KEY + varint(perSender) + perSender * (KEY + 2)),
+      x0: prefix(p0),
+    });
+    const previous = bytePrefixes[i];
+    bytePrefixes.push({
+      rows: previous.rows + c1 - c0 + rankGapBytes(intervals, p0, p1) + senders * (1 + SIG),
+      entries: previous.entries + senders * (varint(perSender) + perSender * (KEY + 2)),
+      transpose: previous.transpose + varint(groups) + groups * (KEY + varint(perSender) + perSender * (KEY + 2)),
+      aggregates: previous.aggregates + 1 + (senders > 0 ? AGG : 0),
+      boundaries: previous.boundaries + boundary(p1, c1, p1, prefix(p1)),
     });
   }
-  const senderSlices = counts.filter((c) => c.senders > 0).length;
   return {
-    E, S, A, perSender, senderSlices, counts, slices,
-    gapBytes: rankGapBytes(intervals, 0, N),
-    indexBytes: S === N ? perSender * indexBytesBefore(N) : indexBytesBefore(A) - indexBytesBefore(A - S),
+    E, A, counts, slices, bytePrefixes,
     totals: { pred: N, rows: A, transpose: E },
   };
-}
-
-function corpus(sc) {
-  const parts = dealtSpan(sc, 0, 1);
-  for (let i = 1; i < sc.slices; i += 1) {
-    for (const [name, bytes] of Object.entries(dealtSpan(sc, i, i + 1))) parts[name] += bytes;
-  }
-  return parts;
 }
 
 // The quorum window holding slice s: q consecutive validators starting at floor(s n / S).
@@ -215,25 +186,35 @@ function spans(n, q, validator, slices) {
   return out;
 }
 
-function committee(sc, n, q) {
-  let busiest = 0;
-  let egress = 0;
-  for (let v = 0; v < n; v += 1) {
-    let dealing = 0;
-    for (const [lo, hi] of spans(n, q, v, sc.slices)) {
-      dealing += byteSize(dealtSpan(sc, lo, hi));
+// The operator encodes each distinct span once and sends it to every assigned validator.
+function assignment(n, q, slices) {
+  const unique = [];
+  const bySpan = new Map();
+  const validators = Array.from({ length: n }, (_, v) => spans(n, q, v, slices).map(([lo, hi]) => {
+    const key = `${lo}:${hi}`;
+    if (!bySpan.has(key)) {
+      bySpan.set(key, unique.length);
+      unique.push({ lo, hi, count: 0 });
     }
-    busiest = Math.max(busiest, dealing);
-    egress += dealing;
-  }
-  return { busiest, egress };
+    const id = bySpan.get(key);
+    unique[id].count += 1;
+    return id;
+  }));
+  return { unique, validators };
 }
 
-// The live-state BMT a full reader holds: 65 B leaves plus a 32 B digest per tree node.
-function stateBmt(N) {
-  let nodes = 1;
-  for (let level = N; level > 1; level = Math.ceil(level / 2)) nodes += level;
-  return LEAF * N + DIGEST * nodes;
+function committee(sc, plan) {
+  const parts = {};
+  const sizes = plan.unique.map(({ lo, hi, count }) => {
+    const span = dealtSpan(sc, lo, hi);
+    for (const [name, bytes] of Object.entries(span)) parts[name] = (parts[name] ?? 0) + count * bytes;
+    return byteSize(span);
+  });
+  let busiest = 0;
+  for (const ids of plan.validators) {
+    busiest = Math.max(busiest, ids.reduce((total, id) => total + sizes[id], 0));
+  }
+  return { parts, busiest };
 }
 
 function sig3(x) {
@@ -296,22 +277,7 @@ function injectStyles() {
       padding-bottom: 14px;
     }
     .clearing-calculator-activity b { color: ${INK}; }
-    .clearing-calculator-legend {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px 20px;
-      font-size: 12px;
-      color: ${GRAY};
-    }
-    .clearing-calculator-legend span { display: flex; align-items: center; gap: 7px; }
-    .clearing-calculator-legend span::before {
-      content: '';
-      width: 20px;
-      border-top: 2px solid ${BLUE};
-      flex: none;
-    }
-    .clearing-calculator-legend .evidence::before { border-color: ${GREEN}; border-top-style: dashed; }
-    .clearing-calculator-legend .state::before { border-color: ${DASH}; border-top-style: dotted; }
+    .clearing-calculator-chart-label { color: ${BLUE}; font-size: 12px; }
     .clearing-calculator canvas {
       display: block;
       margin-top: 12px;
@@ -341,8 +307,8 @@ function injectStyles() {
       font-weight: 700;
       margin: 5px 0;
     }
-    .clearing-calculator-out .reader summary b { color: ${BLUE}; }
-    .clearing-calculator-out .evidence summary b { color: ${GREEN}; }
+    .clearing-calculator-out .dealing summary b { color: ${BLUE}; }
+    .clearing-calculator-out .egress summary b { color: ${GREEN}; }
     .clearing-calculator-out .scope {
       color: ${GRAY};
       display: block;
@@ -399,11 +365,11 @@ function slider(panel, id, label, hint, min, max, step, value) {
   return { input, out, help };
 }
 
-function readout(line, label, scope, id, cls = '') {
+function readout(line, label, id, cls) {
   const container = el('details', { class: cls });
   const summary = el('summary', {}, label);
   const value = el('b', { id });
-  const note = el('span', { class: 'scope' }, scope);
+  const note = el('span', { class: 'scope' });
   summary.append(value, note);
   const card = el('div', { class: 'clearing-calculator-card' });
   container.append(summary, card);
@@ -411,18 +377,16 @@ function readout(line, label, scope, id, cls = '') {
   return { value, card, note };
 }
 
-// Each byte component contributes one row and its share of the displayed total.
-// A row may carry its own share text instead of a percentage of the total.
 function fillCard(card, total, rows, note) {
   card.replaceChildren();
-  for (const [label, amount, share] of rows) {
+  for (const [label, amount] of rows) {
     const row = el('span', { class: 'row' });
     row.append(el('span', { class: 'term' }, label));
-    row.append(el('span', { class: 'amount' }, typeof amount === 'string' ? amount : bytesText(amount)));
-    row.append(el('span', { class: 'share' }, share === undefined ? `${Math.round((100 * amount) / total)}%` : share));
+    row.append(el('span', { class: 'amount' }, bytesText(amount)));
+    row.append(el('span', { class: 'share' }, `${Math.round((100 * amount) / total)}%`));
     card.append(row);
   }
-  if (note) card.append(el('span', { class: 'note' }, note));
+  card.append(el('span', { class: 'note' }, note));
 }
 
 function mount(root) {
@@ -447,10 +411,7 @@ function mount(root) {
   activity.append(pairs, accounts);
   panel.append(activity);
 
-  const legend = el('div', { class: 'clearing-calculator-legend' });
-  const stateReference = el('span', { class: 'state' });
-  legend.append(el('span', {}, 'State update'), el('span', { class: 'evidence' }, 'Validation data'), stateReference);
-  panel.append(legend);
+  panel.append(el('div', { class: 'clearing-calculator-chart-label' }, 'Average sent to one validator per close'));
 
   const canvas = el('canvas', {
     height: '360',
@@ -460,10 +421,8 @@ function mount(root) {
 
   const results = el('div', { class: 'clearing-calculator-out' });
   panel.append(results);
-  const oPosted = readout(results, 'State update', 'For updating and checking a full copy of account state.', 'clearing-calc-certified', 'reader');
-  const oDealt = readout(results, 'Validation data', 'For checking assigned slices. Counts every slice once.', 'clearing-calc-dealt', 'evidence');
-  const oBusiest = readout(results, 'Largest validator download', 'Maximum received by one validator.', 'clearing-calc-busiest');
-  const oEgress = readout(results, 'Total sent to validators', '', 'clearing-calc-egress');
+  const oDealing = readout(results, 'Validator dealing', 'clearing-calc-dealing', 'dealing');
+  const oEgress = readout(results, 'Operator egress', 'clearing-calc-egress', 'egress');
 
   // Committee sizes snap to n = 3f + 1.
   const curV = () => {
@@ -477,49 +436,38 @@ function mount(root) {
     const kMax = maxDegree(N);
     sK.input.max = Math.log10(kMax);
     const V = curV();
+    const plan = assignment(V.n, V.q, V.slices);
     const sc = scenario(N, Math.pow(10, parseFloat(sK.input.value)), V.slices);
     const K = sc.E / N;
-    const st = stateBmt(N);
     sN.out.textContent = count(N);
     sK.out.textContent = Number(K.toPrecision(3));
     sV.out.textContent = count(V.n);
     sV.help.textContent = `${count(V.q)} holders per slice; ${count(V.slices)} slices.`;
-    stateReference.textContent = `Stored account tree: ${bytesText(st)}`;
     for (const s of [sN, sK, sV]) s.input.setAttribute('aria-valuetext', s.out.textContent);
 
-    const postedParts = certified(sc);
-    const dealtParts = corpus(sc);
-    const posted = byteSize(postedParts);
-    const dt = byteSize(dealtParts);
-    const cm = committee(sc, V.n, V.q);
-    oPosted.value.textContent = bytesText(posted);
-    oDealt.value.textContent = bytesText(dt);
+    const cm = committee(sc, plan);
+    const total = byteSize(cm.parts);
+    const average = total / V.n;
+    oDealing.value.textContent = bytesText(average);
+    oDealing.note.textContent = `Average per validator. Largest: ${bytesText(cm.busiest)}.`;
     oE.textContent = count(sc.E);
     oRows.textContent = count(sc.A);
-    oBusiest.value.textContent = bytesText(cm.busiest);
-    oEgress.value.textContent = bytesText(cm.egress);
-    oEgress.note.textContent = `Across ${count(V.n)} validators, including replicas.`;
-    canvas.setAttribute('aria-label', `Logarithmic size comparison as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))}, the state update is ${bytesText(posted)} and one set of validation data is ${bytesText(dt)}. The stored account tree is ${bytesText(st)}.`);
+    oEgress.value.textContent = bytesText(total);
+    oEgress.note.textContent = `${bytesText(average)} × ${count(V.n)} validators per close.`;
+    canvas.setAttribute('aria-label', `Average operator-to-validator dealing size as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))} recipients, the operator sends ${bytesText(average)} per validator, with a largest dealing of ${bytesText(cm.busiest)} and total egress of ${bytesText(total)} per close. Both axes use logarithmic scales.`);
 
-    fillCard(oPosted.card, posted, [
-      ['Header and roots', postedParts.fixed],
-      ['Account updates', postedParts.rows],
-      ['Payments by sender', postedParts.vectors],
-      ['Operator signatures', postedParts.aggregates],
-    ], 'Uses compact account references and rebuilds recipient totals from the sender entries. The reader checks the close against its full prior state.');
-    fillCard(oDealt.card, dt, [
-      ['Account updates', dealtParts.rows],
-      ['Payments by sender', dealtParts.entries],
-      ['Payments by recipient', dealtParts.transpose],
-      ['Operator signatures', dealtParts.aggregates],
-      ['Slice proofs',
-        dealtParts.fixed + dealtParts.boundaries + dealtParts.starts + dealtParts.openings + dealtParts.guards],
-    ], 'Payment entries use full account keys and appear in both sender and recipient order. This lets a validator check credits from payers outside its slices. Proofs tie each slice to the close; prior account state comes from the validator\'s retained copy.');
-    oBusiest.card.textContent = `The largest of ${count(V.n)} validator downloads. Adjacent slices share a proof; each validator receives one or two spans. Each slice goes to ${count(V.q)} validators.`;
-    fillCard(oEgress.card, cm.egress, [
-      ['Average per validator', cm.egress / V.n, ''],
-      ['Validators', count(V.n), ''],
-    ], 'Average download multiplied by validator count. Counts evidence delivery; excludes transport overhead and other protocol messages.');
+    const parts = cm.parts;
+    const components = [
+      ['Account updates', parts.rows],
+      ['Payments by sender', parts.entries],
+      ['Payments by recipient', parts.transpose],
+      ['Operator signatures', parts.aggregates],
+      ['Span proofs', parts.fixed + parts.boundaries + parts.starts + parts.openings + parts.guards],
+    ];
+    fillCard(oDealing.card, average, components.map(([label, bytes]) => [label, bytes / V.n]),
+      'Adjacent slices share a proof. Validators reuse their retained account state.');
+    fillCard(oEgress.card, total, components,
+      'Includes delivery of every assigned copy. Excludes transport overhead and other protocol messages.');
 
     const w = canvas.clientWidth;
     const h = Math.max(240, Math.round(w * 0.42));
@@ -540,23 +488,20 @@ function mount(root) {
     const kMin = 0.001;
     const STEPS = 120;
     const ks = [];
-    const cv = [];
-    const dv = [];
+    const dealings = [];
     let yMin = Infinity;
     let yMax = 0;
     for (let j = 0; j <= STEPS; j += 1) {
       const kj = kMin * Math.pow(kMax / kMin, j / STEPS);
       const sj = scenario(N, kj, V.slices);
-      const pj = byteSize(certified(sj));
-      const dj = byteSize(corpus(sj));
+      const bytes = byteSize(committee(sj, plan).parts) / V.n;
       ks.push(sj.E / N);
-      cv.push(pj);
-      dv.push(dj);
-      yMin = Math.min(yMin, pj);
-      yMax = Math.max(yMax, dj);
+      dealings.push(bytes);
+      yMin = Math.min(yMin, bytes);
+      yMax = Math.max(yMax, bytes);
     }
-    yMin = Math.min(yMin, st) * 0.55;
-    yMax = Math.max(yMax, st) * 1.5;
+    yMin = Math.min(yMin, average) * 0.55;
+    yMax = Math.max(yMax, average) * 1.5;
     const X = (k) => L + (pw * Math.log(k / ks[0])) / Math.log(kMax / ks[0]);
     const Y = (b) => T + ph * (1 - Math.log(b / yMin) / Math.log(yMax / yMin));
 
@@ -590,30 +535,14 @@ function mount(root) {
       g.textBaseline = 'top';
       g.fillText(String(kt), xx, T + ph + 8);
     }
-    const trace = (vals) => {
-      g.beginPath();
-      for (let j = 0; j <= STEPS; j += 1) {
-        if (j === 0) g.moveTo(X(ks[j]), Y(vals[j]));
-        else g.lineTo(X(ks[j]), Y(vals[j]));
-      }
-      g.stroke();
-    };
-    const ySt = Y(st);
-    g.strokeStyle = DASH;
-    g.setLineDash([2, 4]);
-    g.lineWidth = 1.5;
-    g.beginPath();
-    g.moveTo(L, ySt);
-    g.lineTo(w - R, ySt);
-    g.stroke();
-    g.setLineDash([6, 3]);
-    g.strokeStyle = GREEN;
-    g.lineWidth = 2;
-    trace(dv);
-    g.setLineDash([]);
     g.strokeStyle = BLUE;
     g.lineWidth = 2.2;
-    trace(cv);
+    g.beginPath();
+    for (let j = 0; j <= STEPS; j += 1) {
+      if (j === 0) g.moveTo(X(ks[j]), Y(dealings[j]));
+      else g.lineTo(X(ks[j]), Y(dealings[j]));
+    }
+    g.stroke();
 
     const cx = X(K);
     g.strokeStyle = GRAY;
@@ -623,15 +552,11 @@ function mount(root) {
     g.lineTo(cx, T + ph);
     g.stroke();
     g.setLineDash([]);
-    g.fillStyle = GREEN;
-    g.beginPath();
-    g.arc(cx, Y(dt), 3, 0, 7);
-    g.fill();
     g.fillStyle = BLUE;
     g.strokeStyle = 'white';
     g.lineWidth = 2;
     g.beginPath();
-    g.arc(cx, Y(posted), 4.5, 0, 7);
+    g.arc(cx, Y(average), 4.5, 0, 7);
     g.fill();
     g.stroke();
   }
