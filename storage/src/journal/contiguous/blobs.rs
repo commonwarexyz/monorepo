@@ -5,7 +5,7 @@ use crate::{
     journal::{Error, frame::FrameReader},
 };
 use bytes::Bytes;
-use commonware_codec::Buf;
+use commonware_codec::{Buf, Error as CodecError, ReadExt};
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
@@ -648,6 +648,14 @@ enum ReplayInner<'a, B: RBlob> {
 }
 
 impl<'a, B: RBlob> Replay<'a, B> {
+    /// Decode an item through the concrete buffer so field reads avoid repeated dispatch.
+    pub(super) fn read<A: ReadExt>(&mut self) -> Result<A, CodecError> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => A::read(replay),
+            ReplayInner::View(replay) => A::read(replay),
+        }
+    }
+
     /// Wrap a paged replay handle.
     const fn paged(replay: PagedReplay<B>) -> Self {
         Self {
@@ -826,6 +834,7 @@ impl<'a, B: RBlob> Blobs<'a, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::codec::View;
     use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
     use commonware_utils::{NZU16, NZUsize};
 
@@ -868,32 +877,33 @@ mod tests {
             let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
             let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
             let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
-            writer.append(b"abcdefgh").await.unwrap();
+            writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
             let snapshot = writer.snapshot().await.unwrap();
 
             for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
                 let paged = matches!(source, Blob::Sealed(_));
                 let mut replay = source
-                    .replay_from(0, NZUsize!(4), ReadOptions::default())
+                    .replay_from(0, NZUsize!(12), ReadOptions::default())
                     .unwrap();
-                assert!(replay.ensure(4).await.unwrap());
+                assert!(replay.ensure(12).await.unwrap());
                 let first_range = replay.chunk().as_ptr_range();
-                let first = replay.copy_to_bytes(2);
-                assert_eq!(first.as_ref(), b"ab");
+                let first = replay.read::<View>().unwrap().bytes;
                 assert!(first_range.contains(&first.as_ptr()));
 
-                assert!(replay.ensure(6).await.unwrap());
-                let middle = replay.copy_to_bytes(4);
-                assert_eq!(middle.as_ref(), b"cdef");
+                assert!(replay.ensure(16).await.unwrap());
+                let middle = replay.read::<View>().unwrap().bytes;
                 assert_eq!(first_range.contains(&middle.as_ptr()), paged);
 
                 let last_range = replay.chunk().as_ptr_range();
-                let last = replay.copy_to_bytes(2);
-                assert_eq!(last.as_ref(), b"gh");
+                let last = replay.copy_to_bytes(8);
                 assert!(last_range.contains(&last.as_ptr()));
                 assert_eq!(replay.remaining(), 0);
                 assert!(!replay.ensure(1).await.unwrap());
                 assert!(replay.is_exhausted());
+                drop(replay);
+                assert_eq!(first.as_ref(), b"abcdefgh");
+                assert_eq!(middle.as_ref(), b"ijklmnop");
+                assert_eq!(last.as_ref(), b"qrstuvwx");
             }
         });
     }

@@ -146,7 +146,7 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Writer},
@@ -295,7 +295,7 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
 
         let base = self.pos;
         for i in 0..count {
-            match A::read(&mut self.replay) {
+            match self.replay.read::<A>() {
                 Ok(item) => batch.push(Ok((base + i as u64, item))),
                 Err(err) => {
                     batch.push(Err(Error::Codec(err)));
