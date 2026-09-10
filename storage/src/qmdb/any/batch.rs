@@ -29,6 +29,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, iter::zip_eq};
 use core::{cmp::Ordering, ops::Range};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, hash_map},
     iter, mem,
     sync::{Arc, Weak},
@@ -2182,7 +2183,7 @@ where
         // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
         // before `find_next_key` / `find_prev_key_mut` binary-search them.
         let mut next_candidates: Vec<K> = Vec::new();
-        let mut prev_candidates: PrevCandidates<K, F, V::Value> = Vec::new();
+        let mut prev_candidates: PrevCandidates<K, F, Cow<'_, V::Value>> = Vec::new();
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
@@ -2216,7 +2217,7 @@ where
             }
 
             next_candidates.push(next_key);
-            prev_candidates.push((key.clone(), (Some(value), old_loc)));
+            prev_candidates.push((key.clone(), (Some(Cow::Owned(value)), old_loc)));
 
             let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
@@ -2307,7 +2308,7 @@ where
                 continue;
             }
             next_candidates.push(data.next_key);
-            prev_candidates.push((data.key, (Some(data.value), old_loc)));
+            prev_candidates.push((data.key, (Some(Cow::Owned(data.value)), old_loc)));
         }
 
         // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
@@ -2324,8 +2325,8 @@ where
         //
         // Each diff is key-sorted, as are `updated`/`created`/`deleted`, so the handled check
         // advances three cursors in a sorted merge instead of three binary searches per key.
-        // Active entries are collected and read in one batch below instead of one awaited
-        // read per key.
+        // Ancestor operations remain owned by the retained chain. Borrow their values until
+        // a predecessor rewrite needs them.
         let track_shadow = m.ancestors.len() > 1;
         let seen_cap = if track_shadow {
             m.ancestors.iter().map(|a| a.diff.len()).sum()
@@ -2334,7 +2335,6 @@ where
         };
         let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         let mut ancestor_deleted: Vec<&K> = Vec::new();
-        let mut ancestor_locs: Vec<Location<F>> = Vec::new();
         for batch in m.ancestors.iter() {
             let (mut ui, mut ci, mut di) = (0, 0, 0);
             for (key, entry) in batch.diff.iter() {
@@ -2359,7 +2359,15 @@ where
                 }
                 match entry {
                     DiffEntry::Active { loc, .. } => {
-                        ancestor_locs.push(*loc);
+                        // Each active diff entry references an operation appended by this batch.
+                        let idx = (**loc - *batch.bounds.base.size) as usize;
+                        let Operation::Update(data) = &batch.journal_batch.items()[idx] else {
+                            unreachable!("ancestor diff Active should reference Update op");
+                        };
+                        next_candidates.push(data.key.clone());
+                        next_candidates.push(data.next_key.clone());
+                        prev_candidates
+                            .push((data.key.clone(), (Some(Cow::Borrowed(&data.value)), *loc)));
                     }
                     DiffEntry::Deleted { .. } => {
                         ancestor_deleted.push(key);
@@ -2369,22 +2377,6 @@ where
         }
         ancestor_deleted.sort();
         ancestor_deleted.dedup();
-
-        // Batch-read the collected active entries' ops and emit their candidates.
-        for (op, loc) in m
-            .read_ops(&ancestor_locs, &[], &db.log)
-            .await?
-            .into_iter()
-            .zip(ancestor_locs)
-        {
-            let data = match op {
-                Operation::Update(data) => data,
-                _ => unreachable!("ancestor diff Active should reference Update op"),
-            };
-            next_candidates.push(data.key.clone());
-            next_candidates.push(data.next_key);
-            prev_candidates.push((data.key, (Some(data.value), loc)));
-        }
 
         // Sort + dedup candidate sets now so find_next_key/find_prev_key_mut can binary-search.
         db.strategy().sort_by(&mut next_candidates, |a, b| a.cmp(b));
@@ -2510,6 +2502,7 @@ where
                 let Some(prev_value) = prev_value.take() else {
                     continue;
                 };
+                let prev_value = prev_value.into_owned();
 
                 let prev_new_loc = m.base_state.size + ops.len() as u64;
                 let prev_next_key = find_next_key(prev_key, &next_candidates);
@@ -2533,6 +2526,8 @@ where
                 user_steps += 1;
             }
         }
+
+        drop(prev_candidates);
 
         // Committed locations superseded by this batch, for the floor raise (`finish` sorts
         // the diff itself).
