@@ -5702,10 +5702,15 @@ mod tests {
             append.sync().await.unwrap();
 
             // Shrinking to a page boundary resizes the blob but does not rewrite CRC metadata.
+            // Only the resize needs a full sync, which the truncation issues itself.
             append.truncate(PAGE_SIZE.get() as u64).await.unwrap();
-            append.sync().await.unwrap();
+            let (_, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 1);
 
-            // Only the resize needs a full sync, no additional writes are emitted by the shrink.
+            // Nothing is left pending, so a later sync adds no barrier.
+            append.sync().await.unwrap();
             let (_, writes, full_syncs, range_syncs) = blob.snapshot();
             assert_eq!(writes, 1);
             assert_eq!(full_syncs, 2);

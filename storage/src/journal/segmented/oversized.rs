@@ -1316,7 +1316,7 @@ mod tests {
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, probability};
 
     impl<E: crate::Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
@@ -1778,6 +1778,101 @@ mod tests {
                 "truncated entry must not be revived over reused value bytes"
             );
             oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// Reopen at a page-aligned index bound, append over the freed index pages and value bytes,
+    /// then crash with the appends retained and any unsynced resize lost. Recovery must not
+    /// revive discarded entries over the new values.
+    #[test_traced]
+    fn test_oversized_init_at_most_truncation_survives_crash() {
+        const BOUND: u64 = 3;
+        // One entry per index page makes the bound page aligned. A value buffer smaller than one
+        // frame writes every value straight to the blob, and the two-page index buffer floor
+        // flushes three of the four new entries while the fourth stays buffered, so the new
+        // values reach further than the new entries.
+        fn cfg(pooler: &impl BufferPooler) -> Config<()> {
+            Config {
+                index_write_buffer: NZUsize!(1),
+                value_write_buffer: NZUsize!(4),
+                ..entry_cfg(pooler)
+            }
+        }
+        let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
+
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(move |context| async move {
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg(&context))
+                    .await
+                    .unwrap();
+            for id in 0..8u64 {
+                (journal, _, _, _) = journal
+                    .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .unwrap();
+            }
+            let journal = journal.sync(1).await.unwrap();
+            drop(journal);
+
+            // Keep unsynced writes and drop unsynced resizes at the crash.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_at_most(context.child("cap"), cfg(&context), 1, BOUND * chunk)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(1).unwrap(), BOUND * chunk);
+            for id in 100..104u64 {
+                (journal, _, _, _) = journal
+                    .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                    .await
+                    .unwrap();
+            }
+            drop(journal);
+        });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("recover"), cfg(&context))
+                    .await
+                    .unwrap();
+            let entries = journal.size(1).unwrap() / chunk;
+            assert!(
+                (BOUND..=BOUND + 4).contains(&entries),
+                "recovered {entries} entries, not a prefix of the new history"
+            );
+            for position in 0..entries {
+                let entry = journal.get(1, position).await.unwrap();
+                let id = if position < BOUND {
+                    position
+                } else {
+                    100 + position - BOUND
+                };
+                assert_eq!(
+                    entry.id, id,
+                    "entry at retained position {position} was never written there"
+                );
+                assert_eq!(
+                    journal
+                        .get_value(1, entry.value_offset, entry.value_size)
+                        .await
+                        .unwrap(),
+                    [id as u8; 16]
+                );
+            }
+            journal.destroy().await.unwrap();
         });
     }
 

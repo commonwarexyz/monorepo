@@ -409,7 +409,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 
     /// Truncate to a specific section and size.
     ///
-    /// Truncates the section to the given size and removes all sections after it.
+    /// Truncates the section to the given size and removes all sections after it. A shorter
+    /// length is durable when this returns.
     pub(crate) async fn truncate(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.truncate_pending(section, size).await?;
         Ok(self)
@@ -417,7 +418,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 
     /// Truncate only the given section to a specific size.
     ///
-    /// Other sections are unaffected.
+    /// Other sections are unaffected. A shorter length is durable when this returns.
     pub(crate) async fn truncate_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.truncate_pending_section(section, size).await?;
         Ok(self)
@@ -476,7 +477,7 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, probability};
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
         pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
@@ -737,6 +738,79 @@ mod tests {
 
             glob.destroy().await.expect("Failed to destroy");
         });
+    }
+
+    /// Reopen a section at a shorter size, append over the freed bytes without a sync, then
+    /// crash with the append retained or lost and any unsynced resize lost. Recovery must not
+    /// stitch the discarded frames behind the new value.
+    #[test_traced]
+    fn test_glob_truncate_survives_crash() {
+        // A buffer smaller than one 8-byte frame writes every value straight to the blob.
+        let cfg = || Config {
+            write_buffer: NZUsize!(4),
+            ..test_cfg()
+        };
+        for retained in [true, false] {
+            let executor = deterministic::Runner::default();
+            let ((kept, offset, size), checkpoint) =
+                executor.start_and_recover(move |context| async move {
+                    let mut glob: Glob<_, i32> =
+                        Glob::init(context.child("first"), cfg()).await.unwrap();
+                    let mut kept = 0;
+                    for value in 1..=3 {
+                        let (offset, size);
+                        (glob, offset, size) = glob.append(1, &value).await.unwrap();
+                        if value == 1 {
+                            kept = offset + u64::from(size);
+                        }
+                    }
+                    let glob = glob.sync(1).await.unwrap();
+
+                    // Keep or lose unsynced writes and lose unsynced resizes at the crash.
+                    *context.storage_fault_config().write() = if retained {
+                        deterministic::FaultConfig {
+                            write_rate: Some(deterministic::WriteConfig {
+                                failure_rate: probability!(0.0),
+                                retention_rate: probability!(1.0),
+                                mode: deterministic::PartialWriteMode::Prefix,
+                            }),
+                            resize_rate: Some(deterministic::ResizeConfig {
+                                failure_rate: probability!(0.0),
+                                partial_rate: probability!(0.0),
+                            }),
+                            ..Default::default()
+                        }
+                    } else {
+                        deterministic::FaultConfig::default()
+                    };
+                    let glob = glob.test_reopen_section(1, kept).await.unwrap();
+                    assert_eq!(glob.size(1).unwrap(), kept);
+                    let (glob, offset, size) = glob.append(1, &4).await.unwrap();
+                    assert_eq!(offset, kept);
+                    drop(glob);
+                    (kept, offset, size)
+                });
+
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let glob: Glob<_, i32> = Glob::init(context.child("second"), cfg()).await.unwrap();
+                let end = if retained {
+                    offset + u64::from(size)
+                } else {
+                    kept
+                };
+                let recovered = glob.size(1).unwrap();
+                assert_eq!(
+                    recovered, end,
+                    "recovered {recovered} bytes, not the {end} byte prefix of the new history"
+                );
+                assert_eq!(glob.get(1, 0, kept as u32).await.unwrap(), 1);
+                if retained {
+                    assert_eq!(glob.get(1, offset, size).await.unwrap(), 4);
+                }
+                glob.destroy().await.unwrap();
+            });
+        }
     }
 
     #[test_traced]

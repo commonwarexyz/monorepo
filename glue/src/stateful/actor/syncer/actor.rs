@@ -273,8 +273,13 @@ mod tests {
         async fn init(
             _context: deterministic::Context,
             config: Self::Config,
-            _expected: Option<Self::SyncTargets>,
+            expected: Option<Self::SyncTargets>,
         ) -> Self {
+            assert_eq!(
+                expected,
+                Some(config),
+                "startup must pass the configured target"
+            );
             Self(config)
         }
 
