@@ -128,7 +128,8 @@ pub struct Config<S: Strategy> {
 
     /// Capacity (in entries) of the position-keyed node cache serving historical node reads.
     /// `None` disables it. The cache pays off for access patterns that repeatedly read the same
-    /// positions, such as grafted reads over hot regions or repeated proof generation.
+    /// positions, such as grafted reads over hot regions or repeated proof generation. Size it
+    /// to minimize the `node_cache_faults` metric.
     pub node_cache_size: Option<NonZeroUsize>,
 }
 
