@@ -18,13 +18,13 @@ use crate::{
     types::{Attributable as _, Round, View},
 };
 use commonware_actor::{Feedback, Unreliable, mailbox};
-use commonware_codec::{Codec, EncodeSize as _, Write as _};
+use commonware_codec::{Decode as _, EncodeSize as _, Write as _};
 use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
 use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Receiver};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, IoBuf, Metrics, Spawner, spawn_cell,
     telemetry::{
         metrics::{Histogram, HistogramExt as _},
         traces::TracedExt as _,
@@ -35,8 +35,7 @@ use futures::FutureExt as _;
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    future::{Future, pending},
-    iter::{from_fn, once},
+    future::Future,
     marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::Arc,
@@ -44,13 +43,11 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, debug_span, error, info_span};
 
-type PlaneReceiver<R, M, T> = DecodingReceiver<R, Envelope<M>, T>;
 type VerifyResult<P, D> = (
     Span,
     Result<(VerificationCompletion<D>, Vec<P>), VerificationTaskPanicked>,
 );
 type VerifyResults<P, D> = Pool<'static, VerifyResult<P, D>>;
-type DecodedMessage<P, M> = (P, Result<M, commonware_codec::Error>);
 
 #[derive(Debug)]
 struct VerificationTaskPanicked;
@@ -58,46 +55,22 @@ struct VerificationTaskPanicked;
 #[derive(Debug)]
 struct IngressTaskPanicked;
 
-/// A cancellation-safe bounded decoder. Submitted jobs remain owned by the receiver when a
-/// different actor arm wins the surrounding select.
-struct DecodingReceiver<R, M, T>
-where
-    R: Receiver,
-    M: Codec + Send,
-    T: Strategy,
-{
+/// Owns bounded decode-and-identify jobs across cancellation of the network select.
+struct IngressReceiver<E, R: Receiver, H: Hasher, V: Variant, T> {
+    context: E,
     receiver: R,
-    config: M::Cfg,
+    plane: NetworkPlane,
+    config: EnvelopeConfig<CodecConfig>,
+    scheme: Arc<Scheme<R::PublicKey, V>>,
     strategy: T,
-    jobs: Pool<'static, DecodedMessage<R::PublicKey, M>>,
+    jobs: IngressResults<R::PublicKey, V, H::Digest>,
     capacity: usize,
     closed: bool,
 }
 
-impl<R, M, T> DecodingReceiver<R, M, T>
-where
-    R: Receiver,
-    M: Codec + Send + 'static,
-    M::Cfg: Clone + Send + 'static,
-    T: Strategy,
-{
-    fn new(receiver: R, config: M::Cfg, strategy: T) -> Self {
-        let capacity = strategy.manual().parallelism();
-        Self {
-            receiver,
-            config,
-            strategy,
-            jobs: Pool::default(),
-            capacity,
-            closed: false,
-        }
-    }
-
-    async fn recv(&mut self, accept: bool) -> Option<DecodedMessage<R::PublicKey, M>> {
+impl<E: Clock, R: Receiver, H: Hasher, V: Variant, T: Strategy> IngressReceiver<E, R, H, V, T> {
+    async fn recv(&mut self) -> Option<IngressCompletion<R::PublicKey, V, H::Digest>> {
         loop {
-            if !accept {
-                return pending().await;
-            }
             if self.closed {
                 if self.jobs.is_empty() {
                     return None;
@@ -108,17 +81,125 @@ where
                 return Some(self.jobs.next_completed().await);
             }
             select! {
-                decoded = self.jobs.next_completed() => return Some(decoded),
+                prepared = self.jobs.next_completed() => return Some(prepared),
                 received = self.receiver.recv() => {
                     let Ok((peer, bytes)) = received else {
                         self.closed = true;
                         continue;
                     };
+                    let received_at = self.context.current();
                     let config = self.config.clone();
-                    self.jobs.push(self.strategy.manual().spawn(bytes.len(), move |_| {
-                        (peer, M::decode_cfg(bytes, &config))
+                    let plane = self.plane;
+                    let scheme = Arc::clone(&self.scheme);
+                    let strategy = self.strategy.clone();
+                    // The catch boundary includes submission because a strategy may run inline.
+                    let operation = async move {
+                        let strategy = strategy.manual();
+                        strategy.spawn(bytes.len(), move |_| {
+                            let prepared = Self::prepare(plane, &peer, bytes, &config, &scheme, received_at);
+                            (peer, prepared)
+                        }).await
+                    };
+                    self.jobs.push(AssertUnwindSafe(operation).catch_unwind().map(|outcome| {
+                        outcome.map_err(|_| IngressTaskPanicked)
                     }));
                 },
+            }
+        }
+    }
+
+    /// Checks contextual frame constraints and identifies an entire atomic ingress group.
+    fn prepare(
+        plane: NetworkPlane,
+        peer: &R::PublicKey,
+        bytes: IoBuf,
+        config: &EnvelopeConfig<CodecConfig>,
+        scheme: &Scheme<R::PublicKey, V>,
+        received_at: SystemTime,
+    ) -> Result<PreparedIngress<V, H::Digest>, InvalidIngress> {
+        let mut scratch = Vec::new();
+        match plane {
+            NetworkPlane::Consensus => {
+                let message = Envelope::<ConsensusMessage<V, H::Digest>>::decode_cfg(bytes, config)
+                    .map_err(|_| InvalidIngress::Decode)?;
+                match message.into_payload() {
+                    ConsensusMessage::Proposal {
+                        parent: None,
+                        block,
+                    } => Ok((
+                        LaneId::Consensus,
+                        Group::one(
+                            Artifact::LeaderBlock(*block).identify::<H>(&mut scratch),
+                            received_at,
+                        ),
+                    )),
+                    ConsensusMessage::Proposal {
+                        parent: Some(parent),
+                        block,
+                    } => {
+                        let certificate = *parent;
+                        scratch.reserve(certificate.encode_size());
+                        certificate.write(&mut scratch);
+                        let parent_reference = CertificateId::new(H::hash(&[scratch.as_slice()]));
+                        if parent_reference != block.block().parent() {
+                            return Err(InvalidIngress::ProposalParent);
+                        }
+                        let parent = Artifact::Vqc(certificate)
+                            .identify_from_canonical_encoding::<H>(&scratch);
+                        let block = Artifact::LeaderBlock(*block).identify::<H>(&mut scratch);
+                        Ok((LaneId::Consensus, Group::pair([parent, block], received_at)))
+                    }
+                    message => {
+                        let artifact = message
+                            .into_artifacts()
+                            .next()
+                            .expect("non-proposal consensus messages contain one artifact");
+                        Ok((
+                            LaneId::Consensus,
+                            Group::one(artifact.identify::<H>(&mut scratch), received_at),
+                        ))
+                    }
+                }
+            }
+            NetworkPlane::Certificate => {
+                let artifact =
+                    Envelope::<CertificateMessage<V, H::Digest>>::decode_cfg(bytes, config)
+                        .map_err(|_| InvalidIngress::Decode)?
+                        .into_payload()
+                        .into_artifact();
+                Ok((
+                    LaneId::Certificate,
+                    Group::one(artifact.identify::<H>(&mut scratch), received_at),
+                ))
+            }
+            NetworkPlane::Data => {
+                let chains = config.payload.chains();
+                let config = EnvelopeConfig {
+                    max_frame_bytes: config.max_frame_bytes,
+                    epoch: config.epoch,
+                    payload: (),
+                };
+                let message = Envelope::<DataMessage<V, H::Digest>>::decode_cfg(bytes, &config)
+                    .map_err(|_| InvalidIngress::Decode)?
+                    .into_payload();
+                let chain = message.chain().get() as usize;
+                // Recovery attributes invalid shares to signer indices, so ingress binds each
+                // share to its authenticated sender before it can enter a recovery job.
+                let forged = matches!(&message, DataMessage::DaVote(vote)
+                    if scheme.participants().get(vote.signer().into()) != Some(peer));
+                if chain >= chains {
+                    return Err(InvalidIngress::Chain);
+                }
+                if forged {
+                    return Err(InvalidIngress::DaVoteSigner);
+                }
+                Ok((
+                    LaneId::Data(chain),
+                    Group::one(
+                        message.into_artifact().identify::<H>(&mut scratch),
+                        received_at,
+                    ),
+                ))
             }
         }
     }
@@ -159,7 +240,7 @@ const CRITICAL_POOL: &str = "critical";
 /// Span label for a job that ran on the bulk pool.
 const BULK_POOL: &str = "bulk";
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum NetworkPlane {
     Consensus,
     Certificate,
@@ -176,24 +257,24 @@ impl NetworkPlane {
     }
 }
 
-enum NetworkMessage<P: PublicKey, V: Variant, D: commonware_cryptography::Digest> {
-    Consensus(DecodedMessage<P, Envelope<ConsensusMessage<V, D>>>),
-    Certificate(DecodedMessage<P, Envelope<CertificateMessage<V, D>>>),
-    Data(DecodedMessage<P, Envelope<DataMessage<V, D>>>),
-}
-
 type PreparedIngress<V, D> = (LaneId, Group<V, D>);
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 enum InvalidIngress {
+    Decode,
     ProposalParent,
     Chain,
     DaVoteSigner,
 }
 
 impl InvalidIngress {
-    const fn reason(self) -> &'static str {
+    const fn reason(self, plane: NetworkPlane) -> &'static str {
         match self {
+            Self::Decode => match plane {
+                NetworkPlane::Consensus => "consensus decoding error",
+                NetworkPlane::Certificate => "certificate decoding error",
+                NetworkPlane::Data => "data decoding error",
+            },
             Self::ProposalParent => "proposal exact parent mismatch",
             Self::Chain => "invalid chain",
             Self::DaVoteSigner => "data-availability vote from a peer that did not sign it",
@@ -202,29 +283,8 @@ impl InvalidIngress {
 }
 
 type IngressResult<P, V, D> = (P, Result<PreparedIngress<V, D>, InvalidIngress>);
-type IngressResults<P, V, D> = Pool<'static, Result<IngressResult<P, V, D>, IngressTaskPanicked>>;
-
-async fn run_ingress_operation<O, R, T>(strategy: T, operation: O) -> Result<R, IngressTaskPanicked>
-where
-    O: FnOnce() -> R + Send + 'static,
-    R: Send + 'static,
-    T: Strategy,
-{
-    AssertUnwindSafe(strategy.manual().spawn(1, move |_| operation()))
-        .catch_unwind()
-        .await
-        .map_err(|_| IngressTaskPanicked)
-}
-
-impl<P: PublicKey, V: Variant, D: commonware_cryptography::Digest> NetworkMessage<P, V, D> {
-    const fn plane(&self) -> NetworkPlane {
-        match self {
-            Self::Consensus(_) => NetworkPlane::Consensus,
-            Self::Certificate(_) => NetworkPlane::Certificate,
-            Self::Data(_) => NetworkPlane::Data,
-        }
-    }
-}
+type IngressCompletion<P, V, D> = Result<IngressResult<P, V, D>, IngressTaskPanicked>;
+type IngressResults<P, V, D> = Pool<'static, IngressCompletion<P, V, D>>;
 
 /// Votes and novotes this batcher verified, by view, for certificate transcript discharge.
 ///
@@ -435,38 +495,28 @@ where
             error!("failed to compute bounded ingress frame sizes");
             return;
         };
-        let mut data: PlaneReceiver<_, DataMessage<V, H::Digest>, T> = DecodingReceiver::new(
-            data,
-            self.plane_config(bounds.max_data_frame_bytes(), ()),
-            self.strategy.clone(),
+        let mut data =
+            self.ingress_receiver(data, NetworkPlane::Data, bounds.max_data_frame_bytes());
+        let mut consensus = self.ingress_receiver(
+            consensus,
+            NetworkPlane::Consensus,
+            bounds.max_consensus_frame_bytes(),
         );
-        let mut consensus: PlaneReceiver<_, ConsensusMessage<V, H::Digest>, T> =
-            DecodingReceiver::new(
-                consensus,
-                self.plane_config(bounds.max_consensus_frame_bytes(), self.codec),
-                self.strategy.clone(),
-            );
-        let mut certificates: PlaneReceiver<_, CertificateMessage<V, H::Digest>, T> =
-            DecodingReceiver::new(
-                certificates,
-                self.plane_config(bounds.max_certificate_frame_bytes(), self.codec),
-                self.strategy.clone(),
-            );
+        let mut certificates = self.ingress_receiver(
+            certificates,
+            NetworkPlane::Certificate,
+            bounds.max_certificate_frame_bytes(),
+        );
 
         let mut lanes: Lanes<P, V, H::Digest> =
             Lanes::new(self.codec.chains(), self.codec.participants(), self.limits);
-        let mut ingress: IngressResults<P, V, H::Digest> = Pool::default();
-        let ingress_capacity = self.strategy.manual().parallelism();
-        let mut accept_ingress;
+        let ingress_budget = self.strategy.manual().parallelism();
         let mut jobs: VerifyResults<P, H::Digest> = Pool::default();
         let mut observations_inflight = 0usize;
         let mut next_network = NetworkPlane::Consensus;
 
         select_loop! {
             self.context,
-            on_start => {
-                accept_ingress = ingress.len() < ingress_capacity;
-            },
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
             },
@@ -517,53 +567,16 @@ where
                     break;
                 }
             },
-            identified = ingress.next_completed() => {
-                if self.apply_ready_ingress(&mut lanes, identified, &mut ingress, ingress_capacity).is_err() {
-                    error!("ingress identification worker panicked");
+            Some((plane, prepared)) = Self::recv_network(
+                next_network, &mut data, &mut consensus, &mut certificates,
+            ) else break => {
+                if self.apply_ready_ingress(
+                    &mut lanes, (plane, prepared), &mut next_network,
+                    [&mut consensus.jobs, &mut certificates.jobs, &mut data.jobs], ingress_budget,
+                ).is_err() {
+                    error!("ingress worker panicked");
                     break;
                 }
-            },
-            Some(message) = Self::recv_network(
-                accept_ingress,
-                next_network,
-                &mut data,
-                &mut consensus,
-                &mut certificates,
-            ) else break => {
-                let plane = message.plane();
-                next_network = plane.next();
-                let message = match message {
-                    NetworkMessage::Consensus((peer, message)) => {
-                        let Ok(message) = message else {
-                            self.block(peer, "consensus decoding error");
-                            continue;
-                        };
-                        self.metrics.decoded.get_or_create(&Traffic::CONSENSUS).inc();
-                        NetworkMessage::Consensus((peer, Ok(message)))
-                    }
-                    NetworkMessage::Certificate((peer, message)) => {
-                        let Ok(message) = message else {
-                            self.block(peer, "certificate decoding error");
-                            continue;
-                        };
-                        self.metrics.decoded.get_or_create(&Traffic::CERTIFICATE).inc();
-                        NetworkMessage::Certificate((peer, Ok(message)))
-                    }
-                    NetworkMessage::Data((peer, message)) => {
-                        let Ok(message) = message else {
-                            self.block(peer, "data decoding error");
-                            continue;
-                        };
-                        self.metrics.decoded.get_or_create(&Traffic::DATA).inc();
-                        NetworkMessage::Data((peer, Ok(message)))
-                    }
-                };
-                let chains = self.codec.chains();
-                let scheme = Arc::clone(&self.scheme);
-                let received_at = self.context.current();
-                ingress.push(run_ingress_operation(self.strategy.clone(), move || {
-                    Self::prepare(message, chains, &scheme, received_at)
-                }));
             },
             on_end => {
                 // Forward buffered artifacts while the voter has observation credit. Cohorts
@@ -576,120 +589,44 @@ where
         }
     }
 
-    /// Performs contextual frame checks and canonical artifact identification off the actor loop.
-    fn prepare(
-        message: NetworkMessage<P, V, H::Digest>,
-        chains: usize,
-        scheme: &Scheme<P, V>,
-        received_at: SystemTime,
-    ) -> IngressResult<P, V, H::Digest> {
-        let mut scratch = Vec::new();
-        let (peer, prepared) = match message {
-            NetworkMessage::Consensus((peer, message)) => {
-                let message = message.expect("only decoded messages enter identification");
-                let prepared = match message.into_payload() {
-                    ConsensusMessage::Proposal {
-                        parent: None,
-                        block,
-                    } => Ok((
-                        LaneId::Consensus,
-                        Group::one(
-                            Artifact::LeaderBlock(*block).identify::<H>(&mut scratch),
-                            received_at,
-                        ),
-                    )),
-                    ConsensusMessage::Proposal {
-                        parent: Some(parent),
-                        block,
-                    } => {
-                        let certificate = *parent;
-                        scratch.clear();
-                        scratch.reserve(certificate.encode_size());
-                        certificate.write(&mut scratch);
-                        let parent_reference = CertificateId::new(H::hash(&[scratch.as_slice()]));
-                        if parent_reference != block.block().parent() {
-                            Err(InvalidIngress::ProposalParent)
-                        } else {
-                            let parent = Artifact::Vqc(certificate);
-                            let parent = parent.identify_from_canonical_encoding::<H>(&scratch);
-                            let block = Artifact::LeaderBlock(*block);
-                            let block = block.identify::<H>(&mut scratch);
-                            Ok((LaneId::Consensus, Group::pair([parent, block], received_at)))
-                        }
-                    }
-                    message => {
-                        let artifact = message
-                            .into_artifacts()
-                            .next()
-                            .expect("non-proposal consensus messages contain one artifact");
-                        Ok((
-                            LaneId::Consensus,
-                            Group::one(artifact.identify::<H>(&mut scratch), received_at),
-                        ))
-                    }
-                };
-                (peer, prepared)
-            }
-            NetworkMessage::Certificate((peer, message)) => {
-                let artifact = message
-                    .expect("only decoded messages enter identification")
-                    .into_payload()
-                    .into_artifact();
-                (
-                    peer,
-                    Ok((
-                        LaneId::Certificate,
-                        Group::one(artifact.identify::<H>(&mut scratch), received_at),
-                    )),
-                )
-            }
-            NetworkMessage::Data((peer, message)) => {
-                let message = message
-                    .expect("only decoded messages enter identification")
-                    .into_payload();
-                let chain = message.chain().get() as usize;
-                // A share is only ever sent by its own signer to the block's producer, and a
-                // failed recovery attributes an invalid share to that signer index. Binding the
-                // two here stops another peer from forging an index and having an honest
-                // participant blocked for it.
-                let forged = matches!(
-                    &message,
-                    DataMessage::DaVote(vote)
-                        if scheme.participants().get(vote.signer().into()) != Some(&peer)
-                );
-                if chain >= chains {
-                    (peer, Err(InvalidIngress::Chain))
-                } else if forged {
-                    (peer, Err(InvalidIngress::DaVoteSigner))
-                } else {
-                    let artifact = message.into_artifact();
-                    (
-                        peer,
-                        Ok((
-                            LaneId::Data(chain),
-                            Group::one(artifact.identify::<H>(&mut scratch), received_at),
-                        )),
-                    )
-                }
-            }
-        };
-        (peer, prepared)
-    }
-
-    /// Buffers ready completions without waiting, bounded by the ingress capacity per actor turn.
+    /// Buffers only ready completions, rotating planes within a bounded actor turn.
     fn apply_ready_ingress(
         &mut self,
         lanes: &mut Lanes<P, V, H::Digest>,
-        first: Result<IngressResult<P, V, H::Digest>, IngressTaskPanicked>,
-        ingress: &mut IngressResults<P, V, H::Digest>,
+        first: (NetworkPlane, IngressCompletion<P, V, H::Digest>),
+        next: &mut NetworkPlane,
+        ingress: [&mut IngressResults<P, V, H::Digest>; 3],
         capacity: usize,
     ) -> Result<(), IngressTaskPanicked> {
-        let ready = once(first).chain(from_fn(|| ingress.next_completed().now_or_never()));
-        for identified in ready.take(capacity) {
-            let (peer, prepared) = identified?;
+        let mut ready = Some(first);
+        for _ in 0..capacity {
+            let Some((plane, outcome)) = ready.take().or_else(|| {
+                let mut plane = *next;
+                for _ in 0..3 {
+                    if let Some(outcome) = ingress[plane as usize].next_completed().now_or_never() {
+                        return Some((plane, outcome));
+                    }
+                    plane = plane.next();
+                }
+                None
+            }) else {
+                break;
+            };
+            *next = plane.next();
+            let (peer, prepared) = outcome?;
+            if !matches!(prepared, Err(InvalidIngress::Decode)) {
+                self.metrics
+                    .decoded
+                    .get_or_create(&match plane {
+                        NetworkPlane::Consensus => Traffic::CONSENSUS,
+                        NetworkPlane::Certificate => Traffic::CERTIFICATE,
+                        NetworkPlane::Data => Traffic::DATA,
+                    })
+                    .inc();
+            }
             match prepared {
                 Ok((lane, group)) => self.buffer(lanes, lane, peer, group),
-                Err(invalid) => self.block(peer, invalid.reason()),
+                Err(invalid) => self.block(peer, invalid.reason(plane)),
             }
         }
         Ok(())
@@ -697,12 +634,11 @@ where
 
     /// Receives one message, starting the biased scan after the plane selected last.
     async fn recv_network<DR, CR, RR>(
-        enabled: bool,
         next: NetworkPlane,
-        data: &mut PlaneReceiver<DR, DataMessage<V, H::Digest>, T>,
-        consensus: &mut PlaneReceiver<CR, ConsensusMessage<V, H::Digest>, T>,
-        certificates: &mut PlaneReceiver<RR, CertificateMessage<V, H::Digest>, T>,
-    ) -> Option<NetworkMessage<P, V, H::Digest>>
+        data: &mut IngressReceiver<E, DR, H, V, T>,
+        consensus: &mut IngressReceiver<E, CR, H, V, T>,
+        certificates: &mut IngressReceiver<E, RR, H, V, T>,
+    ) -> Option<(NetworkPlane, IngressCompletion<P, V, H::Digest>)>
     where
         DR: Receiver<PublicKey = P>,
         CR: Receiver<PublicKey = P>,
@@ -711,38 +647,56 @@ where
         match next {
             NetworkPlane::Consensus => {
                 select! {
-                    message = consensus.recv(enabled) => message.map(NetworkMessage::Consensus),
-                    message = certificates.recv(enabled) => message.map(NetworkMessage::Certificate),
-                    message = data.recv(enabled) => message.map(NetworkMessage::Data),
+                    message = consensus.recv() => message.map(|result| (NetworkPlane::Consensus, result)),
+                    message = certificates.recv() => message.map(|result| (NetworkPlane::Certificate, result)),
+                    message = data.recv() => message.map(|result| (NetworkPlane::Data, result)),
                 }
             }
             NetworkPlane::Certificate => {
                 select! {
-                    message = certificates.recv(enabled) => message.map(NetworkMessage::Certificate),
-                    message = data.recv(enabled) => message.map(NetworkMessage::Data),
-                    message = consensus.recv(enabled) => message.map(NetworkMessage::Consensus),
+                    message = certificates.recv() => message.map(|result| (NetworkPlane::Certificate, result)),
+                    message = data.recv() => message.map(|result| (NetworkPlane::Data, result)),
+                    message = consensus.recv() => message.map(|result| (NetworkPlane::Consensus, result)),
                 }
             }
             NetworkPlane::Data => {
                 select! {
-                    message = data.recv(enabled) => message.map(NetworkMessage::Data),
-                    message = consensus.recv(enabled) => message.map(NetworkMessage::Consensus),
-                    message = certificates.recv(enabled) => message.map(NetworkMessage::Certificate),
+                    message = data.recv() => message.map(|result| (NetworkPlane::Data, result)),
+                    message = consensus.recv() => message.map(|result| (NetworkPlane::Consensus, result)),
+                    message = certificates.recv() => message.map(|result| (NetworkPlane::Certificate, result)),
                 }
             }
         }
     }
 
-    /// Returns the envelope decode configuration for one plane.
-    fn plane_config<Payload>(
+    fn ingress_receiver<R: Receiver<PublicKey = P>>(
         &self,
+        receiver: R,
+        plane: NetworkPlane,
         max_frame_bytes: usize,
-        payload: Payload,
-    ) -> EnvelopeConfig<Payload> {
-        EnvelopeConfig {
-            max_frame_bytes,
-            epoch: self.scheme.epoch(),
-            payload,
+    ) -> IngressReceiver<E, R, H, V, T> {
+        let context = self.context.child("ingress").with_attribute(
+            "plane",
+            match plane {
+                NetworkPlane::Consensus => "consensus",
+                NetworkPlane::Certificate => "certificate",
+                NetworkPlane::Data => "data",
+            },
+        );
+        IngressReceiver {
+            context,
+            receiver,
+            plane,
+            config: EnvelopeConfig {
+                max_frame_bytes,
+                epoch: self.scheme.epoch(),
+                payload: self.codec,
+            },
+            scheme: Arc::clone(&self.scheme),
+            strategy: self.strategy.clone(),
+            jobs: Pool::default(),
+            capacity: self.strategy.manual().parallelism(),
+            closed: false,
         }
     }
 
@@ -902,34 +856,36 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_codec::Encode as _;
-    use commonware_cryptography::{
-        Sha256, Signer as _, bls12381::primitives::variant::MinPk, ed25519,
+    use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk, ed25519};
+    use commonware_parallel::{
+        Rayon, Sequential,
+        mocks::{self, CountingStrategy},
     };
-    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{IoBuf, Runner as _, Supervisor as _, deterministic, tokio};
     use commonware_utils::sync::{Condvar, Mutex};
-    use std::{num::NonZeroUsize, sync::Arc, thread};
+    use std::{collections::VecDeque, future::pending, num::NonZeroUsize, sync::Arc, thread};
 
-    type IngressActor = Actor<
+    type IngressActor<H = Sha256, T = Sequential> = Actor<
         deterministic::Context,
-        Sha256,
+        H,
         ed25519::PublicKey,
         MinPk,
         RecordingBlocker,
-        Sequential,
+        T,
         Sequential,
     >;
 
-    fn ingress_actor(
+    fn ingress_actor<H: Hasher<Digest = <Sha256 as Hasher>::Digest>, T: Strategy>(
         context: deterministic::Context,
         committee: &Committee<MinPk>,
-    ) -> IngressActor {
+        strategy: T,
+    ) -> IngressActor<H, T> {
         Actor::new(
             context,
             Config {
                 scheme: committee.verifier.clone(),
                 blocker: RecordingBlocker::default(),
-                strategy: Sequential,
+                strategy,
                 critical_strategy: Sequential,
                 codec: committee.codec(),
                 limits: IngressLimits {
@@ -952,13 +908,17 @@ mod tests {
         {
             deterministic::Runner::default().start(move |context| async move {
                 let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
-                let mut actor = ingress_actor(context.child("batcher"), &committee);
+                let mut actor =
+                    ingress_actor::<Sha256, _>(context.child("batcher"), &committee, Sequential);
                 let mut lanes = Lanes::new(
                     actor.codec.chains(),
                     actor.codec.participants(),
                     actor.limits,
                 );
                 let mut ingress = IngressResults::default();
+                let mut certificates = IngressResults::default();
+                let mut data = IngressResults::default();
+                let mut next = NetworkPlane::Consensus;
                 let mut expected_bytes = 0;
                 let admitted = ready.min(capacity);
                 let now = context.current();
@@ -983,7 +943,13 @@ mod tests {
                     .now_or_never()
                     .expect("first completion is ready");
                 actor
-                    .apply_ready_ingress(&mut lanes, first, &mut ingress, capacity)
+                    .apply_ready_ingress(
+                        &mut lanes,
+                        (NetworkPlane::Consensus, first),
+                        &mut next,
+                        [&mut ingress, &mut certificates, &mut data],
+                        capacity,
+                    )
                     .unwrap();
                 assert_eq!(lanes.items(), admitted);
                 assert_eq!(ingress.len(), ready - admitted + usize::from(pending_tail));
@@ -1019,19 +985,105 @@ mod tests {
     }
 
     #[test]
+    fn ready_ingress_rotates_after_invalid_results_and_stops_at_budget() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+            let mut actor =
+                ingress_actor::<Sha256, _>(context.child("batcher"), &committee, Sequential);
+            let mut lanes = Lanes::new(
+                actor.codec.chains(),
+                actor.codec.participants(),
+                actor.limits,
+            );
+            let mut consensus = IngressResults::default();
+            let mut certificates = IngressResults::default();
+            let mut data = IngressResults::default();
+            let mut next = NetworkPlane::Consensus;
+            let now = context.current();
+            let peer = committee.identities[1].clone();
+            let prepared = |lane, artifact: Artifact<MinPk, <Sha256 as Hasher>::Digest>| {
+                Ok((
+                    peer.clone(),
+                    Ok((
+                        lane,
+                        Group::one(artifact.identify::<Sha256>(&mut Vec::new()), now),
+                    )),
+                ))
+            };
+            for view in 2..=3 {
+                consensus.push(std::future::ready(prepared(
+                    LaneId::Consensus,
+                    Artifact::NoVote(committee.novote(1, view)),
+                )));
+            }
+            certificates.push(std::future::ready(Ok((
+                peer.clone(),
+                Err(InvalidIngress::Decode),
+            ))));
+            certificates.push(std::future::ready(prepared(
+                LaneId::Certificate,
+                Artifact::Vqc(committee.vqc(1)),
+            )));
+            data.push(std::future::ready(prepared(
+                LaneId::Data(0),
+                Artifact::TransactionBlock(committee.signed_block(1, Sha256::hash(&[b"data"]))),
+            )));
+            data.push(pending());
+            let first = prepared(LaneId::Consensus, Artifact::NoVote(committee.novote(1, 1)));
+            actor
+                .apply_ready_ingress(
+                    &mut lanes,
+                    (NetworkPlane::Consensus, first),
+                    &mut next,
+                    [&mut consensus, &mut certificates, &mut data],
+                    3,
+                )
+                .unwrap();
+            assert_eq!(next, NetworkPlane::Consensus);
+            assert_eq!(lanes.items(), 2);
+            assert_eq!((consensus.len(), certificates.len(), data.len()), (2, 1, 1));
+            assert_eq!(actor.blocker.blocked(), vec![peer]);
+            let first = consensus.next_completed().now_or_never().unwrap();
+            actor
+                .apply_ready_ingress(
+                    &mut lanes,
+                    (NetworkPlane::Consensus, first),
+                    &mut next,
+                    [&mut consensus, &mut certificates, &mut data],
+                    4,
+                )
+                .unwrap();
+            assert_eq!(next, NetworkPlane::Certificate);
+            assert_eq!(lanes.items(), 5);
+            assert_eq!((consensus.len(), certificates.len(), data.len()), (0, 0, 1));
+            assert_eq!(context.current(), now);
+        });
+    }
+
+    #[test]
     fn ready_ingress_propagates_worker_panics() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
-            let mut actor = ingress_actor(context.child("batcher"), &committee);
+            let mut actor =
+                ingress_actor::<Sha256, _>(context.child("batcher"), &committee, Sequential);
             let mut lanes = Lanes::new(
                 actor.codec.chains(),
                 actor.codec.participants(),
                 actor.limits,
             );
             let mut ingress = IngressResults::default();
+            let mut certificates = IngressResults::default();
+            let mut data = IngressResults::default();
+            let mut next = NetworkPlane::Consensus;
             assert!(
                 actor
-                    .apply_ready_ingress(&mut lanes, Err(IngressTaskPanicked), &mut ingress, 4)
+                    .apply_ready_ingress(
+                        &mut lanes,
+                        (NetworkPlane::Consensus, Err(IngressTaskPanicked)),
+                        &mut next,
+                        [&mut ingress, &mut certificates, &mut data],
+                        4
+                    )
                     .is_err()
             );
             assert_eq!(lanes.items(), 0);
@@ -1050,7 +1102,13 @@ mod tests {
             ));
             assert!(
                 actor
-                    .apply_ready_ingress(&mut lanes, first, &mut ingress, 4)
+                    .apply_ready_ingress(
+                        &mut lanes,
+                        (NetworkPlane::Consensus, first),
+                        &mut next,
+                        [&mut ingress, &mut certificates, &mut data],
+                        4
+                    )
                     .is_err()
             );
             assert_eq!(lanes.items(), 1);
@@ -1058,40 +1116,228 @@ mod tests {
         });
     }
 
-    #[derive(Debug)]
-    struct RawReceiver(Option<(ed25519::PublicKey, IoBuf)>);
+    #[derive(Debug, Default)]
+    struct RawReceiver(VecDeque<(ed25519::PublicKey, IoBuf)>);
 
     impl Receiver for RawReceiver {
-        type Error = std::convert::Infallible;
+        type Error = std::io::Error;
         type PublicKey = ed25519::PublicKey;
 
         async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
-            match self.0.take() {
-                Some(message) => Ok(message),
-                None => pending().await,
-            }
+            self.0
+                .pop_front()
+                .ok_or_else(|| std::io::ErrorKind::UnexpectedEof.into())
         }
     }
 
     #[test]
-    fn decoder_shares_payload_buffer() {
-        deterministic::Runner::default().start(|_| async move {
-            let payload = Bytes::from(vec![42; 96]);
-            let encoded = payload.encode();
-            let expected = encoded[encoded.len() - payload.len()..].as_ptr() as usize;
-            let peer = ed25519::PrivateKey::from_seed(0).public_key();
-            let receiver = RawReceiver(Some((peer.clone(), IoBuf::from(encoded.clone()))));
-            let mut decoder = DecodingReceiver::<_, Bytes, _>::new(
-                receiver,
-                (..=payload.len()).into(),
-                Sequential,
+    fn ingress_envelope_shares_payload_buffer() {
+        let payload = Bytes::from(vec![42; 96]);
+        let epoch = crate::types::Epoch::new(1);
+        let encoded = Envelope::new(epoch, payload.clone()).encode();
+        let expected = encoded[encoded.len() - payload.len()..].as_ptr();
+        let decoded = Envelope::<Bytes>::decode_cfg(
+            IoBuf::from(encoded.clone()),
+            &EnvelopeConfig {
+                max_frame_bytes: encoded.len(),
+                epoch,
+                payload: (..=payload.len()).into(),
+            },
+        )
+        .unwrap()
+        .into_payload();
+        assert_eq!(decoded, payload);
+        assert_eq!(decoded.as_ptr(), expected);
+    }
+
+    #[test]
+    fn ingress_submits_once_per_frame() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+            let strategy = CountingStrategy::default();
+            let actor =
+                ingress_actor::<Sha256, _>(context.child("batcher"), &committee, strategy.clone());
+            let parent = committee.vqc(1);
+            let block = committee.leader_block_with_parent(2, &parent);
+            let frame = Envelope::new(
+                committee.config.epoch(),
+                ConsensusMessage::Proposal {
+                    parent: Some(Box::new(parent)),
+                    block: Box::new(block),
+                },
+            )
+            .encode();
+            let peer = committee.identities[1].clone();
+            let raw = RawReceiver(VecDeque::from([
+                (peer.clone(), IoBuf::from(frame)),
+                (peer.clone(), IoBuf::from(Bytes::from_static(b"invalid"))),
+            ]));
+            let bounds = committee
+                .codec()
+                .encoded_bounds::<MinPk, <Sha256 as Hasher>::Digest>()
+                .unwrap();
+            let mut receiver = actor.ingress_receiver(
+                raw,
+                NetworkPlane::Consensus,
+                bounds.max_consensus_frame_bytes(),
             );
-            let (from, decoded) = decoder.recv(true).await.unwrap();
-            let decoded = decoded.unwrap();
+            let (from, prepared) = receiver.recv().await.unwrap().unwrap();
             assert_eq!(from, peer);
-            assert_eq!(decoded, payload);
-            assert_eq!(decoded.as_ptr() as usize, expected);
+            let (lane, group) = prepared.unwrap();
+            assert_eq!(lane, LaneId::Consensus);
+            assert_eq!(group.len(), 2);
+            assert_eq!(strategy.spawns(), 1);
+            let (_, malformed) = receiver.recv().await.unwrap().unwrap();
+            assert!(matches!(malformed, Err(InvalidIngress::Decode)));
+            assert_eq!(strategy.spawns(), 2);
+            assert!(receiver.recv().await.is_none());
         });
+    }
+
+    #[test]
+    fn cancelled_ingress_receives_preserve_each_planes_capacity() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+            let strategy = rayon();
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let manual = strategy.manual();
+            let blockers = (0..2)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    manual.spawn(1, move |_| {
+                        barrier.wait();
+                        barrier.wait();
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let actor = ingress_actor::<Sha256, _>(context.child("batcher"), &committee, strategy);
+            let peer = committee.identities[1].clone();
+            let mut receivers = [
+                NetworkPlane::Consensus,
+                NetworkPlane::Certificate,
+                NetworkPlane::Data,
+            ]
+            .map(|plane| {
+                let raw = RawReceiver(
+                    (0..3)
+                        .map(|_| (peer.clone(), IoBuf::from(Bytes::from_static(b"invalid"))))
+                        .collect(),
+                );
+                actor.ingress_receiver(raw, plane, 1024)
+            });
+            for _ in 0..4 {
+                for receiver in &mut receivers {
+                    assert!(receiver.recv().now_or_never().is_none());
+                    assert_eq!(receiver.jobs.len(), 2);
+                    assert_eq!(receiver.receiver.0.len(), 1);
+                }
+            }
+            assert_eq!(
+                receivers
+                    .iter()
+                    .map(|receiver| receiver.jobs.len())
+                    .sum::<usize>(),
+                6
+            );
+            barrier.wait();
+            futures::executor::block_on(futures::future::join_all(blockers));
+            for receiver in &mut receivers {
+                for _ in 0..2 {
+                    assert!(matches!(
+                        futures::executor::block_on(receiver.jobs.next_completed()),
+                        Ok((_, Err(InvalidIngress::Decode)))
+                    ));
+                }
+                assert!(receiver.jobs.is_empty());
+                assert_eq!(receiver.receiver.0.len(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn closed_ingress_drains_owned_completion_after_cancellation() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+            let actor = ingress_actor::<Sha256, _>(
+                context.child("batcher"),
+                &committee,
+                mocks::inline(NonZeroUsize::new(2).unwrap()),
+            );
+            let mut receiver =
+                actor.ingress_receiver(RawReceiver::default(), NetworkPlane::Consensus, 1024);
+            let (send, receive) = futures::channel::oneshot::channel();
+            receiver.jobs.push(async { receive.await.unwrap() });
+            for _ in 0..4 {
+                assert!(receiver.recv().now_or_never().is_none());
+                assert!(receiver.closed);
+                assert_eq!(receiver.jobs.len(), 1);
+            }
+            assert!(
+                send.send(Ok((
+                    committee.identities[1].clone(),
+                    Err(InvalidIngress::Decode)
+                )))
+                .is_ok()
+            );
+            assert!(matches!(
+                receiver.recv().await,
+                Some(Ok((_, Err(InvalidIngress::Decode))))
+            ));
+            assert!(receiver.jobs.is_empty());
+            assert!(receiver.recv().await.is_none());
+        });
+    }
+
+    #[derive(Default)]
+    struct PanickingHasher;
+
+    impl Hasher for PanickingHasher {
+        type Digest = <Sha256 as Hasher>::Digest;
+        fn hash(_: &[&[u8]]) -> Self::Digest {
+            panic!("identification panic")
+        }
+        fn hash_pair(_: &[&[u8]], _: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+            panic!("identification panic")
+        }
+        fn update(&mut self, _: &[u8]) -> &mut Self {
+            panic!("identification panic")
+        }
+        fn finalize(self) -> (Self, Self::Digest) {
+            panic!("identification panic")
+        }
+    }
+
+    #[test]
+    fn ingress_catches_inline_and_offloaded_identification_panics() {
+        for strategy in [mocks::inline(NonZeroUsize::MIN), rayon()] {
+            deterministic::Runner::default().start(move |context| async move {
+                let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+                let actor = ingress_actor::<PanickingHasher, _>(
+                    context.child("batcher"),
+                    &committee,
+                    strategy.clone(),
+                );
+                let frame = Envelope::new(
+                    committee.config.epoch(),
+                    ConsensusMessage::<MinPk, <Sha256 as Hasher>::Digest>::NoVote(
+                        committee.novote(1, 1),
+                    ),
+                )
+                .encode();
+                let raw = RawReceiver(VecDeque::from([(
+                    committee.identities[1].clone(),
+                    IoBuf::from(frame),
+                )]));
+                let mut receiver = actor.ingress_receiver(raw, NetworkPlane::Consensus, 1024);
+                // Driving from a pool member lets Rayon execute the job without an external wake.
+                let outcome = strategy
+                    .manual()
+                    .spawn(1, move |_| futures::executor::block_on(receiver.recv()));
+                let result = futures::executor::block_on(outcome);
+                assert!(matches!(result, Some(Err(IngressTaskPanicked))));
+            });
+        }
     }
 
     #[test]

@@ -209,71 +209,68 @@ impl ReadyHarness {
 }
 
 #[test_traced]
-fn stalled_decode_and_identification_workers_do_not_block_control() {
-    for stall_at in [0, 1] {
-        let executor = DeterministicRunner::timed(Duration::from_secs(1));
-        executor.start(move |context| async move {
-            let committee =
-                Committee::<MinPk>::new(84 + stall_at as u64, 6, Limits::new(2, 1).unwrap());
-            let epoch = committee.config.epoch();
-            let strategy = CountingStrategy::stalling(stall_at);
-            let calls = strategy.clone();
-            let (actor, mailbox): (
-                Actor<
-                    DeterministicContext,
-                    Sha256,
-                    Ed25519PublicKey,
-                    MinPk,
-                    RecordingBlocker,
-                    CountingStrategy,
-                    CountingStrategy,
-                >,
-                _,
-            ) = Actor::new(
-                context.child("batcher"),
-                Config {
-                    scheme: committee.verifier.clone(),
-                    blocker: RecordingBlocker::default(),
-                    critical_strategy: strategy.clone(),
-                    strategy,
-                    codec: committee.codec(),
-                    limits: limits(),
-                    mailbox_size: NonZeroUsize::new(4).unwrap(),
-                    observation_capacity: NonZeroUsize::MIN,
-                },
-            );
-            let (observation_sender, _observations) =
-                mailbox::new_unreliable(context.child("observations"), NonZeroUsize::MIN);
-            let (completion_sender, _completions) =
-                mailbox::new(context.child("completions"), NonZeroUsize::MIN);
-            let consensus = ReadyReceiver::new(vec![(
-                committee.identities[1].clone(),
-                Envelope::new(
-                    epoch,
-                    ConsensusMessage::<MinPk, Sha256Digest>::NoVote(committee.novote(1, 1)),
-                )
-                .encode(),
-            )]);
-            let mut task = actor.start(
-                observation_sender,
-                completion_sender,
-                ReadyReceiver::new(Vec::new()),
-                consensus,
-                ReadyReceiver::new(Vec::new()),
-            );
+fn stalled_ingress_worker_does_not_block_control() {
+    let executor = DeterministicRunner::timed(Duration::from_secs(1));
+    executor.start(move |context| async move {
+        let committee = Committee::<MinPk>::new(84, 6, Limits::new(2, 1).unwrap());
+        let epoch = committee.config.epoch();
+        let strategy = CountingStrategy::stalling(0);
+        let calls = strategy.clone();
+        let (actor, mailbox): (
+            Actor<
+                DeterministicContext,
+                Sha256,
+                Ed25519PublicKey,
+                MinPk,
+                RecordingBlocker,
+                CountingStrategy,
+                CountingStrategy,
+            >,
+            _,
+        ) = Actor::new(
+            context.child("batcher"),
+            Config {
+                scheme: committee.verifier.clone(),
+                blocker: RecordingBlocker::default(),
+                critical_strategy: strategy.clone(),
+                strategy,
+                codec: committee.codec(),
+                limits: limits(),
+                mailbox_size: NonZeroUsize::new(4).unwrap(),
+                observation_capacity: NonZeroUsize::MIN,
+            },
+        );
+        let (observation_sender, _observations) =
+            mailbox::new_unreliable(context.child("observations"), NonZeroUsize::MIN);
+        let (completion_sender, _completions) =
+            mailbox::new(context.child("completions"), NonZeroUsize::MIN);
+        let consensus = ReadyReceiver::new(vec![(
+            committee.identities[1].clone(),
+            Envelope::new(
+                epoch,
+                ConsensusMessage::<MinPk, Sha256Digest>::NoVote(committee.novote(1, 1)),
+            )
+            .encode(),
+        )]);
+        let mut task = actor.start(
+            observation_sender,
+            completion_sender,
+            ReadyReceiver::new(Vec::new()),
+            consensus,
+            ReadyReceiver::new(Vec::new()),
+        );
 
-            while calls.spawns() <= stall_at {
-                context.sleep(Duration::from_millis(1)).await;
-            }
-            assert!(mailbox.enqueue(Message::ObservationsConsumed(1)).accepted());
-            select! {
-                result = &mut task => result.expect("batcher exits after servicing control"),
-                _ = context.sleep(Duration::from_millis(10)) => {
-                    panic!("stalled worker blocked the batcher control mailbox")
-                },
-            }
-        });
-    }
+        while calls.spawns() == 0 {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        assert!(mailbox.enqueue(Message::ObservationsConsumed(1)).accepted());
+        select! {
+            result = &mut task => result.expect("batcher exits after servicing control"),
+            _ = context.sleep(Duration::from_millis(10)) => {
+                panic!("stalled worker blocked the batcher control mailbox")
+            },
+        }
+    });
 }
 
 #[test_traced]
