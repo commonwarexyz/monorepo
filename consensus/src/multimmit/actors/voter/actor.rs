@@ -511,11 +511,12 @@ struct PendingJournal<V: Variant, D: Digest> {
     root: Span,
 }
 
-/// Adjacent bulk observation cohorts merged into one machine step.
+/// Adjacent observation cohorts from the same verification pool merged into one machine step.
 ///
-/// Cohorts wait in the voter's mailbox only while the voter is busy, so draining them together
-/// adds no latency and lets one step and one verification batch cover what arrived meanwhile.
-/// View-critical cohorts stay intact to retain the ingress batcher's size bound.
+/// Draining queued cohorts together does not wait for new arrivals and lets one machine step
+/// and verification batch cover work that accumulated while the voter was busy.
+/// View-critical batches retain the ingress batcher's small artifact bound. Whole cohorts stay
+/// intact, including indivisible parent-and-proposal groups.
 struct ObservedBatch<P: PublicKey, V: Variant, D: Digest> {
     artifacts: Vec<(P, IdentifiedArtifact<V, D>)>,
     spans: Vec<Span>,
@@ -527,8 +528,8 @@ struct ObservedBatch<P: PublicKey, V: Variant, D: Digest> {
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
-    /// Merges adjacent bulk cohorts within `max_items`, carrying the first incompatible cohort
-    /// into the next batch without reordering observations.
+    /// Merges adjacent compatible cohorts within their item bound, carrying the first incompatible
+    /// cohort into the next batch without reordering observations.
     fn drain(
         first: Observed<P, V, D>,
         observations: &mut mailbox::UnreliableReceiver<Observed<P, V, D>>,
@@ -547,13 +548,15 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
             forwarded_at,
             bytes,
         };
-        if batch
+        let critical = batch
             .artifacts
             .iter()
-            .any(|(_, identified)| identified.artifact.view_critical())
-        {
-            return (batch, None);
-        }
+            .any(|(_, identified)| identified.artifact.view_critical());
+        let max_items = if critical {
+            max_items.min(batcher::VIEW_COHORT_ITEMS)
+        } else {
+            max_items
+        };
         while batch.artifacts.len() < max_items {
             let Ok(next) = observations.try_recv() else {
                 break;
@@ -563,6 +566,7 @@ impl<P: PublicKey, V: Variant, D: Digest> ObservedBatch<P, V, D> {
                     .artifacts
                     .iter()
                     .any(|(_, identified)| identified.artifact.view_critical())
+                    != critical
             {
                 return (batch, Some(next));
             }
@@ -3252,7 +3256,7 @@ mod tests {
     use tracing_subscriber::{Layer, layer::Context, prelude::*, registry::LookupSpan};
 
     #[test]
-    fn observed_batches_preserve_critical_cohorts_and_bulk_bounds() {
+    fn observed_batches_merge_ready_cohorts_within_pool_bounds() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new(81, 6, Limits::new(2, 1).unwrap());
             let critical = Artifact::LeaderBlock(committee.leader_block(1));
@@ -3261,14 +3265,18 @@ mod tests {
             );
             let (sender, mut receiver) = mailbox::new_unreliable(
                 context.child("observations"),
-                NonZeroUsize::new(8).unwrap(),
+                NonZeroUsize::new(16).unwrap(),
             );
             let shapes = [
-                (true, 4),
+                (true, 1),
+                (true, 1),
                 (false, 8),
                 (false, 8),
+                (true, 3),
                 (true, 2),
                 (true, 2),
+                (true, 5),
+                (true, 1),
                 (false, 6),
                 (false, 6),
                 (false, 6),
@@ -3278,7 +3286,7 @@ mod tests {
                 let artifact = if view_critical { &critical } else { &bulk };
                 let artifacts = vec![
                     (
-                        committee.identities[0].clone(),
+                        committee.identities[index % committee.identities.len()].clone(),
                         artifact.clone().identify::<Sha256>(&mut Vec::new()),
                     );
                     count
@@ -3289,7 +3297,8 @@ mod tests {
                         .enqueue(Observed {
                             artifacts,
                             span: Span::none(),
-                            forwarded_at: context.current() + Duration::from_millis(index as u64),
+                            forwarded_at: context.current()
+                                + Duration::from_millis(16 - index as u64),
                             bytes: artifact.encode_size() * count,
                         })
                         .accepted()
@@ -3298,13 +3307,15 @@ mod tests {
 
             let mut carried = None;
             let mut received = Vec::new();
-            for (items, cohorts, first) in [
-                (4, 1, 0),
-                (16, 2, 1),
-                (2, 1, 3),
-                (2, 1, 4),
-                (12, 2, 5),
-                (6, 1, 7),
+            for (items, cohorts, last, has_remainder) in [
+                (2, 2, 1, true),
+                (16, 2, 3, false),
+                (3, 1, 4, true),
+                (4, 2, 6, false),
+                (5, 1, 7, false),
+                (1, 1, 8, true),
+                (12, 2, 10, true),
+                (6, 1, 11, false),
             ] {
                 let next = carried
                     .take()
@@ -3313,9 +3324,10 @@ mod tests {
                 assert_eq!(batch.artifacts.len(), items);
                 assert_eq!(batch.cohorts, cohorts);
                 assert_eq!(batch.spans.len(), cohorts);
+                assert_eq!(remainder.is_some(), has_remainder);
                 assert_eq!(
                     batch.forwarded_at,
-                    context.current() + Duration::from_millis(first)
+                    context.current() + Duration::from_millis(16 - last)
                 );
                 assert_eq!(
                     batch.bytes,
@@ -3331,6 +3343,73 @@ mod tests {
             assert_eq!(received, expected);
             assert!(carried.is_none());
             assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn observed_batches_keep_parent_proposal_groups_atomic() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(82, 6, Limits::new(2, 1).unwrap());
+            let parent = committee.vqc(1);
+            let proposal = committee.leader_block_with_parent(2, &parent);
+            let pair = vec![Artifact::Vqc(parent), Artifact::LeaderBlock(proposal)];
+            let singleton = Artifact::Nullification(committee.nullification(1));
+            for (label, prefix, max_items, expected_batches) in [
+                ("merged", 1, 16, vec![(3, 2)]),
+                ("carried", 3, 16, vec![(3, 1), (2, 1)]),
+                ("configured_bound", 1, 2, vec![(1, 1), (2, 1)]),
+            ] {
+                let (sender, mut receiver) =
+                    mailbox::new_unreliable(context.child(label), NonZeroUsize::new(2).unwrap());
+                let mut expected = Vec::new();
+                for artifacts in [vec![singleton.clone(); prefix], pair.clone()] {
+                    let bytes = artifacts.iter().map(Artifact::encoded_len).sum();
+                    let artifacts = artifacts
+                        .into_iter()
+                        .map(|artifact| {
+                            (
+                                committee.identities[0].clone(),
+                                artifact.identify::<Sha256>(&mut Vec::new()),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    expected.extend(artifacts.clone());
+                    assert!(
+                        sender
+                            .enqueue(Observed {
+                                artifacts,
+                                bytes,
+                                span: Span::none(),
+                                forwarded_at: context.current(),
+                            })
+                            .accepted()
+                    );
+                }
+                let mut carried = None;
+                let mut received = Vec::new();
+                for (items, cohorts) in expected_batches {
+                    let first = carried
+                        .take()
+                        .unwrap_or_else(|| receiver.try_recv().unwrap());
+                    let (batch, remainder) = ObservedBatch::drain(first, &mut receiver, max_items);
+                    assert_eq!(batch.artifacts.len(), items);
+                    assert_eq!(batch.cohorts, cohorts);
+                    assert_eq!(batch.spans.len(), cohorts);
+                    assert_eq!(
+                        batch.bytes,
+                        batch
+                            .artifacts
+                            .iter()
+                            .map(|(_, identified)| identified.artifact.encoded_len())
+                            .sum::<usize>()
+                    );
+                    received.extend(batch.artifacts);
+                    carried = remainder;
+                }
+                assert_eq!(received, expected);
+                assert!(carried.is_none());
+                assert!(receiver.try_recv().is_err());
+            }
         });
     }
 

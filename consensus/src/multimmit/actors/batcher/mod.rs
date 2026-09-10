@@ -37,6 +37,7 @@ use commonware_cryptography::{Digest, PublicKey, bls12381::primitives::variant::
 use commonware_utils::N5f1;
 #[cfg(any(test, feature = "test-utils"))]
 pub use fuzz::exercise_lanes;
+pub(crate) use lanes::VIEW_COHORT_ITEMS;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
 use tracing::Span;
 

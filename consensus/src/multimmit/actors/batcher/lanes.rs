@@ -40,10 +40,10 @@ impl Plane {
 
 /// Artifacts of the latency-sensitive planes selected into one observation cohort.
 ///
-/// A cohort becomes one verification job, so consensus and certificate cohorts stay small
-/// enough that a view-critical verdict never waits out a large batch's cryptography; data
-/// cohorts use the configured cohort budget to keep the job count bounded.
-pub(super) const VIEW_COHORT_ITEMS: usize = 4;
+/// Consensus and certificate cohorts stay small enough that a view-critical verdict never
+/// waits out a large batch's cryptography; data cohorts use the configured cohort budget to
+/// keep the job count bounded.
+pub(crate) const VIEW_COHORT_ITEMS: usize = 4;
 
 pub(super) struct Group<V: Variant, D: Digest> {
     first: IdentifiedArtifact<V, D>,
@@ -291,10 +291,10 @@ impl<P: PublicKey, V: Variant, D: Digest> Lanes<P, V, D> {
 
     /// Selects up to `budget` artifacts from a single plane for one observation cohort.
     ///
-    /// Each cohort holds one plane's artifacts: a cohort becomes one verification job, and a
-    /// view-critical verdict must never wait out a data batch's cryptography, so consensus
-    /// and certificate cohorts are additionally capped at [`VIEW_COHORT_ITEMS`]. Consecutive
-    /// flushes rotate across planes, and data selections rotate across producer chains.
+    /// Each cohort holds one plane's artifacts. Consensus and certificate cohorts use
+    /// [`VIEW_COHORT_ITEMS`] to keep view-critical work separate from large data batches.
+    /// Consecutive flushes rotate across planes, and data selections rotate across producer
+    /// chains.
     pub(super) fn flush(&mut self, budget: usize) -> Vec<Selected<P, V, D>> {
         let Some(plane) = self.next_ready_plane() else {
             return Vec::new();
