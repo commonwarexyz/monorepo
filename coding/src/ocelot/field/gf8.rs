@@ -194,12 +194,20 @@ impl<K: Kernel> GF8Vec<K> {
     ///
     /// # Panics
     ///
-    /// If `elements.len() != K::LANES`.
+    /// - `elements.len() != K::LANES`.
     pub fn load(elements: &[GF8]) -> Self {
-        let kernel = K::default();
+        Self::load_bytes(K::default(), GF8::slice_as_bytes(elements))
+    }
+
+    /// Load field elements from their byte representations using `kernel`.
+    ///
+    /// # Panics
+    ///
+    /// - `bytes.len() != K::LANES`.
+    pub fn load_bytes(kernel: K, bytes: &[u8]) -> Self {
         Self {
             kernel,
-            data: kernel.load(GF8::slice_as_bytes(elements)),
+            data: kernel.load(bytes),
         }
     }
 
@@ -207,9 +215,18 @@ impl<K: Kernel> GF8Vec<K> {
     ///
     /// # Panics
     ///
-    /// If `out.len() != K::LANES`.
+    /// - `out.len() != K::LANES`.
     pub fn store(self, out: &mut [GF8]) {
-        self.kernel.store(self.data, GF8::slice_as_bytes_mut(out));
+        self.store_bytes(GF8::slice_as_bytes_mut(out));
+    }
+
+    /// Store field elements as their byte representations.
+    ///
+    /// # Panics
+    ///
+    /// - `out.len() != K::LANES`.
+    pub fn store_bytes(self, out: &mut [u8]) {
+        self.kernel.store(self.data, out);
     }
 
     fn to_vec(self) -> Vec<GF8> {
@@ -337,6 +354,14 @@ impl<K: Kernel> Mul<&Self> for GF8Vec<K> {
     }
 }
 
+impl<K: Kernel> Mul<GF8> for GF8Vec<K> {
+    type Output = Self;
+
+    fn mul(self, rhs: GF8) -> Self::Output {
+        self.mul_constant(rhs)
+    }
+}
+
 impl<K: Kernel> MulAssign<&Self> for GF8Vec<K> {
     fn mul_assign(&mut self, rhs: &Self) {
         *self = *self * rhs;
@@ -354,7 +379,7 @@ impl<K: Kernel> Ring for GF8Vec<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocelot::kernel::{with_kernel, WithKernel};
+    use crate::ocelot::kernel::{WithKernel, with_kernel};
 
     #[test]
     fn test_field() {
@@ -394,11 +419,17 @@ mod tests {
                 a.store(&mut ea);
                 b.store(&mut eb);
                 let lanes = |f: &dyn Fn(GF8, GF8) -> GF8| {
-                    GF8Vec::<K>::load(&ea.iter().zip(&eb).map(|(x, y)| f(*x, *y)).collect::<Vec<_>>())
+                    GF8Vec::<K>::load(
+                        &ea.iter()
+                            .zip(&eb)
+                            .map(|(x, y)| f(*x, *y))
+                            .collect::<Vec<_>>(),
+                    )
                 };
                 assert_eq!(a + b, lanes(&|x, y| x + y));
                 assert_eq!(a * b, lanes(&|x, y| x * y));
                 assert_eq!(a.mul_constant(c), lanes(&|x, _| x * c));
+                assert_eq!(a * c, lanes(&|x, _| x * c));
                 Ok(())
             });
         }
