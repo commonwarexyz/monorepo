@@ -187,7 +187,7 @@ impl Driver {
 
     /// Earliest active deadline registered on the operation wheel.
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.state.timeout_wheel.next_deadline_at()
+        self.state.timeout_wheel.next_deadline()
     }
 
     /// Consume a retained result or check whether its waker needs refreshing.
