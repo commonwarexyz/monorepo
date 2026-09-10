@@ -140,102 +140,20 @@ O’Grady</a></div>
         the same to settle.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
         as Browsing the Web</h2>
-        <p>Let’s suppose account <span class="math inline">a</span>
-        opens with 100 and wants to pay account <span
-        class="math inline">b</span> 20. Every signature in epoch <span
-        class="math inline">e</span> binds that epoch’s onchain anchor
-        <span class="math inline">\mathcal A_e</span>.</p>
-        <p><span class="math inline">a</span>’s persistent state <span
-        class="math inline">X_a</span> is a balance <span
-        class="math inline">B_a</span>, a cumulative debit <span
-        class="math inline">D_a</span>, the cumulative credit <span
-        class="math inline">C_a</span> the operator has promised it, the
-        receipt count behind that credit, and a flag for whether the
-        account is present in the live state. Credit stays a promise
-        until the epoch ends, when the operator collates it (the next
-        section explains why). <span class="math inline">a</span>’s
-        epoch activity is one strictly recipient-sorted vector <span
-        class="math inline">V_a</span> with one cumulative entry per
-        recipient it paid this epoch. The entry <span
-        class="math inline">(G,J)</span> for <span
-        class="math inline">b</span> is <span
-        class="math inline">a</span>’s cumulative credit to <span
-        class="math inline">b</span> this epoch and the number of
-        payments behind it. Before the payment, <span
-        class="math inline">a</span> holds <span
-        class="math inline">B_a=100</span> and <span
-        class="math inline">D_a=0</span>, and <span
-        class="math inline">V_a</span> is empty.</p>
-        <p>To send <span class="math inline">x&gt;0</span> from <span
-        class="math inline">a</span> to <span
-        class="math inline">b</span>, the payer advances <span
-        class="math inline">b</span>’s entry in its own vector and signs
-        the resulting endpoint, its cumulative position after this send:
-        an epoch-local sequence number <span
-        class="math inline">n_a</span>, the cumulative debit, and the
-        vector’s Merkle root. The operator accepts by countersigning the
-        same body:</p>
-        <p><span class="math display">
-        S=\mathsf{Sign}_a\bigl(\mathcal
-        A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with
-        }b:(G+x,\,J+1))\bigr),
-        \qquad
-        R=\mathsf{CounterSign}_{\mathsf{op}}(S).
-        </span></p>
-        <p>Here the endpoint is <span class="math inline">n_a=1</span>,
-        <span class="math inline">D_a=20</span>, and the root of <span
-        class="math inline">V_a=\{b:(20,1)\}</span>. After
-        authenticating <span class="math inline">S</span> and checking
-        spendability, the operator atomically commits the debit, the
-        entry advance, a close reservation, a replay record, and the
-        acknowledgment body. The close is the settlement package the
-        operator builds when the epoch ends, and the reservation holds
-        room in it for this account’s row and this edge’s entry. The
-        replay record lets a retried request return the same
-        acknowledgment. The operator then countersigns and returns <span
-        class="math inline">R</span> with one Merkle opening per
-        advanced entry. It countersigns twice: an ordinary signature for
-        the acknowledgment the payer holds, and an aggregable one the
-        close later combines across many rows.</p>
-        <p>A send may batch entries: one signature advances strictly
-        recipient-sorted, unique entries <span
-        class="math inline">(b_i,x_i)</span> under one cumulative
-        endpoint:</p>
-        <p><span class="math display">
-        S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+\textstyle\sum_i
-        x_i,\;\mathsf{root}(V_a\text{ with every }b_i\text{
-        advanced})\bigr).
-        </span></p>
-        <p>The operator accepts or rejects the batch as a whole and
-        returns one acknowledgment covering every entry. A single
-        payment is a batch of one.</p>
-        <p>The countersigned endpoint <span class="math inline">R</span>
-        is the accepted payment. The preconfirmation for one recipient
-        is an entry receipt: <span class="math inline">R</span> plus the
-        opening of that recipient’s entry under the acknowledged vector
-        root. The payer verifies and durably retains <span
-        class="math inline">R</span> and every opening, advances its
-        local <span class="math inline">D_a</span> in the same atomic
-        commit, then forwards each entry receipt to any recipient that
-        will rely on it.</p>
-        <p>The wallet keeps at most one unacknowledged send in flight:
-        it does not sign the next endpoint until the prior
-        acknowledgment is verified and committed, and an
-        operator-reported counter is never its authority. A rejection
-        before the operator’s commit changes no balance, and the wallet
-        retains the staged request for retry. If the response is lost,
-        retrying returns the same acknowledgment without a second debit.
-        A later endpoint authorizes the whole debit delta up to its
-        value, and the close carries only the payer’s terminal endpoint,
-        its last of the epoch. If a wallet signs several endpoints
-        before obtaining the earlier acknowledgments, an intermediate
-        acknowledgment may be neither held nor selected as that
-        terminal, and that exposure is outside the base guarantee. This
-        ordering serializes one payer account, not independent payers or
-        recipients.</p>
-        <p>Figure 1 begins with <span class="math inline">a</span> at
-        100, <span class="math inline">b</span> at 40, and the payment
-        <span class="math inline">a\xrightarrow{20}b</span>.</p>
+        <p>An agent buying an API response should be able to pay and get
+        on with the next request. Bajillion gives the payer an
+        acknowledgment in one round trip to its chosen operator. That
+        response carries a receipt the recipient can verify locally and
+        retain as evidence, while settlement happens later.</p>
+        <p>Suppose a payer, <span class="math inline">a</span>, has 100
+        and wants to pay 20 to a recipient, <span
+        class="math inline">b</span>, with 40. The payer signs a request
+        <span class="math inline">S</span> advancing its running total
+        for that recipient. The operator verifies the signature and
+        available funds, records acceptance, and returns its signed
+        acknowledgment <span class="math inline">R</span> with a proof
+        of the recipient’s entry. The payer verifies and durably saves
+        both, then forwards the resulting receipt to the recipient.</p>
         <style>
           .clearing-loop {
             aspect-ratio: 1024 / 576;
@@ -296,27 +214,111 @@ O’Grady</a></div>
         </div>
         <script type="module" src="clearing.loops.js"></script>
         <div class="image-caption">
-        <p>Figure 1: The payer sends one request and receives one
-        countersigned response. The operator verifies, commits, and
-        signs locally, adding no network round trip. The commit moves
-        <span class="math inline">a</span> from 100 to 80 and advances
-        the <span class="math inline">a\rightarrow b</span> entry in
-        <span class="math inline">a</span>’s vector from <span
-        class="math inline">(0,0)</span> to <span
-        class="math inline">(20,1)</span> before <span
-        class="math inline">R</span> exists. Once <span
-        class="math inline">R</span> returns, <span
-        class="math inline">a</span> sends the entry receipt, <span
-        class="math inline">R</span> plus <span
-        class="math inline">b</span>’s entry opening, directly to <span
-        class="math inline">b</span> as transferable evidence.</p>
+        <p>Figure 1: Verification, acceptance, and signing happen
+        locally at the operator. The payer receives and retains the
+        acknowledgment plus the recipient’s proof before forwarding the
+        receipt. The entry’s pair tracks total amount and payment count:
+        this payment changes <span class="math inline">(0,0)</span> to
+        <span class="math inline">(20,1)</span>.</p>
         </div>
+        <p>An epoch groups accepted payments into a close, the
+        settlement package the operator builds when that epoch ends. The
+        receipt binds the payer’s cumulative position, letting the close
+        summarize many payments through their combined effects. Every
+        signature in epoch <span class="math inline">e</span> binds that
+        epoch’s onchain anchor <span class="math inline">\mathcal
+        A_e</span>.</p>
+        <p>The payer tracks a balance <span
+        class="math inline">B_a</span> and a cumulative debit <span
+        class="math inline">D_a</span>. Its activity within an epoch is
+        one strictly recipient-sorted vector <span
+        class="math inline">V_a</span> with one cumulative entry per
+        recipient it paid. The entry <span
+        class="math inline">(G,J)</span> for <span
+        class="math inline">b</span> is <span
+        class="math inline">a</span>’s cumulative credit to <span
+        class="math inline">b</span> this epoch and the number of
+        payments behind it. Before the example payment, <span
+        class="math inline">a</span> holds <span
+        class="math inline">B_a=100</span> and <span
+        class="math inline">D_a=0</span>, and <span
+        class="math inline">V_a</span> is empty.</p>
+        <p>To send <span class="math inline">x&gt;0</span> from <span
+        class="math inline">a</span> to <span
+        class="math inline">b</span>, the payer advances <span
+        class="math inline">b</span>’s entry in its own vector and signs
+        the resulting endpoint, its cumulative position after this send:
+        an epoch-local sequence number <span
+        class="math inline">n_a</span>, the cumulative debit, and the
+        vector’s Merkle root. The operator’s acknowledgment countersigns
+        the same body:</p>
+        <p><span class="math display">
+        S=\mathsf{Sign}_a\bigl(\mathcal
+        A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with
+        }b:(G+x,\,J+1))\bigr),
+        \qquad
+        R=\mathsf{CounterSign}_{\mathsf{op}}(S).
+        </span></p>
+        <p>Here the endpoint is <span class="math inline">n_a=1</span>,
+        <span class="math inline">D_a=20</span>, and the root of <span
+        class="math inline">V_a=\{b:(20,1)\}</span>. After
+        authenticating <span class="math inline">S</span> and checking
+        spendability, the operator atomically commits the debit, the
+        entry advance, a close reservation, a replay record, and the
+        acknowledgment body. The reservation holds room in the close for
+        this account’s row and this edge’s entry. The replay record lets
+        a retried request return the same acknowledgment. The operator
+        then countersigns and returns <span class="math inline">R</span>
+        with one Merkle opening per advanced entry. It countersigns
+        twice: an ordinary signature for the acknowledgment the payer
+        holds, and an aggregable one the close later combines across
+        many rows.</p>
+        <p>The countersigned endpoint <span class="math inline">R</span>
+        proves the operator accepted the payment. The preconfirmation
+        for one recipient is an entry receipt: <span
+        class="math inline">R</span> plus the opening of that
+        recipient’s entry under the acknowledged vector root. The payer
+        verifies and durably retains <span class="math inline">R</span>
+        and every opening, advances its local <span
+        class="math inline">D_a</span> in the same atomic commit, then
+        forwards each entry receipt to any recipient that will rely on
+        it.</p>
+        <p>The wallet keeps at most one unacknowledged send in flight:
+        it does not sign the next endpoint until the prior
+        acknowledgment is verified and committed, and an
+        operator-reported counter is never its authority. A rejection
+        before the operator’s commit changes no balance, and the wallet
+        retains the staged request for retry. If the response is lost,
+        retrying returns the same acknowledgment without a second
+        debit.</p>
+        <p>A later endpoint authorizes the whole debit delta up to its
+        value, and the close carries only the payer’s terminal endpoint,
+        its last of the epoch. If a wallet signs several endpoints
+        before obtaining the earlier acknowledgments, an intermediate
+        acknowledgment may be neither held nor selected as that
+        terminal, and that exposure is outside the base guarantee. This
+        ordering serializes one payer account, not independent payers or
+        recipients.</p>
+        <p>A send may batch entries: one signature advances strictly
+        recipient-sorted, unique entries <span
+        class="math inline">(b_i,x_i)</span> under one cumulative
+        endpoint:</p>
+        <p><span class="math display">
+        S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+\textstyle\sum_i
+        x_i,\;\mathsf{root}(V_a\text{ with every }b_i\text{
+        advanced})\bigr).
+        </span></p>
+        <p>The operator accepts or rejects the batch as a whole and
+        returns one acknowledgment covering every entry. A single
+        payment is a batch of one.</p>
         <h2 id="optimizing-for-hot-accounts">Optimizing for Hot
         Accounts</h2>
         <p>A single incoming counter would serialize every payment to a
         popular recipient. Bajillion has none: acceptance touches only
-        the payer’s side, so recipients have no state to serialize. A
-        payment of <span class="math inline">x</span> on the edge <span
+        the payer’s side, so recipients have no state to serialize.
+        Incoming credit stays a promise until the epoch ends, when the
+        operator collates it. A payment of <span
+        class="math inline">x</span> on the edge <span
         class="math inline">a\rightarrow b</span> advances only that
         edge’s entry in <span class="math inline">a</span>’s vector:</p>
         <p><span class="math display">
@@ -494,6 +496,13 @@ O’Grady</a></div>
         the balances still sum to 200. That is all the payments add to
         the close: not six payments, but the four accounts they changed,
         one row each.</p>
+        <p><span class="math inline">a</span>’s persistent state <span
+        class="math inline">X_a</span> is a balance <span
+        class="math inline">B_a</span>, a cumulative debit <span
+        class="math inline">D_a</span>, the cumulative credit <span
+        class="math inline">C_a</span> the operator has promised it, the
+        receipt count behind that credit, and a flag for whether the
+        account is present in the live state.</p>
         <p>Write the predecessor and successor states as <span
         class="math inline">X_a^0</span> and <span
         class="math inline">X_a^1</span>, with checked debit and credit

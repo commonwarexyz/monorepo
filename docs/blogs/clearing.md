@@ -25,33 +25,9 @@ For a given set of accounts, one payment or a bajillion costs the same to settle
 
 ## Payments as Fast as Browsing the Web
 
-Let's suppose account $a$ opens with 100 and wants to pay account $b$ 20. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
+An agent buying an API response should be able to pay and get on with the next request. Bajillion gives the payer an acknowledgment in one round trip to its chosen operator. That response carries a receipt the recipient can verify locally and retain as evidence, while settlement happens later.
 
-$a$'s persistent state $X_a$ is a balance $B_a$, a cumulative debit $D_a$, the cumulative credit $C_a$ the operator has promised it, the receipt count behind that credit, and a flag for whether the account is present in the live state. Credit stays a promise until the epoch ends, when the operator collates it (the next section explains why). $a$'s epoch activity is one strictly recipient-sorted vector $V_a$ with one cumulative entry per recipient it paid this epoch. The entry $(G,J)$ for $b$ is $a$'s cumulative credit to $b$ this epoch and the number of payments behind it. Before the payment, $a$ holds $B_a=100$ and $D_a=0$, and $V_a$ is empty.
-
-To send $x>0$ from $a$ to $b$, the payer advances $b$'s entry in its own vector and signs the resulting endpoint, its cumulative position after this send: an epoch-local sequence number $n_a$, the cumulative debit, and the vector's Merkle root. The operator accepts by countersigning the same body:
-
-$$
-S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1))\bigr),
-\qquad
-R=\mathsf{CounterSign}_{\mathsf{op}}(S).
-$$
-
-Here the endpoint is $n_a=1$, $D_a=20$, and the root of $V_a=\{b:(20,1)\}$. After authenticating $S$ and checking spendability, the operator atomically commits the debit, the entry advance, a close reservation, a replay record, and the acknowledgment body. The close is the settlement package the operator builds when the epoch ends, and the reservation holds room in it for this account's row and this edge's entry. The replay record lets a retried request return the same acknowledgment. The operator then countersigns and returns $R$ with one Merkle opening per advanced entry. It countersigns twice: an ordinary signature for the acknowledgment the payer holds, and an aggregable one the close later combines across many rows.
-
-A send may batch entries: one signature advances strictly recipient-sorted, unique entries $(b_i,x_i)$ under one cumulative endpoint:
-
-$$
-S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+\textstyle\sum_i x_i,\;\mathsf{root}(V_a\text{ with every }b_i\text{ advanced})\bigr).
-$$
-
-The operator accepts or rejects the batch as a whole and returns one acknowledgment covering every entry. A single payment is a batch of one.
-
-The countersigned endpoint $R$ is the accepted payment. The preconfirmation for one recipient is an entry receipt: $R$ plus the opening of that recipient's entry under the acknowledged vector root. The payer verifies and durably retains $R$ and every opening, advances its local $D_a$ in the same atomic commit, then forwards each entry receipt to any recipient that will rely on it.
-
-The wallet keeps at most one unacknowledged send in flight: it does not sign the next endpoint until the prior acknowledgment is verified and committed, and an operator-reported counter is never its authority. A rejection before the operator's commit changes no balance, and the wallet retains the staged request for retry. If the response is lost, retrying returns the same acknowledgment without a second debit. A later endpoint authorizes the whole debit delta up to its value, and the close carries only the payer's terminal endpoint, its last of the epoch. If a wallet signs several endpoints before obtaining the earlier acknowledgments, an intermediate acknowledgment may be neither held nor selected as that terminal, and that exposure is outside the base guarantee. This ordering serializes one payer account, not independent payers or recipients.
-
-Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$.
+Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. The payer signs a request $S$ advancing its running total for that recipient. The operator verifies the signature and available funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of the recipient's entry. The payer verifies and durably saves both, then forwards the resulting receipt to the recipient.
 
 ```{=html}
 <style>
@@ -116,12 +92,40 @@ Figure 1 begins with $a$ at 100, $b$ at 40, and the payment $a\xrightarrow{20}b$
 ```
 
 ::: {.image-caption}
-Figure 1: The payer sends one request and receives one countersigned response. The operator verifies, commits, and signs locally, adding no network round trip. The commit moves $a$ from 100 to 80 and advances the $a\rightarrow b$ entry in $a$'s vector from $(0,0)$ to $(20,1)$ before $R$ exists. Once $R$ returns, $a$ sends the entry receipt, $R$ plus $b$'s entry opening, directly to $b$ as transferable evidence.
+Figure 1: Verification, acceptance, and signing happen locally at the operator. The payer receives and retains the acknowledgment plus the recipient's proof before forwarding the receipt. The entry's pair tracks total amount and payment count: this payment changes $(0,0)$ to $(20,1)$.
 :::
+
+An epoch groups accepted payments into a close, the settlement package the operator builds when that epoch ends. The receipt binds the payer's cumulative position, letting the close summarize many payments through their combined effects. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
+
+The payer tracks a balance $B_a$ and a cumulative debit $D_a$. Its activity within an epoch is one strictly recipient-sorted vector $V_a$ with one cumulative entry per recipient it paid. The entry $(G,J)$ for $b$ is $a$'s cumulative credit to $b$ this epoch and the number of payments behind it. Before the example payment, $a$ holds $B_a=100$ and $D_a=0$, and $V_a$ is empty.
+
+To send $x>0$ from $a$ to $b$, the payer advances $b$'s entry in its own vector and signs the resulting endpoint, its cumulative position after this send: an epoch-local sequence number $n_a$, the cumulative debit, and the vector's Merkle root. The operator's acknowledgment countersigns the same body:
+
+$$
+S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with }b:(G+x,\,J+1))\bigr),
+\qquad
+R=\mathsf{CounterSign}_{\mathsf{op}}(S).
+$$
+
+Here the endpoint is $n_a=1$, $D_a=20$, and the root of $V_a=\{b:(20,1)\}$. After authenticating $S$ and checking spendability, the operator atomically commits the debit, the entry advance, a close reservation, a replay record, and the acknowledgment body. The reservation holds room in the close for this account's row and this edge's entry. The replay record lets a retried request return the same acknowledgment. The operator then countersigns and returns $R$ with one Merkle opening per advanced entry. It countersigns twice: an ordinary signature for the acknowledgment the payer holds, and an aggregable one the close later combines across many rows.
+
+The countersigned endpoint $R$ proves the operator accepted the payment. The preconfirmation for one recipient is an entry receipt: $R$ plus the opening of that recipient's entry under the acknowledged vector root. The payer verifies and durably retains $R$ and every opening, advances its local $D_a$ in the same atomic commit, then forwards each entry receipt to any recipient that will rely on it.
+
+The wallet keeps at most one unacknowledged send in flight: it does not sign the next endpoint until the prior acknowledgment is verified and committed, and an operator-reported counter is never its authority. A rejection before the operator's commit changes no balance, and the wallet retains the staged request for retry. If the response is lost, retrying returns the same acknowledgment without a second debit.
+
+A later endpoint authorizes the whole debit delta up to its value, and the close carries only the payer's terminal endpoint, its last of the epoch. If a wallet signs several endpoints before obtaining the earlier acknowledgments, an intermediate acknowledgment may be neither held nor selected as that terminal, and that exposure is outside the base guarantee. This ordering serializes one payer account, not independent payers or recipients.
+
+A send may batch entries: one signature advances strictly recipient-sorted, unique entries $(b_i,x_i)$ under one cumulative endpoint:
+
+$$
+S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+\textstyle\sum_i x_i,\;\mathsf{root}(V_a\text{ with every }b_i\text{ advanced})\bigr).
+$$
+
+The operator accepts or rejects the batch as a whole and returns one acknowledgment covering every entry. A single payment is a batch of one.
 
 ## Optimizing for Hot Accounts
 
-A single incoming counter would serialize every payment to a popular recipient. Bajillion has none: acceptance touches only the payer's side, so recipients have no state to serialize. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
+A single incoming counter would serialize every payment to a popular recipient. Bajillion has none: acceptance touches only the payer's side, so recipients have no state to serialize. Incoming credit stays a promise until the epoch ends, when the operator collates it. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
 
 $$
 (G_{ab},J_{ab})\longrightarrow(G_{ab}+x,J_{ab}+1),
@@ -190,6 +194,8 @@ Rollover changes only live serving state, without changing the evidence required
 ## One Row per Changed Account
 
 Netting each of the four accounts' debits and credits gives exact successor balances: $a$ ends at $100-20+5=85$, $b$ at $40-12+20+4+6=58$, $c$ at $25-7-4+12=26$, and $d$ at $35-5-6+7=31$. Gross debit equals gross credit at $20+12+7+5+4+6=54$, and the balances still sum to 200. That is all the payments add to the close: not six payments, but the four accounts they changed, one row each.
+
+$a$'s persistent state $X_a$ is a balance $B_a$, a cumulative debit $D_a$, the cumulative credit $C_a$ the operator has promised it, the receipt count behind that credit, and a flag for whether the account is present in the live state.
 
 Write the predecessor and successor states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$. The sealed boundary assigns $a$ a deposit $f_a$ and a withdrawal $w_a$, and $p_a$ is credit paid externally because the recipient is absent from the live state. The exact balance relation is
 
