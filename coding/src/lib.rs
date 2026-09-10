@@ -25,6 +25,7 @@ commonware_macros::stability_scope!(ALPHA {
     // TODO: remove this once we have a full impl.
     #[allow(dead_code)]
     mod ocelot;
+    pub use ocelot::{Error as OcelotError, Ocelot8};
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -551,7 +552,7 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
+        use crate::{Ocelot8, PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -629,8 +630,17 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
+            decode_rejects_mixed_commitments::<PhasedAsScheme<Ocelot8<Sha256>>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
             decode_rejects_empty_checked_shards::<ReedSolomon<Sha256>>(&config, b"alpha payload");
             decode_rejects_empty_checked_shards::<PhasedAsScheme<Zoda<Sha256>>>(
+                &config,
+                b"alpha payload",
+            );
+            decode_rejects_empty_checked_shards::<PhasedAsScheme<Ocelot8<Sha256>>>(
                 &config,
                 b"alpha payload",
             );
@@ -646,6 +656,7 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, b"", &selected);
+            roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, b"", &selected);
         }
 
         #[test]
@@ -659,6 +670,7 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &selected);
+            roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, &data, &selected);
         }
 
         #[test]
@@ -666,6 +678,15 @@ mod test {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
                 roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot() {
+            minifuzz::test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<PhasedAsScheme<Ocelot8<Sha256>>>(&config, &data, &selected);
                 Ok(())
             });
         }
@@ -685,7 +706,7 @@ mod test {
 
     mod phased_scheme {
         use super::*;
-        use crate::{PhasedScheme, Zoda};
+        use crate::{Ocelot8, PhasedScheme, Zoda};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -798,6 +819,11 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
+            check_rejects_mixed_commitments::<Ocelot8<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
         }
 
         #[test]
@@ -809,6 +835,7 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
+            roundtrip::<Ocelot8<Sha256>>(&config, b"", &selected);
         }
 
         #[test]
@@ -821,6 +848,7 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+            roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
         }
 
         #[test_group("slow")]
@@ -833,6 +861,15 @@ mod test {
                     roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
                     Ok(())
                 });
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot() {
+            minifuzz::test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
         }
     }
 
