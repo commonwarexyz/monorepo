@@ -17,10 +17,8 @@ pub(crate) mod thread;
 
 mod handle;
 #[commonware_macros::stability(ALPHA)]
-pub use handle::AbortOnDrop;
-pub use handle::Handle;
-#[commonware_macros::stability(ALPHA)]
 pub(crate) use handle::Panicked;
+pub use handle::{AbortOnDrop, Handle};
 pub(crate) use handle::{Aborter, MetricHandle, Panicker};
 
 mod cell;

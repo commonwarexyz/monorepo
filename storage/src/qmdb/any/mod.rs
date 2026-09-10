@@ -1676,9 +1676,7 @@ pub(crate) mod test {
             drop(db);
 
             {
-                // Poll the reopen just enough for the build's tasks to spawn. Workers and
-                // decoders only progress while the coordinator (inside this future) is
-                // polled, so pausing here holds the build mid-flight.
+                // Poll until snapshot tasks own the pending build, then cancel before init returns.
                 let init = UnorderedFixedP1::init(ctx.child("storage"), cfg());
                 pin_mut!(init);
                 let mut spawned = false;

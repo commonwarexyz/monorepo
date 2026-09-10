@@ -479,17 +479,7 @@ const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
 /// location, and whether it is a delete.
 type RoutedBatch<K> = Vec<(K, u64, bool)>;
 
-/// Sends `(worker, batch)` pairs from a decode task to the routing coordinator.
-type RoutedSender<K> = mpsc::Sender<(usize, RoutedBatch<K>)>;
-
-/// Whether the routing loop delivered every batch or stopped early on a closed worker
-/// channel.
-enum RoutingOutcome {
-    Completed,
-    CutShort,
-}
-
-/// Parameters shared by every decode chunk of one parallel build.
+/// Parameters shared by the inline replay and decode chunks of one parallel build.
 #[derive(Clone, Copy)]
 struct SnapshotRouting {
     /// Number of insert workers routed to.
@@ -513,38 +503,34 @@ const SNAPSHOT_ROUTE_BATCH: usize = 3;
 /// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
 /// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
 /// partition-routed) on concurrent tasks while the coordinator forwards finished chunks in position
-/// order. Together with the decoder count this bounds the routed operations a build can hold in
-/// memory at once. Small in tests so ordinary logs exercise chunk boundaries.
+/// order. Together with the decoder count this bounds the queued operations; each decoder also
+/// reserves one batch per worker. Small in tests so ordinary logs exercise chunk boundaries.
 #[cfg(not(test))]
 const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
-/// Decode the `len` operations starting at `start` and stream each keyed op's routed batch
-/// (`partition_of(key) / range_size`) over `tx` in sub-batches of at most [SNAPSHOT_ROUTE_BATCH]
-/// ops. Returns without error if the receiver is dropped (routing was aborted).
-async fn decode_snapshot_chunk<F, C>(
-    log: Arc<C>,
-    start: u64,
-    len: u64,
+/// Replay `range` and send each worker's keyed operations in log order, in batches of at most
+/// [SNAPSHOT_ROUTE_BATCH] operations. Stops if `send` returns false; the caller owns the
+/// receiving tasks and observes their errors when joining them.
+async fn route_snapshot<F, C, Fut>(
+    log: &C,
+    range: Range<u64>,
     routing: SnapshotRouting,
-    tx: RoutedSender<<C::Item as Operation<F>>::Key>,
+    mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
 ) -> Result<(), Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
+    Fut: Future<Output = bool> + Send,
 {
+    let stream = log
+        .replay_range(range, routing.init_buffer, ReadOptions::default())
+        .await?;
+    pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
         .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
         .collect();
-    let stream = log
-        .replay_range(
-            start..start + len,
-            routing.init_buffer,
-            ReadOptions::default(),
-        )
-        .await?;
-    pin_mut!(stream);
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         let is_delete = op.is_delete();
@@ -554,15 +540,15 @@ where
         if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
             let batch =
                 std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
-            if tx.send((w, batch)).await.is_err() {
+            if !send(w, batch).await {
                 return Ok(());
             }
         }
     }
 
-    // Flush remaining batches before the channel closes.
+    // Flush remaining batches before the caller closes the channels.
     for (w, batch) in batches.into_iter().enumerate() {
-        if !batch.is_empty() && tx.send((w, batch)).await.is_err() {
+        if !batch.is_empty() && !send(w, batch).await {
             break;
         }
     }
@@ -765,54 +751,26 @@ where
     // resolving a collision). Routing stops on the first such send failure and the join below
     // surfaces that worker's error, rather than panicking on the send.
     let mut pending = VecDeque::new();
-    let routing_result: Result<RoutingOutcome, Error<F>> = async {
+    let routing = SnapshotRouting {
+        workers,
+        partition_of: I::partition_of,
+        range_size,
+        init_buffer,
+    };
+    let routing_result: Result<(), Error<F>> = async {
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
         if decoders == 0 {
-            let stream = log
-                .replay(floor, init_buffer, ReadOptions::default())
-                .await?;
-            pin_mut!(stream);
-            let mut batches: Vec<RoutedBatch<_>> = (0..workers)
-                .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
-                .collect();
-            while let Some(result) = stream.next().await {
-                let (loc, op) = result?;
-                let is_delete = op.is_delete();
-                let Some(key) = op.into_key() else { continue };
-                let w = I::partition_of(key.as_ref()) / range_size;
-                batches[w].push((key, loc, is_delete));
-                if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
-                    let batch = std::mem::replace(
-                        &mut batches[w],
-                        Vec::with_capacity(SNAPSHOT_ROUTE_BATCH),
-                    );
-                    if senders[w].send(batch).await.is_err() {
-                        return Ok(RoutingOutcome::CutShort);
-                    }
-                }
-            }
-
-            // Flush remaining batches before the channels close.
-            for (w, batch) in batches.into_iter().enumerate() {
-                if !batch.is_empty() && senders[w].send(batch).await.is_err() {
-                    return Ok(RoutingOutcome::CutShort);
-                }
-            }
-            return Ok(RoutingOutcome::Completed);
+            let senders = &senders;
+            return route_snapshot::<F, C, _>(&**log, floor..end, routing, |w, batch| async move {
+                senders[w].send(batch).await.is_ok()
+            })
+            .await;
         }
 
         // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
-        // worker), so a decoder never blocks mid-chunk: in-flight memory stays bounded by the
-        // decoder count times the chunk size while every decode task makes progress regardless of
-        // which chunk is being forwarded.
+        // worker), so every decoder can finish regardless of which chunk is being forwarded.
         let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + workers;
-        let routing = SnapshotRouting {
-            workers,
-            partition_of: I::partition_of,
-            range_size,
-            init_buffer,
-        };
         let mut starts = (floor..end)
             .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
         let mut spawn_next = |pending: &mut VecDeque<_>| {
@@ -825,7 +783,16 @@ where
             let handle = context
                 .child("snapshot_decoder")
                 .dedicated()
-                .spawn(move |_| decode_snapshot_chunk::<F, C>(log, start, len, routing, tx));
+                .spawn(move |_| async move {
+                    let tx = &tx;
+                    route_snapshot::<F, C, _>(
+                        &*log,
+                        start..start + len,
+                        routing,
+                        |w, batch| async move { tx.send((w, batch)).await.is_ok() },
+                    )
+                    .await
+                });
             pending.push_back((rx, handle.abort_on_drop()));
             true
         };
@@ -839,14 +806,14 @@ where
         while let Some((rx, _)) = pending.front_mut() {
             while let Some((w, batch)) = rx.recv().await {
                 if senders[w].send(batch).await.is_err() {
-                    return Ok(RoutingOutcome::CutShort);
+                    return Ok(());
                 }
             }
             let (_, decoder) = pending.pop_front().expect("front exists");
             decoder.join().await??;
             spawn_next(&mut pending);
         }
-        Ok(RoutingOutcome::Completed)
+        Ok(())
     }
     .await;
 
@@ -861,17 +828,8 @@ where
 
     // Join workers before surfacing any replay failure, so none outlive a failed init.
     let joined = AbortOnDrop::join_all::<Error<F>>(handles).await;
-    let routing = routing_result?;
+    routing_result?;
     let joined = joined?;
-
-    // Routing stops on a closed worker channel so the join above can surface that worker's failure.
-    // Every clean join with cut-short routing therefore dropped routed operations. Fail rather than
-    // install a snapshot missing them.
-    if matches!(routing, RoutingOutcome::CutShort) {
-        return Err(Error::DataCorrupted(
-            "snapshot routing stopped without a worker failure",
-        ));
-    }
 
     // Install each worker's partition range into the snapshot and fold its active-key count in.
     let mut total_items = 0;
