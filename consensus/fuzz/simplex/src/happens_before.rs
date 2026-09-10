@@ -485,7 +485,7 @@ pub mod capture {
         /// schedules can collapse to the same fingerprint. This coarse-state
         /// under-approximation is an accepted tradeoff; stable per-transmission
         /// send/delivery correlation (a distinct id per copy, not a payload
-        /// hash) would restore exact coverage if a Learned-vs-Random campaign
+        /// hash) would restore exact coverage if an Input-vs-Random campaign
         /// shows the signal warrants it.
         pub fn summary(&self) -> Summary {
             let mut s = Summary::new();

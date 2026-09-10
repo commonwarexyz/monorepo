@@ -9,7 +9,7 @@
 //! is a network (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder),
 //! or lifecycle (crash-stop, durable restart, amnesia restart) fault. It then waits
 //! for the first new honest finalization or a per-fault timeout, heals the fault,
-//! and (for the learned chooser) applies a temporal-difference update rewarding novel
+//! and (for the input chooser) applies a temporal-difference update rewarding novel
 //! state / happens-before fingerprints. The episode stops once it has observed
 //! `required_containers` distinct finalizations, or on the step cap. A crash-stop is
 //! permanent but not terminal: the loop continues over the surviving quorum.
@@ -24,12 +24,16 @@
 //! Both [`Chooser`]s share ALL of the wiring, setup, catalog, parameter
 //! sampling, the reactive step boundary, the container budget, healing, state and
 //! reward extraction, and the episode-end oracle. Only selection differs:
-//! [`Chooser::Learned`] uses the campaign-persistent Q-policy (and an adaptive
-//! bandit for the episode's role) and learns; [`Chooser::Random`] samples
-//! uniformly from the runtime RNG and never touches the campaign, so it neither
-//! learns nor pollutes the shared novelty registries, the controlled baseline.
+//! [`Chooser::Input`] reads the role and every step's fault from the input's
+//! schedule prefix ([`schedule`]), so a replayed input reproduces its episode
+//! exactly, and learns (the campaign Q-policy and role bandit it feeds steer only
+//! the custom [`mutator`]); [`Chooser::Random`] samples uniformly from the runtime
+//! RNG and never touches the campaign, so it neither learns nor pollutes the
+//! shared novelty registries, the controlled baseline.
 
-use super::{adversary, fault, lifecycle, log, multiplexer, network, policy, state};
+use super::{
+    adversary, fault, lifecycle, log, multiplexer, mutator, network, policy, schedule, state,
+};
 use crate::{SniffChannel, SniffingReceiver, happens_before, invariants, sniff_sink};
 use commonware_consensus::{
     Monitor as _,
@@ -67,6 +71,10 @@ use tracing::{Dispatch, dispatcher};
 /// `max(MALLORY_EPISODE_STEPS, required_containers)` steps so it can attempt the
 /// requested finalization budget.
 const MALLORY_EPISODE_STEPS: usize = 12;
+const _: () = assert!(
+    MALLORY_EPISODE_STEPS <= schedule::SCHEDULE_STEPS,
+    "the schedule prefix must cover every step of the base episode"
+);
 /// Per-fault reactive boundary timeout: a step ends on the first honest finalization
 /// past its baseline, or, if the fault suppressed progress, after this
 /// deterministic timeout. Just when Mallory reacts, not a whole observation span.
@@ -309,13 +317,16 @@ fn enactment_of(plan: &fault::FaultPlan, matched: bool) -> Enactment {
 /// Which fault-selection policy an episode uses.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Chooser {
-    /// Masked softmax over the campaign-persistent Q-row, with a temporal-
-    /// difference update per step.
-    Learned,
+    /// The role and every step's fault come from the input's schedule prefix
+    /// ([`schedule`]), decoded against the step's legal mask, with a temporal-
+    /// difference update per step. Execution never reads the campaign, so the
+    /// episode is a pure function of the input; the campaign only steers the
+    /// custom [`mutator`].
+    Input,
     /// Uniform over the legal faults from the runtime RNG; never consults or
     /// updates the campaign. The A/B baseline: exercised by the runner's A/B
     /// test and given its own fuzz target in a later PR, so the library build
-    /// (which dispatches only [`Chooser::Learned`]) never constructs it.
+    /// (which dispatches only [`Chooser::Input`]) never constructs it.
     #[allow(dead_code)]
     Random,
 }
@@ -343,11 +354,13 @@ fn select_uniform_legal(legal: &[bool], rng: &mut impl Rng) -> policy::ActionId 
 /// pump to drain its held reorder buffer in order. The pump is idle, a
 /// transparent relay, until the shared `cell` carries a fault matching
 /// `(node, channel)`, and it draws no randomness, so it never perturbs a same-seed
-/// replay.
+/// replay. `byzantine` is [`BYZANTINE_IDX`]'s public key: a `Corrupt` fault
+/// mutates only its packets (see [`network::PacketFaultKind::Corrupt`]).
 fn spawn_packet_pump<P: Simplex>(
     context: &deterministic::Context,
     sim_rx: commonware_p2p::simulated::Receiver<PublicKeyOf<P>>,
     cell: network::PacketFaultCell,
+    byzantine: PublicKeyOf<P>,
     node: usize,
     channel: SniffChannel,
 ) -> (
@@ -356,9 +369,18 @@ fn spawn_packet_pump<P: Simplex>(
 ) {
     let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (flush_tx, flush_rx) = mpsc::unbounded_channel();
-    context
-        .child("packet_pump")
-        .spawn(move |ctx| network::pump(ctx, sim_rx, internal_tx, flush_rx, cell, node, channel));
+    context.child("packet_pump").spawn(move |ctx| {
+        network::pump(
+            ctx,
+            sim_rx,
+            internal_tx,
+            flush_rx,
+            cell,
+            byzantine,
+            node,
+            channel,
+        )
+    });
     (network::PacketFaultReceiver::new(internal_rx), flush_tx)
 }
 
@@ -416,8 +438,14 @@ fn wrap_receive<P: Simplex, S>(
     channel: SniffChannel,
 ) -> WrappedReceive<P, S> {
     let (sender, receiver) = raw;
-    let (faulted, flush) =
-        spawn_packet_pump::<P>(context, receiver, packet_cell.clone(), node, channel);
+    let (faulted, flush) = spawn_packet_pump::<P>(
+        context,
+        receiver,
+        packet_cell.clone(),
+        peers[BYZANTINE_IDX].clone(),
+        node,
+        channel,
+    );
     let sink = sniff_sink(hb_capture, node as u32, peers, ambiguous);
     (
         (
@@ -680,8 +708,9 @@ async fn restart_amnesia<P: Simplex>(
 /// `setup_engines`, does NOT sample ByzzFuzz `(c, d, r)`, and consumes no
 /// irrelevant `FuzzRng` bytes.
 ///
-/// An [`adversary::AdversaryRole`] is sampled ONCE at setup from the runtime RNG
-/// and held for the whole episode. Under the Honest role all four nodes are honest
+/// An [`adversary::AdversaryRole`] is fixed ONCE at setup (from the input's role
+/// byte, or from the runtime RNG under [`Chooser::Random`]) and held for the whole
+/// episode. Under the Honest role all four nodes are honest
 /// processes (Mallory perturbs only the network), all four are happens-before
 /// captured (empty ambiguous set), and all four are checked by the episode-end
 /// oracle. Under a Byzantine role [`BYZANTINE_IDX`] is replaced by a raw,
@@ -690,13 +719,13 @@ async fn restart_amnesia<P: Simplex>(
 /// (it is marked ambiguous), and safety excludes its equivocation via
 /// [`invariants::check_vote_invariants_with_byzantine`].
 ///
-/// The deterministic runtime is seeded from `FuzzRng::new(input.raw_bytes)`,
-/// Mallory's only entropy. For [`Chooser::Learned`] the campaign Q-table is the
-/// only cross-input state; because it persists, replaying identical bytes can
-/// yield a different schedule than the first time (online RL over libFuzzer). A
-/// Disrupter role additionally draws from the shared RNG while running, coupling
-/// the stream to its timing, still deterministic under the single-threaded
-/// scheduler since the role is fixed for the episode.
+/// `input.raw_bytes` is split by [`schedule::Schedule::split`]: the schedule prefix
+/// fixes the role and every step's fault, and the tail seeds the deterministic
+/// runtime's `FuzzRng`, Mallory's only entropy. Nothing that persists across inputs
+/// influences execution, so replaying an input reproduces its episode exactly. A
+/// Disrupter role draws from the shared RNG while running, coupling the stream to
+/// its timing, still deterministic under the single-threaded scheduler since the
+/// role is fixed for the episode.
 pub fn run<P: Simplex>(input: commonware_consensus_fuzz_core::FuzzInput, chooser: Chooser)
 where
     <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
@@ -705,11 +734,15 @@ where
     // The hard step cap (truncation guard): allow at least the requested finalization
     // budget so the episode can attempt its full container budget.
     let steps = MALLORY_EPISODE_STEPS.max(input.required_containers as usize);
+    assert!(
+        steps <= schedule::SCHEDULE_STEPS,
+        "required_containers must not exceed the schedule prefix"
+    );
     run_with::<P>(input, chooser, steps);
 }
 
-/// [`run`] with an explicit hard step cap, sampling the adversary role from the
-/// runtime RNG. Production derives the cap from `required_containers` (see [`run`]);
+/// [`run`] with an explicit hard step cap and the role taken as [`run`] does.
+/// Production derives the cap from `required_containers` (see [`run`]);
 /// the ignored integration tests pass a short count so a full deterministic episode
 /// (runtime + reactive steps + liveness + invariants) finishes in seconds while
 /// exercising the same code paths. The episode still stops at its finalization budget
@@ -727,9 +760,10 @@ fn run_with<P: Simplex>(
 
 /// [`run_with`] with an optional forced adversary role. `forced_role` is
 /// `Some(role)` only from the role-specific ignored tests, which pin the episode
-/// environment; production and the A/B / smoke tests pass `None` and sample the
-/// role from the runtime RNG. When forced, the role is NOT drawn from the RNG, so
-/// an Honest-forced episode's schedule is byte-identical to the no-role baseline.
+/// environment; production and the A/B / smoke tests pass `None` and take the role
+/// from the input (or the runtime RNG under [`Chooser::Random`]). A forced role
+/// draws nothing from the RNG, so an Honest-forced episode's schedule is
+/// byte-identical to the no-role baseline.
 fn run_inner<P: Simplex>(
     mut input: commonware_consensus_fuzz_core::FuzzInput,
     chooser: Chooser,
@@ -750,7 +784,9 @@ fn run_inner<P: Simplex>(
 
     log::clear();
 
-    let rng = FuzzRng::new(input.raw_bytes.clone());
+    // The schedule prefix drives every decision; only the tail is runtime entropy.
+    let (schedule, entropy) = schedule::Schedule::split(&input.raw_bytes);
+    let rng = FuzzRng::new(entropy.to_vec());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
     let hb_log = happens_before::capture::EventLog::new();
@@ -771,25 +807,23 @@ fn run_inner<P: Simplex>(
         let peers: Arc<[PublicKeyOf<P>]> = participants.clone().into();
 
         // Select the episode's adversary role ONCE, before the per-node loop. The
-        // learned chooser draws it from the campaign-persistent role bandit, so the
-        // campaign concentrates episodes on the more productive Byzantine profiles;
-        // every other chooser keeps the campaign-independent uniform sample, which
-        // preserves the Random A/B determinism (the bandit never drives that path).
-        // A forced role overrides both and skips the draw, keeping an Honest-forced
-        // episode byte-identical to the no-role baseline. Both draw from the runtime
-        // RNG, so a replay reproduces the role.
+        // input chooser reads it from the input's role byte (the role bandit steers
+        // that byte through the mutator, never the run); Random keeps the
+        // campaign-independent uniform draw from the runtime RNG. A forced role
+        // overrides both and draws nothing, keeping an Honest-forced episode
+        // byte-identical to the no-role baseline.
         let role = forced_role.unwrap_or_else(|| match chooser {
-            Chooser::Learned => adversary::role_bandit().lock().select(&mut context),
-            _ => adversary::AdversaryRole::sample(&mut context),
+            Chooser::Input => schedule.role(),
+            Chooser::Random => adversary::AdversaryRole::sample(&mut context),
         });
         let byz = role.is_byzantine();
-        // The MUTABLE per-step environment role. It starts at the sampled `role` and,
+        // The MUTABLE per-step environment role. It starts at the episode `role` and,
         // in a byzantine episode, a `SwapByzantineRole` step swaps it (via the multiplexer) to
         // another Byzantine profile. It keys the role region of the Q-state every step
         // (`env_tag(current_role, ..)`), so a switch connects the role regions of the
         // MDP. `byz`, `ambiguous`, and the role bandit's credit stay pinned to the
         // INITIAL `role` (all six profiles are Byzantine, so `byz` never changes, and
-        // the bandit learns the role it selected).
+        // the bandit is credited for the role the input's role byte fixed).
         let mut current_role = role;
         // The byzantine node cannot send messages under another node's identity, so its messages are
         // always correctly attributed to `BYZANTINE_IDX`, but a byzantine node
@@ -988,12 +1022,16 @@ fn run_inner<P: Simplex>(
             ^ env_tag(current_role, false, false)
             ^ horizon_tag(remaining_bucket(finalization_budget, 0));
         // Summed per-step novelty reward and the executed-step count. The role
-        // bandit's signal (Learned only) is their ratio, the per-step AVERAGE, which
+        // bandit's signal (Input only) is their ratio, the per-step AVERAGE, which
         // is length-independent, so roles are ranked by novelty density rather than
         // episode length (a short early-crash episode must not out-rank a long
         // productive one).
         let mut episode_reward = 0.0;
         let mut executed_steps = 0usize;
+
+        // The executed steps' (Q-state, legal mask) pairs, recorded for the mutator
+        // at episode end so a mutation of this input can replay the policy over them.
+        let mut trace: Vec<mutator::TraceStep> = Vec::with_capacity(steps);
 
         // Budget-driven reactive loop. `steps` is the hard step cap (truncation
         // guard); the episode also stops at its time or finalization budget. The end
@@ -1033,13 +1071,18 @@ fn run_inner<P: Simplex>(
                 fault::legal_mask(node0_crashed, byz, node0_amnesiac, role_switches_exhausted);
 
             // (b)/(c)/(d) Current abstract state is `state`; select under the
-            // legal mask. Learned consults the campaign; Random does not.
-            let action_id = match chooser {
-                Chooser::Learned => policy::campaign(fault::N_FAULTS)
-                    .lock()
-                    .policy
-                    .select(state, &legal, &mut context),
-                Chooser::Random => select_uniform_legal(&legal, &mut context),
+            // legal mask. Input decodes the step's schedule byte against the mask;
+            // Random draws from the runtime RNG. Neither consults the campaign.
+            trace.push(mutator::TraceStep { state, legal });
+            let (action_id, schedule_byte) = match chooser {
+                Chooser::Input => {
+                    let byte = schedule.action_byte(step);
+                    (schedule::decode_action(byte, &legal), format!("{byte:#04x}"))
+                }
+                Chooser::Random => (
+                    select_uniform_legal(&legal, &mut context),
+                    "n/a".to_string(),
+                ),
             };
             let fault = fault::Fault::from_id(action_id);
             // The stable-order contract: the resolved fault must project back to
@@ -1248,7 +1291,7 @@ fn run_inner<P: Simplex>(
                 .map(|k| reporters[k].clone())
                 .collect();
             let effect_state = state::state_descriptor::<P>(&effect_reporters, n) ^ tag;
-            let reward = if matches!(chooser, Chooser::Learned) {
+            let reward = if matches!(chooser, Chooser::Input) {
                 let campaign = policy::campaign(fault::N_FAULTS);
                 let mut c = campaign.lock();
                 let r = c.reward(effect_state, effect_hb);
@@ -1326,11 +1369,11 @@ fn run_inner<P: Simplex>(
                 remaining_bucket(finalization_budget, observed_finalizations.len());
             let next_state = (hb_log.summary().fingerprint() ^ tag) ^ horizon_tag(remaining_next);
 
-            // (k) TD update (Learned only, `reward` already computed pre-heal). Terminal
+            // (k) TD update (Input only, `reward` already computed pre-heal). Terminal
             // when the episode ends here (no bootstrap); otherwise bootstrap over the
             // faults legal at NEXT, recomputed from `BYZANTINE_IDX`'s POST-enact lifecycle and
             // switch count (so an amnesia restart or a switch-cap hit does not bootstrap
-            // over now-illegal columns). `select` above used the pre-enact `legal`.
+            // over now-illegal columns). The decode above used the pre-enact `legal`.
             let reward_log = match reward {
                 Some(r) => {
                     let role_switches_exhausted_next = multiplexer
@@ -1371,7 +1414,7 @@ fn run_inner<P: Simplex>(
             let containers_remaining =
                 finalization_budget.saturating_sub(observed_finalizations.len());
             log::push(format!(
-                "mallory: chooser={chooser:?} role={} step={step} action_id={action_id} fault={fault:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} next_state={next_state:#018x} state_desc={effect_state:#018x} reward={reward_log} boundary={boundary_label} trigger_node={trigger_node_log} trigger_view={trigger_view_log} baseline={baseline} containers_remaining={containers_remaining} episode_end={} heal={healed} matched={matched_log}",
+                "mallory: chooser={chooser:?} role={} step={step} schedule_byte={schedule_byte} action_id={action_id} fault={fault:?} legal={legal:?} params=[{params}] applied={enactment:?} generation={generation} lifecycle0={lifecycle0} prev_state={state:#018x} next_state={next_state:#018x} state_desc={effect_state:#018x} reward={reward_log} boundary={boundary_label} trigger_node={trigger_node_log} trigger_view={trigger_view_log} baseline={baseline} containers_remaining={containers_remaining} episode_end={} heal={healed} matched={matched_log}",
                 current_role.label(),
                 ended.unwrap_or("false"),
             ));
@@ -1385,13 +1428,17 @@ fn run_inner<P: Simplex>(
         }
 
         // Episode end: fold this episode's accumulated novelty into the campaign-
-        // persistent role bandit so the campaign concentrates on the roles that keep
-        // producing novelty. Learned only, Random / Fixed never touch the bandit,
-        // keeping the A/B baseline campaign-independent. Done before the oracle so a
-        // productive-but-panicking episode still credits its role.
-        if matches!(chooser, Chooser::Learned) {
+        // persistent role bandit so the mutator concentrates on the roles that keep
+        // producing novelty, and hand the executed trace to the mutator. Input only,
+        // Random never touches the campaign, keeping the A/B baseline campaign-
+        // independent. Done before the oracle so a productive-but-panicking episode
+        // still credits its role.
+        if matches!(chooser, Chooser::Input) {
             let role_reward = episode_reward / executed_steps.max(1) as f64;
             adversary::role_bandit().lock().learn(role, role_reward);
+            if let Some(key) = mutator::current_key() {
+                mutator::record_trace(key, trace);
+            }
         }
 
         // Episode end: reach the synchronous phase. Heal unconditionally so any
@@ -1562,9 +1609,14 @@ mod tests {
     /// drop/delay. Paired with `required_containers = 2` in [`mallory_input`].
     const TEST_STEPS: usize = 3;
 
+    /// A test input whose schedule prefix is the zero schedule (Honest role, NoFault
+    /// every step) and whose entropy tail starts with `seed`, so the runtime RNG
+    /// varies per seed while the schedule stays fixed unless a test writes one via
+    /// [`mallory_input_with_actions`].
     fn mallory_input(seed: u64) -> FuzzInput {
-        let mut raw_bytes = seed.to_le_bytes().to_vec();
-        raw_bytes.extend_from_slice(&[0x5au8; 96]);
+        let mut raw_bytes = vec![0u8; schedule::SCHEDULE_LEN];
+        raw_bytes.extend_from_slice(&seed.to_le_bytes());
+        raw_bytes.extend_from_slice(&[0x5au8; 88]);
         FuzzInput {
             raw_bytes,
             required_containers: 2,
@@ -1583,8 +1635,19 @@ mod tests {
         }
     }
 
-    /// Run a short episode with the role SAMPLED from the RNG, tolerating a panic so
-    /// a same-seed outcome is captured identically, and drain the decision log.
+    /// [`mallory_input`] with the given schedule action bytes written over the
+    /// prefix (see [`schedule`]); the role byte and the entropy tail are unchanged.
+    fn mallory_input_with_actions(seed: u64, actions: &[u8]) -> FuzzInput {
+        let mut input = mallory_input(seed);
+        for (step, &byte) in actions.iter().enumerate().take(schedule::SCHEDULE_STEPS) {
+            input.raw_bytes[1 + step] = byte;
+        }
+        input
+    }
+
+    /// Run a short episode with the role taken as production does, tolerating a
+    /// panic so a same-seed outcome is captured identically, and drain the decision
+    /// log.
     fn mallory_trace(input: FuzzInput, chooser: Chooser) -> (bool, Vec<String>) {
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_with::<SimplexCertificateMock>(input, chooser, TEST_STEPS);
@@ -1593,11 +1656,25 @@ mod tests {
         (ok, log::take())
     }
 
+    /// The decision log with its campaign-dependent `reward=` tokens removed: the
+    /// behavior an input must reproduce regardless of what the campaign has learned.
+    fn behavior(log: &[String]) -> Vec<String> {
+        log.iter()
+            .map(|line| {
+                line.split(' ')
+                    .filter(|token| !token.starts_with("reward="))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
     #[test]
     fn select_helpers_only_return_legal_ids() {
-        // Both selection paths must respect the legal mask. The masked-softmax
-        // path is exercised over a seeded Q-row; the uniform path over the same
-        // mask. Pure (no runtime), so this stays in the fast suite.
+        // Both selection helpers must respect the legal mask: the masked-softmax
+        // path (the mutator's, over a parent's recorded trace states) is exercised
+        // over a seeded Q-row; the uniform path (Random's) over the same mask. Pure
+        // (no runtime), so this stays in the fast suite.
         let legal = fault::legal_mask(false, false, false, false);
         let mut policy = policy::QPolicy::new(fault::N_FAULTS);
         policy.learn_terminal(0, 0, 5.0);
@@ -1777,24 +1854,37 @@ mod tests {
     /// oracle. Each must complete (which means its safety and liveness invariants
     /// held). Random never touches the campaign, so a fixed seed must produce a
     /// byte-identical decision log; that same-seed determinism is the property
-    /// Mallory relies on to attribute any learned-vs-random divergence to the
-    /// policy. It must survive the packet-fault pumps: the pumps draw no
+    /// Mallory relies on to attribute any input-vs-random divergence to the
+    /// schedule bytes rather than to any runtime selection. It must survive the
+    /// packet-fault pumps: the pumps draw no
     /// randomness and apply a deterministic, param-driven transform, so the two
-    /// same-seed Random runs stay byte-identical with the pump inserted.
+    /// same-seed Random runs stay byte-identical with the pump inserted. The Input
+    /// chooser must replay the same way even though its first run moved the
+    /// campaign: the schedule is in the input, never in the campaign.
     #[test]
     #[ignore]
-    fn learned_random_ab_baseline() {
+    fn input_random_ab_baseline() {
         policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
+        // Delay, corrupt, reorder: three packet faults through the pump.
+        let actions = [3u8, 5, 7];
         for seed in [1u64, 2, 3] {
-            let (learned_ok, learned_log) = mallory_trace(mallory_input(seed), Chooser::Learned);
+            let (input_ok_a, input_log_a) =
+                mallory_trace(mallory_input_with_actions(seed, &actions), Chooser::Input);
+            let (input_ok_b, input_log_b) =
+                mallory_trace(mallory_input_with_actions(seed, &actions), Chooser::Input);
             assert!(
-                learned_ok,
-                "learned chooser must complete and hold invariants (seed {seed})"
+                input_ok_a && input_ok_b,
+                "input chooser must complete and hold invariants (seed {seed})"
             );
             assert!(
-                !learned_log.is_empty(),
-                "the decision log must record the learned episode (seed {seed})"
+                !input_log_a.is_empty(),
+                "the decision log must record the input episode (seed {seed})"
+            );
+            assert_eq!(
+                behavior(&input_log_a),
+                behavior(&input_log_b),
+                "input chooser: a replay must reproduce the episode regardless of the campaign (seed {seed})"
             );
 
             let (random_ok_a, random_log_a) = mallory_trace(mallory_input(seed), Chooser::Random);
@@ -1834,26 +1924,34 @@ mod tests {
         }
     }
 
-    /// Smoke: learned episodes complete (liveness + safety oracle pass), the campaign
-    /// Q-table gains a row, and the episode-level role bandit learns a nonzero arm.
-    /// A nonzero Q-table implies some step scored a non-novel (negative) reward, whose
-    /// episode therefore accumulated a nonzero productivity total for its role, so a
-    /// learning campaign moves the bandit off its uniform start.
+    /// Smoke: input-chooser episodes complete (liveness + safety oracle pass), the
+    /// campaign Q-table gains a row, and the episode-level role bandit learns a
+    /// nonzero arm, so the mutator they feed has something to steer with. A nonzero
+    /// Q-table implies some step scored a non-novel (negative) reward, whose episode
+    /// therefore accumulated a nonzero productivity total for its role, so a learning
+    /// campaign moves the bandit off its uniform start.
     #[test]
     #[ignore]
     fn run_mallory_smoke_completes_and_learns() {
         policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
+        // Isolate, partition, loss: the same schedule under every seed, so the
+        // view-relative fingerprints recur across episodes and score non-novel.
+        let actions = [1u8, 2, 4];
         for seed in [1u64, 2, 3] {
-            run_with::<SimplexCertificateMock>(mallory_input(seed), Chooser::Learned, TEST_STEPS);
+            run_with::<SimplexCertificateMock>(
+                mallory_input_with_actions(seed, &actions),
+                Chooser::Input,
+                TEST_STEPS,
+            );
         }
         assert!(
             !policy::campaign(fault::N_FAULTS).lock().policy.is_empty(),
-            "learned episodes must populate the campaign Q-table"
+            "input-chooser episodes must populate the campaign Q-table"
         );
         assert!(
             !adversary::role_bandit().lock().is_empty(),
-            "learned episodes must move the role bandit off its uniform start"
+            "input-chooser episodes must move the role bandit off its uniform start"
         );
     }
 
@@ -1883,22 +1981,24 @@ mod tests {
         }
     }
 
-    /// Acceptance criterion 3 (learned): a learned campaign that runs byzantine
-    /// episodes moves the `SwapByzantineRole` Q-column off zero, i.e. it learns a NON-ZERO
-    /// Q-value for some `(state, SwapByzantineRole)` entry. Reuses the smoke seam (run learned
-    /// episodes, then inspect the campaign): with `BYZANTINE_IDX` pinned to a Byzantine role
-    /// SwapByzantineRole is legal every step, so the softmax selects and learns it, and by the
-    /// later episodes the recurring view-relative fingerprints are non-novel, giving a
-    /// nonzero reward that moves the column.
+    /// Acceptance criterion 3 (learned): a campaign that runs byzantine episodes
+    /// enacting `SwapByzantineRole` moves its Q-column off zero, i.e. it learns a
+    /// NON-ZERO Q-value for some `(state, SwapByzantineRole)` entry. Reuses the smoke
+    /// seam (run input episodes, then inspect the campaign): with `BYZANTINE_IDX` pinned
+    /// to a Byzantine role the schedule below selects SwapByzantineRole every step
+    /// until the switch cap, and by the later episodes the recurring view-relative
+    /// fingerprints are non-novel, giving a nonzero reward that moves the column.
     #[test]
     #[ignore]
     fn learned_swap_byzantine_role_learns_a_nonzero_qvalue() {
         policy::reset_campaign(fault::N_FAULTS);
         adversary::reset_role_bandit();
+        let legal = fault::legal_mask(false, true, false, false);
+        let swap = schedule::encode_action(fault::Fault::SwapByzantineRole.id(), &legal);
         for seed in 1u64..=8 {
             run_inner::<SimplexCertificateMock>(
-                mallory_input(seed),
-                Chooser::Learned,
+                mallory_input_with_actions(seed, &[swap; schedule::SCHEDULE_STEPS]),
+                Chooser::Input,
                 MALLORY_EPISODE_STEPS,
                 Some(adversary::AdversaryRole::Disrupter),
             );

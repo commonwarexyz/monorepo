@@ -7,15 +7,18 @@
 //! [`ActionId`](policy::ActionId) boundary ([`policy`]) plus the protocol-state
 //! observation it rewards ([`state`]). The core sees only numeric action ids, so
 //! any fixed, ordered action catalog with an exact state / happens-before
-//! fingerprint can drive it; the Mallory runner ([`runner`]) is its sole driver.
+//! fingerprint can drive it; the Mallory runner ([`runner`]) is its sole learner
+//! and the custom [`mutator`] its sole selector.
 //!
 //! The Mallory runner ([`runner`]) drives the episode loop (fuzz target iteration)
-//! over a stable fault catalog ([`fault`]) under the backend-agnostic Q-core.
+//! over a stable fault catalog ([`fault`]), replaying the role and every step's
+//! fault from the input's schedule prefix ([`schedule`]) and feeding each step's
+//! novelty reward into the backend-agnostic Q-core.
 //! The catalog covers the NoFault, network-topology (isolate / partition), packet (delay /
 //! loss / corrupt / duplicate / reorder), and managed-validator lifecycle
 //! (crash-stop / durable restart, see [`lifecycle`]) faults. Byzantine adversary
-//! profiles ([`adversary`]) are episode-level ENVIRONMENTS sampled once at setup,
-//! not catalog faults. They replace node `commonware_consensus_fuzz_core::BYZANTINE_IDX`
+//! profiles ([`adversary`]) are episode-level ENVIRONMENTS fixed once at setup from
+//! the input's role byte ([`schedule`]), not catalog faults. They replace node `commonware_consensus_fuzz_core::BYZANTINE_IDX`
 //! with a Byzantine actor for the whole episode and add no catalog id.
 //!
 //! # Mallory contract
@@ -34,9 +37,11 @@
 //!   episode-end liveness + safety oracle still runs over the survivors.
 //! - **Deterministic durations.** All fault durations use deterministic time,
 //!   never the failed node's own view (which the fault itself stalls), and all
-//!   randomness is drawn from the runtime `commonware_utils::FuzzRng`. A
-//!   replayed input reproduces its schedule modulo the campaign-persistent
-//!   Q-table.
+//!   randomness is drawn from the runtime `commonware_utils::FuzzRng`. The role
+//!   and every step's fault are read from the input's schedule prefix
+//!   ([`schedule`]), so a replayed input reproduces its episode exactly; the
+//!   campaign-persistent Q-table and role bandit steer only the custom
+//!   [`mutator`].
 //! - **Explicit actors only.** No open-ended "other Byzantine actor": every
 //!   modeled actor has explicit semantics and explicit oracle treatment (safety
 //!   and liveness), so every panic is attributable.
@@ -51,7 +56,9 @@ pub(crate) mod fault;
 pub(crate) mod lifecycle;
 pub(crate) mod log;
 pub(crate) mod multiplexer;
+pub(crate) mod mutator;
 pub(crate) mod network;
 pub(crate) mod policy;
 pub(crate) mod runner;
+pub(crate) mod schedule;
 pub(crate) mod state;

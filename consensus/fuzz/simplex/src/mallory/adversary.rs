@@ -3,7 +3,8 @@
 //! Where [`fault`](super::fault) perturbs only the network, an adversary *role*
 //! replaces the single faultable identity ([`commonware_consensus_fuzz_core::BYZANTINE_IDX`]) with an
 //! explicit Byzantine actor for the WHOLE episode. The role is an environment
-//! property sampled once at setup, not a per-step policy fault, so it never
+//! property fixed once at setup from the input's role byte (see
+//! [`schedule`](super::schedule)), not a per-step policy fault, so it never
 //! enters the fault catalog and adds no catalog id. `BYZANTINE_IDX` then runs as a raw,
 //! unmanaged byzantine node: it gets its registered channels directly, with no
 //! packet pump, no [`SniffingReceiver`](crate::SniffingReceiver), no reporter, and
@@ -50,10 +51,12 @@ use std::sync::{Arc, OnceLock};
 
 /// The Byzantine profile `BYZANTINE_IDX` plays for a whole Mallory episode.
 ///
-/// Sampled once at setup from the runtime `FuzzRng` and held for the episode, so a
-/// replay reproduces it. Folded into the Q-state (via [`tag`](Self::tag)) so a
-/// campaign never merges incompatible environments (Honest and each Byzantine role
-/// are distinct Q-rows and novelty registries).
+/// Fixed once at setup and held for the episode: the production input chooser reads
+/// it from the input's role byte (see [`schedule`](super::schedule)), so a replay
+/// reproduces it without consulting the campaign, while the test-only random chooser
+/// draws it from the runtime `FuzzRng`. Folded into the Q-state (via
+/// [`tag`](Self::tag)) so a campaign never merges incompatible environments (Honest
+/// and each Byzantine role are distinct Q-rows and novelty registries).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum AdversaryRole {
     /// `BYZANTINE_IDX` is an honest [`ManagedValidator`](commonware_consensus_fuzz_core::ManagedValidator) like the
@@ -191,16 +194,18 @@ const ROLE_BANDIT_ALPHA: f64 = 0.1;
 const ROLE_BANDIT_TEMPERATURE: f64 = 1.0;
 
 /// Campaign-persistent multi-armed bandit over the [`AdversaryRole::COUNT`] roles:
-/// one Q-value per role tracking its recent episode productivity. Selection is a
-/// softmax over those values, so the campaign concentrates episodes on the Byzantine
-/// profiles that keep producing novelty (Mallory-faithful adaptive fault selection).
+/// one Q-value per role tracking its recent episode productivity. The custom
+/// [`mutator`](super::mutator) selects a role byte by softmax over those values, so
+/// the campaign concentrates the inputs it GENERATES on the Byzantine profiles that
+/// keep producing novelty (Mallory-faithful adaptive fault selection).
 ///
 /// Persisted for the whole libFuzzer campaign like the per-step
 /// [`Campaign`](super::policy::Campaign), but SEPARATE from it: this picks the
-/// episode's fixed environment (the role), not a per-step fault. Only the learned
-/// chooser selects through it and updates it; the random and fixed choosers keep the
-/// campaign-independent uniform [`AdversaryRole::sample`], so the A/B baseline stays
-/// campaign-independent.
+/// episode's fixed environment (the role), not a per-step fault. The input chooser
+/// only UPDATES it, crediting the episode's role at its end, and never selects
+/// through it, so an episode stays a pure function of its input; the random chooser
+/// keeps the campaign-independent uniform [`AdversaryRole::sample`], so the A/B
+/// baseline stays campaign-independent.
 pub(crate) struct RoleBandit {
     /// Per-role Q-value in [`AdversaryRole::index`] order; all zero by default, which
     /// makes the initial softmax uniform over the roles.
@@ -235,9 +240,10 @@ impl RoleBandit {
     }
 
     /// Select a role by softmax over the per-role Q-values, drawing from the
-    /// caller-supplied RNG (the deterministic runtime context) and sampling by
-    /// inverse-CDF, mirroring [`QPolicy::select`](super::policy::QPolicy::select). An
-    /// all-zero row is uniform over the roles.
+    /// caller-supplied RNG (the [`mutator`](super::mutator)'s, its only caller in a
+    /// fuzz build) and sampling by inverse-CDF, mirroring
+    /// [`QPolicy::select`](super::policy::QPolicy::select). An all-zero row is
+    /// uniform over the roles.
     pub(crate) fn select(&self, rng: &mut impl Rng) -> AdversaryRole {
         let probs = self.softmax();
         // Uniform draw in [0, 1) from 53 random bits, then inverse-CDF over `probs`.
@@ -266,7 +272,7 @@ impl RoleBandit {
     }
 
     /// Whether any arm's Q-value has moved away from zero. Test-only (the smoke test
-    /// asserts a few learned episodes taught the bandit something).
+    /// asserts a few episodes taught the bandit something).
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.q.iter().all(|&q| q == 0.0)
@@ -277,8 +283,9 @@ static ROLE_BANDIT: OnceLock<Mutex<RoleBandit>> = OnceLock::new();
 
 /// Process-global role bandit, initialised empty on first use and persisted across
 /// every libFuzzer input for the rest of the campaign (like
-/// [`campaign`](super::policy::campaign)). Only the learned chooser selects through
-/// it and updates it at episode end; the random and fixed choosers keep the uniform
+/// [`campaign`](super::policy::campaign)). The input chooser updates it at episode
+/// end but never selects through it; only the [`mutator`](super::mutator) selects,
+/// when it redraws an input's role byte. The random chooser keeps the uniform
 /// [`AdversaryRole::sample`], so the A/B baseline stays campaign-independent.
 pub(crate) fn role_bandit() -> &'static Mutex<RoleBandit> {
     ROLE_BANDIT.get_or_init(|| Mutex::new(RoleBandit::default()))

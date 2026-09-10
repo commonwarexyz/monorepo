@@ -1788,13 +1788,16 @@ impl FuzzMode for Byzzfuzz {
 /// (node 0): honest, or one of six Byzantine profiles (Disrupter, Conflicter,
 /// Nuller, Equivocator, Impersonator, Outdated). It then drives a reactive loop of
 /// observe-orient-decide-act steps. Each step observes the honest happens-before
-/// fingerprint (the Q-state) and protocol-state descriptor, then selects a fault
-/// from the stable catalog (`mallory::fault`) under a legal mask. The fault is a
+/// fingerprint (the Q-state) and protocol-state descriptor, then decodes the step's
+/// fault from the input's action byte against a legal mask over the stable catalog
+/// (`mallory::fault`); the Q-state feeds the update and the recorded trace, never a
+/// runtime selection. The fault is a
 /// network (isolation, partition), packet (delay/loss/corrupt/duplicate/reorder), or
 /// lifecycle (crash-stop, durable restart, amnesia restart) fault. It applies the
 /// fault, then reacts: the step ends on the first new honest finalization past its
 /// baseline, or a deterministic per-action timeout if the fault suppressed progress.
-/// The fault heals and (for the learned chooser) a temporal-difference update rewards
+/// The fault heals and (under the input chooser, which updates the campaign but
+/// never selects from it) a temporal-difference update rewards
 /// novel state and happens-before fingerprints (the pre-heal fault effect) via the
 /// backend-agnostic Q-core in `mallory::policy`. The whole episode stops once it has
 /// observed the input's `required_containers` distinct finalization boundaries (each
@@ -1809,9 +1812,25 @@ impl FuzzMode for Byzzfuzz {
 /// its pre-heal frontier) and the vote / state-extraction safety invariants. It runs
 /// over the episode's honest reporter set, excluding an unmanaged Byzantine node 0, a
 /// crash-stopped node from liveness, and an amnesiac node from the honest set. The
-/// name is kept as `MalloryContainer` to avoid target / API churn. See
-/// `mallory::runner::run`.
+/// role and every step's fault are a prefix of `raw_bytes`, so an input replays
+/// its episode exactly; the learned campaign only steers the target's custom
+/// mutator ([`mallory_mutate`]). The name is kept as `MalloryContainer` to avoid
+/// target / API churn. See `mallory::runner::run`.
 pub struct MalloryContainer;
+
+/// Announce the raw bytes of the Mallory input about to run, so the episode's
+/// trace is recorded under the key [`mallory_mutate`] looks up for those bytes.
+/// The Mallory fuzz target calls this before [`fuzz`].
+pub fn mallory_observe_input(data: &[u8]) {
+    mallory::mutator::set_current_input(data);
+}
+
+/// The Mallory custom libFuzzer mutator body (see `mallory::mutator`): rewrites the
+/// parent's schedule prefix by the campaign's learned policy, or defers to
+/// libFuzzer's default mutator. Wire it with `libfuzzer_sys::fuzz_mutator!`.
+pub fn mallory_mutate(data: &mut [u8], size: usize, max_size: usize, seed: u32) -> usize {
+    mallory::mutator::mutate(data, size, max_size, seed)
+}
 impl FuzzMode for MalloryContainer {
     const MODE: Mode = Mode::MalloryContainer;
 }
@@ -1965,7 +1984,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode, C: Coverage>(mut input: FuzzInput)
             panic::catch_unwind(panic::AssertUnwindSafe(|| byzzfuzz::run::<P>(input)))
         }
         Mode::MalloryContainer => panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            mallory::runner::run::<P>(input, mallory::runner::Chooser::Learned)
+            mallory::runner::run::<P>(input, mallory::runner::Chooser::Input)
         })),
         Mode::Chaos => {
             panic::catch_unwind(panic::AssertUnwindSafe(|| chaos::runner::run::<P>(input)))

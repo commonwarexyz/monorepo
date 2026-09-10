@@ -4,8 +4,8 @@
 //! Byzantine actor for the whole run. The [`RoleMultiplexer`] is the SINGLE owner
 //! of `BYZANTINE_IDX`'s three raw consensus channels: it spawns the current Byzantine
 //! profile's actor and, on a per-step [`SwapByzantineRole`](super::fault::Fault::SwapByzantineRole),
-//! swaps to a different profile so the learner can compose faults across views
-//! (e.g. conflict at one view, equivocate at a later one).
+//! swaps to a different profile so one input's schedule can compose faults across
+//! views (e.g. conflict at one view, equivocate at a later one).
 //!
 //! # Single live actor
 //!

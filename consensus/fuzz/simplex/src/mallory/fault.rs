@@ -56,12 +56,13 @@ const PACKET_DUPLICATE_MAX: u32 = 3;
 const PACKET_REORDER_MIN: u32 = 2;
 const PACKET_REORDER_MAX: u32 = 8;
 
-/// The adversarial fault the policy chooses per step.
+/// The adversarial fault enacted per step: the input chooser decodes it from that
+/// step's action byte against the legal mask (see [`crate::mallory::schedule`]).
 ///
 /// # Stable catalog order (contract)
 ///
 /// [`CATALOG`] fixes each fault's [`ActionId`]: index `i` has id `i`. That order
-/// is the contract between the runner's `select` and its enactment, and it is the
+/// is the contract between an input's action byte and its enactment, and it is the
 /// column layout of a Q-table persisted across the whole libFuzzer campaign, so
 /// it MUST NOT change. New faults are APPENDED after the last existing entry;
 /// existing ids never move (so a growing catalog reuses a warm Q-table). PR4a:
@@ -106,10 +107,14 @@ pub(crate) enum Fault {
     /// for the window; the dropped packets never reach the engine or the
     /// happens-before log.
     PacketLoss,
-    /// Corrupt the raw wire bytes of a small, bounded number of packets on one
-    /// honest node's one channel WITHOUT re-signing; each corrupted message fails
-    /// to decode, so it is dropped from the happens-before log and rejected by the
-    /// engine (an effective loss that exercises the decode-rejection path).
+    /// Corrupt the raw wire bytes of a small, bounded number of packets that
+    /// [`commonware_consensus_fuzz_core::BYZANTINE_IDX`] sends to one honest node's
+    /// one channel WITHOUT re-signing; each corrupted message fails to decode or
+    /// verify, so it is dropped from the happens-before log and rejected by the
+    /// engine (an effective loss that exercises the rejection path). Only that
+    /// sender's packets are corrupted: the engine blocks the sender of an invalid
+    /// message and the resolver never fetches from a blocked peer, so corrupting
+    /// honest senders would make honest nodes block each other.
     PacketCorrupt,
     /// Duplicate each packet on one honest node's one channel with a hard-bounded
     /// number of extra identical copies for the window; the engine's idempotent
@@ -141,8 +146,8 @@ pub(crate) enum Fault {
     /// (`BYZANTINE_IDX` is the adversary multiplexer) and only until the per-episode switch
     /// cap ([`MALLORY_MAX_ROLE_SWITCHES`]) is reached. Persists (not a heal-able
     /// transient): the new profile keys the role region of the Q-state for the
-    /// remaining steps, so the learner can compose faults across views. Not
-    /// terminal.
+    /// remaining steps, so one input's schedule can compose faults across views.
+    /// Not terminal.
     SwapByzantineRole,
 }
 
@@ -321,7 +326,7 @@ fn sample_channel(rng: &mut impl Rng) -> SniffChannel {
 }
 
 impl Fault {
-    /// The fault an [`ActionId`] the policy returned maps to.
+    /// The fault an [`ActionId`] maps to.
     pub(crate) fn from_id(id: ActionId) -> Self {
         CATALOG[id]
     }
@@ -405,8 +410,10 @@ impl Fault {
     }
 }
 
-/// The per-step legal-fault mask: which catalog faults the policy may select
-/// this step. With an Honest faultable identity running, every catalog fault
+/// The per-step legal-fault mask: which catalog faults are legal this step. The
+/// input chooser decodes the step's action byte against it, and it is recorded in
+/// the input's trace so the mutator's rollout selects within the same mask. With an
+/// Honest faultable identity running, every catalog fault
 /// except [`Fault::SwapByzantineRole`] (which needs a byzantine multiplexer) is legal, the
 /// loop heals every transient topology/packet fault before the next decision, so at
 /// most one is ever active without any masking, and all three lifecycle faults

@@ -26,7 +26,8 @@
 //! a deterministic, param-driven transform and draws none of its own, so a
 //! replayed input relays identically. Exactly one fault is active at a time (the
 //! runner heals every step), and each pump acts only on the fault whose
-//! `(node, channel)` matches its own.
+//! `(node, channel)` matches its own. A `Corrupt` fault additionally acts only on
+//! packets sent by [`BYZANTINE_IDX`] (see [`PacketFaultKind::Corrupt`]).
 
 use crate::SniffChannel;
 use commonware_consensus_fuzz_core::{
@@ -132,11 +133,16 @@ pub(crate) enum PacketFaultKind {
     /// Drop the next `drop_count` matching packets, then forward. A dropped packet
     /// never reaches the sniffer, so it is absent from the happens-before log.
     Loss { drop_count: u32 },
-    /// Corrupt the raw wire bytes of the next `count` matching packets WITHOUT
-    /// re-signing, XOR the byte at `offset % len` with `mask`, then forward
-    /// unchanged. A corrupted message fails to decode, so the sniffer drops it
-    /// from the happens-before log and the engine rejects it. `count` is bounded
-    /// like a loss so a run still completes.
+    /// Corrupt the raw wire bytes of the next `count` matching packets that
+    /// [`BYZANTINE_IDX`] sent WITHOUT re-signing, XOR the byte at `offset % len`
+    /// with `mask`, then forward unchanged. A corrupted message fails to decode or
+    /// verify, so the sniffer drops it from the happens-before log and the engine
+    /// rejects it. The engine also blocks the sender of such a message and the p2p
+    /// resolver never fetches from a blocked peer, so only the single faultable
+    /// identity may be made to look faulty: corrupting an honest sender's packets
+    /// would make honest nodes block each other and wedge the honest quorum.
+    /// Every other sender's packets pass through intact. `count` is bounded like
+    /// a loss so a run still completes.
     Corrupt { count: u32, offset: u16, mask: u8 },
     /// Forward each matching packet, then push `extra` additional identical copies
     /// into the internal FIFO. `extra` is hard-bounded so the FIFO cannot blow up;
@@ -253,8 +259,11 @@ impl PacketFaultCell {
 
     /// Decide what the pump for `(node, channel)` does with its next packet. Pure
     /// and synchronous: a `Delay` returns the sleep for the pump to perform after
-    /// this returns, so no lock is ever held across an await.
-    fn decide(&self, node: usize, channel: SniffChannel) -> PumpDecision {
+    /// this returns, so no lock is ever held across an await. `from_byzantine` is
+    /// whether [`BYZANTINE_IDX`] sent the packet: a `Corrupt` fault acts only on
+    /// those packets and forwards every other sender's packet unchanged, spending
+    /// no budget and recording no match.
+    fn decide(&self, node: usize, channel: SniffChannel, from_byzantine: bool) -> PumpDecision {
         let Some(fault) = *self.inner.active.lock() else {
             return PumpDecision::Forward;
         };
@@ -283,6 +292,10 @@ impl PacketFaultCell {
                 }
             }
             PacketFaultKind::Corrupt { offset, mask, .. } => {
+                // Only the faultable identity may be made to look faulty.
+                if !from_byzantine {
+                    return PumpDecision::Forward;
+                }
                 // Same race-free load/store discipline as `Loss`: only the single
                 // matching pump reaches here and `decide` has no await.
                 let remaining = self.inner.remaining_corrupts.load(Ordering::Relaxed);
@@ -361,7 +374,9 @@ fn reorder_step<P: PublicKey>(
 /// transparent, in-order relay, an unbounded FIFO, so liveness and order are
 /// unchanged. It draws no randomness (the fault's parameters were sampled by the
 /// runner; `select!` is biased, not random), so two same-seed runs relay
-/// identically.
+/// identically. `byzantine` is the public key of [`BYZANTINE_IDX`]: a `Corrupt`
+/// fault mutates only the packets it sent and forwards every other sender's
+/// packets intact (see [`PacketFaultKind::Corrupt`]).
 ///
 /// A `Reorder` fault holds packets in a per-pump bounded buffer; every other path
 /// leaves that buffer empty, so the pump stays a direct FIFO relay. `flush_rx`
@@ -374,12 +389,14 @@ fn reorder_step<P: PublicKey>(
 /// Breaks when the simulated channel closes, the internal receiver is dropped, or
 /// the runner drops the flush sender at teardown (any buffer still held is then
 /// discarded).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump<P, R, E>(
     context: E,
     mut sim_rx: R,
     internal_tx: mpsc::UnboundedSender<Message<P>>,
     mut flush_rx: mpsc::UnboundedReceiver<FlushAck>,
     cell: PacketFaultCell,
+    byzantine: P,
     node: usize,
     channel: SniffChannel,
 ) where
@@ -420,7 +437,8 @@ pub(crate) async fn pump<P, R, E>(
                 let Ok(message) = message else {
                     break;
                 };
-                match cell.decide(node, channel) {
+                let from_byzantine = message.0 == byzantine;
+                match cell.decide(node, channel, from_byzantine) {
                     PumpDecision::Forward => {
                         if internal_tx.send(message).is_err() {
                             break;
@@ -512,20 +530,32 @@ mod tests {
 
     const NODE: usize = 1;
 
+    /// The Byzantine identity the pump tests pin (`BYZANTINE_IDX`'s key): its
+    /// packets are corruptible, and it is the sole sender unless a test says
+    /// otherwise.
     fn sender() -> Ed25519PublicKey {
         PrivateKey::from_seed(0).public_key()
     }
 
-    /// Drive the pump for `(NODE, channel)` over the one-byte-tagged `tags`,
+    /// A distinct honest sender whose packets a `Corrupt` fault must never touch.
+    fn honest() -> Ed25519PublicKey {
+        PrivateKey::from_seed(1).public_key()
+    }
+
+    /// Drive the pump for `(NODE, channel)` over one-byte-tagged `packets`, each
+    /// flagged whether [`sender`] (the Byzantine identity) or [`honest`] sent it,
     /// applying `fault` (if any), and return the tags the engine-facing receiver
     /// observes in delivery order plus whether the pump matched. All packets are
     /// enqueued and the source closed before the pump runs, so the pump drains,
     /// forwards past the fault, then stops.
-    fn drive(fault: Option<PacketFault>, channel: SniffChannel, tags: &[u8]) -> (Vec<u8>, bool) {
-        let tags = tags.to_vec();
+    fn drive_from(
+        fault: Option<PacketFault>,
+        channel: SniffChannel,
+        packets: &[(u8, bool)],
+    ) -> (Vec<u8>, bool) {
+        let packets = packets.to_vec();
         let executor = deterministic::Runner::seeded(1);
         executor.start(move |context| async move {
-            let from = sender();
             let (src_tx, src_rx) = mpsc::unbounded_channel::<Message<Ed25519PublicKey>>();
             let (internal_tx, internal_rx) = mpsc::unbounded_channel();
             // Held for the whole drive so the pump never sees a dropped flush
@@ -535,10 +565,9 @@ mod tests {
             if let Some(f) = fault {
                 cell.set(f);
             }
-            for &t in &tags {
-                src_tx
-                    .send((from.clone(), IoBuf::copy_from_slice(&[t])))
-                    .unwrap();
+            for &(t, from_byzantine) in &packets {
+                let from = if from_byzantine { sender() } else { honest() };
+                src_tx.send((from, IoBuf::copy_from_slice(&[t]))).unwrap();
             }
             drop(src_tx);
 
@@ -550,6 +579,7 @@ mod tests {
                     internal_tx,
                     flush_rx,
                     pump_cell,
+                    sender(),
                     NODE,
                     channel,
                 )
@@ -563,6 +593,12 @@ mod tests {
             drop(flush_tx);
             (got, cell.matched())
         })
+    }
+
+    /// [`drive_from`] with every packet sent by the Byzantine identity.
+    fn drive(fault: Option<PacketFault>, channel: SniffChannel, tags: &[u8]) -> (Vec<u8>, bool) {
+        let packets: Vec<(u8, bool)> = tags.iter().map(|&t| (t, true)).collect();
+        drive_from(fault, channel, &packets)
     }
 
     /// Drive a `Reorder` fault over `tags`, then (after the pump has drained the
@@ -596,6 +632,7 @@ mod tests {
                     internal_tx,
                     flush_rx,
                     pump_cell,
+                    sender(),
                     NODE,
                     channel,
                 )
@@ -733,6 +770,56 @@ mod tests {
             got,
             vec![1 ^ 0xff, 2 ^ 0xff, 3, 4, 5],
             "the first two packets are byte-mutated, the rest unchanged"
+        );
+    }
+
+    #[test]
+    fn corrupt_leaves_honest_senders_intact() {
+        // Only the Byzantine identity's packets are corruptible: an honest sender's
+        // packets pass through unchanged, spend no budget, and record no match, so
+        // a corrupt fault can never make an honest node look faulty to its peers.
+        let fault = PacketFault {
+            node: NODE,
+            channel: SniffChannel::Vote,
+            kind: PacketFaultKind::Corrupt {
+                count: 2,
+                offset: 0,
+                mask: 0xff,
+            },
+        };
+        let (got, matched) = drive_from(
+            Some(fault),
+            SniffChannel::Vote,
+            &[(1, false), (2, false), (3, false)],
+        );
+        assert!(!matched, "honest packets must never count as a match");
+        assert_eq!(got, vec![1, 2, 3], "honest packets are forwarded intact");
+    }
+
+    #[test]
+    fn corrupt_budget_is_spent_only_on_byzantine_packets() {
+        // Interleaved senders: the budget of two applies to the Byzantine packets
+        // 1 and 3, skipping the honest 2 and 4 in between, and the Byzantine 5 is
+        // past the budget.
+        let fault = PacketFault {
+            node: NODE,
+            channel: SniffChannel::Vote,
+            kind: PacketFaultKind::Corrupt {
+                count: 2,
+                offset: 0,
+                mask: 0xff,
+            },
+        };
+        let (got, matched) = drive_from(
+            Some(fault),
+            SniffChannel::Vote,
+            &[(1, true), (2, false), (3, true), (4, false), (5, true)],
+        );
+        assert!(matched, "a corrupted Byzantine packet records a match");
+        assert_eq!(
+            got,
+            vec![1 ^ 0xff, 2, 3 ^ 0xff, 4, 5],
+            "only Byzantine packets are mutated, honest ones never spend the budget"
         );
     }
 
@@ -882,6 +969,7 @@ mod tests {
                     internal_tx,
                     flush_rx,
                     pump_cell,
+                    sender(),
                     NODE,
                     SniffChannel::Vote,
                 )

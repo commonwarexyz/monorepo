@@ -3,10 +3,11 @@
 //!
 //! A tabular Q-policy learns, across the whole libFuzzer campaign, which
 //! adversarial action to enact next given an exact fingerprint of the protocol's
-//! observed state. One libFuzzer input drives one episode: each step picks an
-//! action by softmax over the state's Q-row, runs the protocol to the next
-//! boundary, and applies a temporal-difference update whose reward favours
-//! reaching a novel protocol-state and/or happens-before fingerprint.
+//! observed state. One libFuzzer input drives one episode: the input's schedule
+//! bytes fix each step's action, the runner runs the protocol to the next boundary
+//! and applies a temporal-difference update whose reward favours reaching a novel
+//! protocol-state and/or happens-before fingerprint, and the custom mutator picks
+//! the actions of the NEXT input by softmax over each recorded state's Q-row.
 //!
 //! The policy is agnostic to what the actions *mean*: it operates on an opaque
 //! [`ActionId`] in a fixed catalog order chosen by the caller (the backend).
@@ -20,13 +21,15 @@
 //!
 //! The Q-table and the novelty registries live in a process-global [`Campaign`]
 //! that persists across inputs, Algorithm 1's outer `repeat until time
-//! budget`. Because that state is persistent, replaying the same input bytes can
-//! produce a different schedule than the first time (the policy has since moved
-//! on); this is inherent to online RL over libFuzzer.
+//! budget`. That persistent state never influences how an input executes: the
+//! runner reads its schedule from the input and only feeds rewards back here,
+//! and the policy selects actions only inside the custom mutator, which writes
+//! them into new inputs. So every input replays exactly, and the campaign's
+//! knowledge shows up as which inputs the fuzzer tries next.
 //!
 //! This module is runtime-agnostic and pure: every stochastic choice is made by
-//! an [`Rng`] supplied by the caller (the deterministic runtime context, itself
-//! seeded from the fuzz input), so the core owns no randomness of its own. It
+//! an [`Rng`] supplied by the caller (the custom mutator's, since it is the only
+//! caller of [`QPolicy::select`]), so the core owns no randomness of its own. It
 //! imports no backend types; actions are numbers.
 
 use commonware_utils::sync::Mutex;
@@ -145,9 +148,9 @@ impl QPolicy {
     }
 
     /// Sample a legal action by inverse-CDF over the masked softmax, drawing from
-    /// the caller-supplied RNG (the deterministic runtime context). Illegal
-    /// actions have zero probability and are never returned. At least one action
-    /// must be legal, else the caller is buggy.
+    /// the caller-supplied RNG (the custom mutator's, its only caller in a fuzz
+    /// build). Illegal actions have zero probability and are never returned. At
+    /// least one action must be legal, else the caller is buggy.
     pub fn select(&self, state: u64, legal: &[bool], rng: &mut impl Rng) -> ActionId {
         assert_eq!(
             legal.len(),
