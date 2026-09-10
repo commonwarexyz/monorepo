@@ -27,7 +27,7 @@ use commonware_storage::{
     Context,
     journal::{
         self,
-        contiguous::{Contiguous, variable},
+        contiguous::{Contiguous, Many, variable},
     },
     metadata::{self, Metadata},
     translator::Translator,
@@ -124,7 +124,7 @@ where
     B: Codec + Digestible<Digest = H::Digest>,
 {
     position: u64,
-    meta: BlockMeta<H::Digest>,
+    rows: Vec<BlockMeta<H::Digest>>,
     segment: Segment<E, H, B>,
 }
 
@@ -1061,52 +1061,78 @@ where
         reference: BlockRef<H::Digest>,
         block: Arc<TransactionBlock<H, B>>,
     ) -> Result<(), Error> {
-        if let Some(append) = self.start_put(reference, block)? {
+        if let Some(append) = self.start_put(&mut [(reference, block)].into_iter())? {
             let append = append.await?;
             self.finish_put(append)?;
         }
         Ok(())
     }
 
-    /// Lends the append journals to one owned operation while retaining the read directory.
+    /// Consumes blocks through one segment boundary and lends its paired journals.
+    /// Exact duplicates consume no positions; completed rows retain input order.
     ///
     /// Only immutable body reads may run until `finish_put` returns the journals. The occupied
     /// segment slot keeps an appendable segment from being mistaken for a cold sealed segment.
     #[allow(clippy::type_complexity)]
     pub(in crate::multimmit::marshal) fn start_put(
         &mut self,
-        reference: BlockRef<H::Digest>,
-        block: Arc<TransactionBlock<H, B>>,
+        blocks: &mut dyn Iterator<Item = (BlockRef<H::Digest>, Arc<TransactionBlock<H, B>>)>,
     ) -> Result<
         Option<impl Future<Output = Result<Append<E, H, B>, Error>> + Send + use<T, E, H, B>>,
         Error,
     > {
-        if !self.admits(reference) {
-            return Err(Error::Inconsistent(
-                "pending block is outside the custody floor",
-            ));
-        }
-        let digest = reference.digest();
-        let meta = BlockMeta::new(
-            block.header().clone(),
-            u64::try_from(block.encode_size())
-                .map_err(|_| Error::Inconsistent("encoded block length exceeds u64"))?,
-        );
-        if block.reference() != reference
-            || validated_reference::<H>(&meta, digest, self.epoch, self.by_chain.len())
-                != Some(reference)
-        {
-            return Err(Error::Inconsistent("pending block identity is invalid"));
-        }
-        match self.by_digest.get(&digest) {
-            Some(entry) if entry.reference == reference && entry.meta == meta => return Ok(None),
-            Some(_) => return Err(Error::Inconsistent("pending digest identity changed")),
-            None => {}
-        }
-
         let position = self.next_position;
         let segment_id = self.segment_id(position);
         let local = position % self.segment_capacity;
+        let mut bodies = Vec::new();
+        let mut rows = Vec::new();
+        let mut seen = HashMap::new();
+        while (rows.len() as u64) < self.segment_capacity - local {
+            let Some((reference, block)) = blocks.next() else {
+                break;
+            };
+            if !self.admits(reference) {
+                return Err(Error::Inconsistent(
+                    "pending block is outside the custody floor",
+                ));
+            }
+            let digest = reference.digest();
+            let meta = BlockMeta::new(
+                block.header().clone(),
+                u64::try_from(block.encode_size())
+                    .map_err(|_| Error::Inconsistent("encoded block length exceeds u64"))?,
+            );
+            if block.reference() != reference
+                || validated_reference::<H>(&meta, digest, self.epoch, self.by_chain.len())
+                    != Some(reference)
+            {
+                return Err(Error::Inconsistent("pending block identity is invalid"));
+            }
+            if let Some(entry) = self.by_digest.get(&digest) {
+                if entry.reference != reference || entry.meta != meta {
+                    return Err(Error::Inconsistent("pending digest identity changed"));
+                }
+                continue;
+            }
+            if let Some(&index) = seen.get(&digest) {
+                if rows[index] != meta {
+                    return Err(Error::Inconsistent("pending digest identity changed"));
+                }
+                continue;
+            }
+            seen.insert(digest, rows.len());
+            rows.push(meta);
+            bodies.push(Shared::new(block));
+        }
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let count = u64::try_from(rows.len())
+            .map_err(|_| Error::Inconsistent("pending position overflow"))?;
+        position
+            .checked_add(count)
+            .ok_or(Error::Inconsistent("pending position overflow"))?;
+        let last = local + count - 1;
         let segment = self.open_segments.insert(segment_id, None);
         let opening = segment.is_none().then(|| self.open_segment(segment_id));
         Ok(Some(async move {
@@ -1119,20 +1145,32 @@ where
                     "pending journals do not match the append coordinate",
                 ));
             }
-            let Segment { bodies, metadata } = segment;
-            let stored_body = Shared::new(block);
+            let Segment {
+                bodies: body_journal,
+                metadata,
+            } = segment;
             let (bodies, metadata) = futures::try_join!(
-                async move { bodies.append(&stored_body).await.map_err(Error::from) },
-                async { metadata.append(&meta).await.map_err(Error::from) },
+                async {
+                    body_journal
+                        .append_many(Many::Flat(&bodies))
+                        .await
+                        .map_err(Error::from)
+                },
+                async {
+                    metadata
+                        .append_many(Many::Flat(&rows))
+                        .await
+                        .map_err(Error::from)
+                },
             )?;
-            if bodies.1 != local || metadata.1 != local {
+            if bodies.1 != last || metadata.1 != last {
                 return Err(Error::Inconsistent(
                     "pending journals assigned different local positions",
                 ));
             }
             Ok(Append {
                 position,
-                meta,
+                rows,
                 segment: Segment {
                     bodies: bodies.0,
                     metadata: metadata.0,
@@ -1148,7 +1186,7 @@ where
     ) -> Result<(), Error> {
         let Append {
             position,
-            meta,
+            rows,
             segment,
         } = append;
         assert_eq!(position, self.next_position, "appends complete in order");
@@ -1157,11 +1195,12 @@ where
         if self.segments.insert(segment_id) {
             self.stage_state()?;
         }
-        self.next_position = position
-            .checked_add(1)
-            .ok_or(Error::Inconsistent("pending position overflow"))?;
         self.dirty_segments.insert(segment_id);
-        self.remember(position, meta)
+        for meta in rows {
+            self.remember(self.next_position, meta)?;
+            self.next_position += 1;
+        }
+        Ok(())
     }
 
     /// Starts one shared durability cut for every buffered producer block.
@@ -1624,6 +1663,22 @@ mod tests {
             Box::pin(self.0.put(reference, block)).await
         }
 
+        async fn put_many(&mut self, blocks: &[Arc<TransactionBlock<Sha256, TestBody>>]) {
+            Box::pin(async {
+                let mut blocks = blocks
+                    .iter()
+                    .map(|block| (block.reference(), block.clone()))
+                    .peekable();
+                while blocks.peek().is_some() {
+                    if let Some(append) = self.0.start_put(&mut blocks).unwrap() {
+                        let append = Box::pin(append).await.unwrap();
+                        self.0.finish_put(append).unwrap();
+                    }
+                }
+            })
+            .await
+        }
+
         fn locator(entry: &Entry<Sha256Digest>) -> BodyLocator<Sha256Digest> {
             InnerTestStore::locator(entry)
         }
@@ -1718,20 +1773,93 @@ mod tests {
     }
 
     #[test]
+    fn batched_appends_match_single_rows_across_segments_and_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut single =
+                open_with_capacity(&context, "single", "pending_single", NZU64!(3)).await;
+            let mut batch = open_with_capacity(&context, "batch", "pending_batch", NZU64!(3)).await;
+            let blocks = (0..7)
+                .map(|i| block((i % 2) as u32, i + 1, i))
+                .collect::<Vec<_>>();
+            for store in [&mut single, &mut batch] {
+                store
+                    .put(blocks[0].reference(), blocks[0].clone())
+                    .await
+                    .unwrap();
+            }
+            let input = [0, 1, 1, 2, 3, 3, 4, 5, 6, 6].map(|i| blocks[i].clone());
+            for block in &input {
+                single.put(block.reference(), block.clone()).await.unwrap();
+            }
+            batch.put_many(&[]).await;
+            batch.put_many(&input).await;
+            batch.put_many(&input).await;
+            for store in [&mut single, &mut batch] {
+                assert_eq!(store.next_position, blocks.len() as u64);
+                for (&id, segment) in &store.open_segments {
+                    let segment = segment.as_ref().unwrap();
+                    let expected = (blocks.len() as u64 - id * 3).min(3);
+                    assert_eq!(segment.bodies.size(), expected);
+                    assert_eq!(segment.metadata.size(), expected);
+                }
+                sync(store).await;
+            }
+            let refs = blocks
+                .iter()
+                .map(|block| block.reference())
+                .collect::<Vec<_>>();
+            for reopened in [false, true] {
+                if reopened {
+                    drop(single);
+                    drop(batch);
+                    single =
+                        open_with_capacity(&context, "single_reopen", "pending_single", NZU64!(3))
+                            .await;
+                    batch =
+                        open_with_capacity(&context, "batch_reopen", "pending_batch", NZU64!(3))
+                            .await;
+                }
+                assert_eq!(single.next_position, batch.next_position);
+                assert_eq!(single.segments, batch.segments);
+                for reference in &refs {
+                    assert_eq!(single.header(*reference), batch.header(*reference));
+                    assert_eq!(
+                        single.by_digest[&reference.digest()].position,
+                        batch.by_digest[&reference.digest()].position
+                    );
+                }
+                let expected = blocks.iter().cloned().map(Some).collect::<Vec<_>>();
+                assert_eq!(single.blocks(&refs).await.unwrap(), expected);
+                assert_eq!(batch.blocks(&refs).await.unwrap(), expected);
+            }
+        });
+    }
+
+    #[test]
     fn owned_append_preserves_snapshot_and_publishes_only_on_completion() {
         deterministic::Runner::default().start(|context| async move {
-            let mut store = open(&context, "store", "pending_owned_append").await;
+            let mut store =
+                open_with_capacity(&context, "store", "pending_owned_append", NZU64!(4)).await;
             let first = block(0, 1, 1);
             let second = block(0, 2, 2);
+            let third = block(1, 1, 3);
             store.put(first.reference(), first.clone()).await.unwrap();
             sync(&mut store).await;
 
             let append = store
-                .start_put(second.reference(), second.clone())
+                .start_put(
+                    &mut [&second, &second, &third]
+                        .into_iter()
+                        .map(|block| (block.reference(), block.clone())),
+                )
                 .unwrap()
                 .unwrap();
             assert!(matches!(store.open_segments.get(&0), Some(None)));
-            let refs = [(0, first.reference()), (1, second.reference())];
+            let refs = [
+                (0, first.reference()),
+                (1, second.reference()),
+                (2, third.reference()),
+            ];
             let mut groups = store.body_read_groups(refs, u64::MAX, 1).unwrap();
             assert_eq!(groups.len(), 1);
             assert_eq!(
@@ -1739,26 +1867,36 @@ mod tests {
                 vec![(0, first.clone())]
             );
             assert_eq!(store.next_position, 1);
-            assert!(!store.by_digest.contains_key(&second.reference().digest()));
+            for block in [&second, &third] {
+                assert!(!store.by_digest.contains_key(&block.reference().digest()));
+            }
 
             let append = Box::pin(append).await.unwrap();
-            assert!(!store.by_digest.contains_key(&second.reference().digest()));
+            for block in [&second, &third] {
+                assert!(!store.by_digest.contains_key(&block.reference().digest()));
+            }
             store.finish_put(append).unwrap();
             assert!(matches!(store.open_segments.get(&0), Some(Some(_))));
-            assert_eq!(store.next_position, 2);
-            assert!(store.by_digest.contains_key(&second.reference().digest()));
+            assert_eq!(store.next_position, 3);
+            for block in [&second, &third] {
+                assert!(store.by_digest.contains_key(&block.reference().digest()));
+            }
             assert!(
                 store
-                    .body_read_groups([(0, second.reference())], u64::MAX, 1)
+                    .body_read_groups(
+                        [(0, second.reference()), (1, third.reference())],
+                        u64::MAX,
+                        1
+                    )
                     .unwrap()
                     .is_empty()
             );
             sync(&mut store).await;
             let values = store
-                .blocks(&[first.reference(), second.reference()])
+                .blocks(&[first.reference(), second.reference(), third.reference()])
                 .await
                 .unwrap();
-            assert_eq!(values, vec![Some(first), Some(second)]);
+            assert_eq!(values, vec![Some(first), Some(second), Some(third)]);
         });
     }
 
@@ -2350,9 +2488,8 @@ mod tests {
     ) {
         let retained = block(0, 1, 1);
         let retained_reference = retained.reference();
-        let tail = block(0, 2, 2);
-        let tail_reference = tail.reference();
-        let mut store = open(context, label, prefix).await;
+        let tail = [block(0, 2, 2), block(1, 1, 3)];
+        let mut store = open_with_capacity(context, label, prefix, NZU64!(4)).await;
         store
             .put(retained_reference, Arc::clone(&retained))
             .await
@@ -2361,40 +2498,49 @@ mod tests {
         let mut segment = store.open_segments.get_mut(&0).unwrap().take().unwrap();
         if metadata_only {
             let metadata = segment.metadata;
-            let meta = BlockMeta::new(
-                tail.header().clone(),
-                u64::try_from(tail.encode_size()).unwrap(),
-            );
-            let (metadata, position) = metadata.append(&meta).await.unwrap();
-            assert_eq!(position, 1);
+            let rows = tail
+                .iter()
+                .map(|block| {
+                    BlockMeta::new(
+                        block.header().clone(),
+                        u64::try_from(block.encode_size()).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let (metadata, position) = metadata.append_many(Many::Flat(&rows)).await.unwrap();
+            assert_eq!(position, 2);
             segment.metadata = metadata.sync().await.unwrap();
         } else {
             let bodies = segment.bodies;
-            let body = Shared::new(Arc::clone(&tail));
-            let (bodies, position) = bodies.append(&body).await.unwrap();
-            assert_eq!(position, 1);
+            let rows = tail.iter().cloned().map(Shared::new).collect::<Vec<_>>();
+            let (bodies, position) = bodies.append_many(Many::Flat(&rows)).await.unwrap();
+            assert_eq!(position, 2);
             segment.bodies = bodies.sync().await.unwrap();
         }
         store.open_segments.insert(0, Some(segment));
         drop(store);
 
-        let mut store = open(context, "partial_reopen", prefix).await;
+        let mut store = open_with_capacity(context, "partial_reopen", prefix, NZU64!(4)).await;
         assert_eq!(store.next_position, 1);
         assert_eq!(
             store.block(retained_reference).await.unwrap().as_deref(),
             Some(retained.as_ref())
         );
-        assert_eq!(store.header(tail_reference), None);
-        assert!(store.block(tail_reference).await.unwrap().is_none());
+        for block in &tail {
+            assert_eq!(store.header(block.reference()), None);
+            assert!(store.block(block.reference()).await.unwrap().is_none());
+        }
         let current = store.open_segments.get(&0).unwrap().as_ref().unwrap();
         assert_eq!(current.bodies.size(), 1);
         assert_eq!(current.metadata.size(), 1);
-        store.put(tail_reference, Arc::clone(&tail)).await.unwrap();
+        store.put_many(&tail).await;
         sync(&mut store).await;
-        assert_eq!(
-            store.block(tail_reference).await.unwrap().as_deref(),
-            Some(tail.as_ref())
-        );
+        for block in &tail {
+            assert_eq!(
+                store.block(block.reference()).await.unwrap().as_deref(),
+                Some(block.as_ref())
+            );
+        }
     }
 
     #[test]

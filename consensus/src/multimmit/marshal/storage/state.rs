@@ -39,7 +39,11 @@ use futures::{
     FutureExt as _,
     future::{BoxFuture, try_join_all},
 };
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    iter::{Peekable, from_fn, once},
+    sync::Arc,
+};
 
 type SharedLqc<V, H> = Shared<Lqc<V, <H as Hasher>::Digest>>;
 type SharedHistory<H> = Shared<TipRecord<<H as Hasher>::Digest>>;
@@ -346,17 +350,18 @@ where
         Ok((footprint.lqc || footprint.history || footprint.blocks).then_some(footprint))
     }
 
-    /// Lends only the journals touched by one admission. Until completion, the catalog may
-    /// read retained block indexes and finalized block metadata or plan immutable body reads,
-    /// but must not perform another storage mutation or access the borrowed journals.
+    /// Consumes one admission or a consecutive block run through one segment boundary.
+    /// Until completion, the catalog may read retained indexes and finalized block metadata
+    /// or plan immutable body reads, but must not perform another storage mutation or access
+    /// the borrowed journals.
     /// Dropping or failing the operation makes this store unusable.
     #[allow(clippy::type_complexity)]
     pub(in crate::multimmit::marshal) fn start_admission(
         &mut self,
-        write: Admission<H, V, B>,
+        writes: &mut Peekable<impl Iterator<Item = Admission<H, V, B>>>,
     ) -> Result<BoxFuture<'static, Result<AdmissionWrite<T, E, H, V, B>, Error>>, Error> {
         // Keep the owned journal operation out of the catalog actor's stack frame.
-        Ok(match write {
+        Ok(match writes.next().expect("admission is available") {
             Admission::Lqc(view, id, proof) => {
                 let lqc = self.pending_lqc.take().expect("catalog owns pending LQCs");
                 async move {
@@ -387,7 +392,16 @@ where
                     .pending_blocks
                     .as_mut()
                     .expect("catalog owns pending blocks")
-                    .start_put(reference, value)
+                    .start_put(&mut once((reference, value)).chain(from_fn(|| {
+                        writes
+                            .next_if(|write| matches!(write, Admission::Block(..)))
+                            .map(|write| {
+                                let Admission::Block(reference, value) = write else {
+                                    unreachable!()
+                                };
+                                (reference, value)
+                            })
+                    })))
                     .map_err(Error::storage)?;
                 async move {
                     let completed = match block {
@@ -877,52 +891,64 @@ where
             )
         };
         let mut lqc = self.final_lqc.take().expect("catalog owns finalized LQCs");
-        let mut index = self.allocated_lqc_index;
-        for selected in selected {
-            index = Some(
-                next_lqc_index(index, selected.view).expect("finalized LQC range was validated"),
-            );
-            lqc = lqc
-                .put(
-                    index.expect("selected LQC has an archive index"),
-                    selected.id.get(),
-                    Shared::new(selected.proof),
-                )
-                .await
-                .map_err(Error::storage)?;
-        }
-        let history_touched = !history.is_empty();
         let mut histories = self
             .final_history
             .take()
             .expect("catalog owns finalized history");
-        for (offset, opening) in history.into_iter().enumerate() {
-            let index = history_start
-                .expect("non-empty history has a start index")
-                .checked_add(u64::try_from(offset).expect("history length was validated"))
-                .expect("history range was validated");
-            histories = histories
-                .put(index, opening.commitment, Shared::new(opening.record))
-                .await
-                .map_err(Error::storage)?;
-        }
-        let blocks_touched = !outputs.is_empty();
         let mut blocks = self
             .final_blocks
             .take()
             .expect("catalog owns finalized blocks");
+        let history_touched = !history.is_empty();
+        let blocks_touched = !outputs.is_empty();
         let generation = checkpoint.generation();
-        for output in outputs {
-            let (index, reference, value) = output.into_parts();
-            blocks = blocks
-                .put(
-                    index.get(),
-                    reference.digest(),
-                    FinalBlockMeta::new(value, generation),
-                )
-                .await
-                .map_err(Error::storage)?;
-        }
+        let (lqc, histories, blocks) = futures::try_join!(
+            async {
+                let mut index = self.allocated_lqc_index;
+                for selected in selected {
+                    index = Some(
+                        next_lqc_index(index, selected.view)
+                            .expect("finalized LQC range was validated"),
+                    );
+                    lqc = lqc
+                        .put(
+                            index.expect("selected LQC has an archive index"),
+                            selected.id.get(),
+                            Shared::new(selected.proof),
+                        )
+                        .await
+                        .map_err(Error::storage)?;
+                }
+                Ok::<_, Error>(lqc)
+            },
+            async {
+                for (offset, opening) in history.into_iter().enumerate() {
+                    let index = history_start
+                        .expect("non-empty history has a start index")
+                        .checked_add(u64::try_from(offset).expect("history length was validated"))
+                        .expect("history range was validated");
+                    histories = histories
+                        .put(index, opening.commitment, Shared::new(opening.record))
+                        .await
+                        .map_err(Error::storage)?;
+                }
+                Ok::<_, Error>(histories)
+            },
+            async {
+                for output in outputs {
+                    let (index, reference, value) = output.into_parts();
+                    blocks = blocks
+                        .put(
+                            index.get(),
+                            reference.digest(),
+                            FinalBlockMeta::new(value, generation),
+                        )
+                        .await
+                        .map_err(Error::storage)?;
+                }
+                Ok::<_, Error>(blocks)
+            },
+        )?;
         self.final_lqc = Some(lqc);
         self.final_history = Some(histories);
         self.final_blocks = Some(blocks);

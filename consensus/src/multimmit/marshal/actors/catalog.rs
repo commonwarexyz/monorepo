@@ -60,6 +60,7 @@ use futures::{
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
+    iter::Peekable,
     num::NonZeroUsize,
     sync::{Arc, mpsc::TryRecvError},
     time::SystemTime,
@@ -1791,10 +1792,13 @@ where
         }
     }
 
-    /// Drives immutable reads while one admission exclusively owns its mutable journals.
+    /// Drives immutable reads while an admission run exclusively owns its mutable journals.
     /// No durability completion, prune, installation, or other mutation runs in this interval.
-    async fn write_admission(&mut self, write: Admission<H, V, B>) -> Result<(), Error> {
-        let write = self.stores.start_admission(write)?;
+    async fn write_admission(
+        &mut self,
+        writes: &mut Peekable<impl Iterator<Item = Admission<H, V, B>>>,
+    ) -> Result<(), Error> {
+        let write = self.stores.start_admission(writes)?;
         let mut write = std::pin::pin!(write);
         loop {
             let accept_reads = self.accept_independent_reads();
@@ -2637,8 +2641,9 @@ where
         let admitted = writes.len();
         let footprint = match async {
             let footprint = self.stores.admission_footprint(&writes)?;
-            for (write, _) in writes {
-                self.write_admission(write).await?;
+            let mut writes = writes.into_iter().map(|(write, _)| write).peekable();
+            while writes.peek().is_some() {
+                self.write_admission(&mut writes).await?;
             }
             Ok::<_, Error>(footprint)
         }
@@ -6847,6 +6852,81 @@ mod tests {
     }
 
     #[test]
+    fn block_runs_preserve_interleaved_admissions_and_duplicates() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new_with_namespace_and_producers(
+                23,
+                b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_RUNS",
+                6,
+                (0..4).map(Participant::new).collect(),
+                Limits::new(2, 2).unwrap(),
+            );
+            let configure = || {
+                let mut config = config(&context, &committee);
+                set_capacity(&mut config, 8);
+                config
+            };
+            let blocks = (0..4)
+                .map(|chain| producer_block(&committee, chain, 10 + u64::from(chain)))
+                .collect::<Vec<_>>();
+            let proof = Arc::new(committee.lqc(1));
+            let record = Arc::new(
+                TipRecord::at_tips(
+                    genesis_history::<Sha256>(committee.config.genesis()),
+                    committee.config.genesis().tips().to_vec(),
+                )
+                .unwrap(),
+            );
+            let history = record.commitment::<Sha256>();
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(), context.child("initial")).await;
+            for timestamp in 100..106 {
+                let block = producer_block(&committee, 0, timestamp);
+                client.admit_block(block.reference(), block).await.unwrap();
+            }
+            client
+                .request(|reply| {
+                    Command::Admit(
+                        vec![
+                            Admission::Block(blocks[0].reference(), blocks[0].clone()),
+                            Admission::Block(blocks[0].reference(), blocks[0].clone()),
+                            Admission::Block(blocks[1].reference(), blocks[1].clone()),
+                            Admission::Lqc(proof.view(), proof.id::<Sha256>(), proof.clone()),
+                            Admission::Block(blocks[2].reference(), blocks[2].clone()),
+                            Admission::Block(blocks[2].reference(), blocks[2].clone()),
+                            Admission::Block(blocks[3].reference(), blocks[3].clone()),
+                            Admission::History(proof.view(), history, record.clone()),
+                        ],
+                        AdmissionMode::Durable,
+                        reply,
+                    )
+                })
+                .await
+                .unwrap();
+            drop(client);
+            assert!(handle.await.is_ok());
+            let (client, handle, _delivery) =
+                spawn_catalog(configure(), context.child("reopened")).await;
+            for block in blocks {
+                assert_eq!(
+                    client.block(block.reference()).await.unwrap().as_deref(),
+                    Some(block.as_ref())
+                );
+            }
+            assert_eq!(
+                client.lqc(proof.id::<Sha256>()).await.unwrap().as_deref(),
+                Some(proof.as_ref())
+            );
+            assert_eq!(
+                client.history(history).await.unwrap().as_deref(),
+                Some(record.as_ref())
+            );
+            drop(client);
+            assert!(handle.await.is_ok());
+        });
+    }
+
+    #[test]
     fn staged_admissions_coalesce_one_trailing_cut_and_reopen() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
@@ -7894,8 +7974,13 @@ mod tests {
         });
     }
 
-    #[test]
-    fn archive_durable_checkpoint_volatile_commit_replays_exactly() {
+    #[rstest::rstest]
+    #[case::outputs(false)]
+    #[case::all_archives(true)]
+    fn archive_durable_checkpoint_volatile_commit_replays_exactly(#[case] all_archives: bool) {
+        let paths = SpanPaths::default();
+        let subscriber = tracing_subscriber::registry().with(paths.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::new_with_namespace_and_producers(
                 44,
@@ -7919,52 +8004,59 @@ mod tests {
             .await
             .unwrap();
             let current = client.checkpoint().await.unwrap();
+            let proof = lqc(&committee, 1, 0..5);
+            let record = Arc::new(TipRecord::at_tips(current.history(), current.ordered().to_vec()).unwrap());
+            let history = record.commitment::<Sha256>();
+            assert_eq!(proof.leader().history(), history);
             let mut emitted = current.emitted().to_vec();
             emitted[0] = block.reference();
             let checkpoint = Checkpoint::new(
                 current.epoch(),
                 current.generation(),
                 current.archive_layout(),
-                current.floor(),
-                current.history(),
-                current.history_index(),
+                if all_archives { proof.id::<Sha256>() } else { current.floor() },
+                if all_archives { history } else { current.history() },
+                if all_archives { Some(0) } else { current.history_index() },
                 current.ordered().to_vec(),
                 emitted,
                 Some(OutputIndex::ZERO),
             )
             .unwrap();
 
+            let batch = || Commit {
+                selected: if all_archives {
+                    vec![SelectedLqc { view: proof.view(), id: proof.id::<Sha256>(), proof: proof.clone() }]
+                } else { Vec::new() },
+                history: if all_archives {
+                    vec![HistoryOpening { commitment: history, record: record.clone() }]
+                } else { Vec::new() },
+                outputs: vec![output_row(OutputIndex::ZERO, &block)],
+                checkpoint: checkpoint.clone(),
+            };
             syncs.arm();
             let token = client
-                .start_commit(
-                    Commit {
-                        selected: Vec::new(),
-                        history: Vec::new(),
-                        outputs: vec![output_row(OutputIndex::ZERO, &block)],
-                        checkpoint: checkpoint.clone(),
-                    },
-                    Vec::new(),
-                )
+                .start_commit(batch(), Vec::new())
                 .await
                 .unwrap();
             let archive_syncs = syncs.calls();
             assert!(archive_syncs > 0, "finalized archive cut did not start");
             let mut publication = Box::pin(token.wait());
-            release_next_pending_syncs(&syncs, archive_syncs);
+            let checkpoint_started = || paths.0.lock().iter().any(|path| {
+                path.first() == Some(&"multimmit.marshal.catalog.publish_checkpoint")
+            });
             for _ in 0..100 {
-                if syncs.calls() > archive_syncs {
+                if checkpoint_started() {
                     break;
                 }
+                let pending = syncs.lock().len();
+                release_next_pending_syncs(&syncs, pending);
                 commonware_macros::select! {
                     result = &mut publication => panic!("commit published before its checkpoint cut: {result:?}"),
                     _ = context.sleep(std::time::Duration::from_millis(1)) => {},
                 }
             }
-            assert_eq!(
-                syncs.calls(),
-                archive_syncs + 1,
-                "checkpoint cut did not start after finalized archives became durable"
-            );
+            assert!(checkpoint_started(), "checkpoint cut did not start after finalized archives became durable");
+            assert!(!syncs.lock().is_empty(), "checkpoint durability remains blocked");
             drop(publication);
             handle.abort();
             drop(client);
@@ -7980,12 +8072,7 @@ mod tests {
                 Err(Error::Invalid(_))
             ));
             client
-                .commit(Commit {
-                    selected: Vec::new(),
-                    history: Vec::new(),
-                    outputs: vec![output_row(OutputIndex::ZERO, &block)],
-                    checkpoint,
-                })
+                .commit(batch())
                 .await
                 .unwrap();
             assert_eq!(
@@ -8000,6 +8087,10 @@ mod tests {
                     .reference,
                 block.reference()
             );
+            if all_archives {
+                assert!(client.final_lqc(proof.id::<Sha256>()).await.unwrap());
+                assert_eq!(client.history(history).await.unwrap().as_deref(), Some(record.as_ref()));
+            }
             drop(client);
             assert!(handle.await.is_ok());
         });
