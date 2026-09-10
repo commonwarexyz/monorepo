@@ -36,11 +36,11 @@ fn digest(label: &[u8]) -> Digest {
     Sha256::hash(&[label])
 }
 
-fn config(participants: usize) -> CodecConfig {
+pub(super) fn config(participants: usize) -> CodecConfig {
     CodecConfig::new(participants, participants, Limits::new(2, 2).unwrap()).unwrap()
 }
 
-fn leader(participants: usize) -> LeaderBlock<MinSig, Digest> {
+pub(super) fn leader(participants: usize) -> LeaderBlock<MinSig, Digest> {
     let config = config(participants);
     let proposals = (0..participants)
         .map(|index| {
@@ -128,28 +128,25 @@ fn reference_safe(
     votes: &[VoteBody<Digest>],
     config: CodecConfig,
 ) -> Vec<BlockRef<Digest>> {
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(leader).unwrap();
-    let paths = votes
-        .iter()
-        .map(|vote| {
-            VotePaths::new::<Sha256, MinSig>(leader, leader.digest::<Sha256>(), &proposals, vote)
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let rank = N5f1::f_plus_one(config.participants()) as usize;
+    let (ordering, votes) = reference_votes(leader, votes);
+    ordering.safe(&votes, config)
+}
 
-    (0..config.chains())
-        .map(|index| {
-            let chain = ChainId::new(index as u32);
-            let mut positions = votes
-                .iter()
-                .map(|vote| vote.positions()[index])
-                .collect::<Vec<_>>();
-            positions.sort_unstable_by(|left, right| right.cmp(left));
-            let base = proposals.block(chain, positions[rank - 1]).unwrap();
-            reference_deepest(&paths, chain, base, config.designation_quorum())
-        })
-        .collect()
+fn reference_votes(
+    leader: &LeaderBlock<MinSig, Digest>,
+    votes: &[VoteBody<Digest>],
+) -> (ReferenceOrdering, Vec<ReferenceVote>) {
+    let anchors = leader
+        .proposals()
+        .iter()
+        .map(|proposal| proposal.anchor().block_ref::<Sha256>())
+        .collect::<Vec<_>>();
+    let mut ordering = ReferenceOrdering::new(leader, &anchors);
+    let votes = indexed(votes)
+        .map(|(signer, body)| (signer, body.clone()))
+        .collect::<Vec<_>>();
+    let votes = ordering.materialize(leader, &votes);
+    (ordering, votes)
 }
 
 fn reference_child_support<'a>(
@@ -172,76 +169,9 @@ fn reference_final(
     votes: &[VoteBody<Digest>],
     config: CodecConfig,
 ) -> (Vec<BlockRef<Digest>>, Vec<Position>, Vec<bool>) {
-    let proposals = ProposalPaths::new::<Sha256, MinSig>(leader).unwrap();
-    let paths = votes
-        .iter()
-        .map(|vote| {
-            VotePaths::new::<Sha256, MinSig>(leader, leader.digest::<Sha256>(), &proposals, vote)
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let rank = N5f1::three_f_plus_one(config.participants()) as usize;
-    let unseen = config.participants() - votes.len();
-    let faults = N5f1::max_faults(config.participants()) as usize;
-    let mut blocks = Vec::with_capacity(config.chains());
-    let mut final_positions = Vec::with_capacity(config.chains());
-    let mut settled = Vec::with_capacity(config.chains());
-
-    for index in 0..config.chains() {
-        let chain = ChainId::new(index as u32);
-        let mut positions = votes
-            .iter()
-            .map(|vote| vote.positions()[index])
-            .collect::<Vec<_>>();
-        positions.sort_unstable_by(|left, right| right.cmp(left));
-        let position = positions[rank - 1];
-        let proposal_tip = Position::new((proposals.chain(chain).unwrap().len() - 1) as u32);
-        let base = proposals.block(chain, position).unwrap();
-        let tip = if position == proposal_tip {
-            reference_deepest(&paths, chain, base, config.view_quorum())
-        } else {
-            base
-        };
-        let beyond =
-            reference_child_support(paths.iter().map(|path| path.chain(chain).unwrap()), tip);
-        blocks.push(tip);
-        final_positions.push(position);
-        settled.push(position == proposal_tip && beyond + unseen <= faults);
-    }
-
-    (blocks, final_positions, settled)
-}
-
-fn reference_deepest(
-    paths: &[VotePaths<Digest>],
-    chain: ChainId,
-    base: BlockRef<Digest>,
-    threshold: usize,
-) -> BlockRef<Digest> {
-    let candidates = paths
-        .iter()
-        .flat_map(|path| path.chain(chain).unwrap().iter().copied())
-        .collect::<BTreeSet<_>>();
-    let mut deepest = base;
-    for candidate in candidates {
-        let support = paths
-            .iter()
-            .filter(|path| {
-                let path = path.chain(chain).unwrap();
-                let Some(base_index) = path.iter().position(|block| *block == base) else {
-                    return false;
-                };
-                path[base_index + 1..].contains(&candidate)
-            })
-            .count();
-        if support >= threshold
-            && (candidate.height() > deepest.height()
-                || candidate.height() == deepest.height() && candidate.digest() < deepest.digest())
-        {
-            deepest = candidate;
-        }
-    }
-    deepest
+    let (ordering, votes) = reference_votes(leader, votes);
+    let tips = ordering.final_tips(&votes, config);
+    (tips.blocks, tips.positions, tips.settled)
 }
 
 fn indexed(votes: &[VoteBody<Digest>]) -> impl Iterator<Item = (Participant, &VoteBody<Digest>)> {
@@ -486,20 +416,17 @@ fn proposal_and_vote_paths_reconstruct_exact_headers() {
             .unwrap();
     let mut ancestry = PathIndex::default();
     proposals.index(&mut ancestry).unwrap();
-    paths
-        .index_extensions(&mut ancestry, body.positions())
-        .unwrap();
-    let chain = paths.chain(ChainId::new(0)).unwrap();
+    paths.index_extensions(&mut ancestry).unwrap();
+    let chain = paths.extension(ChainId::new(0)).unwrap();
 
-    assert_eq!(chain.len(), 3);
-    assert_eq!(chain[0].height(), Height::zero());
+    assert_eq!(chain.len(), 2);
     assert_eq!(
-        chain[1],
+        chain[0],
         proposals.block(ChainId::new(0), Position::new(1)).unwrap()
     );
-    assert_eq!(chain[2].height(), Height::new(2));
+    assert_eq!(chain[1].height(), Height::new(2));
     assert_ne!(
-        chain[2],
+        chain[1],
         proposals.block(ChainId::new(0), Position::new(2)).unwrap()
     );
 }
@@ -519,7 +446,8 @@ fn extension_ancestry_matches_full_vote_paths() {
             let mut full = PathIndex::default();
             proposals.index(&mut full).unwrap();
             let mut extensions = full.clone();
-            for body in &bodies {
+            let (_, reference) = reference_votes(&leader, &bodies);
+            for (body, reference) in bodies.iter().zip(&reference) {
                 let paths = VotePaths::new::<Sha256, MinSig>(
                     &leader,
                     leader.digest::<Sha256>(),
@@ -528,15 +456,10 @@ fn extension_ancestry_matches_full_vote_paths() {
                 )
                 .unwrap();
                 for chain in 0..config.chains() {
-                    full.insert(paths.chain(ChainId::new(chain as u32)).unwrap())
-                        .unwrap();
+                    full.insert(&reference.paths[chain]).unwrap();
                 }
-                paths
-                    .validate_extensions(&extensions, body.positions())
-                    .unwrap();
-                paths
-                    .index_extensions(&mut extensions, body.positions())
-                    .unwrap();
+                paths.validate_extensions(&extensions).unwrap();
+                paths.index_extensions(&mut extensions).unwrap();
                 assert_eq!(extensions, full);
             }
             let prepared = PreparedVotes::new::<Sha256, MinSig, _>(
@@ -571,7 +494,7 @@ fn conflicting_extension_prevalidation_does_not_mutate_ancestry() {
     let paths =
         VotePaths::new::<Sha256, MinSig>(&leader, leader.digest::<Sha256>(), &proposals, &body)
             .unwrap();
-    let suffix = &paths.chain(ChainId::new(1)).unwrap()[1..];
+    let suffix = paths.extension(ChainId::new(1)).unwrap();
     let mut ancestry = PathIndex::default();
     proposals.index(&mut ancestry).unwrap();
     ancestry
@@ -586,7 +509,7 @@ fn conflicting_extension_prevalidation_does_not_mutate_ancestry() {
         .unwrap();
     let before = ancestry.clone();
     assert_eq!(
-        paths.validate_extensions(&ancestry, body.positions()),
+        paths.validate_extensions(&ancestry),
         Err(Error::ConflictingAncestry)
     );
     assert_eq!(ancestry, before);
@@ -640,8 +563,8 @@ fn safe_tips_apply_position_rank_and_branch_aware_carry() {
         VotePaths::new::<Sha256, MinSig>(&leader, leader_digest, &proposals, &votes[0]).unwrap();
     let right =
         VotePaths::new::<Sha256, MinSig>(&leader, leader_digest, &proposals, &votes[3]).unwrap();
-    let left = *left.chain(ChainId::new(0)).unwrap().last().unwrap();
-    let right = *right.chain(ChainId::new(0)).unwrap().last().unwrap();
+    let left = *left.extension(ChainId::new(0)).unwrap().last().unwrap();
+    let right = *right.extension(ChainId::new(0)).unwrap().last().unwrap();
 
     assert_eq!(tips.get(ChainId::new(0)), Some(left.min(right)));
     assert_eq!(tips.blocks().len(), config.chains());
@@ -693,7 +616,7 @@ fn final_tips_use_pool_support_and_generalized_settlement() {
     let path =
         VotePaths::new::<Sha256, MinSig>(&leader, leader.digest::<Sha256>(), &proposals, &votes[0])
             .unwrap();
-    let expected = *path.chain(ChainId::new(0)).unwrap().last().unwrap();
+    let expected = *path.extension(ChainId::new(0)).unwrap().last().unwrap();
 
     assert_eq!(tips.get(ChainId::new(0)), Some(expected));
     assert_eq!(tips.position(ChainId::new(0)), Some(Position::new(2)));
@@ -875,16 +798,118 @@ fn final_tip_index_excludes_subquorum_branches() {
         );
     }
 
-    let proposal_entries = config.chains() * 3;
     assert_eq!(
         pool.retained_support_entries(),
-        proposal_entries + config.view_quorum() * config.extension_bound()
+        config.view_quorum() * config.extension_bound()
     );
-    assert_eq!(pool.final_tip_candidates(), proposal_entries);
+    assert_eq!(pool.final_tip_candidates(), 0);
     assert_eq!(
         pool.final_tips().unwrap().get(ChainId::new(0)),
         Some(proposals.block(ChainId::new(0), Position::new(2)).unwrap())
     );
+}
+
+#[test]
+fn partial_position_extensions_share_proposal_ancestry_and_support() {
+    let config = config(6);
+    let leader = leader(6);
+    let chain = ChainId::new(0);
+    let child = digest(b"shared-child");
+    for full_positions in [1, 4] {
+        let votes = (0..config.participants())
+            .map(|signer| {
+                if signer < full_positions {
+                    vote_with_digests(&leader, 2, vec![child], config)
+                } else {
+                    vote_with_digests(
+                        &leader,
+                        1,
+                        vec![leader.proposals()[0].payloads()[1], child],
+                        config,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let (ordering, reference) = reference_votes(&leader, &votes);
+        let prepared =
+            PreparedVotes::new::<Sha256, MinSig, _>(&leader, indexed(&votes), config).unwrap();
+        let ancestry = prepared.ancestry().unwrap();
+        let mut expected_ancestry = PathIndex::default();
+        for (child, parent) in &ordering.parents {
+            expected_ancestry.insert_parent(*child, *parent).unwrap();
+        }
+        assert_eq!(ancestry, expected_ancestry);
+        let designated = &votes[..config.vqc_max_messages()];
+        let safe =
+            Tips::from_votes::<Sha256, MinSig, _>(&leader, indexed(designated), config).unwrap();
+        assert_eq!(safe.blocks(), reference_safe(&leader, designated, config));
+        assert_eq!(safe.get(chain).unwrap().height(), Height::new(3));
+        for reverse in [false, true] {
+            let mut order = (0..votes.len()).collect::<Vec<_>>();
+            if reverse {
+                order.reverse();
+            }
+            let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+            let mut retained = Vec::new();
+            for signer in order {
+                pool.insert::<Sha256, MinSig>(
+                    &leader,
+                    Participant::new(signer as u32),
+                    &votes[signer],
+                )
+                .unwrap();
+                retained.push(reference[signer].clone());
+                if pool.len() < config.view_quorum() {
+                    continue;
+                }
+                let expected = ordering.final_tips(&retained, config);
+                let expected =
+                    FinalTips::new(expected.blocks, expected.positions, expected.settled).unwrap();
+                assert_eq!(pool.final_tips().unwrap(), expected);
+                assert_eq!(
+                    FinalTips::from_pool::<Sha256, MinSig, _>(
+                        &leader,
+                        retained
+                            .iter()
+                            .map(|vote| (vote.signer, &votes[usize::from(vote.signer)])),
+                        config,
+                    )
+                    .unwrap(),
+                    expected
+                );
+            }
+            let final_tips = pool.final_tips().unwrap();
+            assert_eq!(
+                final_tips.get(chain).unwrap().height(),
+                Height::new(if full_positions == 4 { 3 } else { 1 })
+            );
+            assert_eq!(final_tips.settled(chain), Some(full_positions == 4));
+        }
+    }
+}
+
+#[test]
+fn empty_extensions_retain_no_proposal_support() {
+    let config = config(6);
+    let leader = leader(6);
+    let votes = vec![vote(&leader, 2, &[], config); config.participants()];
+    let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+    for (signer, body) in indexed(&votes) {
+        assert!(
+            pool.insert::<Sha256, MinSig>(&leader, signer, body)
+                .unwrap()
+        );
+        assert_eq!(pool.retained_support_entries(), 0);
+        assert_eq!(pool.final_tip_candidates(), 0);
+        if pool.len() >= config.view_quorum() {
+            let (blocks, positions, settled) =
+                reference_final(&leader, &votes[..pool.len()], config);
+            assert_eq!(
+                pool.final_tips().unwrap(),
+                FinalTips::new(blocks, positions, settled).unwrap()
+            );
+        }
+    }
 }
 
 fn signer_sample(rng: &mut TestRng, participants: usize, count: usize) -> Vec<Participant> {

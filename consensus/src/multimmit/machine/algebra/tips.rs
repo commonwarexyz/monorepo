@@ -25,6 +25,7 @@ pub(crate) struct PoolExtractor<D: Digest> {
     proposals: ProposalPaths<D>,
     signers_seen: Vec<bool>,
     position_counts: Vec<Vec<usize>>,
+    // Extension counts are exact above the proposal tip; proposal ranks use position_counts.
     support: Vec<BTreeMap<BlockRef<D>, usize>>,
     qualified: Vec<BTreeSet<BlockRef<D>>>,
     max_child_support: Vec<BTreeMap<BlockRef<D>, usize>>,
@@ -97,7 +98,7 @@ impl<D: Digest> PoolExtractor<D> {
         }
 
         let paths = VotePaths::new::<H, V>(leader, self.leader, &self.proposals, body)?;
-        paths.validate_extensions(&self.ancestry, body.positions())?;
+        paths.validate_extensions(&self.ancestry)?;
 
         for chain in 0..self.config.chains() {
             let chain_id = ChainId::new(chain as u32);
@@ -105,8 +106,8 @@ impl<D: Digest> PoolExtractor<D> {
             *self.position_counts[chain]
                 .get_mut(position)
                 .ok_or(Error::Vote)? += 1;
-            let path = paths.chain(chain_id)?;
-            for block in path {
+            let path = paths.extension(chain_id)?;
+            for block in &path[1..] {
                 let count = self.support[chain].entry(*block).or_default();
                 *count += 1;
                 if *count == self.config.view_quorum() {
@@ -120,7 +121,7 @@ impl<D: Digest> PoolExtractor<D> {
             }
         }
         paths
-            .index_extensions(&mut self.ancestry, body.positions())
+            .index_extensions(&mut self.ancestry)
             .expect("vote paths were prevalidated against the ancestry index");
         self.signers_seen[index] = true;
         self.len += 1;
@@ -513,6 +514,24 @@ struct PreparedVote<D: Digest> {
     paths: VotePaths<D>,
 }
 
+impl<D: Digest> PreparedVote<D> {
+    fn chain<'a>(
+        &'a self,
+        proposals: &'a ProposalPaths<D>,
+        chain: ChainId,
+    ) -> Result<impl Iterator<Item = &'a BlockRef<D>>, Error> {
+        let position = self
+            .positions
+            .get(chain.get() as usize)
+            .ok_or(Error::Vote)?;
+        let prefix = proposals
+            .chain(chain)?
+            .get(..position.get() as usize)
+            .ok_or(Error::Vote)?;
+        Ok(prefix.iter().chain(self.paths.extension(chain)?))
+    }
+}
+
 pub(super) struct PreparedVotes<D: Digest> {
     proposals: ProposalPaths<D>,
     votes: Vec<PreparedVote<D>>,
@@ -582,8 +601,7 @@ impl<D: Digest> PreparedVotes<D> {
         let mut ancestry = PathIndex::default();
         self.proposals.index(&mut ancestry)?;
         for vote in &self.votes {
-            vote.paths
-                .index_extensions(&mut ancestry, &vote.positions)?;
+            vote.paths.index_extensions(&mut ancestry)?;
         }
         Ok(ancestry)
     }
@@ -613,11 +631,11 @@ impl<D: Digest> PreparedVotes<D> {
     ) -> Result<BlockRef<D>, Error> {
         let mut support = BTreeMap::<BlockRef<D>, usize>::new();
         for vote in &self.votes {
-            let path = vote.paths.chain(chain)?;
-            let Some(base_index) = path.iter().position(|block| *block == base) else {
+            let mut path = vote.chain(&self.proposals, chain)?;
+            if !path.any(|block| *block == base) {
                 continue;
-            };
-            for block in &path[base_index + 1..] {
+            }
+            for block in path {
                 *support.entry(*block).or_default() += 1;
             }
         }
@@ -639,9 +657,11 @@ impl<D: Digest> PreparedVotes<D> {
     fn max_child_support(&self, chain: ChainId, tip: BlockRef<D>) -> Result<usize, Error> {
         let mut children = BTreeMap::<BlockRef<D>, usize>::new();
         for vote in &self.votes {
-            let path = vote.paths.chain(chain)?;
-            if let Some(pair) = path.windows(2).find(|pair| pair[0] == tip) {
-                *children.entry(pair[1]).or_default() += 1;
+            let mut path = vote.chain(&self.proposals, chain)?;
+            if path.any(|block| *block == tip)
+                && let Some(child) = path.next()
+            {
+                *children.entry(*child).or_default() += 1;
             }
         }
         // Every future carry beyond this tip must support one exact immediate child.
@@ -662,4 +682,70 @@ fn descending_rank(counts: &[usize], rank: usize) -> Result<Position, Error> {
         }
     }
     Err(Error::Quorum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::multimmit::{
+        machine::algebra::tests::{config, leader},
+        types::Extension,
+    };
+    use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinSig};
+
+    #[test]
+    fn invalid_extension_leaves_the_entire_pool_unchanged() {
+        let config = config(6);
+        let leader = leader(6);
+        let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+        let positions = vec![Position::new(1); config.chains()];
+        let mut extensions = vec![Extension::empty(); config.chains()];
+        for extension in &mut extensions[..2] {
+            *extension =
+                Extension::new(vec![Sha256::hash(&[b"child"])], config.extension_bound()).unwrap();
+        }
+        let body =
+            VoteBody::for_leader::<Sha256, MinSig>(&leader, positions, extensions, config).unwrap();
+        let paths =
+            VotePaths::new::<Sha256, MinSig>(&leader, pool.leader, &pool.proposals, &body).unwrap();
+        let suffix = paths.extension(ChainId::new(1)).unwrap();
+        let wrong_parent = BlockRef::new(
+            suffix[0].chain(),
+            suffix[0].height(),
+            Sha256::hash(&[b"wrong-parent"]),
+        );
+        pool.ancestry
+            .insert_parent(suffix[1], wrong_parent)
+            .unwrap();
+        let before = pool.clone();
+        let signer = Participant::new(0);
+        assert_eq!(
+            pool.insert::<Sha256, MinSig>(&leader, signer, &body),
+            Err(Error::ConflictingAncestry)
+        );
+        assert_eq!(pool.proposals, before.proposals);
+        assert_eq!(pool.signers_seen, before.signers_seen);
+        assert_eq!(pool.position_counts, before.position_counts);
+        assert_eq!(pool.support, before.support);
+        assert_eq!(pool.qualified, before.qualified);
+        assert_eq!(pool.max_child_support, before.max_child_support);
+        assert_eq!(pool.ancestry, before.ancestry);
+        assert_eq!(pool.len, before.len);
+        let valid = VoteBody::for_leader::<Sha256, MinSig>(
+            &leader,
+            body.positions().to_vec(),
+            vec![Extension::empty(); config.chains()],
+            config,
+        )
+        .unwrap();
+        assert!(
+            pool.insert::<Sha256, MinSig>(&leader, signer, &valid)
+                .unwrap()
+        );
+        assert!(
+            !pool
+                .insert::<Sha256, MinSig>(&leader, signer, &body)
+                .unwrap()
+        );
+    }
 }

@@ -188,11 +188,10 @@ impl<D: Digest> ProposalPaths<D> {
     }
 }
 
-/// Materialized endorsed paths for one complete vote.
+/// Reconstructed vote extensions, each seeded with its endorsed proposal block.
 ///
-/// Each chain starts at the proposal anchor, follows the reported proposal position, and then
-/// follows the vote's extension. Keeping this representation beside an admitted vote lets pool
-/// updates reuse reconstruction work across every extraction pass.
+/// The seed supplies the parent for the first extension edge. Proposal prefixes remain in
+/// [`ProposalPaths`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VotePaths<D: Digest> {
     chains: Vec<Vec<BlockRef<D>>>,
@@ -222,20 +221,17 @@ impl<D: Digest> VotePaths<D> {
         for index in 0..proposals.len() {
             let chain = ChainId::new(u32::try_from(index).map_err(|_| Error::Vote)?);
             let position = vote.positions()[index];
-            let proposal = proposals.chain(chain)?;
-            let prefix_end = position.get() as usize;
-            let prefix = proposal.get(..=prefix_end).ok_or(Error::Vote)?;
             let extension = vote.extensions().get(index).ok_or(Error::Vote)?;
-            let mut path = Vec::with_capacity(prefix.len() + extension.len());
-            path.extend_from_slice(prefix);
+            let mut path = Vec::with_capacity(1 + extension.len());
+            path.push(proposals.block(chain, position)?);
             append_payloads::<H, V, D>(leader, chain, &mut path, extension.payloads())?;
             chains.push(path);
         }
         Ok(Self { chains })
     }
 
-    /// Returns the endorsed path on one producer chain.
-    pub(crate) fn chain(&self, chain: ChainId) -> Result<&[BlockRef<D>], Error> {
+    /// Returns one extension, including its endorsed proposal block at index zero.
+    pub(crate) fn extension(&self, chain: ChainId) -> Result<&[BlockRef<D>], Error> {
         self.chains
             .get(chain.get() as usize)
             .map(Vec::as_slice)
@@ -243,29 +239,17 @@ impl<D: Digest> VotePaths<D> {
     }
 
     /// Adds extension edges to an index containing the proposal paths.
-    ///
-    /// `positions` must be the positions used to reconstruct this vote.
-    pub(crate) fn index_extensions(
-        &self,
-        index: &mut PathIndex<D>,
-        positions: &[Position],
-    ) -> Result<(), Error> {
-        for (path, position) in self.chains.iter().zip(positions) {
-            index.insert(&path[position.get() as usize..])?;
+    pub(crate) fn index_extensions(&self, index: &mut PathIndex<D>) -> Result<(), Error> {
+        for path in &self.chains {
+            index.insert(path)?;
         }
         Ok(())
     }
 
     /// Checks extension edges against an index containing the proposal paths without mutating it.
-    ///
-    /// `positions` must be the positions used to reconstruct this vote.
-    pub(crate) fn validate_extensions(
-        &self,
-        index: &PathIndex<D>,
-        positions: &[Position],
-    ) -> Result<(), Error> {
-        for (path, position) in self.chains.iter().zip(positions) {
-            index.validate(&path[position.get() as usize..])?;
+    pub(crate) fn validate_extensions(&self, index: &PathIndex<D>) -> Result<(), Error> {
+        for path in &self.chains {
+            index.validate(path)?;
         }
         Ok(())
     }
