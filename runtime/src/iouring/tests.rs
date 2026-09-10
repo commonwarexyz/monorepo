@@ -120,11 +120,8 @@ fn take_worker_fault(
 }
 
 /// Model a rejected thread destroying its payload before reporting launch failure.
-pub(super) fn before_launch(
-    payload: (BoxedTask, Arc<Shared>, ActiveWorker),
-) -> (BoxedTask, Arc<Shared>, ActiveWorker) {
-    let (_, _, active) = &payload;
-    if take_worker_fault(&active.0, |fault| matches!(fault, WorkerFault::Launch)).is_some() {
+pub(super) fn before_launch(payload: Launch) -> Launch {
+    if take_worker_fault(&payload.active.0, |fault| matches!(fault, WorkerFault::Launch)).is_some() {
         // Dispose before raising the injected panic so a destructor can itself
         // panic without causing a second panic during unwinding.
         drop(payload);
@@ -960,22 +957,45 @@ fn test_one_off_reservation_covers_factory_construction_through_shutdown() {
 }
 
 #[test]
-fn test_one_off_factory_panic_releases_reservation() {
+fn test_factory_panic_finishes_metrics_and_releases_reservation() {
     for catch in [false, true] {
         Runner::new(config().with_catch_panics(catch)).start(|context| async move {
-            for execution in [Execution::Dedicated, Execution::Shared(true)] {
+            for execution in [
+                Execution::Shared(false),
+                Execution::Dedicated,
+                Execution::Shared(true),
+            ] {
                 let registry = context.shared.workers.clone();
                 let mut child = context.child("panicking_factory");
                 child.execution = execution;
+                let label = Label::task(child.name.clone(), execution);
+                let metrics = &context.shared.metrics;
+                let running = metrics.tasks_running.get_or_create(&label).clone();
+                let spawned = metrics.tasks_spawned.get_or_create(&label).clone();
+                let factory_running = running.clone();
+
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     child.spawn(move |_| -> std::future::Ready<()> {
-                        // Factory execution holds the count but not its lock.
-                        assert_eq!(registry.state.lock().active, 1);
+                        // One-off factories retain their reservation without holding its lock.
+                        let reserved = usize::from(matches!(
+                            execution,
+                            Execution::Dedicated | Execution::Shared(true)
+                        ));
+                        assert_eq!(registry.state.lock().active, reserved);
+                        assert_eq!(factory_running.get(), 1);
                         panic!("factory failed");
                     })
                 }));
-                assert!(result.is_err());
+
+                // Factory panics reach the caller under either task-panic policy.
+                let panic = result.err().expect("factory panic must reach its caller");
+                assert_eq!(panic.downcast_ref::<&str>(), Some(&"factory failed"));
+
+                // Keep the attempted spawn counted, but finish its running metric immediately.
+                assert_eq!(spawned.get(), 1);
+                assert_eq!(running.get(), 0);
                 assert_eq!(context.shared.workers.state.lock().active, 0);
+
                 assert_eq!(
                     context
                         .child("sibling")

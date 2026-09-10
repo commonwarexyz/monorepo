@@ -503,6 +503,20 @@ impl TaskMetrics {
     }
 }
 
+/// Finish task metrics if factory construction unwinds.
+struct FactoryGuard {
+    /// Metric transferred to the execution wrapper after construction succeeds.
+    metric: Option<MetricHandle>,
+}
+
+impl Drop for FactoryGuard {
+    fn drop(&mut self) {
+        if let Some(metric) = &self.metric {
+            metric.finish();
+        }
+    }
+}
+
 /// Registration and cleanup barrier for one-off workers.
 #[derive(Default)]
 struct Workers {
@@ -595,12 +609,26 @@ struct Shared {
     storage_buffer_pool: BufferPool,
 }
 
+/// Task and runtime ownership transferred to a one-off thread.
+///
+/// Field order destroys a rejected task and Shared before the reservation is released.
+struct Launch {
+    /// Task to execute, or destroy if thread creation fails.
+    task: BoxedTask,
+    /// Runtime services retained until execution and cleanup finish.
+    shared: Arc<Shared>,
+    /// Registration released after the preceding owners are destroyed.
+    active: ActiveWorker,
+}
+
 impl Shared {
     /// Transfer a reserved worker's task and its cleanup responsibility to a new thread.
     fn launch(self: &Arc<Self>, task: BoxedTask, active: ActiveWorker) {
-        // Capture the whole tuple so a failed launch destroys the task and Shared
-        // before releasing the reservation, following tuple field order.
-        let payload = (task, self.clone(), active);
+        let payload = Launch {
+            task,
+            shared: self.clone(),
+            active,
+        };
 
         #[cfg(test)]
         let payload = tests::before_launch(payload);
@@ -681,12 +709,22 @@ impl crate::Spawner for Context {
             None
         };
 
+        let mut guard = FactoryGuard {
+            metric: Some(metric),
+        };
+
         // User construction runs on the caller with no runtime borrow or lock.
         // A reserved one-off remains counted through construction and launch,
         // including when the factory unwinds or shutdown closes the registry.
         let future = f(self);
-        let (future, handle) =
-            Handle::init(future, metric, shared.panicker.clone(), parent.clone());
+
+        // The execution wrapper takes over metric cleanup once the factory returns.
+        let (future, handle) = Handle::init(
+            future,
+            guard.metric.take().unwrap(),
+            shared.panicker.clone(),
+            parent.clone(),
+        );
 
         // Attach cancellation before another worker can begin polling the task.
         if let Some(aborter) = handle.aborter() {
@@ -1333,12 +1371,15 @@ impl Worker {
     }
 
     /// Execute a reserved task on this thread and report failures after cleanup.
-    /// The payload owns the task, shared services, and worker reservation in drop order.
-    fn run_task(payload: (BoxedTask, Arc<Shared>, ActiveWorker)) {
-        // Declare the reservation first so unwinding also releases it last.
-        let active = payload.2;
-        let shared = payload.1;
-        let task = payload.0;
+    /// The caller's [`Launch`] owns the task, shared services, and worker reservation
+    /// in drop order.
+    fn run_task(payload: Launch) {
+        // Bind the reservation first so unwinding releases it last.
+        let Launch {
+            active,
+            shared,
+            task,
+        } = payload;
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             // Startup may reject the builder without invoking it. Its captured
