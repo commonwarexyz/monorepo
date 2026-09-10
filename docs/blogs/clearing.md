@@ -21,13 +21,11 @@ If we can't use blockspace to scale to a billion TPS (or at least don't want to 
 
 **Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by one 32-byte commitment, 101 bytes with the certificate for a committee of 100 validators. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
 
-For a given set of accounts, one payment or a bajillion costs the same to settle.
+Settlement records grow with active accounts and payment pairs, however many payments pass between them.
 
 ## Payments as Fast as Browsing the Web
 
-A payment takes one round trip to the operator. The payer gets a receipt the recipient can verify locally and retain as evidence.
-
-Settlement comes later, netting payments across all accounts using that operator. A new counterparty needs no separate channel or funded route.
+An agent buying an API response should be able to pay and get on with the next request. Bajillion gives the payer an acknowledgment in one round trip to its chosen operator, with a receipt the recipient can verify locally and retain as evidence. Settlement comes later, netting payments across all accounts using that operator, without separate channels or funded routes between counterparties.
 
 Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. The payer signs a request $S$ advancing its running total for that recipient. The operator verifies the signature and available funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of the recipient's entry. The payer verifies and durably saves both, then forwards the resulting receipt to the recipient.
 
@@ -48,39 +46,6 @@ Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. 
   .clearing-benchmark-table table {
     min-width: 760px;
   }
-  .clearing-compression {
-    align-items: stretch;
-    display: grid;
-    gap: 16px;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-    margin: 28px 0;
-    text-align: center;
-  }
-  .clearing-compression > div {
-    border: 1px solid #d6d6d6;
-    border-radius: 3px;
-    padding: 20px 12px;
-  }
-  .clearing-compression strong,
-  .clearing-compression span {
-    display: block;
-  }
-  .clearing-compression strong {
-    font-size: 20px;
-    margin-bottom: 6px;
-  }
-  .clearing-compression span {
-    font-size: 14px;
-  }
-  .clearing-compression > div:last-child {
-    border-color: #2424d4;
-  }
-  .clearing-compression > span {
-    align-self: center;
-    font-size: 24px;
-    justify-self: center;
-    line-height: 1;
-  }
   .clearing-calculator {
     border: 1px solid #d6d6d6;
     border-radius: 3px;
@@ -88,8 +53,6 @@ Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. 
     padding: 20px;
   }
   @media (max-width: 640px) {
-    .clearing-compression { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-    .clearing-compression > span { transform: rotate(90deg); }
     .clearing-calculator { padding: 14px; }
   }
 </style>
@@ -720,18 +683,18 @@ Accounts and pairs are limited to $2^{24}$; recipients per sender are capped at 
 
 ## A Bajillion Payments, One Settlement
 
-A bajillion payments can share one settlement.
+Payments across many counterparties settle into one net balance change per active account. The close retains the pair entries that let validators check every credit.
+
+Repeated payments across the same network share those records. Their totals and counts may take more bytes as they grow, but the close never carries the payment history.
 
 ```{=html}
-<div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
-  <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
-  <span aria-hidden="true">&rarr;</span>
-  <div><strong>1 cumulative entry</strong><span>Total amount + payment count</span></div>
-</div>
+<img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account rows with their proofs.">
 ```
 
-Account-level clearing compresses repetition: more payments between the same pairs share the same settlement records. Their totals and counts may take more bytes as they grow, but the close never carries the payment history.
+::: {.image-caption}
+Figure 7: The four-account network carrying 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
+:::
 
-A preconfirmation is as fast as the trust model allows: one round trip to the operator that serializes spending. The close must agree with every acknowledgment a holder retains, or that evidence proves the fault. The state needed for recovery must remain available even if the operator disappears.
+The payer gets a receipt in one round trip to the operator, and that same receipt lets its holder prove a fault if the close contradicts it. Keeping the state available for recovery lets users leave even if the operator disappears.
 
 When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.

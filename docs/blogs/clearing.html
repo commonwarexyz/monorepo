@@ -136,16 +136,17 @@ O’Grady</a></div>
         senders and recipients alike can force recovery through the
         settlement chain alone. And the protocol requires only
         signatures and Merkle openings.</p>
-        <p>For a given set of accounts, one payment or a bajillion costs
-        the same to settle.</p>
+        <p>Settlement records grow with active accounts and payment
+        pairs, however many payments pass between them.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
         as Browsing the Web</h2>
-        <p>A payment takes one round trip to the operator. The payer
-        gets a receipt the recipient can verify locally and retain as
-        evidence.</p>
-        <p>Settlement comes later, netting payments across all accounts
-        using that operator. A new counterparty needs no separate
-        channel or funded route.</p>
+        <p>An agent buying an API response should be able to pay and get
+        on with the next request. Bajillion gives the payer an
+        acknowledgment in one round trip to its chosen operator, with a
+        receipt the recipient can verify locally and retain as evidence.
+        Settlement comes later, netting payments across all accounts
+        using that operator, without separate channels or funded routes
+        between counterparties.</p>
         <p>Suppose a payer, <span class="math inline">a</span>, has 100
         and wants to pay 20 to a recipient, <span
         class="math inline">b</span>, with 40. The payer signs a request
@@ -171,39 +172,6 @@ O’Grady</a></div>
           .clearing-benchmark-table table {
             min-width: 760px;
           }
-          .clearing-compression {
-            align-items: stretch;
-            display: grid;
-            gap: 16px;
-            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-            margin: 28px 0;
-            text-align: center;
-          }
-          .clearing-compression > div {
-            border: 1px solid #d6d6d6;
-            border-radius: 3px;
-            padding: 20px 12px;
-          }
-          .clearing-compression strong,
-          .clearing-compression span {
-            display: block;
-          }
-          .clearing-compression strong {
-            font-size: 20px;
-            margin-bottom: 6px;
-          }
-          .clearing-compression span {
-            font-size: 14px;
-          }
-          .clearing-compression > div:last-child {
-            border-color: #2424d4;
-          }
-          .clearing-compression > span {
-            align-self: center;
-            font-size: 24px;
-            justify-self: center;
-            line-height: 1;
-          }
           .clearing-calculator {
             border: 1px solid #d6d6d6;
             border-radius: 3px;
@@ -211,8 +179,6 @@ O’Grady</a></div>
             padding: 20px;
           }
           @media (max-width: 640px) {
-            .clearing-compression { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-            .clearing-compression > span { transform: rotate(90deg); }
             .clearing-calculator { padding: 14px; }
           }
         </style>
@@ -1436,21 +1402,25 @@ O’Grady</a></div>
         </div>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
-        <p>A bajillion payments can share one settlement.</p>
-        <div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
-          <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
-          <span aria-hidden="true">&rarr;</span>
-          <div><strong>1 cumulative entry</strong><span>Total amount + payment count</span></div>
+        <p>Payments across many counterparties settle into one net
+        balance change per active account. The close retains the pair
+        entries that let validators check every credit.</p>
+        <p>Repeated payments across the same network share those
+        records. Their totals and counts may take more bytes as they
+        grow, but the close never carries the payment history.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account rows with their proofs.">
+        <div class="image-caption">
+        <p>Figure 7: The four-account network carrying 100 million
+        payments of $0.000001, one atomic unit each. Every sender uses
+        its own opening funds. The arrows group independent payments by
+        sender and recipient, with both directions between <span
+        class="math inline">b</span> and <span
+        class="math inline">c</span> retained in the close.</p>
         </div>
-        <p>Account-level clearing compresses repetition: more payments
-        between the same pairs share the same settlement records. Their
-        totals and counts may take more bytes as they grow, but the
-        close never carries the payment history.</p>
-        <p>A preconfirmation is as fast as the trust model allows: one
-        round trip to the operator that serializes spending. The close
-        must agree with every acknowledgment a holder retains, or that
-        evidence proves the fault. The state needed for recovery must
-        remain available even if the operator disappears.</p>
+        <p>The payer gets a receipt in one round trip to the operator,
+        and that same receipt lets its holder prove a fault if the close
+        contradicts it. Keeping the state available for recovery lets
+        users leave even if the operator disappears.</p>
         <p>When the close is clean, those involved keep the receipts.
         The settlement chain only keeps the change.</p>
         <div id="footer-placeholder"></div>
