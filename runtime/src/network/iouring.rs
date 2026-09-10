@@ -877,12 +877,29 @@ mod tests {
             assert_eq!(stream.peek(100), b" world");
             assert_eq!(stream.peek(3), b" wo");
             assert!(stream.peek(0).is_empty());
+
+            // A shorter refill must replace the previous readable extent.
+            peer.write_all(b"xy").unwrap();
+            assert_eq!(stream.recv(7).await.unwrap().coalesce(), b" worldx");
+            assert_eq!(stream.peek(100), b"y");
+
+            // Buffered prefixes and later refills must survive the direct path.
+            let direct = [b'z'; 64];
+            peer.write_all(&direct).unwrap();
+            let received = stream.recv(65).await.unwrap().coalesce();
+            assert_eq!(&received.as_ref()[..1], b"y");
+            assert_eq!(&received.as_ref()[1..], &direct);
+            assert!(stream.peek(100).is_empty());
+
+            peer.write_all(b"next").unwrap();
+            assert_eq!(stream.recv(2).await.unwrap().coalesce(), b"ne");
+            assert_eq!(stream.peek(100), b"xt");
             stream
         });
 
         // Buffered bytes remain readable after the worker has shut down.
-        let rest = futures::executor::block_on(stream.recv(6)).unwrap();
-        assert_eq!(rest.coalesce(), b" world");
+        let rest = futures::executor::block_on(stream.recv(2)).unwrap();
+        assert_eq!(rest.coalesce(), b"xt");
         assert!(stream.peek(100).is_empty());
     }
 

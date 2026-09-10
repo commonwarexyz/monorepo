@@ -2025,6 +2025,17 @@ fn test_callback_generated_work_prevents_parking() {
 
 #[test]
 fn test_final_callbacks_finish_before_tls_removal() {
+    /// Observe disposal of a successful root result when shutdown fails.
+    #[derive(Debug)]
+    struct Output(Arc<AtomicUsize>);
+
+    impl Drop for Output {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("root output drop panic");
+        }
+    }
+
     /// Observe final timer disposal through the registered waker's destructor.
     struct Callback(Arc<AtomicUsize>);
 
@@ -2057,30 +2068,45 @@ fn test_final_callbacks_finish_before_tls_removal() {
         }
     }
 
-    let drops = Arc::new(AtomicUsize::new(0));
-    let observed = drops.clone();
-    let mut escaped = None;
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        Runner::new(config()).start(|_| async {
-            let mut sleep = Sleep::new(Duration::from_secs(60));
-            let waker = Waker::from(Arc::new(Callback(drops)));
-            assert!(
-                Pin::new(&mut sleep)
-                    .poll(&mut TaskContext::from_waker(&waker))
-                    .is_pending()
-            );
-            drop(waker);
-            escaped = Some(sleep);
-            panic!("primary root panic");
-        });
-    }));
+    for root_panics in [true, false] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let observed = drops.clone();
+        let output_drops = Arc::new(AtomicUsize::new(0));
+        let observed_output = output_drops.clone();
+        let mut escaped = None;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config()).start(|_| async {
+                let mut sleep = Sleep::new(Duration::from_secs(60));
+                let waker = Waker::from(Arc::new(Callback(drops)));
+                assert!(
+                    Pin::new(&mut sleep)
+                        .poll(&mut TaskContext::from_waker(&waker))
+                        .is_pending()
+                );
+                drop(waker);
+                escaped = Some(sleep);
+                if root_panics {
+                    panic!("primary root panic");
+                }
+                Output(output_drops)
+            })
+        }));
 
-    assert_eq!(
-        extract_panic_message(&*result.unwrap_err()),
-        "primary root panic"
-    );
-    assert_eq!(observed.load(Ordering::SeqCst), 1);
-    drop(escaped);
+        assert_eq!(
+            extract_panic_message(&*result.unwrap_err()),
+            if root_panics {
+                "primary root panic"
+            } else {
+                "terminal callback panic"
+            }
+        );
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            observed_output.load(Ordering::SeqCst),
+            usize::from(!root_panics)
+        );
+        drop(escaped);
+    }
 }
 
 #[test]

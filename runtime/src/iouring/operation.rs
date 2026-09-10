@@ -338,7 +338,7 @@ pub mod tests {
         }))
     }
 
-    /// Service the worker until every request and cancellation CQE retires.
+    /// Service the worker until every logical request retires.
     async fn drained() {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !Local::current()
