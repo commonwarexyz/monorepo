@@ -36,6 +36,7 @@ use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::{Future, pending},
+    iter::{from_fn, once},
     marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::Arc,
@@ -517,14 +518,10 @@ where
                 }
             },
             identified = ingress.next_completed() => {
-                let (peer, identified) = match identified {
-                    Ok(identified) => identified,
-                    Err(IngressTaskPanicked) => {
-                        error!("ingress identification worker panicked");
-                        break;
-                    }
-                };
-                self.apply_prepared(&mut lanes, peer, identified);
+                if self.apply_ready_ingress(&mut lanes, identified, &mut ingress, ingress_capacity).is_err() {
+                    error!("ingress identification worker panicked");
+                    break;
+                }
             },
             Some(message) = Self::recv_network(
                 accept_ingress,
@@ -569,9 +566,8 @@ where
                 }));
             },
             on_end => {
-                // Forward buffered artifacts while the voter has observation credit. Ingress only
-                // accumulates in the lanes while every credit is in flight, so batching follows
-                // voter backpressure instead of a timer.
+                // Forward buffered artifacts while the voter has observation credit. Cohorts
+                // collect ready ingress and any backlog retained while credits were in flight.
                 if !self.flush_pending(&mut lanes, &observations, &mut observations_inflight) {
                     error!("voter observation path failed");
                     return;
@@ -680,16 +676,23 @@ where
         (peer, prepared)
     }
 
-    fn apply_prepared(
+    /// Buffers ready completions without waiting, bounded by the ingress capacity per actor turn.
+    fn apply_ready_ingress(
         &mut self,
         lanes: &mut Lanes<P, V, H::Digest>,
-        peer: P,
-        prepared: Result<PreparedIngress<V, H::Digest>, InvalidIngress>,
-    ) {
-        match prepared {
-            Ok((lane, group)) => self.buffer(lanes, lane, peer, group),
-            Err(invalid) => self.block(peer, invalid.reason()),
+        first: Result<IngressResult<P, V, H::Digest>, IngressTaskPanicked>,
+        ingress: &mut IngressResults<P, V, H::Digest>,
+        capacity: usize,
+    ) -> Result<(), IngressTaskPanicked> {
+        let ready = once(first).chain(from_fn(|| ingress.next_completed().now_or_never()));
+        for identified in ready.take(capacity) {
+            let (peer, prepared) = identified?;
+            match prepared {
+                Ok((lane, group)) => self.buffer(lanes, lane, peer, group),
+                Err(invalid) => self.block(peer, invalid.reason()),
+            }
         }
+        Ok(())
     }
 
     /// Receives one message, starting the biased scan after the plane selected last.
@@ -893,13 +896,167 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multimmit::{
+        config::Limits,
+        mocks::{Committee, RecordingBlocker},
+    };
     use bytes::Bytes;
     use commonware_codec::Encode as _;
-    use commonware_cryptography::{Signer as _, ed25519};
+    use commonware_cryptography::{
+        Sha256, Signer as _, bls12381::primitives::variant::MinPk, ed25519,
+    };
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{IoBuf, Runner as _, Supervisor as _, deterministic, tokio};
     use commonware_utils::sync::{Condvar, Mutex};
     use std::{num::NonZeroUsize, sync::Arc, thread};
+
+    type IngressActor = Actor<
+        deterministic::Context,
+        Sha256,
+        ed25519::PublicKey,
+        MinPk,
+        RecordingBlocker,
+        Sequential,
+        Sequential,
+    >;
+
+    fn ingress_actor(
+        context: deterministic::Context,
+        committee: &Committee<MinPk>,
+    ) -> IngressActor {
+        Actor::new(
+            context,
+            Config {
+                scheme: committee.verifier.clone(),
+                blocker: RecordingBlocker::default(),
+                strategy: Sequential,
+                critical_strategy: Sequential,
+                codec: committee.codec(),
+                limits: IngressLimits {
+                    cohort_items: NonZeroUsize::new(2).unwrap(),
+                    lane_items: NonZeroUsize::new(16).unwrap(),
+                    lane_bytes: NonZeroUsize::new(64 * 1024).unwrap(),
+                    inflight_jobs: NonZeroUsize::new(2).unwrap(),
+                },
+                mailbox_size: NonZeroUsize::new(4).unwrap(),
+                observation_capacity: NonZeroUsize::MIN,
+            },
+        )
+        .0
+    }
+
+    #[test]
+    fn ready_ingress_batches_before_flush_without_waiting() {
+        for (capacity, ready, pending_tail) in
+            [(1, 1, false), (4, 4, false), (4, 2, true), (4, 5, false)]
+        {
+            deterministic::Runner::default().start(move |context| async move {
+                let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+                let mut actor = ingress_actor(context.child("batcher"), &committee);
+                let mut lanes = Lanes::new(
+                    actor.codec.chains(),
+                    actor.codec.participants(),
+                    actor.limits,
+                );
+                let mut ingress = IngressResults::default();
+                let mut expected_bytes = 0;
+                let admitted = ready.min(capacity);
+                let now = context.current();
+                for view in 0..ready {
+                    let artifact = Artifact::NoVote(committee.novote(1, view as u64 + 1));
+                    if view < admitted {
+                        expected_bytes += artifact.encoded_len();
+                    }
+                    ingress.push(std::future::ready(Ok((
+                        committee.identities[1].clone(),
+                        Ok((
+                            LaneId::Consensus,
+                            Group::one(artifact.identify::<Sha256>(&mut Vec::new()), now),
+                        )),
+                    ))));
+                }
+                if pending_tail {
+                    ingress.push(pending());
+                }
+                let first = ingress
+                    .next_completed()
+                    .now_or_never()
+                    .expect("first completion is ready");
+                actor
+                    .apply_ready_ingress(&mut lanes, first, &mut ingress, capacity)
+                    .unwrap();
+                assert_eq!(lanes.items(), admitted);
+                assert_eq!(ingress.len(), ready - admitted + usize::from(pending_tail));
+                assert_eq!(context.current(), now);
+
+                let (sender, mut observations) =
+                    mailbox::new_unreliable(context.child("observations"), NonZeroUsize::MIN);
+                let mut inflight = 0;
+                let mut forwarded = 0;
+                let mut bytes = 0;
+                while lanes.items() > 0 {
+                    assert!(actor.flush_pending(&mut lanes, &sender, &mut inflight));
+                    assert_eq!(inflight, 1);
+                    let cohort = observations
+                        .try_recv()
+                        .expect("ready ingress flushes with credit");
+                    assert_eq!(cohort.artifacts.len(), (admitted - forwarded).min(2));
+                    forwarded += cohort.artifacts.len();
+                    bytes += cohort.bytes;
+                    assert!(actor.flush_pending(&mut lanes, &sender, &mut inflight));
+                    assert!(
+                        observations.try_recv().is_err(),
+                        "held credit prevents another cohort"
+                    );
+                    assert_eq!(lanes.items(), admitted - forwarded);
+                    inflight -= 1;
+                }
+                assert_eq!(forwarded, admitted);
+                assert_eq!(bytes, expected_bytes);
+                assert_eq!(context.current(), now);
+            });
+        }
+    }
+
+    #[test]
+    fn ready_ingress_propagates_worker_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+            let mut actor = ingress_actor(context.child("batcher"), &committee);
+            let mut lanes = Lanes::new(
+                actor.codec.chains(),
+                actor.codec.participants(),
+                actor.limits,
+            );
+            let mut ingress = IngressResults::default();
+            assert!(
+                actor
+                    .apply_ready_ingress(&mut lanes, Err(IngressTaskPanicked), &mut ingress, 4)
+                    .is_err()
+            );
+            assert_eq!(lanes.items(), 0);
+
+            ingress.push(std::future::ready(Err(IngressTaskPanicked)));
+            let artifact = Artifact::NoVote(committee.novote(1, 1));
+            let first = Ok((
+                committee.identities[1].clone(),
+                Ok((
+                    LaneId::Consensus,
+                    Group::one(
+                        artifact.identify::<Sha256>(&mut Vec::new()),
+                        context.current(),
+                    ),
+                )),
+            ));
+            assert!(
+                actor
+                    .apply_ready_ingress(&mut lanes, first, &mut ingress, 4)
+                    .is_err()
+            );
+            assert_eq!(lanes.items(), 1);
+            assert!(ingress.is_empty());
+        });
+    }
 
     #[derive(Debug)]
     struct RawReceiver(Option<(ed25519::PublicKey, IoBuf)>);

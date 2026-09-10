@@ -97,9 +97,8 @@ pub struct Config<P: PublicKey, V: Variant, B, T, C> {
     pub mailbox_size: NonZeroUsize,
     /// Maximum observation cohorts awaiting voter consumption.
     ///
-    /// Buffered artifacts are forwarded as soon as a cohort credit is free, so this depth is the
-    /// only source of batching: while every credit is in flight, ingress accumulates in the fair
-    /// lanes and leaves as full cohorts.
+    /// Ready ingress completions are grouped into bounded cohorts and forwarded as soon as credit
+    /// is free. While every credit is in flight, ingress accumulates in the fair lanes.
     pub observation_capacity: NonZeroUsize,
 }
 
