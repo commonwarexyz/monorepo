@@ -469,11 +469,11 @@ The [protocol primitives and benchmarks are in #4664](https://github.com/commonw
 
 Every profile below uses a 100-validator committee and 256 slices. Prepare, deal, and seal share one adaptive 16-worker pool (AWS c8a.4xlarge), while certificate, challenge, and withdrawal-claim checks are scalar calling-thread measurements. The first matrix varies $N$, the number of live accounts: every account sends one entry and the same 512 accounts receive, so with $A$ changed accounts and $B$ distinct recipients the fixture holds $A=N$ and $B=512$ as $N$ grows from 1,024 to one million. The active sweep uses the first $A$ accounts in key order as senders while holding $N$ at one million.
 
-Four quantities appear in the tables. The posted close is what a reader holding the previous certified state must download: live accounts ride as compact rank gaps, and the transpose, both states, and prefixes are derived rather than shipped. The proof-slice corpus is the complete evidence: all 256 proof slices, including full rows, unchanged leaves, outgoing vectors, transpose entries, and their witnesses. The largest dealing is the busiest validator's share of it, one proof slice per span with no unchanged leaves, since every validator retains its key interval across closes and hydrates each dealing against it. The external certified package is the commitment and certificate.
+The full proof-slice corpus contains all 256 slices, each with its own proofs. The posted close is a compact update for a reader holding the previous certified state. Each validator uses its retained state to reconstruct its assigned slices from a compact dealing; the table reports the largest such download. The external certified package is the commitment and certificate.
 
 Repeated payments over the same edges add no records: rows and vector entries carry cumulative totals. Exact wire sizes can grow when cumulative amounts, counts, or sequence numbers cross a varint boundary. Every fixture send is a batch of one entry. Each additional recipient adds a 48-byte committed vector entry and its transpose image to the evidence.
 
-Stages are measured independently. Prepare reuses the predecessor-state proof cache, built beforehand, to construct the close's new roots. Deal constructs the dealings for the whole committee. Seal verifies and retains the busiest validator's dealing and signs the commitment. Percentages in the certification rows are relative to the proof-slice corpus.
+Stages are measured independently. Prepare reuses the predecessor-state proof cache, built beforehand, to construct the close's new roots. Deal constructs the dealings for the whole committee. Seal verifies and retains the busiest validator's dealing and signs the commitment.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -481,7 +481,7 @@ Stages are measured independently. Prepare reuses the predecessor-state proof ca
   <thead>
     <tr>
       <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
-      <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>)</th>
+      <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>), all sending</th>
     </tr>
     <tr>
       <th style="text-align:right;">1,024</th>
@@ -500,7 +500,7 @@ Stages are measured independently. Prepare reuses the predecessor-state proof ca
       <td style="text-align:right;">71.8 MB</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">proof-slice corpus</td>
+      <td style="padding-left:20px;">full proof-slice corpus</td>
       <td style="text-align:right;">2.07 MB</td>
       <td style="text-align:right;">6.35 MB</td>
       <td style="text-align:right;">48.8 MB</td>
@@ -522,11 +522,11 @@ Stages are measured independently. Prepare reuses the predecessor-state proof ca
     </tr>
     <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
     <tr>
-      <td style="padding-left:20px;">largest dealing</td>
-      <td style="text-align:right;">155 KB <span style="color:#666;">(-92.5%)</span></td>
-      <td style="text-align:right;">1.08 MB <span style="color:#666;">(-83.0%)</span></td>
-      <td style="text-align:right;">10.3 MB <span style="color:#666;">(-78.8%)</span></td>
-      <td style="text-align:right;">103 MB <span style="color:#666;">(-78.3%)</span></td>
+      <td style="padding-left:20px;">largest validator dealing</td>
+      <td style="text-align:right;">155 KB</td>
+      <td style="text-align:right;">1.08 MB</td>
+      <td style="text-align:right;">10.3 MB</td>
+      <td style="text-align:right;">103 MB</td>
     </tr>
     <tr>
       <td style="padding-left:20px;">seal</td>
@@ -613,7 +613,7 @@ Stages are measured independently. Prepare reuses the predecessor-state proof ca
 Figure 4: These are four measured profiles, not an interpolation. Both axes are logarithmic, and each point is labeled with its measured latency. Construction and sealing scale approximately linearly once the fixed costs are amortized.
 :::
 
-The busiest validator receives 78 to 93% fewer bytes than the proof-slice corpus while holding roughly two thirds of the slices. Its dealt wire carries compact rows and edges plus one witness per span; the validator reconstructs the full proof slices using its retained interval. At one million live accounts, it receives 103 MB compared with the 473 MB corpus. When only a fraction of accounts change, unchanged state stays in the retained interval, so the posted close and dealt wire follow the movers:
+The next table fixes the live state at one million accounts and varies how many send; its rightmost column is the fully active case above.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -621,7 +621,7 @@ The busiest validator receives 78 to 93% fewer bytes than the proof-slice corpus
   <thead>
     <tr>
       <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
-      <th colspan="4" style="text-align:center;">Active accounts (<em>A</em>) at <em>N</em> = 1,000,000</th>
+      <th colspan="4" style="text-align:center;">Sending accounts (<em>A</em>) out of 1,000,000 live</th>
     </tr>
     <tr>
       <th style="text-align:right;">1,024</th>
@@ -639,7 +639,7 @@ The busiest validator receives 78 to 93% fewer bytes than the proof-slice corpus
       <td style="text-align:right;">71.8 MB</td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">largest dealing</td>
+      <td style="padding-left:20px;">largest validator dealing</td>
       <td style="text-align:right;"><strong>182 KB</strong></td>
       <td style="text-align:right;"><strong>1.40 MB</strong></td>
       <td style="text-align:right;"><strong>13.6 MB</strong></td>
@@ -664,7 +664,7 @@ The busiest validator receives 78 to 93% fewer bytes than the proof-slice corpus
 </div>
 ```
 
-At 1,024 sending accounts among one million live accounts, the posted close is 74.0 KB, about a thousandth of the column where every account sends. The busiest dealing falls from 103 MB to 182 KB across the same sweep. Preparation and sealing still process live state.
+Fewer senders reduce the posted close and the largest validator dealing. Preparation and sealing still process live state.
 
 Holding the measured byte budget fixed illustrates how repetition amortizes a close. Ten million payments divide the one-million-account profile's 472,797,104-byte corpus and 71,762,697-byte posted close into 47.3 and 7.2 bytes per payment. A billion divide them into 0.473 and 0.072. These projections hold integer widths fixed; the 101-byte certified package and 164-byte root bundle are fixed-size encodings.
 
