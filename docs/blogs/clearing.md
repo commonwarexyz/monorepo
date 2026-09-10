@@ -104,14 +104,6 @@ The wallet keeps one unacknowledged request in flight and durably saves the veri
 
 One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
 
-## Epochs, Closes, and the Queue
-
-An epoch ends at a cut. The operator summarizes the payments accepted before that cut in a close, binding the account changes and their supporting evidence to the resulting state.
-
-Before acknowledging an epoch's first payment, the operator registers it onchain against the exact predecessor $\mathsf{StateRoot}$. Registration also fixes that epoch's deposits and signed withdrawal authorizations. A successor epoch can begin once its predecessor is admitted, while that predecessor remains challengeable.
-
-The settlement chain admits a certified close into an ordered queue. Each close waits through a challenge window ending at $\Delta_e$ and finalizes only after that window and all earlier closes. A successful challenge blocks that close and its pending descendants. Withdrawals become claimable after finalization. These queue rules let payments continue while earlier epochs settle.
-
 ## Optimizing for Hot Accounts
 
 A single incoming counter would serialize every payment to a popular recipient. Bajillion has none: acceptance touches only the payer's side, so recipients have no state to serialize. Incoming credit stays a promise until the epoch ends, when the operator collates it. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
@@ -134,7 +126,7 @@ $$
 
 $b$'s three incoming payments end as the entries $(20,1)$ in $a$'s vector, $(4,1)$ in $c$'s, and $(6,1)$ in $d$'s.
 
-Each payer's last vector of the epoch is its terminal vector. At the cut, the operator sorts the union of terminal entries by recipient, then payer, into the transpose. These are the same entries viewed from the receiving side and committed under $\mathsf{TransposeRoot}_e$. $b$'s three entries sum to $20+4+6=30$. Each entry can be opened separately under its payer's signed vector root and the transpose root.
+Each payer's last vector of the epoch is its terminal vector. When the epoch ends, the operator sorts the union of terminal entries by recipient, then payer, into the transpose. These are the same entries viewed from the receiving side and committed under $\mathsf{TransposeRoot}_e$. $b$'s three entries sum to $20+4+6=30$. Each entry can be opened separately under its payer's signed vector root and the transpose root.
 
 ## One Row per Changed Account
 
@@ -162,43 +154,9 @@ $$
 
 With no boundary flows, $L_{e+1}=L_e=200$.
 
-## Rebuild the Live State
-
-A $\mathsf{StateRoot}$ commits the sorted vector of live accounts in a binary Merkle tree (BMT). Each live account has a positive balance. Deposits can add accounts, while withdrawals and payments can remove them when their balance reaches zero.
+These rows update the live account state, a sorted vector of accounts with positive balances committed under $\mathsf{StateRoot}$ in a binary Merkle tree (BMT). Deposits can add accounts, while withdrawals and payments can remove them when their balance reaches zero.
 
 Changed rows and unchanged accounts together determine the next state. The operator rebuilds the full successor tree at each close. Validators retain their assigned state between closes and reconstruct their portions from the changes they receive.
-
-The close also commits a compact guard for each changed account under $\mathsf{ChangeRoot}_e$. This gives challenges and external-payout claims a small authenticated opening of the account's terminal position.
-
-## Streamlined Epoch Transitions
-
-After epoch $e$ is admitted and epoch $e+1$ is registered, successor payments can proceed while the predecessor remains challengeable. Importing predecessor credits into each account's live serving state can also overlap those payments.
-
-For an account with no boundary operations, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. With predecessor debits fixed, the remaining credit can only add to that head. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight,
-
-$$
-\boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
-$$
-
-The preserved head is safe to spend against. Importing credit adds $\rho_a$ to the live balance, preserving any successor debits already accepted.
-
-In the running example, $a\xrightarrow{20}b$ leaves the preserved head at 80 while the not-yet-imported $d\xrightarrow{5}a$ credit makes the exact close 85. If $a$ spends 20 and then 15 in the successor while the missing credit arrives between them,
-
-$$
-80-20+5-15=50=(85)-20-15.
-$$
-
-```{=html}
-<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated credit reconciliation for account a after predecessor admission and successor registration. An epoch-e send leaves a preserved head of 80. Two connected rails branch from that 80. The admitted predecessor balance is 85. The live successor rail spends 20 to reach 60, imports the remaining credit to reach 65, and spends 15 to reach 50. One vertical marker identifies the same predecessor credit of 5 in both calculations. The admitted balance never overwrites the live head.">
-  <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
-</div>
-```
-
-::: {.image-caption}
-Figure 2: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
-:::
-
-Accounts affected by deposits or withdrawal authorizations must resolve their full admitted outcome before spending in the successor epoch.
 
 ## Slice the Evidence
 
@@ -227,7 +185,7 @@ A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Each
 ```
 
 ::: {.image-caption}
-Figure 3: With sixteen validators and sixteen slices, each slice has eleven holders. The holder window slides around the ring (left); each validator's assigned slices form one span, or two at the wrap (right).
+Figure 2: With sixteen validators and sixteen slices, each slice has eleven holders. The holder window slides around the ring (left); each validator's assigned slices form one span, or two at the wrap (right).
 :::
 
 A validator authenticates every row, signature, state transition, and boundary check in its assigned spans. It retains the evidence through the challenge deadline before signing the commitment.
@@ -243,6 +201,8 @@ $$
 
 The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator certified package is 101 bytes.
 
+The settlement chain admits the certified close into an ordered queue. A close can finalize only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. A successful challenge blocks that close and its pending descendants.
+
 ## The Unavoidable Challenge
 
 A certificate establishes that the disclosed close is internally valid. The operator could still have signed a promise it left out.
@@ -255,7 +215,7 @@ $$
 
 If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature.
 
-The change tree gives a holder a compact opening of the close's terminal position to compare against a retained receipt. The challenge verifier checks three kinds of contradiction:
+The close commits each changed account's terminal position under $\mathsf{ChangeRoot}_e$. An opening of that position supports receipt challenges and external-payout claims. A holder can prove three kinds of contradiction:
 
 1. **Debit mismatch.** For example, the close records a cumulative debit of 20 after the operator acknowledged 35.
 
@@ -269,7 +229,7 @@ Each challenge is checked in one onchain call using signatures, arithmetic, and 
 
 A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next epoch's boundary. A censored user can instead queue it directly onchain between epoch registrations, a path the settlement integration must keep live.
 
-An exact withdrawal releases its amount if enough funds remain at the cut. An account close sweeps that epoch's final balance. Once the carrying close finalizes, the user claims the certified payout with a Merkle opening. Each output can be claimed only once.
+An exact withdrawal releases its amount if enough funds remain at the epoch boundary. An account close sweeps that epoch's final balance. Once the carrying close finalizes, the user claims the certified payout with a Merkle opening. Each output can be claimed only once.
 
 Custody remains onchain throughout. Finalization reserves withdrawals and external payouts, and individual claims reduce the reserve and the chain's assets together. A challenged or invalidated close creates no payout reserve.
 
@@ -280,6 +240,38 @@ If the operator misses an admission, deposit, or withdrawal deadline, or a holde
 The recovery rules keep finalized payouts independently claimable and refund unadmitted deposits. Accounts recover from the frozen state using Merkle openings. Payments in a never-admitted or invalidated close do not debit that state.
 
 Recovery needs a correct, live settlement chain and available claim openings even when the operator disappears. The settlement integration must apply each claim atomically with its payout.
+
+## Streamlined Epoch Transitions
+
+Payments need not wait for earlier closes to finalize. Once epoch $e$'s close is admitted, the operator can register epoch $e+1$ onchain against the resulting $\mathsf{StateRoot}$. Registration fixes deposits and signed withdrawal authorizations before the new epoch's first payment is acknowledged.
+
+Importing predecessor credits into each account's live balance can also overlap new payments.
+
+For an account with no boundary operations, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. With predecessor debits fixed, the remaining credit can only add to that head. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight,
+
+$$
+\boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
+$$
+
+The preserved head is safe to spend against. Importing credit adds $\rho_a$ to the live balance, preserving any successor debits already accepted.
+
+In the running example, $a\xrightarrow{20}b$ leaves the preserved head at 80 while the not-yet-imported $d\xrightarrow{5}a$ credit makes the exact close 85. If $a$ spends 20 and then 15 in the successor while the missing credit arrives between them,
+
+$$
+80-20+5-15=50=(85)-20-15.
+$$
+
+```{=html}
+<div id="clearing-fig-rollover" class="clearing-loop" role="img" aria-label="Animated credit reconciliation for account a after predecessor admission and successor registration. An epoch-e send leaves a preserved head of 80. Two connected rails branch from that 80. The admitted predecessor balance is 85. The live successor rail spends 20 to reach 60, imports the remaining credit to reach 65, and spends 15 to reach 50. One vertical marker identifies the same predecessor credit of 5 in both calculations. The admitted balance never overwrites the live head.">
+  <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
+</div>
+```
+
+::: {.image-caption}
+Figure 3: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
+:::
+
+Accounts affected by deposits or withdrawal authorizations must resolve their full admitted outcome before spending in the successor epoch.
 
 ## The Close Follows Accounts and Edges
 
