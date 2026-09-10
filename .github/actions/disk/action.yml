@@ -2,10 +2,6 @@ name: Free Disk Space
 runs:
   using: composite
   steps:
-    - name: Show disk free (before)
-      shell: bash
-      run: df -h || true
-
     # Linux Cleanup
     - name: Cleanup (Linux)
       if: runner.os == 'Linux'
@@ -21,16 +17,12 @@ runs:
         TIMEFORMAT='Final sweep: %3R s'
         time sudo rm -rf -- "${dirs[@]}" || true
 
-        TIMEFORMAT='Docker pruning: %3R s'
-        time sudo docker image prune --all --force || true
-
     # macOS Cleanup
     - name: Cleanup (macOS)
       if: runner.os == 'macOS'
       shell: bash
       run: |
         set -euxo pipefail
-        docker system prune -af || true
         brew cleanup -s || true
         rm -rf "$(brew --cache)" || true
         # Remove large preinstalled SDKs and runtimes
@@ -39,7 +31,3 @@ runs:
         sudo rm -rf /usr/local/.ghcup || true
         sudo rm -rf ~/Library/Android/sdk || true
         sudo rm -rf ~/Library/Caches || true
-
-    - name: Show disk free (after)
-      shell: bash
-      run: df -h || true

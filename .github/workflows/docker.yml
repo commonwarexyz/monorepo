@@ -98,10 +98,20 @@ jobs:
           sparse-checkout: |
             .github/actions/swap
             .github/actions/disk
+            .github/actions/docker-prune
       - name: Configure swap
         uses: ./.github/actions/swap
-      - name: Clear disk space
-        uses: ./.github/actions/disk
+      - name: Show disk free (before)
+        shell: bash
+        run: df -h || true
+      - parallel:
+          - name: Clear disk space
+            uses: ./.github/actions/disk
+          - name: Prune Docker
+            uses: ./.github/actions/docker-prune
+      - name: Show disk free (after)
+        shell: bash
+        run: df -h || true
       - name: Prepare
         run: |
           platform=${{ matrix.platform }}
