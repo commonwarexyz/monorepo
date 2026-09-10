@@ -3,7 +3,7 @@ title: "Scalable Private Payments"
 description: "Every private payment system has an ever growing global nullifier set. We design a payment system where state only grows with the number of accounts."
 date: "September 3rd, 2026"
 published-time: "2026-09-03T00:00:00Z"
-modified-time: "2026-09-03T00:00:00Z"
+modified-time: "2026-09-10T00:00:00Z"
 author: "Guru Vamsi Policharla"
 author_twitter: "https://x.com/guruvamsip"
 url: "https://commonware.xyz/blogs/private-payments"
@@ -41,6 +41,7 @@ Sure you can always throw more threads at the problem and use bigger machines bu
 Below we present our design for a private payment scheme where:
 
 - **a million transactions** can be verified on an M5 Macbook Pro (18 cores)
+- every transaction is **256 bytes** and validators store a **single 32-byte commitment per account**
 - validator storage grows **logarithmically in \#(transactions)** and linearly in \#(accounts)
 - work done by users **only depends on the transactions they are involved in**
 
@@ -105,9 +106,9 @@ We now focus on scaling the system and insist on three restrictions:
 2. **Constant work:** validators only do a constant amount of work per transaction, independent of the number of accounts (or anonymity sets)
 3. **Fully offline users:** a user can be offline indefinitely and return knowing only its secrets and the current state, without reading any past transactions
 
-First, instead of signing every single transaction, the committee can accumulate receipts in a Merkle Mountain Range and just sign the root (see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blog](https://commonware.xyz/blogs/mmr) for an explainer). The receive proof can be modified to additionally prove knowledge of a merkle tree opening.
+First, instead of signing every single receipt, the ledger appends receipts to a Merkle Mountain Range (see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blogpost](https://commonware.xyz/blogs/mmr) for an explainer). The receive proof is modified to prove knowledge of an MMR opening under a root $\mathsf{root}_\rho$ which the receiver reveals in the clear.
 
-Thus, validators only need to maintain the peaks of the receipt MMR, which grow logarithmically in the number of transactions.
+Thus, validators only need to maintain the frontier of the receipt MMR, which grows logarithmically in the number of transactions.
 
 ### Scaling: delegate nullifiers
 
@@ -116,7 +117,9 @@ Now we tackle the nullifier set. Unlike receipts where we want to prove *members
 The [Tachyon project](https://tachyon.z.cash/) uses [oblivious synchronization](https://eprint.iacr.org/2025/2031) to get around this issue. Here, validators periodically offload their nullifier set and users will ask untrusted services to create proofs that their coins have so far not been spent. Importantly, these services cannot link clients to their transactions when they eventually spend their coins. However, this
 requires every unspent shielded note to *continually* synchronize non-membership proofs with the ledger -- hence users cannot be truly offline if they have unspent coins.
 
-We have the benefit of working in the account based model and albeit providing less *on-chain* privacy than Zcash, it allows us to **efficiently delegate** nullifier storage. Each user remembers the nullifiers for any transactions they received, accumulates them into an [indexed merkle tree](https://eprint.iacr.org/2021/1263) and stores the root inside their account commitment. Using zero-knowledge proofs they show that it was correctly updated whenever they receive funds.
+We have the benefit of working in the account based model and albeit providing less *on-chain* privacy than Zcash, it allows us to **efficiently delegate** nullifier storage. Each user remembers the nullifiers for any transactions they received, accumulates them into a [sparse Merkle tree](https://eprint.iacr.org/2016/683) and stores the root inside their account commitment. Using zero-knowledge proofs they show that it was correctly updated whenever they receive funds.
+
+Since nullifiers are never published on chain, they no longer need to look random. The nullifier of a receipt can simply be its **position** $\mathsf{pid}$ in the receipt MMR.
 
 Validator storage now grows with accounts, not transactions. Great.
 
@@ -124,23 +127,22 @@ But eventually... the nullifier set will grow too big for users to manage as wel
 
 ### Scaling: prune nullifiers
 
-Now for the final optimization. Users can actually prune their nullifier sets as well! We divide the ledger into epochs and introduce a second MMR which stores the roots of nullifier trees from previous epochs. Storage only grows logarithmically in the number of epochs plus the number of nullifiers in the current epoch.
+Now for the final optimization. Users can actually **prune nullifier sets** as well! 
 
-Note that this means claiming a receipt from an old epoch is more expensive as they would need to update the MMR which requires retrieving the old roots and nullifiers.
+Since nullifiers are positions in the MMR, they  arrive in **increasing order**, unlike nullifiers derived from PRFs. In other words, a receipt created later has a larger position. For any threshold $L$ chosen by the user, the nullifier tree splits into a prefix $[0, L)$ whose contents are frozen as long as we never insert below $L$ again, and a suffix $[L, \infty)$. The prefix is summarized by its *frontier* (logarithmic number of hashes) and a user who holds the frontier together with the positions it has claimed at or above $L$ can produce an insertion proof for any new position $\mathsf{pid} \geq L$.
 
-In practice, we expect that this rarely happens as in typical transactions the seller will only hand over the goods when they have a receipt in-hand in which case they know all the receipts they need to claim before closing out the epoch.
+Keeping the $w$ most recently claimed positions costs $\ell + w$ hashes for a tree of depth $\ell$, no matter how many receipts the user has claimed in its lifetime or how long it has been offline. Claiming a receipt with a position below $L$ is still possible -- it just requires fetching the relevant path from the user's cold storage to update the tree.
 :::
 
 ## The full construction
 
-**Accounts.** Every account is represented by a single commitment
+**Accounts.** An account name $A$ is a signature verification key, and registering it involves proving knowledge of the corresponding signing key. Every account is represented by a single commitment
 
 $$
-\mathsf{com}_A = \mathsf{Com}_{\mathsf{acct}}\big(b_A,\ \kappa_A,\ \mathsf{root}_{\mathsf{null}}(A);\ r_A\big)
+\mathsf{com}_A = \mathsf{Com}_{\mathsf{acct}}\big(b_A,\ \mathsf{root}_{\mathsf{null}}(A);\ r_A\big)
 $$
 
-to its balance $b_A$, a secret PRF key $\kappa_A$, and the root $\mathsf{root}_{\mathsf{null}}(A)$ of the account's nullifier tree. With epoch based pruning, we store another root for the MMR of nullifier tree roots.
-
+to its balance $b_A$ and the root $\mathsf{root}_{\mathsf{null}}(A)$ of the account's nullifier tree -- a sparse Merkle tree keyed by receipt position.
 **Validators maintain:**
 
 - the account commitments $\mathsf{Acct}[A] = \mathsf{com}_A$
@@ -152,32 +154,31 @@ $$
 \rho = \mathsf{Com}_{\mathsf{rec}}\big(v,\ \mathsf{Sen},\ \mathsf{Rec},\ 1;\ r''\big),
 $$
 
-whose last entry demarcates whether it's a real receipt (coming from the send branch) or a dummy receipt (coming from the receive branch). The position $\mathsf{pid}$ at which the ledger inserts $\rho$ into the MMR is the payment's identifier and determines its nullifier,
+whose last entry demarcates whether it's a real receipt (coming from the send branch) or a dummy receipt (coming from the receive branch). The position $\mathsf{pid}$ at which the ledger inserts $\rho$ into the MMR is the payment's identifier *and* its nullifier.
 
-$$
-\mathsf{null} = \mathsf{CRPRF}_{\kappa_{\mathsf{Rec}}}(\mathsf{recv}, \mathsf{pid}),
-$$
+Positions are unique, so distinct receipts always carry distinct nullifiers and no send can block another pending payment (see [Faerie Gold attack](https://zips.z.cash/protocol/protocol.pdf)). Note that the nullifier is never actually published on chain, it will be inserted into the tree maintained inside the account commitment. This means that a sender does not learn if or when a payment was claimed.
 
-derived under the *receiver's* committed key. Positions are unique, so distinct receipts collide with negligible probability thereby preventing [Faerie Gold attacks](cite here). Note that the nullifier is never actually published on chain, it will be inserted into the tree maintained inside the account commitment. This means that a sender does not learn when a payment was claimed.
-
-A send/receive is a strict disjunctive proof of the following relations, where only one branch is every proved at a time:
+Every transaction publishes the same record $(A, \mathsf{com}', \rho, \mathsf{root}_\rho, \pi)$: a 32-byte account identifier, the new account commitment, a receipt, an MMR root and a 128-byte proof, for a total of 256 bytes. The ledger checks $\mathsf{root}_\rho \in \mathcal{T}$, verifies $\pi$, updates $\mathsf{Acct}[A] \gets \mathsf{com}'$ and appends $\rho$ to the receipt MMR. The proof $\pi$ is a strict disjunction of the following relations, where only one branch is ever proved at a time:
 
 **If it is a send**, the proof shows that:
 
-- the balance was updated correctly: $\mathsf{com} = \mathsf{Com}_{\mathsf{acct}}(b,\kappa,\mathsf{root}_{\mathsf{null}};r) \wedge \mathsf{com}' = \mathsf{Com}_{\mathsf{acct}}(b-v,\kappa,\mathsf{root}_{\mathsf{null}};r')$
-- receipt was created correctly: $\rho = \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r'')$
+- the balance was updated correctly: $\mathsf{com} = \mathsf{Com}_{\mathsf{acct}}(b,\mathsf{root}_{\mathsf{null}};r) \wedge \mathsf{com}' = \mathsf{Com}_{\mathsf{acct}}(b-v,\mathsf{root}_{\mathsf{null}};r')$
+- receipt was created correctly: $\rho = \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r'')$ with $\mathsf{Sen} = A$
 - no overflows: $0 \le v \le b$ and $b,\,v,\,b-v \in \mathcal{B}$
 
-Once the send transaction lands, the sender reads off its position $\mathsf{pid}$ and forwards the opening of $\rho$ together with $\mathsf{pid}$ to the receiver over a private channel.
+Once the send transaction lands, the sender reads off its position $\mathsf{pid}$ and forwards the opening of $\rho$ together with $\mathsf{pid}$ to the receiver over a private channel. The receiver need not have registered when the receipt is created.
 
 **If it is a receive**, the proof shows that:
 
-- the balance was updated correctly: $\mathsf{com} = \mathsf{Com}_{\mathsf{acct}}(b,\kappa,\mathsf{root}_{\mathsf{null}};r) \wedge \mathsf{com}' = \mathsf{Com}_{\mathsf{acct}}(b+v,\kappa,\mathsf{root}_{\mathsf{null}}';r')$
-- claiming a receipt addressed to me: $\mathsf{MMR.Verify}(\mathsf{root}_\rho,\rho^\star,\mathsf{pid},\pi_{\mathsf{mmr}})=1 \wedge \rho^\star = \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r'')$
-- nullifer did not appear: $\mathsf{null} = \mathsf{CRPRF}_\kappa(\mathsf{recv},\mathsf{pid}) \wedge \mathsf{MT.AccVerifyInsert}(\mathsf{root}_{\mathsf{null}},\mathsf{null},\pi_{\mathsf{mt}})=\mathsf{root}_{\mathsf{null}}'$
-- published a dummy receipt $\rho = \mathsf{Com}_{\mathsf{rec}}(\cdot,\cdot,\cdot,0;\cdot)$
+- the balance was updated correctly: $\mathsf{com} = \mathsf{Com}_{\mathsf{acct}}(b,\mathsf{root}_{\mathsf{null}};r) \wedge \mathsf{com}' = \mathsf{Com}_{\mathsf{acct}}(b+v,\mathsf{root}_{\mathsf{null}}';r')$
+- claiming a receipt addressed to me: $\mathsf{MMR.Verify}(\mathsf{root}_\rho,\rho_{\mathsf{in}},\mathsf{pid},\pi_{\mathsf{mmr}})=1 \wedge \rho_{\mathsf{in}} = \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r'')$ with $\mathsf{Rec} = A$
+- nullifier did not appear: $\mathsf{SMT.VerifyInsert}(\mathsf{root}_{\mathsf{null}},\mathsf{pid},\pi_{\mathsf{smt}})=\mathsf{root}_{\mathsf{null}}'$
+- published a dummy receipt $\rho = \mathsf{Com}_{\mathsf{rec}}(0,\bot,\bot,0;r''')$
+- no overflows: $b,\,v,\,b+v \in \mathcal{B}$
 
-**Wallets maintain.** The opening of its account commitment (balance, PRF key, randomness), the nullifiers of the current epoch together with their indexed Merkle tree, one root per past epoch, and the openings of any receipts it has been handed but not yet claimed.
+The dummy receipt is appended to the MMR like any other, but since a receive may only consume receipts of type $1$, it can never be claimed. Fees can be supported by revealing $v_{\mathsf{fee}}$ in the statement and proving the new commitment carries $v_{\mathsf{fee}}$ less balance.
+
+**Wallets maintain.** The opening of its account commitment (balance and randomness), the frontier of its nullifier tree together with the recently claimed positions, older nullifiers in cold storage, and the openings of any receipts it has been handed but not yet claimed.
 
 When the sender and receiver are both online which is typically the case in e-commerce, the buyer can provide the seller with confirmation that a receipt has landed on chain and the seller can collect the receipt's opening to claim it at some point in the future. However, this is challenging when the receiver is not online in applications such as payments between friends or payroll. One option is to use existing communication channels such as end-to-end encrypted messaging or email to share the receipt opening, thereby using the rest of the conversation as cover traffic.
 
@@ -264,40 +265,41 @@ In a real world deployment however, the gap may be narrower. Typically, wallet d
 
 ## Early Benchmarks
 
-A prototype of our payment system where the NIZK is instantiated with [Pari + batch verification](https://commonware.xyz/blogs/batch-pari) can be found [here](https://github.com/guruvamsi-policharla/zk-pari/tree/vanishing-poly-zk). Pari is not zero-knowledge as described in the [original paper](https://eprint.iacr.org/2024/1245). We use masking polynomials to add zk while ensuring the the proof size remains unchanged $2 \mathbb{G}_1 + \mathbb{F}$ and there is minimal overhead on the proving/verification time. All numbers below are on an M5 MacBook Pro (6 performance + 12 efficiency cores, 48 GB RAM) over BLS12-381, single-threaded unless stated, and exclude deserialization and subgroup checks.
+A prototype of our payment system where the NIZK is instantiated with [Pari + batch verification](https://commonware.xyz/blogs/batch-pari) can be found [here](https://github.com/guruvamsi-policharla/zk-pari/pull/2). Pari is not zero-knowledge as described in the [original paper](https://eprint.iacr.org/2024/1245) or its [improvement](https://eprint.iacr.org/2025/1485). We use vanishing-polynomial masks to add zk while ensuring the proof size remains unchanged at $2 \mathbb{G}_1 + \mathbb{F}$ (128 bytes), there is negligible overhead on the prover, and the batch-verification strategy carries over. All numbers below are on an M5 MacBook Pro (6 performance + 12 efficiency cores, 48 GB RAM) over BLS12-381, single-threaded unless stated, and exclude deserialization and subgroup checks.
 
-**Batch Verification.** Verifying a proof takes about $0.7$ ms regardless of circuit size. But with batch verification, this can be brought down significantly. At $N = 65{,}536$ the three MSMs account for over 90% of the 729 ms total time. Computing the Fiat-Shamir challenges take 34 ms, the statement evaluations 24 ms (with inversions batched across proofs), and the final pairing under a millisecond.
+**Batch Verification.** Verifying a proof takes about $0.7$ ms regardless of circuit size. But with batch verification, this can be brought down significantly. At $N = 65{,}536$ the three MSMs account for over 90% of the 771 ms total time. Computing the Fiat-Shamir challenges takes 36 ms, the statement evaluations 25 ms (with inversions batched across proofs), and the final pairings under a millisecond.
 
-**Throughput.** Batches are independent, so we shard them across threads with nothing shared, each thread verifying its own 80,000-proof chunk. Scaling is sub-linear because the efficiency cores are slower, but it crosses a million transactions per second on the laptop, where a transaction is a single send or receive.
+**Throughput.** Batches are independent, so we shard them across threads with nothing shared, each thread verifying its own 80,000-proof chunk. Scaling is sub-linear because the efficiency cores are slower, but it crosses a million transactions per second on the laptop, where a transaction is a single send or receive (so roughly 525,000 payments per second, each being one send and one receive).
 
 ::: {.table-row}
 ::: {.table-col}
 | Batch size $N$ | Verify (amortized) | Speedup |
 |:---:|:---:|:---:|
-| 1 | 696 $\mu$s | -- |
-| 256 | 29.4 $\mu$s | $24\times$ |
-| 4,096 | 15.6 $\mu$s | $46\times$ |
-| 65,536 | 11.2 $\mu$s | $64\times$ |
+| 1 | 723 $\mu$s | -- |
+| 256 | 29.8 $\mu$s | $25\times$ |
+| 4,096 | 16.1 $\mu$s | $46\times$ |
+| 65,536 | 11.7 $\mu$s | $64\times$ |
 :::
 ::: {.table-col}
 | Threads | Transactions / s |
 |:---:|:---:|
-| 1 | 86,532 |
-| 4 | 314,710 |
-| 8 | 537,862 |
-| 16 | 970,676 |
-| 18 | 1,017,948 |
+| 1 | 86,929 |
+| 4 | 324,857 |
+| 8 | 559,399 |
+| 16 | 992,728 |
+| 18 | 1,051,487 |
 :::
 :::
 
-**Proving.** The circuits use Pedersen hashes over Jubjub for Merkle nodes, and account/receipt commitments, and SHA-256 for the collision resistant PRF. As expected a send is cheaper than a receive as it does not have to prove merkle openings. In receive is where the cost sits, since it also verifies a depth-40 MMR opening and an insertion into the nullifier tree. The operation-hiding relation $\mathcal R_{\mathsf{op}}$ is *not* the sum of the two: send is structurally a sub-relation of receive, so the circuit instantiates each shared gadget once and lets the branch bit multiplex only the inputs, adding about 8K constraints on top of receive. $d$ is the depth of the user's nullifier tree.
+**Proving.** The circuits only use a collision-resistant hash function and we benchmark two instantiations: Pedersen hashes over Jubjub, whose security rests only on discrete log, and Poseidon over the BLS12-381 scalar field. Both the receipt MMR opening and the nullifier tree have depth 40. As expected a send is cheaper than a receive as it is just three commitment openings and range checks. Receive is where the cost sits: the depth-40 MMR opening (40 hashes) and the sparse Merkle tree insertion (80 hashes) account for 120 of its 123 hash evaluations. The operation-hiding relation $\mathcal R_{\mathsf{op}}$ is *not* the sum of the two: send is structurally a sub-relation of receive, so the circuit instantiates each shared gadget once and lets the branch bit multiplex only the inputs, adding about 8.3K (Pedersen) or 1K (Poseidon) constraints on top of receive.
 
-| Circuit | R1CS | SR1CS | Prove | Verify |
-|:--|---:|---:|---:|---:|
-| $\mathcal R_{\mathsf{send}}$ | 19,293 | 38,595 | 1.6 s | 748 $\mu$s |
-| $\mathcal R_{\mathsf{recv}}$, $d = 10$ | 370,020 | 740,049 | 20.9 s | 760 $\mu$s |
-| $\mathcal R_{\mathsf{recv}}$, $d = 20$ | 497,360 | 994,729 | 21.9 s | 750 $\mu$s |
-| $\mathcal R_{\mathsf{op}}$, $d = 10$ | 378,369 | 756,749 | 21.0 s | 743 $\mu$s |
-| $\mathcal R_{\mathsf{op}}$, $d = 20$ | 505,709 | 1,011,429 | 21.6 s | 756 $\mu$s |
+| Circuit | Hash | R1CS | SR1CS | Prove | Verify |
+|:--|:--|---:|---:|---:|---:|
+| $\mathcal R_{\mathsf{send}}$ | Pedersen | 16,109 | 32,227 | 0.93 s | 794 $\mu$s |
+| $\mathcal R_{\mathsf{recv}}$ | Pedersen | 398,111 | 796,231 | 23.2 s | 785 $\mu$s |
+| $\mathcal R_{\mathsf{op}}$ | Pedersen | 406,460 | 812,931 | 23.2 s | 785 $\mu$s |
+| $\mathcal R_{\mathsf{send}}$ | Poseidon | 1,647 | 3,303 | 0.14 s | 780 $\mu$s |
+| $\mathcal R_{\mathsf{recv}}$ | Poseidon | 30,729 | 61,467 | 1.9 s | 772 $\mu$s |
+| $\mathcal R_{\mathsf{op}}$ | Poseidon | 31,706 | 63,423 | 1.9 s | 779 $\mu$s |
 
-We note that the prover time can be halved by increasing the proof size by 1 field element (32 bytes), and we expect the number of constraints to come down as we optimize circuits.
+We note that the prover time can be halved by increasing the proof size by 1 field element (32 bytes) to natively support R1CS constraints in Pari. We also expect the number of constraints to come down as we optimize our circuits.
