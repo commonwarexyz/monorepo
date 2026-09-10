@@ -31,6 +31,7 @@ use crate::{
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use core::{
+    iter::once,
     mem::take,
     ops::{Bound, Deref},
 };
@@ -4706,7 +4707,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     .remove(sign)
                     .expect("validated signing effect exists");
                 self.release_durable_effect(*sign, &completed)?;
-                let ids = Self::effect_artifact_ids(&publication_effect);
+                let ids = once(artifact_id)
+                    .chain(parent.as_ref().map(|(id, _)| *id))
+                    .collect();
+                debug_assert_eq!(
+                    ids,
+                    Self::effect_artifact_ids(&publication_effect),
+                    "a signed publication carries its artifact and exact parent in order"
+                );
                 let publish = self
                     .publication_obligation(*publication, &publication_effect)
                     .is_some();

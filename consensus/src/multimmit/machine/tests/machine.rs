@@ -7347,6 +7347,10 @@ fn proposal_parent_forwarding_provenance_survives_retirement() {
         };
         assert_eq!(proposal.parent().exact().map(Arc::as_ref), Some(&parent));
         assert_eq!(proposal.attach_parent(), !forwarded_exact_parent);
+        let artifact = Arc::new(Artifact::LeaderBlock(SignedLeaderBlock::new(
+            proposal.block().clone(),
+            attestation(signer.get()),
+        )));
 
         // A snapshot retains the exact proof, but retired forwarding provenance is volatile.
         let mut recovered = Machine::restore(profile.clone(), snapshot).unwrap();
@@ -7374,7 +7378,32 @@ fn proposal_parent_forwarding_provenance_survives_retirement() {
                 },
             ))
             .unwrap();
-        Machine::restore(profile, restored.live_snapshot_for_test()).unwrap();
+        Machine::restore(profile.clone(), restored.live_snapshot_for_test()).unwrap();
+        let signed_cursor = proposal_cursor.next().unwrap();
+        let publication = EffectId::from_cursor(signed_cursor);
+        restored
+            .replay(DomainEvent::new(
+                profile.protocol().epoch(),
+                signed_cursor,
+                Change::SignedArtifact {
+                    sign: EffectId::from_cursor(proposal_cursor),
+                    publication,
+                    artifact: Arc::clone(&artifact),
+                },
+            ))
+            .unwrap();
+        let parent_id = Artifact::Vqc(parent).id::<Sha256>();
+        assert_eq!(
+            restored.durable_effect_ids[&publication],
+            vec![artifact.id::<Sha256>(), parent_id]
+        );
+        assert!(restored.durable.local.contains_key(&parent_id));
+        let recovered = Machine::restore(profile, restored.live_snapshot_for_test()).unwrap();
+        assert_eq!(recovered.durable_effect_ids, restored.durable_effect_ids);
+        assert_eq!(
+            recovered.durable_artifact_references,
+            restored.durable_artifact_references
+        );
     }
 }
 
