@@ -34,7 +34,6 @@ use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
-use futures::{TryStreamExt as _, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
@@ -696,20 +695,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
-        // Avoid `try_join_all`: its ordered collector can hide errors behind pending reads.
-        // Track indices to preserve the family's pinned-node order without delaying errors.
-        let mut reads = F::nodes_to_pin(loc)
-            .enumerate()
-            .map(|(index, p)| async move {
-                let node = self.get_node(p).await?.ok_or(Error::ElementPruned(p))?;
-                Ok::<_, Error<F>>((index, node))
-            })
-            .collect::<FuturesUnordered<_>>();
-        let mut nodes: Vec<_> = (0..reads.len()).map(|_| None).collect();
-        while let Some((index, node)) = reads.try_next().await? {
-            nodes[index] = Some(node);
-        }
-        Ok(nodes.into_iter().map(Option::unwrap).collect())
+        let futs = F::nodes_to_pin(loc)
+            .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
+            .collect::<Vec<_>>();
+        commonware_utils::futures::try_join_all(futs).await
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to

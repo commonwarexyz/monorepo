@@ -13,7 +13,8 @@ use commonware_runtime::{
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use futures::{TryStreamExt as _, future::join_all, stream::FuturesUnordered};
+use commonware_utils::futures::try_join_all;
+use futures::future::join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -209,12 +210,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     where
         F::Buffer: 'a,
     {
-        blobs
-            .into_iter()
-            .map(|blob| blob.wait_for_sync())
-            .collect::<FuturesUnordered<_>>()
-            .try_collect::<()>()
+        try_join_all(blobs.into_iter().map(|blob| blob.wait_for_sync()))
             .await
+            .map(|_| ())
             .map_err(Error::Runtime)
     }
 
@@ -296,14 +294,14 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         for &section in &sections {
             self.prune_guard(section)?;
         }
-        let futures: FuturesUnordered<_> = self
+        let futures: Vec<_> = self
             .blobs
             .iter_mut()
             .filter(|(section, _)| sections.contains(section))
             .map(|(_, blob)| blob.sync())
             .collect();
         let count = futures.len() as u64;
-        futures.try_collect::<()>().await.map_err(Error::Runtime)?;
+        try_join_all(futures).await.map_err(Error::Runtime)?;
         self.synced.inc_by(count);
         Ok(())
     }
@@ -338,22 +336,14 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.synced.inc_by(futures.len() as u64);
         let handles = join_all(futures).await;
         Ok(Handle::from_future(async move {
-            handles
-                .into_iter()
-                .collect::<FuturesUnordered<_>>()
-                .try_collect::<()>()
-                .await
+            try_join_all(handles).await.map(|_| ())
         }))
     }
 
     /// Sync all sections to storage.
     pub async fn sync_all(&mut self) -> Result<(), Error> {
         let count = self.blobs.len() as u64;
-        self.blobs
-            .values_mut()
-            .map(|b| b.sync())
-            .collect::<FuturesUnordered<_>>()
-            .try_collect::<()>()
+        try_join_all(self.blobs.values_mut().map(|b| b.sync()))
             .await
             .map_err(Error::Runtime)?;
         self.synced.inc_by(count);

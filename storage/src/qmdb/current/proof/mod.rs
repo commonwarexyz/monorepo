@@ -45,9 +45,11 @@ use crate::{
 use bytes::BufMut;
 use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+use commonware_utils::{
+    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+    futures::try_join_all,
+};
 use core::{num::NonZeroU64, ops::Range};
-use futures::{TryStreamExt as _, stream::FuturesUnordered};
 use tracing::debug;
 
 pub mod operation;
@@ -339,17 +341,11 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         )
         .await?;
 
-        // Avoid `try_join_all`: its ordered collector can hide errors behind pending reads.
-        // Track indices to preserve location order without delaying error delivery.
+        // Collect the operations necessary to verify the proof.
         let futures = (*request.start_loc..*end_loc)
-            .enumerate()
-            .map(|(index, loc)| async move { log.read(loc).await.map(|op| (index, op)) });
-        let mut reads = futures.collect::<FuturesUnordered<_>>();
-        let mut ops: Vec<_> = (0..reads.len()).map(|_| None).collect();
-        while let Some((index, op)) = reads.try_next().await? {
-            ops[index] = Some(op);
-        }
-        let ops = ops.into_iter().map(Option::unwrap).collect();
+            .map(|i| log.read(i))
+            .collect::<Vec<_>>();
+        let ops = try_join_all(futures).await?;
 
         // Gather the chunks necessary to verify the proof.
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit

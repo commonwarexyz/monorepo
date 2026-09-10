@@ -15,7 +15,8 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
-use futures::{FutureExt as _, TryStreamExt as _, future, stream::FuturesUnordered};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
@@ -189,7 +190,7 @@ impl<E: Context> Writable<E> {
         }
         let oldest = pending.keys().next().copied();
         let mut sealed = Vec::with_capacity(pending.len());
-        let syncs = FuturesUnordered::new();
+        let mut syncs = Vec::with_capacity(pending.len());
         let mut tail: Option<Writer<E::Blob>> = None;
         let mut expected = oldest;
         for (blob, writer) in pending {
@@ -207,7 +208,7 @@ impl<E: Context> Writable<E> {
                 sealed.push(sealed_blob);
             }
         }
-        syncs.try_collect::<()>().await?;
+        try_join_all(syncs).await?;
         let tail = match tail {
             Some(writer) => writer,
             None => partition.open(tail_blob).await?,

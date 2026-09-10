@@ -38,9 +38,8 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Replay, Writer},
 };
-use futures::{
-    FutureExt as _, Stream, TryStreamExt as _, future::try_join, stream::FuturesUnordered,
-};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, Stream, future::try_join};
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -723,18 +722,11 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             group_start = group_end;
         }
 
-        // Avoid `try_join_all`: its ordered collector can hide errors behind pending reads.
-        // Restore completed runs to their requested slots without delaying error delivery.
-        let mut reads = runs
-            .into_iter()
-            .map(|(run_start, run_end, blob, handle)| async move {
-                let items = self
-                    .read_consecutive(&handle, blob, &miss_offsets[run_start..run_end])
-                    .await?;
-                Ok::<_, Error>((run_start, items))
-            })
-            .collect::<FuturesUnordered<_>>();
-        while let Some((run_start, items)) = reads.try_next().await? {
+        let run_items = try_join_all(runs.iter().map(|(run_start, run_end, blob, handle)| {
+            self.read_consecutive(handle, *blob, &miss_offsets[*run_start..*run_end])
+        }))
+        .await?;
+        for ((run_start, _, _, _), items) in runs.iter().zip(run_items) {
             for (k, item) in items.into_iter().enumerate() {
                 let slot = miss_indices.map_or(run_start + k, |indices| indices[run_start + k]);
                 result[slot] = Some(item);
@@ -1961,12 +1953,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         let start_blob = position_to_blob(start_position, items_per_blob);
         let end_blob = position_to_blob(end_position - 1, items_per_blob);
-        pending
-            .range_mut(start_blob..=end_blob)
-            .map(|(_, writer)| writer.sync())
-            .collect::<FuturesUnordered<_>>()
-            .try_collect::<()>()
-            .await?;
+        commonware_utils::futures::try_join_all(
+            pending
+                .range_mut(start_blob..=end_blob)
+                .map(|(_, writer)| writer.sync()),
+        )
+        .await?;
         Ok(())
     }
 

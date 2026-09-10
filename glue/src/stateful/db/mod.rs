@@ -86,13 +86,12 @@ use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, resche
 use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
+    futures::try_join_all,
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
-    StreamExt as _,
     future::{Either, pending},
     join,
-    stream::FuturesUnordered,
 };
 use std::{
     collections::BTreeMap,
@@ -485,27 +484,27 @@ impl Barrier {
     /// non-durable state. Returns `false` only when runtime shutdown aborts
     /// or closes a sync handle.
     pub async fn durable(self) -> bool {
-        let mut syncs = self
+        let syncs = self
             .syncs
             .into_iter()
-            .map(|(db_type, index, handle)| async move { (db_type, index, handle.await) })
-            .collect::<FuturesUnordered<_>>();
+            .map(|(db_type, index, handle)| async move {
+                match handle.await {
+                    Ok(()) => Ok(true),
+                    Err(RuntimeError::Closed | RuntimeError::Aborted) => {
+                        debug!(db_type, "runtime shutdown before database sync completed");
+                        Ok(false)
+                    }
+                    Err(err) => Err((db_type, index, err)),
+                }
+            });
 
-        let mut durable = true;
-        while let Some((db_type, index, result)) = syncs.next().await {
-            match result {
-                Ok(()) => {}
-                Err(RuntimeError::Closed | RuntimeError::Aborted) => {
-                    debug!(db_type, "runtime shutdown before database sync completed");
-                    durable = false;
-                }
-                Err(err) => {
-                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
-                    panic!("database sync failed ({index}type {db_type}): {err}");
-                }
+        match try_join_all(syncs).await {
+            Ok(results) => results.into_iter().all(|durable| durable),
+            Err((db_type, index, err)) => {
+                let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                panic!("database sync failed ({index}type {db_type}): {err}");
             }
         }
-        durable
     }
 }
 

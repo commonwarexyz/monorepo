@@ -6,8 +6,8 @@ use commonware_runtime::{
     Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Span;
-use futures::{FutureExt as _, TryStreamExt as _, stream::FuturesUnordered};
+use commonware_utils::{Span, futures::try_join_all};
+use futures::FutureExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
@@ -465,10 +465,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                         WriteOptions::DONT_CACHE,
                     ),
                 ]);
-            writes
-                .collect::<FuturesUnordered<_>>()
-                .try_collect::<()>()
-                .await?;
+            try_join_all(writes).await?;
             let sync = if pipelined {
                 Some(target.blob.start_sync().await)
             } else {

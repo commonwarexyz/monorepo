@@ -11,10 +11,8 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use futures::{
-    TryStreamExt as _,
-    stream::{self, FuturesUnordered, Stream},
-};
+use commonware_utils::futures::try_join_all;
+use futures::stream::{self, Stream};
 
 pub mod fixed;
 pub mod variable;
@@ -200,10 +198,7 @@ where
         let futures = locs
             .into_iter()
             .map(|loc| Self::get_update_op(&self.log, *loc));
-        let mut updates: Vec<_> = futures
-            .collect::<FuturesUnordered<_>>()
-            .try_collect()
-            .await?;
+        let mut updates = try_join_all(futures).await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
         Ok(updates)
