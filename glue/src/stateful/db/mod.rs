@@ -89,8 +89,10 @@ use commonware_utils::{
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
-    future::{Either, pending, try_join_all},
+    StreamExt as _,
+    future::{Either, pending},
     join,
+    stream::FuturesUnordered,
 };
 use std::{
     collections::BTreeMap,
@@ -483,27 +485,27 @@ impl Barrier {
     /// non-durable state. Returns `false` only when runtime shutdown aborts
     /// or closes a sync handle.
     pub async fn durable(self) -> bool {
-        let syncs = self
+        let mut syncs = self
             .syncs
             .into_iter()
-            .map(|(db_type, index, handle)| async move {
-                match handle.await {
-                    Ok(()) => Ok(true),
-                    Err(RuntimeError::Closed | RuntimeError::Aborted) => {
-                        debug!(db_type, "runtime shutdown before database sync completed");
-                        Ok(false)
-                    }
-                    Err(err) => Err((db_type, index, err)),
-                }
-            });
+            .map(|(db_type, index, handle)| async move { (db_type, index, handle.await) })
+            .collect::<FuturesUnordered<_>>();
 
-        match try_join_all(syncs).await {
-            Ok(results) => results.into_iter().all(|durable| durable),
-            Err((db_type, index, err)) => {
-                let index = index.map_or(String::new(), |i| format!("index {i}, "));
-                panic!("database sync failed ({index}type {db_type}): {err}");
+        let mut durable = true;
+        while let Some((db_type, index, result)) = syncs.next().await {
+            match result {
+                Ok(()) => {}
+                Err(RuntimeError::Closed | RuntimeError::Aborted) => {
+                    debug!(db_type, "runtime shutdown before database sync completed");
+                    durable = false;
+                }
+                Err(err) => {
+                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
+                    panic!("database sync failed ({index}type {db_type}): {err}");
+                }
             }
         }
+        durable
     }
 }
 
@@ -2005,6 +2007,7 @@ mod tests {
     use std::{
         convert::Infallible,
         num::{NonZeroU64, NonZeroUsize},
+        panic::AssertUnwindSafe,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -3790,6 +3793,105 @@ mod tests {
                 Handle::ready(Err(RuntimeError::WriteFailed)),
             ]);
             let _ = barrier.durable().await;
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn barrier_panics_on_later_failure(
+        #[case] count: usize,
+        #[values(false, true)] shutdown: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let (pending_tx, pending_rx) = oneshot::channel();
+            let mut handles = vec![Handle::from_receiver(pending_rx)];
+            handles.extend((1..count).map(|index| {
+                Handle::ready(if index == count - 1 {
+                    Err(RuntimeError::WriteFailed)
+                } else if shutdown && index == 1 {
+                    Err(RuntimeError::Closed)
+                } else {
+                    Ok(())
+                })
+            }));
+            let barrier = Barrier::from_handles::<TestDb>(handles);
+            let mut durable = Box::pin(AssertUnwindSafe(barrier.durable()).catch_unwind());
+            let result = select! {
+                result = &mut durable => result,
+                _ = context.sleep(Duration::from_secs(1)) => panic!("barrier hid a completed sync failure"),
+            };
+            let panic = result.expect_err("sync failure must panic, even after shutdown");
+            let message = panic.downcast_ref::<String>().expect("formatted panic");
+            assert!(message.contains(&format!(
+                "database sync failed (index {}, type {}):",
+                count - 1,
+                std::any::type_name::<TestDb>(),
+            )));
+            // Panic cleanup releases pending completion receivers before the outer future drops.
+            assert!(pending_tx.send(Ok(())).is_err());
+            drop(durable);
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn barrier_waits_for_every_handle(#[case] count: usize, #[values(false, true)] shutdown: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let (pending_tx, pending_rx) = oneshot::channel();
+            let handles = std::iter::once(Handle::from_receiver(pending_rx))
+                .chain((1..count).map(|_| Handle::ready(Ok(()))));
+            let mut durable = Box::pin(Barrier::from_handles::<TestDb>(handles).durable());
+            assert!(durable.as_mut().now_or_never().is_none());
+            pending_tx
+                .send(if shutdown {
+                    Err(RuntimeError::Aborted)
+                } else {
+                    Ok(())
+                })
+                .unwrap();
+            let result = select! {
+                result = durable => result,
+                _ = context.sleep(Duration::from_secs(1)) => panic!("completed barrier stalled"),
+            };
+            assert_eq!(result, !shutdown);
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(31)]
+    #[case(64)]
+    fn barrier_cancellation_releases_handles(
+        #[case] count: usize,
+        #[values(false, true)] poll: bool,
+    ) {
+        deterministic::Runner::default().start(|_context| async move {
+            let (senders, handles): (Vec<_>, Vec<_>) = (0..count)
+                .map(|_| {
+                    let (sender, receiver) = oneshot::channel();
+                    (sender, Handle::from_receiver(receiver))
+                })
+                .unzip();
+            let mut durable = Box::pin(Barrier::from_handles::<TestDb>(handles).durable());
+            if poll {
+                assert!(durable.as_mut().now_or_never().is_none());
+            }
+            drop(durable);
+            for sender in senders {
+                assert!(sender.send(Ok(())).is_err());
+            }
+        });
+    }
+
+    #[test]
+    fn barrier_empty_is_durable() {
+        deterministic::Runner::default().start(|_context| async move {
+            assert!(Barrier::from_handles::<TestDb>([]).durable().await);
         });
     }
 
