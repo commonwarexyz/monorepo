@@ -84,7 +84,7 @@ Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. 
 Figure 1: The operator verifies, commits, and countersigns locally. The payer verifies and retains the receipt before forwarding it. The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry records total amount and payment count, changing $(0,0)$ to $(20,1)$.
 :::
 
-An epoch groups accepted payments into a close, the settlement package the operator builds when that epoch ends. The receipt binds the payer's cumulative position, letting the close summarize many payments through their combined effects. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
+An epoch groups accepted payments into a close, the settlement package the operator builds when that epoch ends. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
 
 The payer tracks a balance $B_a$ and a cumulative debit $D_a$. Its activity within an epoch is one strictly recipient-sorted vector $V_a$ with one cumulative entry per recipient it paid. The entry $(G,J)$ for $b$ is $a$'s cumulative credit to $b$ this epoch and the number of payments behind it. Before the example payment, $a$ holds $B_a=100$ and $D_a=0$, and $V_a$ is empty.
 
@@ -96,33 +96,21 @@ S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+x,\;\mathsf{root}(V_a\text{ with
 R=\mathsf{CounterSign}_{\mathsf{op}}(S).
 $$
 
-Here the endpoint is $n_a=1$, $D_a=20$, and the root of $V_a=\{b:(20,1)\}$. After authenticating $S$ and checking spendability, the operator atomically commits the debit, the entry advance, a close reservation, a replay record, and the acknowledgment body. The reservation holds room in the close for this account's row and this edge's entry. The replay record lets a retried request return the same acknowledgment. The operator then countersigns and returns $R$ with one Merkle opening per advanced entry. It countersigns twice: an ordinary signature for the acknowledgment the payer holds, and an aggregable one the close later combines across many rows.
+Here the endpoint is $n_a=1$, $D_a=20$, and the root of $V_a=\{b:(20,1)\}$. The operator checks $S$ and available funds, durably records acceptance, then returns $R$ with an opening of $b$'s entry.
 
-The countersigned endpoint $R$ proves the operator accepted the payment. The preconfirmation for one recipient is an entry receipt: $R$ plus the opening of that recipient's entry under the acknowledged vector root. The payer verifies and durably retains $R$ and every opening, advances its local $D_a$ in the same atomic commit, then forwards each entry receipt to any recipient that will rely on it.
+This entry receipt proves the operator accepted the payment. The recipient obtains it before relying on the payment and can verify it locally.
 
-The wallet keeps at most one unacknowledged send in flight: it does not sign the next endpoint until the prior acknowledgment is verified and committed, and an operator-reported counter is never its authority. A rejection before the operator's commit changes no balance, and the wallet retains the staged request for retry. If the response is lost, retrying returns the same acknowledgment without a second debit.
+The wallet keeps one unacknowledged request in flight and durably saves the verified acknowledgment and openings before signing the next endpoint. It retries that exact request after response loss.
 
-A later endpoint authorizes the whole debit delta up to its value, and the close carries only the payer's terminal endpoint, its last of the epoch. If a wallet signs several endpoints before obtaining the earlier acknowledgments, an intermediate acknowledgment may be neither held nor selected as that terminal, and that exposure is outside the base guarantee. This ordering serializes one payer account, not independent payers or recipients.
-
-A send may batch entries: one signature advances strictly recipient-sorted, unique entries $(b_i,x_i)$ under one cumulative endpoint:
-
-$$
-S=\mathsf{Sign}_a\bigl(\mathcal A_e,\;n_a,\;D_a+\textstyle\sum_i x_i,\;\mathsf{root}(V_a\text{ with every }b_i\text{ advanced})\bigr).
-$$
-
-The operator accepts or rejects the batch as a whole and returns one acknowledgment covering every entry. A single payment is a batch of one.
+One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
 
 ## Epochs, Closes, and the Queue
 
-An epoch ends at a cut. Everything accepted before the cut belongs to epoch $e$, and the operator builds epoch $e$'s close: one row per changed account, a handful of Merkle roots over the rows and the resulting state, and the proofs that let validators check it. Later sections build that close. This one covers how it reaches the chain.
+An epoch ends at a cut. The operator summarizes the payments accepted before that cut in a close, binding the account changes and their supporting evidence to the resulting state.
 
-The operator is Byzantine: it may halt, censor, equivocate, withhold messages, and propose arbitrary closes, but it cannot forge a payer signature. Bajillion assumes secure hashes and signatures, authenticated validator proofs of possession, at most $f$ Byzantine validators in a committee of exactly $n=3f+1$, and a correct and live settlement chain. Honest validators authenticate and durably retain their assigned share of each close before voting for it. The embedding, the chain-side integration that hosts a deployment, must keep the root bundle, public corpus, and required Merkle openings retrievable for as long as they can be challenged or claimed.
+Before acknowledging an epoch's first payment, the operator registers it onchain against the exact predecessor $\mathsf{StateRoot}$. Registration also fixes that epoch's deposits and signed withdrawal authorizations. A successor epoch can begin once its predecessor is admitted, while that predecessor remains challengeable.
 
-A deployment starts from an authenticated account vector, and each epoch uses an onchain anchor $\mathcal A_e$. Before acknowledging any payment of epoch $e$, the operator must register the epoch onchain against the exact predecessor $\mathsf{StateRoot}$, the root the previous close produced. Registration also seals the epoch's boundary: the deposits and signed withdrawal authorizations the chain fixes for this epoch, which the close must consume exactly. An accepted registration is one immutable admission obligation. Construction, certification, and admission may retry against it through the inclusive deadline, but the first later observation permanently faults the deployment. A successor epoch can be registered and prepared while its predecessor remains challengeable.
-
-Admission checks the certificate over the close's 32-byte commitment, consuming a 164-byte root bundle and one compact terminal proof as witness data, then places the close in a FIFO queue of pending slots. Each slot waits through an inclusive challenge window ending at its deadline $\Delta_e$, and slots finalize in order from the front. A proven challenge blocks the challenged slot and every pending descendant from finalizing, while earlier pending slots keep their windows and may still finalize in order. A withdrawal carried by a close becomes claimable only after that close reaches the front and finalizes.
-
-The deployment fixes the maximum admission-delay increment and the minimum and maximum challenge duration before it accepts funds, while deposits and user-signed withdrawals carry their own deadlines. Every accepted deposit must enter an admitted close before its deadline. Settlement records each deposit's refund account and amount, so an expired unadmitted deposit is refundable by anyone without an operator, a state opening, or private evidence. A missed admission, an expired withdrawal or deposit, or a proven challenge permanently faults the deployment, freezing new work and moving every account to the recovery path in [Hard Fault](#hard-fault).
+The settlement chain admits a certified close into an ordered queue. Each close waits through a challenge window ending at $\Delta_e$ and finalizes only after that window and all earlier closes. A successful challenge blocks that close and its pending descendants. Withdrawals become claimable after finalization. These queue rules let payments continue while earlier epochs settle.
 
 ## Optimizing for Hot Accounts
 
@@ -146,60 +134,27 @@ $$
 
 $b$'s three incoming payments end as the entries $(20,1)$ in $a$'s vector, $(4,1)$ in $c$'s, and $(6,1)$ in $d$'s.
 
-Credit is collated at the close instead of per payment. Each payer's vector as it stands when the epoch ends is its terminal vector (terminal means end-of-epoch throughout). The operator re-sorts the union of terminal entries by recipient and then payer into the transpose, the same entries viewed recipient-major and committed under $\mathsf{TransposeRoot}_e$, where each recipient's entries form one contiguous range. $b$'s range holds those three entries, and its sum is $b$'s credit delta: $20+4+6=30$ over 3 payments. Proving one edge never requires shipping the rest: the payer-side entry opens under its payer's signed vector root, and the recipient-side image under the transpose root.
+Each payer's last vector of the epoch is its terminal vector. At the cut, the operator sorts the union of terminal entries by recipient, then payer, into the transpose. These are the same entries viewed from the receiving side and committed under $\mathsf{TransposeRoot}_e$. $b$'s three entries sum to $20+4+6=30$. Each entry can be opened separately under its payer's signed vector root and the transpose root.
 
 ## One Row per Changed Account
 
 Netting each of the four accounts' debits and credits gives exact successor balances: $a$ ends at $100-20+5=85$, $b$ at $40-12+20+4+6=58$, $c$ at $25-7-4+12=26$, and $d$ at $35-5-6+7=31$. Gross debit equals gross credit at $20+12+7+5+4+6=54$, and the balances still sum to 200. The six payments change four account rows, one per account.
 
-$a$'s persistent state $X_a$ is a balance $B_a$, a cumulative debit $D_a$, the cumulative credit $C_a$ the operator has promised it, the receipt count behind that credit, and a flag for whether the account is present in the live state.
-
-Write the predecessor and successor states as $X_a^0$ and $X_a^1$, with checked debit and credit deltas $d_a=D_a^1-D_a^0$ and $c_a=C_a^1-C_a^0$. The sealed boundary assigns $a$ a deposit $f_a$ and a withdrawal $w_a$, and $p_a$ is credit paid externally because the recipient is absent from the live state. The exact balance relation is
+For each account, the opening and closing balances are $B_a^0$ and $B_a^1$, with debit and credit deltas $d_a$ and $c_a$. Deposits $f_a$, withdrawals $w_a$, and external payouts $p_a$ complete the balance equation:
 
 $$
 \boxed{B_a^1+d_a+w_a+p_a=B_a^0+c_a+f_a.}
 $$
 
-For an account already in the state, $p_a=0$. For a recipient absent from the predecessor state with no deposit, $B_a^0=B_a^1=0$ and $p_a=c_a$: the accepted sends become one net external-payout claim when the close finalizes, without creating a zero-balance account. This is how someone not registered with the operator gets paid. The operator accepts the sends normally and records one row whose output names the recipient and net amount. Had $a$ also paid an unregistered $e$ 10, $e$'s row would carry $c_e=p_e=10$ with both balances zero, and $e$ would claim the 10 from the chain once the close finalizes. The same holds for payments to an account after its close removes it at the cut: the identity is absent from the successor state, so those sends become external payouts rather than recreating the account. To custody this is a netted withdrawal. To the sender it is an ordinary preconfirmed payment.
+A recipient without a live account can receive a net external payout onchain after finalization. The row validator derives each settlement output from the same balance equation and signed authorizations.
 
-Each row also carries a settlement output $o_a$ that validators recompute from the same authenticated effect. An account close, the signed exit in [A Deadline to Exit](#a-deadline-to-exit), has a withdrawal output even when its epoch-tail balance is zero, so the leaf still authenticates the close action while releasing no funds:
-
-$$
-o_a=
-\begin{cases}
-\mathsf{withdrawal}(w_a), & \text{if the row consumes a withdrawal record},\\
-\mathsf{external}(p_a), & \text{if }p_a>0,\\
-\mathsf{none}, & \text{otherwise.}
-\end{cases}
-$$
-
-The withdrawal outputs form their own Merkle tree under $\mathsf{WithdrawalOutputRoot}_e$, and a claim later opens one leaf of it and nothing else.
-
-The row binds both account states and, exactly when the account sent, the terminal payer-signed endpoint $\mathsf{Out}_a$. It also carries a running total $\mathsf{prefix}_a$ over the sorted rows so far, with three counters beside the value totals: $\chi$ flags a withdrawal record, $\varepsilon$ counts the row's vector entries, and $\iota$ counts its transpose entries. The prefix is what lets a validator check one slice of rows without seeing the others:
-
-$$
-\begin{aligned}
-\mathsf{prefix}_a&=\sum_{a'\le a}\bigl(d_{a'},\;c_{a'},\;p_{a'},\;f_{a'},\;w_{a'},\;\chi_{a'},\;\varepsilon_{a'},\;\iota_{a'}\bigr),\\[0.3em]
-\mathsf{Row}_a&=\bigl(a,\;X_a^0,\;X_a^1,\;\mathsf{Out}_a,\;o_a,\;\mathsf{prefix}_a\bigr).
-\end{aligned}
-$$
-
-The signed vector root rides inside $\mathsf{Out}_a$, so a sending row carries its whole epoch fan-out under one signature. The operator's acceptance is not stored per row: its aggregable countersignatures combine into one per slice, checked at sealing.
-
-Each prefix must extend the preceding prefix exactly, so the terminal row alone carries the epoch's totals. The rows are strictly sorted by account, with exactly one for every account whose authenticated state changes:
-
-$$
-\mathbf A_e=(\mathsf{Row}_a,\;\mathsf{Row}_b,\;\mathsf{Row}_c,\;\mathsf{Row}_d),
-\qquad a<b<c<d.
-$$
-
-Prefix continuity ties the epoch totals to the rows beneath them. The deposit total and withdrawal record count must reproduce the sealed boundary. Every withdrawal releases its authorized amount exactly when the row tail covers it and nothing otherwise, and every account close sweeps its epoch tail. The totals must respect the deployment's close limits (maximum rows, entries, and value totals) and conserve payments:
+Each row binds the account's old and new state and, when it sent, its terminal signed endpoint. The rows are sorted by account and carry running totals, so a validator can check that its portion begins where the preceding portion ended. The final row carries the epoch's totals, including gross debit $D_e$ and credit $C_e$:
 
 $$
 \boxed{D_e=C_e.}
 $$
 
-Here $D_e=C_e=54$. Writing $L_e=\sum_a B_a^0$ and $L_{e+1}=\sum_a B_a^1$, summing the per-account balance equation cancels payments but not boundary flows:
+Here $D_e=C_e=54$. Summing account balances into $L_e$ and $L_{e+1}$ cancels payments, leaving only deposits $F_e$, withdrawals $W_e$, and external payouts $P_e$:
 
 $$
 \boxed{L_{e+1}=L_e+F_e-W_e-P_e.}
@@ -209,40 +164,23 @@ With no boundary flows, $L_{e+1}=L_e=200$.
 
 ## Rebuild the Live State
 
-A $\mathsf{StateRoot}$ commits every field and the exact length of the strictly sorted vector of live accounts in a binary Merkle tree (BMT). A live leaf has a positive balance: a deposit can insert an account, an account close removes one, and any other zero balance also leaves no leaf. There are no zero-balance tombstones.
+A $\mathsf{StateRoot}$ commits the sorted vector of live accounts in a binary Merkle tree (BMT). Each live account has a positive balance. Deposits can add accounts, while withdrawals and payments can remove them when their balance reaches zero.
 
-$$
-\mathbf X_e=\bigl((a,X_a^0):B_a^0>0\bigr)_{\text{sorted by }a},
-\qquad
-\mathbf X_e\xrightarrow{\ \mathsf{BMT}\ }\mathsf{StateRoot}_e.
-$$
+Changed rows and unchanged accounts together determine the next state. The operator rebuilds the full successor tree at each close. Validators retain their assigned state between closes and reconstruct their portions from the changes they receive.
 
-Writing only the balances, the example has $\mathbf X_e=((a,100),(b,40),(c,25),(d,35))$ and $\mathbf X_{e+1}=((a,85),(b,58),(c,26),(d,31))$.
-
-The changed rows and unchanged live leaves partition the two states:
-
-$$
-\begin{aligned}
-\mathbf X_e&=\mathsf{merge}\bigl(\mathsf{unchanged}_e,\;(a,X_a^0)_{a\in\mathbf A_e,\ B_a^0>0}\bigr),\\[0.3em]
-\mathbf X_{e+1}&=\mathsf{merge}\bigl(\mathsf{unchanged}_e,\;(a,X_a^1)_{a\in\mathbf A_e,\ B_a^1>0}\bigr).
-\end{aligned}
-$$
-
-The operator reuses the predecessor-state proof cache and builds the full successor BMT from the ordered leaves. Full-corpus validation independently reconstructs both trees.
-
-Beside the two state roots, the close commits one compact guard per row under $\mathsf{ChangeRoot}_e$. Challenges and external-payout claims open this tree rather than the full rows, so it exposes only what they need ([The Unavoidable Challenge](#the-unavoidable-challenge) gives its contents).
+The close also commits a compact guard for each changed account under $\mathsf{ChangeRoot}_e$. This gives challenges and external-payout claims a small authenticated opening of the account's terminal position.
 
 ## Streamlined Epoch Transitions
 
 After epoch $e$ is admitted and epoch $e+1$ is registered, successor payments can proceed while the predecessor remains challengeable. Importing predecessor credits into each account's live serving state can also overlap those payments.
 
-For an account with no boundary operations, an asymmetry makes this safe. When an account rolls over, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. Debits ended at the rollover, so the predecessor credit still in flight can only add to that head later, never subtract. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight, the exact predecessor close is
+For an account with no boundary operations, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. With predecessor debits fixed, the remaining credit can only add to that head. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight,
 
 $$
 \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
 $$
 
-The preserved head is a floor, and a floor is safe to spend against: the operator can accept successor payments on $\widetilde B_a$ before importing the remaining predecessor credit. Reconciliation adds $\rho_a$ to the live value. It never assigns $B_a^1$ over it, which would erase successor debits already accepted.
+The preserved head is safe to spend against. Importing credit adds $\rho_a$ to the live balance, preserving any successor debits already accepted.
 
 In the running example, $a\xrightarrow{20}b$ leaves the preserved head at 80 while the not-yet-imported $d\xrightarrow{5}a$ credit makes the exact close 85. If $a$ spends 20 and then 15 in the successor while the missing credit arrives between them,
 
@@ -260,48 +198,29 @@ $$
 Figure 2: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
 :::
 
-The live balance is not monotone, since successor payments spend it down. The one-sidedness is all on the predecessor's side: completion can add missing credit but can never discover another accepted debit. Accounts with boundary operations must reflect their full admitted outcome before they can spend in the successor epoch. Closed accounts are absent from that successor state.
-
-Rollover changes only live serving state, without changing the evidence required for finalization. The close still produces the canonical rows, state root, and public corpus, and a challenge against the predecessor still invalidates its pending descendants.
+Accounts affected by deposits or withdrawal authorizations must resolve their full admitted outcome before spending in the successor epoch.
 
 ## Slice the Evidence
 
-Each validator checks its assigned evidence. The evidence is divided into $S$ deterministic account-key slices (256 in the benchmarks) and dealt among validators. A span is a contiguous range of assigned slices, a proof slice is the evidence for one span with its openings, and a validator's dealing contains at most two proof slices.
+The evidence is divided into $S$ deterministic account-key slices (256 in the benchmarks). A validator receives at most two contiguous spans of slices, each with its own range proof.
 
-Authenticating each slice alone would not prove their union has no gaps or overlaps, so $\mathsf{CoverageRoot}_e$ commits their shared boundaries. For $S$ slices, $S+1$ boundaries fix where each cut falls in the predecessor state ($\alpha_j$), the change vector ($\beta_j$), and the successor state ($\gamma_j$), plus the cumulative prefix and two running accumulator checksums $u_j$ and $v_j$ at the cut:
+Shared boundaries make these local checks compose. The coverage commitment binds each boundary's position in the old state, new state, changed rows, and payment entries, together with running totals and two accumulator checksums. Each slice must begin where its predecessor ended.
 
-$$
-\mathsf{Coverage}_e=\bigl((\alpha_j,\beta_j,\gamma_j,\mathsf{prefix}_j,u_j,v_j)\bigr)_{j=0}^{S}
-\xrightarrow{\ \mathsf{BMT}\ }
-\mathsf{CoverageRoot}_e.
-$$
+Take $S=2$ with slice 1 holding $\{a,b\}$ and slice 2 holding $\{c,d\}$. The boundary after $b$ carries debit $20+12=32$ and credit $5+30=35$, which need not balance. Slice 2 resumes from those totals and must finish at $54=54$. Each slice checks its own rows against the boundaries on either side.
 
-Take $S=2$ with slice 1 holding $\{a,b\}$ and slice 2 holding $\{c,d\}$. The boundary between them carries the prefix after $b$: debit $20+12=32$ and credit $5+30=35$, which need not balance. Slice 2 resumes from that prefix, adds $c$ and $d$, and must land on the terminal prefix, where $54=54$ must hold. Each slice checks its rows against the boundaries on either side and needs none of the others' rows.
-
-The checksums let the committee verify the transpose piecewise. Every terminal edge folds one canonical key (payer, recipient, cumulative credit, count) into an order-independent lattice-hash multiset accumulator: $u$ over the vector entries in payer-major order and $v$ over the transpose entries in recipient-major order. Here $u$ folds the six edges in payer order, $a\rightarrow b$, $b\rightarrow c$, $c\rightarrow b$, $c\rightarrow d$, $d\rightarrow a$, $d\rightarrow b$, while $v$ folds the same six in recipient order, $d\rightarrow a$, $a\rightarrow b$, $c\rightarrow b$, $d\rightarrow b$, $b\rightarrow c$, $c\rightarrow d$. Same multiset, same value. Each slice resumes both accumulators from its opening boundary, folds its own entries, and must land exactly on its closing boundary. Terminal equality $u_S=v_S$ then proves the transpose is a permutation of the union of the payer vectors, so every promised credit is backed by exactly one payer-signed entry: double-entry bookkeeping as a multiset equation, verified without requiring a validator to see both sides of an edge.
-
-A proof slice covers a contiguous span of slices and opens every boundary in the span under one range opening, so the span is gap-free against its neighbors. Every holder checks each internal boundary in full: the rows and leaves before it advance the committed positions exactly, and the running prefix and checksums land on it. The withdrawal, vector-entry, and transpose-entry counts in the same prefixes select the span's exact ranges under $\mathsf{WithdrawalOutputRoot}_e$ and $\mathsf{TransposeRoot}_e$. A terminal coverage proof authenticates the final counts and totals.
-
-The coverage root thus binds each slice's exact positions in both state vectors, the change vector, and the transpose, so account insertion and deletion cannot create a gap or overlap between dealings.
-
-The predecessor state root belongs to $\mathsf{CloseContext}_e$, with the deployment, epoch, anchor, operator, sealed boundary roots, predecessor liability, deadlines, and close limits. Five roots and the transpose length form the 164-byte root bundle, checked at admission and retained while the close is pending. The 32-byte header binds every root in its contextual role:
+The checksums verify the transpose piecewise. An order-independent lattice hash accumulates each entry's payer, recipient, cumulative amount, and count, once from the payer vectors and once from the transpose. Each slice resumes both accumulators, $u$ and $v$, from its opening boundary and must reach the values at its closing boundary. At the end,
 
 $$
-\begin{aligned}
-\mathsf{RootBundle}_e
-&=\bigl(\mathsf{ChangeRoot}_e,\;\mathsf{WithdrawalOutputRoot}_e,\;\mathsf{StateRoot}_{e+1},\\
-&\qquad\;\mathsf{CoverageRoot}_e,\;\mathsf{TransposeRoot}_e,\;\ell_e\bigr),\\[0.3em]
-\mathsf{Commitment}_e=\mathsf{Header}_e
-&=H\!\bigl(\mathsf{CloseContext}_e\parallel\mathsf{ChangeRoot}_e\parallel\mathsf{WithdrawalOutputRoot}_e\parallel\mathsf{StateRoot}_{e+1}\\
-&\qquad\;\parallel\mathsf{CoverageRoot}_e\parallel\mathsf{TransposeRoot}_e\parallel\ell_e\bigr).
-\end{aligned}
+\boxed{u_S=v_S.}
 $$
 
-The transpose length $\ell_e$ closes a wedge: slice openings prove membership but cannot see past their own range, so without it a certified transpose could carry trailing leaves no slice opens. The terminal boundary requires $\ell_e$ to equal its transpose-entry count. The terminal prefix carries gross debit $D_e$, credit $C_e$, external payouts $P_e$, deposits $F_e$, and withdrawals $W_e$, with the row, withdrawal-record, and entry counts alongside, and one terminal coverage proof authenticates those totals without listing their recipients. Neither the root bundle nor the terminal proof counts toward the 32-byte commitment figure. The live leaves, vectors, rows, withdrawal outputs, and remaining openings stay offchain as an authenticated corpus $\mathcal D_e$ that must remain retrievable through the challenge deadline $\Delta_e$.
+This equality proves that the two orderings contain the same multiset of directed entries. Every recipient credit is backed by a payer-signed entry, even though one validator need not see both sides of an edge.
+
+The commitment format binds the roots and epoch context in a 32-byte header. Admission also requires a 164-byte root bundle and a terminal coverage proof. The full evidence remains offchain as an authenticated corpus $\mathcal D_e$, retrievable through the challenge deadline $\Delta_e$.
 
 ## Seal Every Dealing Up Front
 
-Before the chain queues a close for finalization, the operator disseminates each validator's dealing. Slice $s$ of $S$ is held by the $q$ consecutive validators starting at $\lfloor ns/S\rfloor$ around the validator ring, so the window slides with the slice index. A validator's assigned slices therefore form at most two contiguous spans, and the accumulator start states and range openings travel once per span rather than once per slice.
+A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Each slice is assigned to $q=2f+1$ consecutive validators around a ring, starting at $\lfloor ns/S\rfloor$ for slice $s$. This sliding window gives each validator at most two contiguous spans, so range proofs and accumulator start states travel once per span.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-ring-assignment.svg" alt="Sixteen validators on a ring with eleven-holder windows for slices 0, 5, and 10. Beside the ring, sixteen rows show each validator's assigned slices as one span, or two at the wrap.">
@@ -311,9 +230,9 @@ Before the chain queues a close for finalization, the operator disseminates each
 Figure 3: With sixteen validators and sixteen slices, each slice has eleven holders. The holder window slides around the ring (left); each validator's assigned slices form one span, or two at the wrap (right).
 :::
 
-Sealing is not a totals-only check. A validator authenticates every assigned span: the coverage and state ranges in its slices, every changed-account equation and settlement output, every terminal payer-signed endpoint and vector, its transpose interval, and the accumulator, prefix, and state transitions at every covered boundary. It verifies each slice's combined operator countersignature and checks every distinct payer authorization across the dealing in one randomized batch. The terminal boundary then binds the vector lengths, deposits, withdrawals, external payouts, payment conservation, the multiset equality between the two edge orderings, and successor liability. Having checked all of that, the validator retains the evidence through the challenge deadline and only then seals the shared commitment. The assignments cover the complete corpus.
+A validator authenticates every row, signature, state transition, and boundary check in its assigned spans. It retains the evidence through the challenge deadline before signing the commitment.
 
-Every certificate signer signs the same commitment. Each slice is assigned to a quorum of validators who authenticate and retain it. Quorum intersection guarantees that an honest signer authenticated and retains each slice, though that signer may differ by slice. With $n$ validators, $f$ tolerated faults, and quorum $q$, every slice $j$'s holders share more than $f$ validators with the certificate's signers:
+The certificate needs $q$ signers, all signing the same commitment. Quorum intersection guarantees that an honest signer authenticated and retains each slice, though that signer may differ by slice. Every slice $j$'s holders share more than $f$ validators with the certificate's signers:
 
 $$
 \begin{aligned}
@@ -324,15 +243,11 @@ $$
 
 The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked when the committee registered. With the 32-byte commitment and an eight-byte bitmap-length prefix, the 100-validator certified package is 101 bytes.
 
-## Fault and Availability Model
-
-Certification establishes that the bound corpus satisfies the public relation: every row, boundary, signature, and total checks out. It cannot establish that the operator never countersigned an endpoint outside that corpus. The next section shows why no verifier can, and what a holder does about it.
-
-The entry receipt is private, transferable evidence. Any holder may challenge, not only the payer or recipient, and neither must stay continuously online. The availability assumption is per acknowledgment: at least one honest holder must retain the acknowledgment or entry receipt and get the bounded challenge included by $\Delta_e$. A recipient that wants an independently enforceable preconfirmation obtains its entry receipt before relying on it. Honest validators retain the public proof slices but cannot reconstruct private evidence no holder received. This is not a single global observer assumption: different edges may depend on different holders. The configured challenge duration therefore trades clean-settlement latency against how long a holder may stay offline.
-
 ## The Unavoidable Challenge
 
-This is the omission problem from the introduction, and no certifier solves it. Fix a public corpus $\mathcal D_e$ and accepting certificate, proof, or attestation $\zeta$. Compare two executions: in $\Xi_0$ the operator countersigns exactly the acknowledgments represented by $\mathcal D_e$, while in $\Xi_1$ it produces the same $(\mathcal D_e,\zeta)$ and privately delivers one more valid acknowledgment $R^+$. The close verifier has the same view in both:
+A certificate establishes that the disclosed close is internally valid. The operator could still have signed a promise it left out.
+
+Fix a public corpus $\mathcal D_e$ and accepting certificate, proof, or attestation $\zeta$. In $\Xi_0$ the operator countersigns exactly the acknowledgments represented by $\mathcal D_e$. In $\Xi_1$ it produces the same $(\mathcal D_e,\zeta)$ and privately delivers one more valid acknowledgment $R^+$. The close verifier has the same view in both:
 
 $$
 \mathsf{View}(\Xi_0)=(\mathcal D_e,\zeta)=\mathsf{View}(\Xi_1).
@@ -340,92 +255,43 @@ $$
 
 If it accepts $\Xi_0$, it must accept $\Xi_1$. A validation committee (or TEE or SNARK/STARK) can certify the exact public-validity relation over selected inputs. None proves the nonexistence of an additional private signature.
 
-So the close must expose exactly what a holder needs to contradict it. That is the guard committed per row under $\mathsf{ChangeRoot}_e$:
+The change tree gives a holder a compact opening of the close's terminal position to compare against a retained receipt. The challenge verifier checks three kinds of contradiction:
 
-$$
-\begin{aligned}
-\mathsf{ChangeValue}_a
-&=\bigl(o_a,\;D_a^1,\;n_a,\;\mathsf{OutDigest}_a,\;\mathsf{root}(V_a)\bigr),\\
-\mathsf{ChangeGuard}_a
-&=\bigl(a,\;H(\textsf{change-value}\parallel\mathsf{encode}(\mathsf{ChangeValue}_a))\bigr),\\
-\mathbf C_e
-&=\bigl(\mathsf{ChangeGuard}_a\bigr)_{\mathsf{Row}_a\in\mathbf A_e},\\
-\mathbf C_e
-\xrightarrow{\ \mathsf{Merkle}\ }
-\mathsf{ChangeRoot}_e.
-\end{aligned}
-$$
+1. **Debit mismatch.** For example, the close records a cumulative debit of 20 after the operator acknowledged 35.
 
-The $\mathsf{ChangeValue}$ is the settlement output, terminal debit, terminal sequence number, endpoint-body digest, and terminal vector root, where $\mathsf{OutDigest}_a$ binds the unsigned terminal endpoint body (or a distinguished absence). Together they pin the exact acknowledged terminal a challenger contradicts. Validators still check the complete row in the proof-slice corpus, but the change tree commits only this projection, and its digested guard keeps range boundaries compact.
+2. **Entry mismatch.** A retained entry promises more value or more payments to a recipient than the close records.
 
-Every retained acknowledgment in challenge evidence carries both payer and operator signatures over one endpoint body. Through the inclusive deadline $t\le\Delta_e$, any holder may submit one of three bounded contradictions. In the example, $a$'s public terminal is $n_a=1$, $D_a=20$, and the entry $b:(20,1)$.
+3. **Acknowledgment fork.** The operator countersigns different bodies at the same payer sequence number.
 
-1. **Higher acknowledged debit** ($\mathsf{HigherAckDebit}$). A retained dual-signed endpoint carries a cumulative debit above the public terminal debit, a different countersigned body at the committed terminal sequence number, or the same cumulative debit at a strictly later sequence. A retained $R$ at $n_a=2$ with $D_a=35$ is one. A bare payer authorization is insufficient, since only the countersignature proves operator acknowledgment.
-
-2. **Higher acknowledged entry** ($\mathsf{HigherAckEntry}$). Authenticate the public terminal entry $(G^\star,J^\star)$ for one edge under the sender row's committed vector root, using $(0,0)$ for authenticated absence, and present a retained entry $(G^+,J^+)$ opened under its own acknowledged root. Either strict increase, $G^+>G^\star$ or $J^+>J^\star$, is a contradiction. A retained opening of $b:(30,2)$ under $a$'s acknowledged root contradicts the public $(20,1)$.
-
-3. **Acknowledgment fork** ($\mathsf{AckFork}$). Two distinct operator-countersigned endpoint bodies at one payer sequence number, such as two countersigned bodies at $n_a=1$. Only the operator countersignatures need to verify, since a fork is the operator's fault whatever produced the payer halves. Different signature bytes over one identical body are not a fork.
-
-Each challenge is one-shot. There is no interactive dispute game and no execution trace to bisect: the holder submits the signed pair or pairs and the bounded openings that expose the contradiction, and the chain checks fixed signature, arithmetic, and Merkle predicates in one call.
+Each challenge is checked in one onchain call using signatures, arithmetic, and Merkle openings. Any holder can submit it. Every receipt a user relies on needs an honest holder who retains the evidence, obtains the public openings, and gets a challenge included by $\Delta_e$. Validators retain the public corpus but cannot reconstruct a private receipt nobody saved.
 
 ## A Deadline to Exit
 
-A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. So every account can queue a unilateral signed authorization directly onchain, either to withdraw an exact amount or to close the account. The queue is only the censorship fallback: an uncensored user hands the same authorization to the operator, which carries it inside the next close's sealed boundary, so the happy-path exit costs one onchain transaction, the claim.
+A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next epoch's boundary. A censored user can instead queue it directly onchain between epoch registrations, a path the settlement integration must keep live.
 
-$$
-Q=\mathsf{Sign}_a\bigl(\mathsf{deployment},\;\mathsf{rt}_z,\;v,\;\omega,\;\tau\bigr),
-\qquad
-\omega\in\bigl\{\mathsf{withdraw}(x)\mid x>0\bigr\}\cup\bigl\{\mathsf{close}\bigr\}.
-$$
+An exact withdrawal releases its amount if enough funds remain at the cut. An account close sweeps that epoch's final balance. Once the carrying close finalizes, the user claims the certified payout with a Merkle opening. Each output can be claimed only once.
 
-$Q$ names the finalized root $\mathsf{rt}_z$ it was signed against, where $z$ indexes the last finalized close, a destination $v$, an operation $\omega$, and an absolute deadline $\tau$. A withdrawal settles all or nothing: it releases exactly $x$ when the epoch tail covers it and otherwise releases nothing and leaves the balance in the account. A close carries no amount. Queueing $Q$ needs no operator approval. Once queued or included in an admitted close, it resolves through clean finalization or hard-fault settlement.
+Custody remains onchain throughout. Finalization reserves withdrawals and external payouts, and individual claims reduce the reserve and the chain's assets together. A challenged or invalidated close creates no payout reserve.
 
-The chain accepts queue submissions only while no epoch is registered. The settlement integration must ensure valid independent requests are eventually accepted between registrations. Queueing authenticates $Q$ and requires an account opening under the finalized root and every pending successor root. The account must be active at each root, with enough balance for $x$ in the exact-amount case. The next registered close must include $Q$ in its sealed boundary and commit the corresponding account row.
+### Hard Fault
 
-An operator-carried authorization enters the sealed boundary at registration instead. It is validated against the same finalized root, destination rules, and notice window (the deployment's bounds on how far ahead $\tau$ may sit), plus one predecessor-root opening proving the account can cover it, and its replay identity is consumed at admission. It needs no proofs against every root that can still finalize, because it binds one specific close and settles all or nothing there.
+If the operator misses an admission, deposit, or withdrawal deadline, or a holder proves a fault, the deployment permanently stops new work. Clean pending closes ahead of a disputed close may still finalize. Recovery then freezes the last finalized state root.
 
-An account close does not freeze the account: it keeps sending and receiving until the cut, which sweeps its epoch-tail balance and omits it from the successor state:
+The recovery rules keep finalized payouts independently claimable and refund unadmitted deposits. Accounts recover from the frozen state using Merkle openings. Payments in a never-admitted or invalidated close do not debit that state.
 
-$$
-\boxed{w_a=B_a^0+f_a+c_a-d_a,\qquad B_a^1=0.}
-$$
-
-Had $a$ closed its account in epoch $e$, the sweep would be $w_a=100+0+5-20=85$ with $B_a^1=0$.
-
-After clean finalization, $\mathsf{withdraw}(x)$ and $\mathsf{close}$ use the same claim: the validator-derived $\{\mathsf{destination},\mathsf{amount}\}$ plus one opening under $\mathsf{WithdrawalOutputRoot}_e$, without retransmitting the signed request. For $\mathsf{close}$, validators derive the amount from the epoch tail, so $a$'s claim would be $\{v,85\}$ plus one opening. External payouts, the $p_a$ rows, claim the same way: each recipient presents its $\{\mathsf{account},\mathsf{ChangeValue}\}$ projection and $\mathsf{ChangeRoot}_e$ opening. Each output can be claimed only once. Withdrawal claim size is the destination plus the amount and one logarithmic opening, measured below.
-
-What makes the exit credible is that custody never leaves the chain early. Let $R_z$ be the reserve for finalized but unclaimed withdrawals and external payouts. With finalized liability $L_z$, pending slots $z+1,\ldots,m$ carrying boundary flows $(F_i,W_i,P_i)$, and deposits not yet included in a pending close $F_\star$:
-
-$$
-\boxed{
-E=L_z+R_z+\sum_{i=z+1}^{m}F_i+F_\star
-=L_m+R_z+\sum_{i=z+1}^{m}(W_i+P_i)+F_\star.
-}
-$$
-
-Withdrawals and external payouts stay in active custody until their slot finalizes at the queue front, when their aggregate value moves into $R_z$. Individual claims reduce that reserve and the chain's assets together. Finalization touches only totals and roots, so its work does not grow with the number of recipients, and a challenged or invalidated suffix creates no reserve. The operator can stop serving payments, but it cannot take funds or send them without authorization.
-
-## Hard Fault
-
-If a registered close misses admission, a queued or admitted $Q$ is still unfinalized at $t\ge\tau$, an accepted deposit remains outside an admitted close at or after its deadline, or a challenge is proven, the first time-aware onchain call permanently freezes new work. This is the hard fault.
-
-Pending deposit refunds remain independently claimable. The pending prefix resolves from the front, finalizing eligible clean slots, while a challenged or invalidated suffix never finalizes. Hard-fault settlement then freezes the last finalized state root.
-
-Acknowledged sends that existed only in a never-admitted registration or invalidated suffix do not debit that root. Each sender recovers its finalized balance exactly once through a replay-protected state opening. An unfinalized authorization from the queue or an admitted close routes its amount to the signed destination if the frozen balance covers it, returning the residual to the account. Otherwise, the account receives its whole balance. Reserves from earlier clean finalizations remain separately claimable, so recovery needs neither an all-account scan nor a global payout crank.
-
-Hard-fault recovery needs no operator, but claimants still need their openings against the frozen root, which must remain available until each position is claimed, and the settlement integration must atomically persist each claim with its custody effect. The protocol supplies neither a historical witness store nor a terminal-claim deadline.
+Recovery needs a correct, live settlement chain and available claim openings even when the operator disappears. The settlement integration must apply each claim atomically with its payout.
 
 ## The Close Follows Accounts and Edges
 
 The [protocol primitives and benchmarks are in #4664](https://github.com/commonwarexyz/monorepo/pull/4664). Applications supply the operator and wallet services, including durable storage, retries, and live credit reconciliation.
 
-Every profile below uses a 100-validator committee and 256 slices. Prepare, deal, and seal share one adaptive 16-worker pool (AWS c8a.4xlarge), while certificate, challenge, and withdrawal-claim checks are scalar calling-thread measurements. The first matrix varies $N$, the number of live accounts: every account sends one entry and the same 512 accounts receive, so with $A$ changed accounts and $B$ distinct recipients the fixture holds $A=N$ and $B=512$ as $N$ grows from 1,024 to one million. The active sweep uses the first $A$ accounts in key order as senders while holding $N$ at one million.
+Every profile uses 100 validators and 256 slices on an AWS c8a.4xlarge. Prepare, deal, and seal share an adaptive 16-worker pool. Certificate, challenge, and withdrawal-claim checks run on the calling thread.
+
+The first matrix varies the number of live accounts, $N$, from 1,024 to one million. Every account sends one entry, and the same 512 accounts receive. The active sweep holds $N$ at one million and varies how many accounts send, taking senders in key order.
 
 The full proof-slice corpus contains all 256 slices, each with its own proofs. The posted close is a compact update for a reader holding the previous certified state. Each validator uses its retained state to reconstruct its assigned slices from a compact dealing; the table reports the largest such download. The external certified package is the commitment and certificate.
 
-Repeated payments over the same edges add no records: rows and vector entries carry cumulative totals. Exact wire sizes can grow when cumulative amounts, counts, or sequence numbers cross a varint boundary. Every fixture send is a batch of one entry. Each additional recipient adds a 48-byte committed vector entry and its transpose image to the evidence.
-
-Stages are measured independently. Prepare reuses the predecessor-state proof cache, built beforehand, to construct the close's new roots. Deal constructs the dealings for the whole committee. Seal verifies and retains the busiest validator's dealing and signs the commitment.
+Stages are measured independently, with one entry per batch. Prepare constructs the new roots using a prebuilt predecessor-state proof cache. Deal constructs dealings for the whole committee. Seal verifies and retains the busiest validator's dealing and signs the commitment.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -618,19 +484,17 @@ The next table fixes the live state at one million accounts and varies how many 
 
 Fewer senders reduce the posted close and the largest validator dealing. Preparation and sealing still process live state.
 
-Holding the measured byte budget fixed illustrates how repetition amortizes a close. Ten million payments divide the one-million-account profile's 472,797,104-byte corpus and 71,762,697-byte posted close into 47.3 and 7.2 bytes per payment. A billion divide them into 0.473 and 0.072. These projections hold integer widths fixed; the 101-byte certified package and 164-byte root bundle are fixed-size encodings.
+Additional payments over the same pairs share these settlement records, spreading their byte cost over more payments.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots amortize fixed byte budgets over one million to one billion accepted payments. The left uses the table's rounded proof-slice corpus sizes for four account counts; the right uses the 101-byte external certified package.">
 ```
 
 ::: {.image-caption}
-Figure 5: Each line divides a fixed byte budget from the table by $T$. The corpus curves use rounded table values and hold integer widths fixed. The external certified package stays 101 bytes across profiles.
+Figure 5: Each line divides a fixed byte budget from the table by the payment count. The corpus curves use rounded table values and hold integer widths fixed. The external certified package stays 101 bytes across profiles.
 :::
 
-In these one-entry fixtures, debit and entry challenges grow with the changed-row lookup depth. An entry challenge also authenticates the retained entry and, when present, its public terminal entry. Those openings grow logarithmically with their respective recipient vectors. A fork needs two countersigned bodies and no state opening. Clean closes submit no challenge, and adjudication reuses the certificate check performed at admission.
-
-Withdrawal claims scale with the claimed close's own withdrawal count $W$, never $N$, because each opens only that close's withdrawal-output tree, and an external-payout claim likewise opens one leaf of its change tree. The certified close above queues no withdrawals, so separate fixtures use a 21-byte destination, once with a single withdrawal output and once with a surge in which all $N$ accounts exit through one close. At $W=1$ a $\mathsf{withdraw}$ or $\mathsf{close}$ claim is 39 bytes and verifies in 0.313 µs on the same c8a.4xlarge. The opening adds one 32-byte sibling per doubling of $W$, so a surge barely moves it: 359 bytes when 1,024 accounts exit together and 679 bytes when one million do, with verification adding only the twenty path hashes.
+Challenge proofs grow with their Merkle lookup depths. Withdrawal claims grow with the number of withdrawal outputs $W$ in their close. The separate fixtures below use a 21-byte destination and range from one output to one million, with each claim opening just one leaf. The payment profiles above contain no withdrawals.
 
 ```{=html}
 <div class="clearing-benchmark-table">
