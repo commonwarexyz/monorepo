@@ -222,9 +222,8 @@ impl Future for Operation {
                     }
                     local.reconcile_admissions();
                     if let State::Admitting { registration, .. } = &this.state
-                        && !local.admissions.is_granted(*registration)
                         && incoming.is_none()
-                        && local.admissions.will_wake(*registration, cx.waker())
+                        && local.admissions.is_waiting(*registration, cx.waker())
                     {
                         return Poll::Pending;
                     }
@@ -428,7 +427,7 @@ impl Future for SyncAdmission {
                 if incoming.is_none()
                     && this
                         .registration
-                        .is_some_and(|id| local.admissions.will_wake(id, cx.waker()))
+                        .is_some_and(|id| local.admissions.is_waiting(id, cx.waker()))
                 {
                     return Poll::Pending;
                 }

@@ -903,7 +903,7 @@ impl Local {
         Ok(Self {
             driver: Some(driver),
             tasks: Tasks::default(),
-            admissions: Admissions::new(),
+            admissions: Admissions::default(),
             operations: Operations::default(),
             timers: Timers::new(),
             closing: false,
