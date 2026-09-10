@@ -115,7 +115,7 @@ impl Mailbox {
     }
 }
 
-#[cfg(all(test, not(feature = "loom")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::iouring::{task::Task, waker::tests::eventfd_count};
