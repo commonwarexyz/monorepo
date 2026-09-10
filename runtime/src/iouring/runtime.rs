@@ -1426,7 +1426,7 @@ impl Worker {
     }
 
     /// Acknowledge one transferred mailbox batch.
-    fn acknowledge_batch(&mut self) {
+    const fn acknowledge_batch(&mut self) {
         self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
     }
 

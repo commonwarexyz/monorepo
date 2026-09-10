@@ -21,13 +21,15 @@ use futures::{
 use std::{
     cell::Cell,
     fs::{self, File},
-    io::Write as _,
+    future::{Pending, Ready},
+    io::{self, Write as _},
     os::unix::net::UnixStream,
     panic::panic_any,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
+    task::Wake,
     thread,
 };
 
@@ -112,6 +114,7 @@ fn take_worker_fault(
     let entry = faults
         .iter_mut()
         .find(|entry| ptr::eq(entry.workers.as_ptr(), Arc::as_ptr(registry)))?;
+
     if entry.fault.as_ref().is_some_and(matches) {
         entry.fault.take()
     } else {
@@ -131,16 +134,18 @@ pub(super) fn before_launch(payload: Launch) -> Launch {
         drop(payload);
         panic!("failed to spawn thread: injected worker launch failure");
     }
+
     payload
 }
 
 /// Reject native initialization on the selected worker before creating its ring.
-pub(super) fn before_startup(registry: &Arc<Workers>) -> std::io::Result<()> {
+pub(super) fn before_startup(registry: &Arc<Workers>) -> io::Result<()> {
     if take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some() {
-        return Err(std::io::Error::other(
+        return Err(io::Error::other(
             "injected native worker initialization failure",
         ));
     }
+
     Ok(())
 }
 
@@ -283,8 +288,9 @@ fn test_config_validation_before_startup() {
 
     for invalid in invalid_layouts.into_iter().chain([invalid_spinner]) {
         let directory = invalid.storage_directory().clone();
-        assert!(!directory.exists());
         let called = AtomicBool::new(false);
+
+        assert!(!directory.exists());
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
                 Runner::new(invalid).start(|_| {
@@ -294,6 +300,7 @@ fn test_config_validation_before_startup() {
             }))
             .is_err()
         );
+
         // Invalid settings must fail before acquiring storage resources or
         // invoking user code, including layouts whose slot arithmetic overflows.
         assert!(!called.load(Ordering::SeqCst));
@@ -324,6 +331,7 @@ fn test_nested_same_directory_rejected_before_closure_and_outer_remains_usable()
                 async {}
             });
         }));
+
         assert!(rejected.is_err());
         assert!(!called.load(Ordering::SeqCst));
 
@@ -353,6 +361,7 @@ fn test_resolver_handles_numeric_hosts_and_invalid_input() {
                 vec![host.parse::<IpAddr>().unwrap()]
             );
         }
+
         assert!(matches!(
             context.resolve("\0").await,
             Err(Error::ResolveFailed(_))
@@ -368,12 +377,14 @@ fn test_resolver_handles_numeric_hosts_and_invalid_input() {
 
 #[test]
 fn test_root_borrows_non_send_state_across_pending_poll() {
-    let state = Rc::new(std::cell::Cell::new(0));
+    let state = Rc::new(Cell::new(0));
     let text = String::from("borrowed root output");
     let origin = thread::current().id();
+
     let output = Runner::new(config()).start(|context| {
         let state = &state;
         let text = &text;
+
         async move {
             // Holding an Rc reference across suspension exercises both the
             // borrowed root lifetime and its lack of a Send requirement.
@@ -392,6 +403,8 @@ fn test_root_borrows_non_send_state_across_pending_poll() {
 fn test_root_self_wake_survives_pending_poll() {
     Runner::new(config()).start(|_| async move {
         let mut polls = 0;
+
+        // Every pending poll relies on its own wake to be polled again.
         poll_fn(|cx| {
             polls += 1;
             if polls == 1000 {
@@ -402,6 +415,7 @@ fn test_root_self_wake_survives_pending_poll() {
             }
         })
         .await;
+
         assert_eq!(polls, 1000);
     });
 }
@@ -410,16 +424,19 @@ fn test_root_self_wake_survives_pending_poll() {
 fn test_root_constructor_panic_drops_unpolled_tasks_and_clears_scope() {
     let drops = Arc::new(AtomicUsize::new(0));
     let payload = DropCount(drops.clone());
+
     // Register a child during construction, then fail before either future polls.
     let result = catch_unwind(AssertUnwindSafe(|| {
-        Runner::new(config()).start(move |context| -> std::future::Pending<()> {
+        Runner::new(config()).start(move |context| -> Pending<()> {
             context.child("never_polled").spawn(move |_| async move {
                 let _payload = payload;
                 pending::<()>().await;
             });
+
             panic!("root constructor failed");
         });
     }));
+
     assert!(result.is_err());
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(Local::current().is_none());
@@ -460,6 +477,7 @@ fn test_root_poll_or_drop_panic_clears_scope() {
                 drops: drops.clone(),
             });
         }));
+
         let panic = result.expect_err("root execution must fail the runner");
         assert_eq!(
             extract_panic_message(&*panic),
@@ -511,6 +529,7 @@ fn test_root_destruction_can_spawn_work_before_shutdown() {
     for dedicated in [false, true] {
         let invoked = Arc::new(AtomicBool::new(false));
         let drops = Arc::new(AtomicUsize::new(0));
+
         Runner::new(config()).start(|context| {
             let context = context.child("root_drop");
             Root {
@@ -533,17 +552,19 @@ fn test_root_destruction_can_spawn_work_before_shutdown() {
 
 #[test]
 fn test_failure_queued_before_root_poll_interrupts_root() {
-    // Publish during construction so the first service turn sees the failure
-    // before polling user code.
+    // Publish during construction so the interrupt wrapper sees the failure
+    // before the user's root future is polled.
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config()).start(|context| {
             context
                 .shared
                 .panicker
                 .notify(Box::new("queued worker panic"));
+
             async { panic!("interrupted root must not be polled") }
         });
     }));
+
     assert_eq!(
         extract_panic_message(&*result.expect_err("queued failure must interrupt the root")),
         "queued worker panic"
@@ -578,6 +599,7 @@ fn test_execution_modes_share_ordinary_descendants() {
                             ordinary
                         );
                     }
+
                     // Nested one-off tasks each receive a separate worker.
                     for blocking in [false, true] {
                         let nested = context.child("one_off");
@@ -602,10 +624,12 @@ fn test_execution_modes_share_ordinary_descendants() {
                             .await
                             .unwrap();
                     }
+
                     parent
                 })
                 .await
                 .unwrap();
+
             assert_eq!(
                 parent == ordinary,
                 matches!(mode, None | Some(Execution::Shared(false)))
@@ -622,15 +646,18 @@ fn test_factories_execute_synchronously_on_the_caller() {
         Some(Execution::Dedicated),
         Some(Execution::Shared(true)),
     ];
+
     for catch in [false, true] {
         Runner::new(config().with_catch_panics(catch)).start(|context| async move {
             for parent_mode in modes {
                 placed(context.child("parent"), parent_mode)
                     .spawn(move |context| async move {
                         let caller = thread::current().id();
+
                         for mode in modes {
                             let invoked = Arc::new(AtomicBool::new(false));
                             let observed = invoked.clone();
+
                             // Construction must finish on the caller before spawn
                             // returns, independent of the future's placement.
                             let handle = placed(context.child("factory"), mode).spawn(move |_| {
@@ -645,12 +672,11 @@ fn test_factories_execute_synchronously_on_the_caller() {
                             // Constructor panics also belong to the caller, which
                             // must remain usable after catching the failure.
                             let result = catch_unwind(AssertUnwindSafe(|| {
-                                placed(context.child("panic"), mode).spawn(
-                                    |_| -> std::future::Ready<()> {
-                                        panic!("task constructor failed");
-                                    },
-                                )
+                                placed(context.child("panic"), mode).spawn(|_| -> Ready<()> {
+                                    panic!("task constructor failed");
+                                })
                             }));
+
                             assert!(result.is_err());
                             assert_eq!(
                                 context
@@ -690,6 +716,7 @@ fn test_blocking_parents_can_wait_for_ordinary_descendants() {
                         child.spawn(move |_| async move {
                             sender.send(thread::current().id()).unwrap();
                         });
+
                         // The root awaits this parent asynchronously, leaving the ordinary
                         // worker available while this dedicated thread blocks.
                         assert_eq!(receiver.recv_timeout(TEST_TIMEOUT).unwrap(), ordinary);
@@ -715,11 +742,14 @@ fn test_foreign_context_can_spawn_await_and_abort_ordinary_work() {
             )
             .unwrap();
             assert_eq!(executed, ordinary);
+
             let aborted = remote.child("aborted").spawn(|_| pending::<()>());
             aborted.abort();
             assert!(block_on(aborted).is_err());
+
             finished.send(()).unwrap();
         });
+
         // Keep the root polling while the foreign thread blocks on its handles.
         completion.await.unwrap();
         foreign.join().unwrap();
@@ -732,19 +762,19 @@ fn test_aborted_context_skips_factories_for_every_placement() {
         context.tree.abort();
 
         for execution in [
-            Execution::default(),
             Execution::Shared(false),
             Execution::Dedicated,
             Execution::Shared(true),
         ] {
             let mut rejected = context.child("rejected");
             rejected.execution = execution;
-            let handle = rejected.spawn(|_| -> std::future::Ready<()> {
+            let handle = rejected.spawn(|_| -> Ready<()> {
                 panic!("an aborted context must not invoke its factory");
             });
 
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
+
         assert_eq!(context.shared.workers.state.lock().active, 0);
     });
 }
@@ -764,7 +794,7 @@ fn test_closed_origin_skips_local_and_foreign_factories() {
 
             // Test the caller-local check and the foreign mailbox check separately.
             let spawn = move || {
-                context.spawn(|_| -> std::future::Ready<()> {
+                context.spawn(|_| -> Ready<()> {
                     panic!("a closed origin must not invoke its factory");
                 })
             };
@@ -773,6 +803,7 @@ fn test_closed_origin_skips_local_and_foreign_factories() {
             } else {
                 spawn()
             };
+
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         });
     }
@@ -781,17 +812,19 @@ fn test_closed_origin_skips_local_and_foreign_factories() {
 #[test]
 fn test_closed_registry_skips_one_off_factories() {
     Runner::new(config()).start(|context| async move {
+        // Leave supervision open so rejection must come from worker registration.
         context.shared.workers.close();
 
         for execution in [Execution::Dedicated, Execution::Shared(true)] {
             let mut rejected = context.child("rejected");
             rejected.execution = execution;
-            let handle = rejected.spawn(|_| -> std::future::Ready<()> {
+            let handle = rejected.spawn(|_| -> Ready<()> {
                 panic!("a closed registry must not invoke its factory");
             });
 
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
+
         assert_eq!(context.shared.workers.state.lock().active, 0);
     });
 }
@@ -801,10 +834,11 @@ fn test_closed_runner_rejects_one_off_payload_without_invoking_closure() {
     let escaped = Runner::new(config()).start(|context| async { context });
     let drops = Arc::new(AtomicUsize::new(0));
     let payload = DropCount(drops.clone());
+
     let handle = escaped
         .child("closed")
         .shared(true)
-        .spawn(move |_| -> std::future::Ready<()> {
+        .spawn(move |_| -> Ready<()> {
             let _payload = payload;
             panic!("closed worker invoked user closure");
         });
@@ -819,6 +853,7 @@ fn test_reservation_before_close_remains_counted_until_release() {
     let worker_registry = registry.clone();
     let (reserved, reservation) = mpsc::channel();
     let (release, released) = mpsc::channel();
+
     let worker = thread::spawn(move || {
         let active = worker_registry.reserve().unwrap();
         reserved.send(()).unwrap();
@@ -862,6 +897,7 @@ fn test_closure_before_reservation_rejects_without_tracking() {
     thread::spawn(move || assert!(worker_registry.reserve().is_none()))
         .join()
         .unwrap();
+
     assert_eq!(registry.state.lock().active, 0);
     registry.wait();
 }
@@ -873,6 +909,7 @@ fn test_shutdown_does_not_wait_for_an_unpublished_ordinary_factory() {
     let payload = DropCount(drops.clone());
     let future_polled = polled.clone();
     let (release, released) = mpsc::channel();
+
     let publisher = Runner::new(config()).start(|context| async move {
         let (entered, entering) = oneshot::channel();
         let publisher = thread::spawn(move || {
@@ -885,6 +922,7 @@ fn test_shutdown_does_not_wait_for_an_unpublished_ordinary_factory() {
                 }
             })
         });
+
         entering.await.unwrap();
         publisher
     });
@@ -894,6 +932,7 @@ fn test_shutdown_does_not_wait_for_an_unpublished_ordinary_factory() {
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     release.send(()).unwrap();
     let handle = publisher.join().unwrap();
+
     assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!polled.load(Ordering::Relaxed));
@@ -918,6 +957,7 @@ fn test_one_off_reservation_covers_factory_construction_through_shutdown() {
         let (metadata, received) = mpsc::channel();
         let (closing, closed) = mpsc::channel();
         let (release, released) = mpsc::channel();
+
         let runner = thread::spawn(move || {
             Runner::new(config()).start(|context| async move {
                 // Ordinary task disposal follows registry closure. Its signal
@@ -929,6 +969,7 @@ fn test_one_off_reservation_covers_factory_construction_through_shutdown() {
                         let _closing = closing;
                         pending::<()>().await;
                     });
+
                 let registry = context.shared.workers.clone();
                 let (entered, entering) = oneshot::channel();
                 let mut child = context.child("foreign");
@@ -943,6 +984,7 @@ fn test_one_off_reservation_covers_factory_construction_through_shutdown() {
                         }
                     })
                 });
+
                 entering.await.unwrap();
                 metadata.send((registry, publisher)).unwrap();
             });
@@ -987,7 +1029,7 @@ fn test_factory_panic_finishes_metrics_and_releases_reservation() {
                 let factory_running = running.clone();
 
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    child.spawn(move |_| -> std::future::Ready<()> {
+                    child.spawn(move |_| -> Ready<()> {
                         // One-off factories retain their reservation without holding its lock.
                         let reserved = usize::from(matches!(
                             execution,
@@ -1037,6 +1079,7 @@ fn test_retained_descendant_context_is_closed_before_parent_result() {
                 async {}
             })
             .await;
+
         assert!(matches!(result, Err(Error::Closed)));
         assert!(!invoked.load(Ordering::SeqCst));
 
@@ -1072,9 +1115,11 @@ fn test_one_off_completion_cancels_local_and_remote_descendants() {
                 })
                 .await
                 .unwrap();
+
             for descendant in descendants {
                 assert!(matches!(descendant.await, Err(Error::Closed)));
             }
+
             assert_eq!(
                 context
                     .child("sibling")
@@ -1106,6 +1151,7 @@ fn test_root_shutdown_cancels_descendants_across_workers() {
         let [local, remote] = descendants.await.unwrap();
         [parent, local, remote]
     });
+
     for handle in handles {
         assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
     }
@@ -1120,6 +1166,8 @@ fn test_completed_one_off_worker_does_not_close_sibling_registry() {
             .spawn(|_| async {})
             .await
             .unwrap();
+
+        // Spawning remains available to a later sibling and its own one-off children.
         let result = context
             .child("second")
             .dedicated()
@@ -1133,6 +1181,7 @@ fn test_completed_one_off_worker_does_not_close_sibling_registry() {
             })
             .await
             .unwrap();
+
         assert_eq!(result, 11);
     });
 }
@@ -1147,6 +1196,7 @@ fn test_completed_workers_release_tracking_before_subsequent_launches() {
                 .spawn(|_| async {})
                 .await
                 .unwrap();
+
             // Handle completion can precede worker cleanup. Wait for the lease
             // to retire before checking another launch for accumulated tracking.
             poll_fn(|cx| {
@@ -1181,6 +1231,7 @@ fn test_creation_failure_destroys_payload_before_releasing_tracking() {
                         .spawn(move |_| payload),
                 );
             }));
+
             assert!(result.is_err());
             assert_eq!(drops.load(Ordering::SeqCst), 1);
             assert_eq!(context.shared.workers.state.lock().active, 0);
@@ -1226,6 +1277,7 @@ fn test_launch_failure_destroys_reentrant_payload_after_unlocking_registry() {
                 });
         });
     }));
+
     let panic = result.expect_err("thread creation failure must panic in its caller");
     assert!(extract_panic_message(&*panic).contains("failed to spawn thread"));
     assert_eq!(observed.load(Ordering::SeqCst), 1);
@@ -1252,6 +1304,7 @@ fn test_creation_failure_in_caught_task_leaves_runner_usable() {
                         .unwrap();
                 })
                 .await;
+
             assert!(matches!(result, Err(Error::Exited)));
             assert_eq!(
                 context
@@ -1285,6 +1338,7 @@ fn test_worker_startup_failure_uses_configured_panic_policy() {
                         // Keep the root active until it observes the worker failure.
                         pending::<()>().await;
                     }
+
                     context
                         .child("sibling")
                         .spawn(|_| async { 11 })
@@ -1292,6 +1346,7 @@ fn test_worker_startup_failure_uses_configured_panic_policy() {
                         .unwrap()
                 })
             }));
+
             if catch {
                 assert_eq!(result.unwrap(), 11);
             } else {
@@ -1326,6 +1381,7 @@ fn test_startup_failure_survives_rejected_payload_destructor_panic() {
             pending::<()>().await;
         });
     }));
+
     let panic = result.expect_err("native startup failure must fail the runner");
     assert!(
         extract_panic_message(&*panic).contains("injected native worker initialization failure")
@@ -1348,6 +1404,7 @@ fn test_service_error_preserves_completions_before_cleanup() {
     });
     let retained = Arc::new(Mutex::new(None));
     let operation = retained.clone();
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config()).start(|_| async move {
             *operation.lock() = Some(Operation::register(request));
@@ -1367,6 +1424,7 @@ fn test_service_error_preserves_completions_before_cleanup() {
             .await;
         });
     }));
+
     let panic = result.expect_err("injected service failure must fail the runner");
     let message = extract_panic_message(&*panic);
     assert!(message.contains("io_uring driver service failed"));
@@ -1419,11 +1477,15 @@ fn test_shutdown_cancels_tasks_before_destruction() {
             let drops = &drops;
             let cancelled = &cancelled;
             let gauge = &gauge;
+
             async move {
+                // Build both wrappers directly so a shared gauge can check that
+                // the whole subtree is cancelled before either future is destroyed.
                 let tree = Tree::child(&context.tree).0;
                 let descendant = Tree::child(&tree).0;
                 let mut handles = Vec::new();
                 let mut receivers = Vec::new();
+
                 for tree in [tree, descendant.clone()] {
                     let cleanup = Cleanup {
                         drops: drops.clone(),
@@ -1452,6 +1514,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                     } else {
                         assert!(Tasks::register(&context.origin, task).is_ok());
                     }
+
                     handles.push(handle);
                     receivers.push(ready);
                 }
@@ -1462,6 +1525,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         ready.await.unwrap();
                     }
                 }
+
                 handles
             }
         });
@@ -1473,6 +1537,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
             "placement={placement:?}"
         );
         assert_eq!(gauge.get(), 0, "placement={placement:?}");
+
         for handle in handles {
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
@@ -1499,6 +1564,7 @@ fn test_shutdown_waits_for_one_off_task_destruction() {
     let (metadata, received) = mpsc::channel();
     let (entered, entering) = mpsc::channel();
     let (release, released) = mpsc::channel();
+
     let runner = thread::spawn(move || {
         Runner::new(config()).start(|context| async move {
             metadata.send(context.shared.workers.clone()).unwrap();
@@ -1560,6 +1626,7 @@ fn test_shutdown_waits_for_workers_without_observing_late_panics() {
         let (metadata, received) = mpsc::channel();
         let (publishing, publication) = mpsc::channel();
         let (release, released) = mpsc::channel();
+
         let runner = thread::spawn(move || {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 Runner::new(config().with_catch_panics(false)).start(move |context| {
@@ -1577,12 +1644,14 @@ fn test_shutdown_waits_for_workers_without_observing_late_panics() {
                         drop(active);
                     });
                     metadata.send((registry, publisher)).unwrap();
+
                     RootWithLatePublisher {
                         dropped: Some(dropped),
                         fail: root_fails,
                     }
                 })
             }));
+
             result.map_err(|panic| extract_panic_message(&*panic))
         });
 
@@ -1614,6 +1683,7 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
     let directory = cfg.storage_directory().clone();
     let (released, after_release) = mpsc::channel();
     let (finish, finished) = mpsc::channel();
+
     let (shared, registry, _fault) = Runner::new(cfg).start(|context| async move {
         let shared = Arc::downgrade(&context.shared);
         let registry = context.shared.workers.clone();
@@ -1631,6 +1701,9 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
             .dedicated()
             .spawn(move |context| async move {
                 let (blob, _) = context.open("partition", b"retained").await.unwrap();
+
+                // Drop the write after registration so shutdown must finish its
+                // durable I/O without an observer.
                 let write = blob.write_at(0, b"durable", WriteOptions::SYNC);
                 assert!(write.now_or_never().is_none());
                 drop(blob);
@@ -1683,8 +1756,10 @@ fn test_queued_foreign_task_disposal_is_contained_at_shutdown() {
     for catch in [false, true] {
         let drops = Arc::new(AtomicUsize::new(0));
         let payload = PanickingDrop(drops.clone());
+
         let handle = Runner::new(config().with_catch_panics(catch)).start(|context| async move {
             let remote = context.child("queued_foreign");
+
             // Joining only the publisher leaves its accepted task in the
             // mailbox when this root completes its first poll.
             thread::spawn(move || {
@@ -1736,6 +1811,7 @@ fn test_ready_future_destructor_closes_handle_and_leaves_runner_usable() {
                 polls: polls.clone(),
                 drops: drops.clone(),
             };
+
             Runner::new(config().with_catch_panics(catch)).start(|context| async move {
                 let child = context.child("ready_drop");
                 let child = if dedicated { child.dedicated() } else { child };
@@ -1744,6 +1820,7 @@ fn test_ready_future_destructor_closes_handle_and_leaves_runner_usable() {
                 // before it publishes a result. Task disposal remains contained.
                 let result = child.spawn(move |_| future).await;
                 assert!(matches!(result, Err(Error::Closed)));
+
                 context.child("survivor").spawn(|_| async {}).await.unwrap();
             });
 
@@ -1801,10 +1878,12 @@ fn test_callback_failure_does_not_skip_siblings() {
         ..Deferred::default()
     };
     let mut panics = Panics::default();
+
     assert!(panics.take().is_none());
 
     // The first wake fails, but the rest of the batch must still run.
     deferred.run(&mut panics);
+
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert!(deferred.is_empty());
 
@@ -1861,7 +1940,7 @@ fn test_callback_generated_work_prevents_parking() {
 
     // The destructor performs the callback, which Waker::noop cannot model.
     #[allow(clippy::manual_noop_waker)]
-    impl std::task::Wake for Callback {
+    impl Wake for Callback {
         fn wake(self: Arc<Self>) {}
     }
 
@@ -1880,6 +1959,7 @@ fn test_callback_generated_work_prevents_parking() {
                     })));
                 return;
             }
+
             match work {
                 Work::Wake(waker, ready) => {
                     ready.store(true, Ordering::SeqCst);
@@ -1904,6 +1984,7 @@ fn test_callback_generated_work_prevents_parking() {
                         let mut sender = Some(sender);
                         let ready = Arc::new(AtomicBool::new(false));
                         let mut queued = false;
+
                         poll_fn(|cx| {
                             if !queued {
                                 queued = true;
@@ -1917,6 +1998,7 @@ fn test_callback_generated_work_prevents_parking() {
                                 };
                                 let local = Local::current().unwrap();
                                 let mut local = local.borrow_mut();
+
                                 // Longer chains leave a fresh batch after both normal
                                 // callback passes. All progress is local to this worker.
                                 local.deferred.drops.push(Waker::from(Arc::new(Callback {
@@ -1953,7 +2035,7 @@ fn test_final_callbacks_finish_before_tls_removal() {
 
     // This waker owns a reentrant destructor, which Waker::noop cannot model.
     #[allow(clippy::manual_noop_waker)]
-    impl std::task::Wake for Chain {
+    impl Wake for Chain {
         fn wake(self: Arc<Self>) {}
     }
 
@@ -1964,6 +2046,7 @@ fn test_final_callbacks_finish_before_tls_removal() {
             if self.remaining == 0 {
                 panic!("terminal callback panic");
             }
+
             // Each destructor generates another ownership batch. No Local
             // reference escapes shutdown or postpones its final destruction.
             local
@@ -1979,6 +2062,7 @@ fn test_final_callbacks_finish_before_tls_removal() {
 
     let drops = Arc::new(AtomicUsize::new(0));
     let observed = drops.clone();
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         Runner::new(config()).start(|_| async move {
             Local::current()
@@ -1993,6 +2077,7 @@ fn test_final_callbacks_finish_before_tls_removal() {
             panic!("primary root panic");
         });
     }));
+
     assert_eq!(
         extract_panic_message(&*result.unwrap_err()),
         "primary root panic"
@@ -2039,6 +2124,7 @@ fn test_finished_worker_tls_can_wait_for_live_root_work() {
         let (release, release_rx) = oneshot::channel();
         let (done, done_rx) = oneshot::channel();
         let exit_context = context.child("tls_dependency");
+
         context
             .child("first_worker")
             .dedicated()
@@ -2096,6 +2182,7 @@ fn test_foreign_tls_destructor_can_wake_after_current_key_destruction() {
         poll_fn(|cx| {
             let waker = cx.waker().clone();
             let (result, received) = mpsc::channel();
+
             thread::spawn(move || {
                 // Initialize user TLS first. The foreign wake initializes
                 // CURRENT afterward, so CURRENT is destroyed before EXIT.
@@ -2109,6 +2196,7 @@ fn test_foreign_tls_destructor_can_wake_after_current_key_destruction() {
             })
             .join()
             .unwrap();
+
             // Keep the owning runner alive through foreign TLS destruction.
             Poll::Ready(received.recv_timeout(TEST_TIMEOUT).unwrap())
         })
