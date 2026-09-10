@@ -19,8 +19,8 @@
 //! distributes).
 
 use crate::dkg::{SecretStore, network::Directory, types::EpochInfo};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
@@ -724,7 +724,7 @@ mod tests {
 
     fn summary(seed: u8) -> Summary {
         let bytes = [seed; Summary::SIZE];
-        Summary::read(&mut bytes.as_ref()).expect("valid summary")
+        Summary::read(&mut commonware_codec::Copying(&bytes)).expect("valid summary")
     }
 
     fn output(seed: u64) -> Output<MinPk, PublicKey> {

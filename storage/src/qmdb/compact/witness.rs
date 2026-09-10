@@ -24,7 +24,8 @@ use crate::{
         sync::{CompactTarget, Request, Response},
     },
 };
-use commonware_codec::{Decode as _, EncodeSize, Read, Write};
+use bytes::Bytes;
+use commonware_codec::{Buf, Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
@@ -34,7 +35,7 @@ use futures::FutureExt as _;
 #[derive(Clone)]
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// The encoded last commit operation at `size - 1`.
-    pub(crate) op_bytes: Vec<u8>,
+    pub(crate) op_bytes: Bytes,
     /// The committed database size.
     pub(crate) size: Location<F>,
     /// Pinned nodes at the commit operation, in the order returned by
@@ -59,8 +60,8 @@ impl<F: Family, D: Digest> Write for Witness<F, D> {
 impl<F: Family, D: Digest> Read for Witness<F, D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let op_bytes = Vec::<u8>::read_cfg(buf, &((..).into(), ()))?;
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let op_bytes = Bytes::read_cfg(buf, &(..).into())?;
         let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
@@ -78,7 +79,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            op_bytes: u.arbitrary()?,
+            op_bytes: u.arbitrary::<Vec<u8>>()?.into(),
             size: Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?),
             pinned_nodes: u.arbitrary()?,
         })
@@ -212,7 +213,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         if request.start() < last_commit_loc {
             return Err(crate::journal::Error::ItemPruned(*request.start()).into());
         }
-        let op = Op::decode_cfg(self.tip_witness.witness.op_bytes.as_ref(), cfg)
+        let op = Op::decode_cfg(self.tip_witness.witness.op_bytes.clone(), cfg)
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
         // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
         // pinned nodes for this request.
@@ -564,7 +565,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 pub(crate) fn build_witness<F, H, S>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     inactivity_floor_loc: Location<F>,
-    last_commit_op_bytes: Vec<u8>,
+    last_commit_op_bytes: impl Into<Bytes>,
 ) -> Result<VerifiedWitness<F, H::Digest>, Error<F>>
 where
     F: Family,
@@ -583,7 +584,7 @@ where
     let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
     Ok(VerifiedWitness {
         witness: Witness {
-            op_bytes: last_commit_op_bytes,
+            op_bytes: last_commit_op_bytes.into(),
             size,
             pinned_nodes,
         },
@@ -653,7 +654,7 @@ where
     // Decode the commit op to get the inactivity floor, which determines the inactive peak
     // boundary used for root computation.
     let last_commit_loc = size - 1;
-    let last_commit_op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
+    let last_commit_op = Op::decode_cfg(witness.op_bytes.clone(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_op
         .has_floor()
@@ -777,7 +778,7 @@ pub(crate) mod tests {
     {
         let size = journal.size();
         let entry = journal.read(size - 1).await.unwrap();
-        (entry.op_bytes, entry.size, entry.pinned_nodes)
+        (entry.op_bytes.to_vec(), entry.size, entry.pinned_nodes)
     }
 
     /// Append a witness entry without syncing it.
@@ -794,7 +795,7 @@ pub(crate) mod tests {
     {
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                op_bytes: op_bytes.into(),
                 size,
                 pinned_nodes,
             })
@@ -819,7 +820,7 @@ pub(crate) mod tests {
         let journal = journal.rewind(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                op_bytes: op_bytes.into(),
                 size,
                 pinned_nodes,
             })

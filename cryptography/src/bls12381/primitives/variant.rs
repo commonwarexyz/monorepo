@@ -10,8 +10,10 @@ use super::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use bytes::BufMut;
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+};
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Space};
 use commonware_parallel::Strategy;
 use commonware_utils::Participant;
