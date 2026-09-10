@@ -104,7 +104,7 @@ pub struct Network {
 }
 
 impl Network {
-    /// Retain socket policy and shared receive buffers without creating a ring.
+    /// Create a network with the given socket policy and receive buffer pool.
     pub(crate) const fn new(cfg: Config, pool: BufferPool) -> Self {
         Self {
             tcp_nodelay: cfg.tcp_nodelay,
@@ -121,6 +121,7 @@ impl Network {
 fn configure_socket(fd: &OwnedFd, tcp_nodelay: Option<bool>, zero_linger: bool) {
     if let Some(enabled) = tcp_nodelay {
         let value: libc::c_int = enabled.into();
+
         // SAFETY: `fd` owns the live socket throughout this call. The kernel reads
         // exactly one initialized integer from `value` before setsockopt returns.
         if unsafe {
@@ -136,6 +137,7 @@ fn configure_socket(fd: &OwnedFd, tcp_nodelay: Option<bool>, zero_linger: bool) 
             warn!(err = ?std::io::Error::last_os_error(), "failed to set TCP_NODELAY");
         }
     }
+
     if zero_linger {
         let value = libc::linger {
             l_onoff: 1,
@@ -166,6 +168,7 @@ impl crate::Network for Network {
         listener
             .set_nonblocking(true)
             .map_err(|_| Error::BindFailed)?;
+
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
             zero_linger: self.zero_linger,
@@ -180,13 +183,14 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        // Establish one absolute budget before socket creation and admission.
+        // Include socket creation and time waiting for staging in the timeout.
         let deadline = Instant::now() + self.connect_timeout;
         let family = if socket.is_ipv4() {
             libc::AF_INET
         } else {
             libc::AF_INET6
         };
+
         // SAFETY: socket takes only integer flags and returns a fresh descriptor
         // or -1. The successful descriptor is immediately placed in one owner.
         let raw = unsafe {
@@ -199,6 +203,7 @@ impl crate::Network for Network {
         if raw < 0 {
             return Err(Error::ConnectionFailed);
         }
+
         // SAFETY: `raw` is the unique successful result of socket above and has
         // not been closed or placed in another owning descriptor.
         let fd = Arc::new(unsafe { OwnedFd::from_raw_fd(raw) });
@@ -209,6 +214,7 @@ impl crate::Network for Network {
         }))
         .await
         .map_err(|_| Error::ConnectionFailed)?;
+
         let RequestOutput::Connect(result) = output else {
             unreachable!("connect request returned another output kind");
         };
@@ -216,7 +222,9 @@ impl crate::Network for Network {
             Error::Timeout => Error::Timeout,
             _ => Error::ConnectionFailed,
         })?;
+
         configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
+
         Ok((
             Sink::new(fd.clone(), self.read_write_timeout),
             Stream::new(
@@ -252,14 +260,15 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (stream, remote_addr) = loop {
-            // A queued connection needs no waiter or readiness SQE. This also
-            // makes cancellation before readiness incapable of consuming it.
+            // Accept only while this future is being polled. A readiness
+            // request left behind by cancellation cannot consume a connection.
             match self.inner.accept() {
                 Ok(accepted) => break accepted,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(_) => return Err(Error::ConnectionFailed),
             }
+
             let output = Operation::register(Request::Poll(PollRequest {
                 fd: self.inner.clone(),
                 flags: libc::POLLIN as u32,
@@ -267,9 +276,11 @@ impl crate::Listener for Listener {
             }))
             .await
             .map_err(|_| Error::ConnectionFailed)?;
+
             let RequestOutput::Poll(result) = output else {
                 unreachable!("readiness request returned another output kind");
             };
+
             match result {
                 // Readiness may be stale, and an idle listener has no public
                 // timeout. Both outcomes retry the nonblocking accept syscall.
@@ -277,11 +288,15 @@ impl crate::Listener for Listener {
                 Err(_) => return Err(Error::ConnectionFailed),
             }
         };
+
+        // Accepted sockets do not inherit the listener's nonblocking flag.
         stream
             .set_nonblocking(true)
             .map_err(|_| Error::ConnectionFailed)?;
+
         let fd = Arc::new(OwnedFd::from(stream));
         configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
+
         Ok((
             remote_addr,
             Sink::new(fd.clone(), self.read_write_timeout),
@@ -342,6 +357,7 @@ impl Sink {
         unsafe {
             libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_WR);
         }
+
         self.state = SinkState::Closed;
     }
 }
@@ -436,9 +452,8 @@ impl Stream {
     /// `offset` is the byte offset into `buffer` where received data should
     /// start. `len` is the number of bytes to read starting at that offset.
     ///
-    /// Returns the buffer and either the number of bytes read for this
-    /// invocation or an error. The outer error means worker teardown retained
-    /// and retired the admitted buffer, so no replacement owner is fabricated.
+    /// Returns the buffer and the number of bytes read by this invocation.
+    /// Failed requests discard their buffers because the stream is poisoned.
     async fn submit_recv(
         &self,
         buffer: IoBufMut,
@@ -446,7 +461,7 @@ impl Stream {
         len: usize,
         exact: bool,
         deadline: Instant,
-    ) -> Result<Result<(IoBufMut, usize), (IoBufMut, Error)>, Error> {
+    ) -> Result<(IoBufMut, usize), Error> {
         let output = Operation::register(Request::Recv(RecvRequest {
             fd: self.fd.clone(),
             buf: buffer,
@@ -457,12 +472,15 @@ impl Stream {
         }))
         .await
         .map_err(|_| Error::RecvFailed)?;
+
         let RequestOutput::Recv(result) = output else {
             unreachable!("recv request returned another output kind");
         };
-        // Translate cumulative progress while returning only a real owned
-        // buffer. Worker teardown may retire that owner before a later poll.
-        Ok(result.map(|(buf, total)| (buf, total - offset)))
+
+        // Request progress includes the bytes filled by earlier calls.
+        result
+            .map(|(buf, total)| (buf, total - offset))
+            .map_err(|(_, error)| error)
     }
 
     /// Fills the internal buffer by reading from the socket via io_uring.
@@ -473,18 +491,13 @@ impl Stream {
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
-        self.buffer_len = match self.submit_recv(buffer, 0, len, false, deadline).await? {
-            Ok((buffer, read)) => {
-                self.buffer = buffer;
-                read
-            }
-            Err((buffer, err)) => {
-                self.buffer = buffer;
-                return Err(err);
-            }
-        };
+        let (buffer, read) = self.submit_recv(buffer, 0, len, false, deadline).await?;
+        self.buffer = buffer;
+        self.buffer_len = read;
+
         // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
         unsafe { self.buffer.set_len(self.buffer_len) };
+
         Ok(self.buffer_len)
     }
 }
@@ -524,16 +537,11 @@ impl crate::Stream for Stream {
                 // to fill the buffer and immediately drain it
                 let buffer_capacity = self.buffer.capacity();
                 if buffer_capacity == 0 || remaining >= buffer_capacity {
-                    match self
+                    let (buf, read) = self
                         .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
-                        .await?
-                    {
-                        Ok((buf, read)) => {
-                            owned_buf = buf;
-                            bytes_received += read;
-                        }
-                        Err((_, err)) => return Err(err),
-                    }
+                        .await?;
+                    owned_buf = buf;
+                    bytes_received += read;
                 } else {
                     // Fill internal buffer, then loop will copy
                     self.fill_buffer(deadline).await?;
@@ -561,24 +569,26 @@ impl crate::Stream for Stream {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sink, Stream};
+    use super::{Config, Network, Sink, Stream};
     use crate::{
         BufferPool, BufferPoolConfig, Clock as _, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
         Network as _, Runner as _, Sink as _, Spawner as _, Stream as _, Supervisor as _, iouring,
-        network::{
-            iouring::{Config, Network},
-            tests,
-        },
+        network::tests,
         telemetry::metrics::{Register, Registry},
     };
     use commonware_macros::{select, test_group};
     use std::{
-        io::{Read, Write},
-        os::{fd::OwnedFd, unix::net::UnixStream},
+        io::Write,
+        net::TcpStream,
+        os::{
+            fd::{AsRawFd, OwnedFd},
+            unix::net::UnixStream,
+        },
         sync::Arc,
         time::{Duration, Instant},
     };
 
+    /// Allocate receive buffers with the network pool configuration.
     fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), scope)
     }
@@ -590,18 +600,50 @@ mod tests {
         Network::new(cfg, pool)
     }
 
+    /// Read the TCP_NODELAY and SO_LINGER settings from a connected socket.
+    fn socket_options(fd: &OwnedFd) -> (bool, Option<Duration>) {
+        let stream = TcpStream::from(fd.try_clone().unwrap());
+        let nodelay = stream.nodelay().unwrap();
+        let mut linger = libc::linger {
+            l_onoff: 0,
+            l_linger: 0,
+        };
+        let mut len = size_of_val(&linger) as libc::socklen_t;
+
+        // SAFETY: `fd` owns the socket and both output pointers refer to writable
+        // storage. `len` gives the full size of the initialized linger value.
+        let result = unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                std::ptr::from_mut(&mut linger).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(result, 0);
+        assert_eq!(len as usize, size_of_val(&linger));
+
+        let linger =
+            (linger.l_onoff != 0).then(|| Duration::from_secs(linger.l_linger.try_into().unwrap()));
+        (nodelay, linger)
+    }
+
     #[test]
-    fn test_queued_accept_and_cached_operations_without_worker() {
+    fn test_queued_accept_and_empty_operations_without_worker() {
         let network = test_network(Config::default());
         let mut listener =
             futures::executor::block_on(network.bind("127.0.0.1:0".parse().unwrap())).unwrap();
-        let peer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
 
         // A completed handshake is already in the accept queue. No current
         // worker exists, so success also proves no readiness request was polled.
         let (_, mut sink, mut stream) = futures::executor::block_on(listener.accept()).unwrap();
         assert!(stream.peek(1).is_empty());
+
         futures::executor::block_on(sink.send(IoBufs::default())).unwrap();
+        futures::executor::block_on(sink.send(IoBuf::default())).unwrap();
+        futures::executor::block_on(sink.send(Vec::<u8>::new())).unwrap();
         assert!(
             futures::executor::block_on(stream.recv(0))
                 .unwrap()
@@ -623,9 +665,8 @@ mod tests {
             let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
             let address = listener.local_addr().unwrap();
 
-            // The first poll admits readiness but cannot consume a connection.
-            // Dropping it immediately must release the sole slot and make its
-            // stale staging token harmless before the connect reuses capacity.
+            // Cancel readiness before driver service. Its stale queue entry
+            // must not interfere with the connect that reuses the waiter slot.
             assert!(futures::FutureExt::now_or_never(listener.accept()).is_none());
             let (mut sender, _receiver) = network.dial(address).await.unwrap();
             let (_, _sender, mut receiver) = listener.accept().await.unwrap();
@@ -644,12 +685,15 @@ mod tests {
             let mut stream = Stream::new(fd, Duration::from_secs(1), 0, test_pool(&mut registry));
             let mut send = Box::pin(async move { sink.send(b"x").await });
             let mut recv = Box::pin(async move { stream.recv(1).await });
+
             // Retain registered futures across shutdown, including their
             // resources, before polling their original worker's closed state.
             assert!(futures::poll!(send.as_mut()).is_pending());
             assert!(futures::poll!(recv.as_mut()).is_pending());
+
             (send, recv, peer)
         });
+
         assert!(matches!(
             futures::executor::block_on(send),
             Err(Error::SendFailed)
@@ -698,84 +742,46 @@ mod tests {
             }),
         )
         .start(|context| async move {
-            // Exercise the io_uring backend under the shared stress suite.
-            tests::stress_test_network_trait(context, || {
-                test_network(Config {
-                    ..Default::default()
-                })
-            })
-            .await;
-        });
-    }
-
-    #[test]
-    fn test_small_send_read_quickly() {
-        iouring::Runner::default().start(|context| async move {
-            // Verify a small message is delivered promptly through the buffered recv path.
-            let network = test_network(Config::default());
-
-            // Bind a listener
-            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let addr = listener.local_addr().unwrap();
-
-            // Spawn a task to accept and read
-            let reader = context.child("reader").spawn(move |_| async move {
-                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
-
-                // Read a small message (much smaller than the 64KB buffer)
-                stream.recv(10).await.unwrap()
-            });
-
-            // Connect and send a small message
-            let (mut sink, _stream) = network.dial(addr).await.unwrap();
-            let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-            sink.send(msg.clone()).await.unwrap();
-
-            // Wait for the reader to complete
-            let received = reader.await.unwrap();
-
-            // Verify we got the right data
-            assert_eq!(received.coalesce(), msg.as_slice());
+            tests::stress_test_network_trait(context, || test_network(Config::default())).await;
         });
     }
 
     #[test]
     fn test_read_timeout_with_partial_data() {
         iouring::Runner::default().start(|context| async move {
-            // Verify a top-level recv returns timeout after partial progress stalls.
-            // Use a short timeout to make the test fast
             let op_timeout = Duration::from_millis(100);
             let network = test_network(Config {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             });
 
-            // Bind a listener
             let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
             let addr = listener.local_addr().unwrap();
 
             let reader = context.child("reader").spawn(move |_| async move {
                 let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-                // Try to read 100 bytes, but only 5 will be sent
+                // Keep the call pending after a short read so expiry must
+                // return an error instead of exposing a partial result.
                 let start = Instant::now();
                 let result = stream.recv(100).await;
                 let elapsed = start.elapsed();
 
+                // Failed buffered reads expose no partial data and cannot resume.
+                assert!(stream.peek(100).is_empty());
+                assert!(matches!(stream.recv(1).await, Err(Error::Closed)));
+
                 (result, elapsed)
             });
 
-            // Connect and send only partial data
             let (mut sink, _stream) = network.dial(addr).await.unwrap();
             sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
 
-            // Wait for the reader to complete
             let (result, elapsed) = reader.await.unwrap();
             assert!(matches!(result, Err(Error::Timeout)));
-
-            // Verify the timeout occurred around the expected time
             assert!(elapsed >= op_timeout);
-            // Allow some margin for timing variance
+
+            // Allow some margin for scheduling and timer precision.
             assert!(elapsed < op_timeout * 3);
         });
     }
@@ -783,29 +789,20 @@ mod tests {
     #[test]
     fn test_unbuffered_mode() {
         iouring::Runner::default().start(|context| async move {
-            // Verify disabling the internal read buffer preserves direct recv behavior.
-            // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
             let network = test_network(Config {
                 read_buffer_size: 0,
                 ..Default::default()
             });
 
-            // Bind a listener
             let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
             let addr = listener.local_addr().unwrap();
 
-            // Accept one connection and verify that peeking never observes buffered
-            // bytes because the wrapper should not retain any internal read state.
             let reader = context.child("reader").spawn(move |_| async move {
                 let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-                // In unbuffered mode, peek should always return empty
+                // Direct receives must leave no unread bytes in the stream buffer.
                 assert!(stream.peek(100).is_empty());
-
-                // Read messages without buffering
                 let buf1 = stream.recv(5).await.unwrap();
-
-                // Even after recv, peek should be empty in unbuffered mode
                 assert!(stream.peek(100).is_empty());
 
                 let buf2 = stream.recv(5).await.unwrap();
@@ -814,27 +811,19 @@ mod tests {
                 (buf1, buf2)
             });
 
-            // Send two independent messages so the reader exercises repeated direct recvs.
             let (mut sink, _stream) = network.dial(addr).await.unwrap();
             sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
             sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
-            // Both messages should arrive exactly as sent, with no extra bytes hidden in `peek`.
             let (buf1, buf2) = reader.await.unwrap();
-
             assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
             assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
         });
     }
 
     #[test]
-    fn test_op_fd_keeps_descriptor_alive() {
+    fn test_cancelled_recv_retains_descriptor_until_completion() {
         iouring::Runner::default().start(|context| async move {
-            // Verify queued recv requests keep their socket fd alive after caller cancellation.
-            // When a recv future is cancelled (e.g. via select!) after the Request has
-            // been admitted to the worker, the Stream can be dropped while
-            // the request is still in flight. The request's fd field keeps the socket alive
-            // so the OS cannot reuse the FD number.
             let op_timeout = Duration::from_millis(200);
             let network = test_network(Config {
                 read_write_timeout: op_timeout,
@@ -857,15 +846,15 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(50)) => {},
             }
 
-            // The queued request holds an additional clone.
+            // Cancellation cannot release the descriptor before the receive CQE.
             assert_eq!(Arc::strong_count(&fd), 4);
 
-            // Drop all handles. The queued request still retains the fd.
+            // Only this test and the in-flight request retain the descriptor.
             drop(client_sink);
             drop(client_stream);
-            assert_eq!(Arc::strong_count(&fd), 2); // our clone + request
+            assert_eq!(Arc::strong_count(&fd), 2);
 
-            // After op_timeout, the request completes and releases its fd clone.
+            // Allow the worker to process cancellation and retire the request.
             context.sleep(op_timeout).await;
             assert_eq!(Arc::strong_count(&fd), 1);
         });
@@ -873,135 +862,61 @@ mod tests {
 
     #[test]
     fn test_peek_with_buffered_data() {
-        iouring::Runner::default().start(|context| async move {
-            // Verify buffered recv calls leave unread bytes visible via peek().
-            // Use default buffer size to enable buffering
-            let network = test_network(Config::default());
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut registry = Registry::default();
+        let mut stream = Stream::new(
+            Arc::new(socket.into()),
+            Duration::from_secs(1),
+            64,
+            test_pool(&mut registry),
+        );
+        assert!(stream.peek(100).is_empty());
 
-            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let addr = listener.local_addr().unwrap();
+        // Queue the full payload before receiving so the fill can read ahead.
+        peer.write_all(b"hello world").unwrap();
+        let mut stream = iouring::Runner::default().start(|_| async move {
+            let first = stream.recv(5).await.unwrap();
+            assert_eq!(first.coalesce(), b"hello");
+            assert_eq!(stream.peek(100), b" world");
 
-            let reader = context.child("reader").spawn(move |_| async move {
-                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
-
-                // Initially peek should be empty (no data received yet)
-                assert!(stream.peek(100).is_empty());
-
-                // Receive partial data - this should buffer more than requested
-                let first = stream.recv(5).await.unwrap();
-                assert_eq!(first.coalesce(), b"hello");
-
-                // Peek should show remaining buffered data
-                let peeked = stream.peek(100);
-                assert!(!peeked.is_empty());
-                assert_eq!(peeked, b" world");
-
-                // Peek again should return the same (non-consuming)
-                assert_eq!(stream.peek(100), b" world");
-
-                // Peek with max_len should truncate
-                assert_eq!(stream.peek(3), b" wo");
-
-                // Receive the rest
-                let rest = stream.recv(6).await.unwrap();
-                assert_eq!(rest.coalesce(), b" world");
-
-                // Peek should be empty after consuming all buffered data
-                assert!(stream.peek(100).is_empty());
-            });
-
-            // Connect and send data
-            let (mut sink, _stream) = network.dial(addr).await.unwrap();
-            sink.send(b"hello world").await.unwrap();
-
-            reader.await.unwrap();
+            // Peeking does not consume bytes and respects the requested limit.
+            assert_eq!(stream.peek(100), b" world");
+            assert_eq!(stream.peek(3), b" wo");
+            assert!(stream.peek(0).is_empty());
+            stream
         });
+
+        // Buffered bytes remain readable after the worker has shut down.
+        let rest = futures::executor::block_on(stream.recv(6)).unwrap();
+        assert_eq!(rest.coalesce(), b" world");
+        assert!(stream.peek(100).is_empty());
     }
 
     #[test]
     fn test_submit_recv_returns_bytes_for_this_call() {
-        iouring::Runner::default().start(|context| async move {
-            // Verify `submit_recv` translates the request state's cumulative total
-            // back into the per-call byte count expected by the higher-level recv loop.
+        iouring::Runner::default().start(|_| async {
             let mut registry = Registry::default();
             let pool = test_pool(&mut registry.sub_registry("pool"));
-
-            // Build the wrapper directly so the test exercises `submit_recv`
-            // without involving the higher-level buffered recv machinery.
             let (left, mut right) = UnixStream::pair().unwrap();
             let stream = Stream::new(Arc::new(left.into()), Duration::from_secs(1), 0, pool);
 
-            // Pretend the caller already filled two bytes, then complete exactly
-            // three more bytes from the socket.
-            let writer = context
-                .child("writer")
-                .shared(true)
-                .spawn(move |_| async move { right.write_all(b"abc") });
-            let buffer = IoBufMut::with_capacity(5);
+            // Preserve an existing two-byte prefix while receiving three more bytes.
+            right.write_all(b"abc").unwrap();
+            let buffer = IoBufMut::from(b"xy___");
             let result = stream
                 .submit_recv(buffer, 2, 3, true, Instant::now() + Duration::from_secs(1))
                 .await;
 
-            // The wrapper should report only the bytes read by this invocation,
-            // not the cumulative total tracked inside the request state.
-            writer.await.unwrap().unwrap();
-            let (_buffer, read) = result
-                .expect("worker should remain open")
-                .expect("submit_recv should succeed");
+            // Report this call's progress while returning the whole buffer.
+            let (buffer, read) = result.expect("submit_recv should succeed");
             assert_eq!(read, 3);
-
-            drop(stream);
-        });
-    }
-
-    #[test]
-    fn test_vectored_send_path() {
-        iouring::Runner::default().start(|context| async move {
-            // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
-            let (left, mut right) = UnixStream::pair().unwrap();
-            let mut sink = Sink::new(Arc::new(left.into()), Duration::from_secs(1));
-
-            // Queue two buffers so the wrapper must preserve vectored ordering.
-            let mut bufs = IoBufs::default();
-            bufs.append(IoBuf::from(b"ab"));
-            bufs.append(IoBuf::from(b"cd"));
-
-            // Read from the peer in one shot so the final payload ordering is unambiguous.
-            let reader = context
-                .child("reader")
-                .shared(true)
-                .spawn(move |_| async move {
-                    let mut buf = [0u8; 4];
-                    right.read_exact(&mut buf).unwrap();
-                    buf
-                });
-
-            // The peer should observe the concatenated payload in-order.
-            sink.send(bufs).await.unwrap();
-            assert_eq!(&reader.await.unwrap(), b"abcd");
-
-            drop(sink);
-        });
-    }
-
-    #[test]
-    fn test_zero_length_send_short_circuits_before_submit() {
-        iouring::Runner::default().start(|_| async move {
-            // Empty sends finish without registering a current-worker operation.
-            let (left, _right) = UnixStream::pair().unwrap();
-            let mut sink = Sink::new(Arc::new(left.into()), Duration::from_secs(1));
-
-            sink.send(IoBufs::default()).await.unwrap();
-            sink.send(IoBuf::default()).await.unwrap();
-            sink.send(Vec::<u8>::new()).await.unwrap();
+            assert_eq!(buffer.as_ref(), b"xyabc");
         });
     }
 
     #[test]
     fn test_large_recv_skips_internal_buffer() {
         iouring::Runner::default().start(|context| async move {
-            // Verify reads that are at least as large as the internal buffer go
-            // straight into the caller-owned output buffer.
             let network = test_network(Config {
                 read_buffer_size: 8,
                 ..Default::default()
@@ -1021,55 +936,39 @@ mod tests {
             });
 
             let (mut sink, _stream) = network.dial(addr).await.unwrap();
-            sink.send(expected.to_vec()).await.unwrap();
+            sink.send(expected.as_slice()).await.unwrap();
 
             assert_eq!(reader.await.unwrap().coalesce(), expected);
         });
     }
 
     #[test]
-    fn test_configured_socket_options_cover_accept_and_dial_paths() {
-        iouring::Runner::default().start(|context| async move {
-            // Verify both dial and accept exercise the configured socket-option branches.
-            let network = test_network(Config {
-                tcp_nodelay: Some(true),
-                zero_linger: true,
-                ..Default::default()
-            });
+    fn test_socket_options_on_accept_and_dial() {
+        iouring::Runner::default().start(|_| async {
+            for (tcp_nodelay, zero_linger) in
+                [(Some(true), true), (Some(false), false), (None, false)]
+            {
+                let network = test_network(Config {
+                    tcp_nodelay,
+                    zero_linger,
+                    ..Default::default()
+                });
+                let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+                let address = listener.local_addr().unwrap();
 
-            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let addr = listener.local_addr().unwrap();
+                let (client_sink, _client_stream) = network.dial(address).await.unwrap();
+                let (_, server_sink, _server_stream) = listener.accept().await.unwrap();
 
-            // Accepting the connection covers the listener-side option setters.
-            let accepter = context.child("reader").spawn(move |_| async move {
-                let (_addr, _sink, _stream) = listener.accept().await.unwrap();
-            });
-
-            // Dialing the listener covers the client-side option setters.
-            let (_sink, _stream) = network.dial(addr).await.unwrap();
-            accepter.await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_disabled_socket_options_cover_accept_and_dial_paths() {
-        iouring::Runner::default().start(|context| async move {
-            // Verify both dial and accept also cover the "do not touch socket options" branches.
-            let network = test_network(Config {
-                tcp_nodelay: None,
-                zero_linger: false,
-                ..Default::default()
-            });
-
-            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let addr = listener.local_addr().unwrap();
-
-            let accepter = context.child("reader").spawn(move |_| async move {
-                let (_addr, _sink, _stream) = listener.accept().await.unwrap();
-            });
-
-            let (_sink, _stream) = network.dial(addr).await.unwrap();
-            accepter.await.unwrap();
+                // Both connection paths must apply the policy. Unconfigured
+                // sockets retain the default Nagle and disabled-linger settings.
+                let expected = (
+                    tcp_nodelay.unwrap_or(false),
+                    zero_linger.then_some(Duration::ZERO),
+                );
+                for fd in [&client_sink.fd, &server_sink.fd] {
+                    assert_eq!(socket_options(fd), expected);
+                }
+            }
         });
     }
 }
