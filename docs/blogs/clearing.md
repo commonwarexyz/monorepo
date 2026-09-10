@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-09T00:00:00Z"
+modified-time: "2026-09-10T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/9/26): Payers now sign cumulative vectors that can advance several recipients in one batch, removing recipient-side contention. The close carries one row per changed account and one entry per edge, with every credit backed by a payer-signed entry. Validators retain state between closes and receive only the delta.*
+*Update (9/10/26): Payers now sign cumulative vectors that can advance several recipients in one batch, removing recipient-side contention. The close carries one row per changed account and one entry per edge, with every credit backed by a payer-signed entry. Validators retain state between closes and receive only the delta.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
