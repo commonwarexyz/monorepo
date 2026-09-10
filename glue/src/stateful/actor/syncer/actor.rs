@@ -273,9 +273,9 @@ mod tests {
         async fn init(
             _context: deterministic::Context,
             config: Self::Config,
-            _expected: Option<Self::SyncTargets>,
+            expected: Option<Self::SyncTargets>,
         ) -> Self {
-            Self(config)
+            Self(expected.unwrap_or(config))
         }
 
         fn initial_sync_targets() -> Self::SyncTargets {

@@ -410,7 +410,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 
     /// Truncate to a specific section and size.
     ///
-    /// Truncates the section to the given size and removes all sections after it.
+    /// Truncates the section to the given size and removes all sections after it. A shorter
+    /// length is durable when this returns.
     pub(crate) async fn truncate(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.truncate_pending(section, size).await?;
         Ok(self)
@@ -418,7 +419,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 
     /// Truncate only the given section to a specific size.
     ///
-    /// Other sections are unaffected.
+    /// Other sections are unaffected. A shorter length is durable when this returns.
     pub(crate) async fn truncate_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
         self.0.truncate_pending_section(section, size).await?;
         Ok(self)

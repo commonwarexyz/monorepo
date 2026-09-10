@@ -61,7 +61,8 @@ pub trait SectionBuffer: Send + Sync {
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Shorten an unpublished section during initialization.
+    /// Shorten an unpublished section during initialization. A shorter length is durable when
+    /// this returns.
     fn truncate_pending(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 
     /// Irreversibly publish this section for appends.
@@ -194,8 +195,8 @@ impl<B: Blob> AppendBuffer<B> {
         }
     }
 
-    /// Repair an unpublished section. Initialized sections cannot be shortened. Panics if the
-    /// requested end would shorten a published section.
+    /// Repair an unpublished section. A shorter length is durable when this returns. Initialized
+    /// sections cannot be shortened. Panics if the requested end would shorten a published section.
     pub async fn truncate_pending(&mut self, end: u64) -> Result<(), RError> {
         match self {
             Self::Pending(p) => p.as_mut().expect("pending section").truncate(end).await,
@@ -387,7 +388,8 @@ impl<B: Blob> WriteBuffer<B> {
         self.pending = false;
     }
 
-    /// Repair the unpublished section. Panics if a published section would be shortened.
+    /// Repair the unpublished section. A shorter length is durable when this returns. Panics if a
+    /// published section would be shortened.
     pub async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
         if len >= self.inner.size() {
             return Ok(());
@@ -763,7 +765,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Truncate by removing all sections after `section` and resizing the target section.
+    /// Truncate by removing all sections after `section` and resizing the target section. A
+    /// shorter section length is durable when this returns.
     pub async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
@@ -805,7 +808,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
-    /// Resize only the given section without affecting other sections.
+    /// Resize only the given section without affecting other sections. A shorter length is
+    /// durable when this returns.
     pub async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 

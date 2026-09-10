@@ -277,13 +277,11 @@ where
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
     ) -> Result<Self, Error<F>> {
-        let Some(target) = expected else {
-            return <Self>::init(context, config, None).await;
-        };
-        let db = <Self>::init(context, config, Some(target.range.end())).await?;
+        let bound = expected.as_ref().map(|target| target.range.end());
+        let db = <Self>::init(context, config, bound).await?;
         crate::stateful::db::validate_initialization::<E, Self>(
             db,
-            target,
+            expected,
             Error::InitializationTargetMismatch,
         )
     }
@@ -366,13 +364,11 @@ where
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
     ) -> Result<Self, Error<F>> {
-        let Some(target) = expected else {
-            return <Self>::init(context, config, None).await;
-        };
-        let db = <Self>::init(context, config, Some(target.range.end())).await?;
+        let bound = expected.as_ref().map(|target| target.range.end());
+        let db = <Self>::init(context, config, bound).await?;
         crate::stateful::db::validate_initialization::<E, Self>(
             db,
-            target,
+            expected,
             Error::InitializationTargetMismatch,
         )
     }

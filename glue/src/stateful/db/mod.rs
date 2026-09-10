@@ -734,15 +734,18 @@ where
     ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
 }
 
-/// Validate the complete target before returning a managed database.
+/// Validate the complete target, when one was supplied, before returning a managed database.
 fn validate_initialization<E, T: ManagedDb<E>>(
     db: T,
-    expected: T::SyncTarget,
+    expected: Option<T::SyncTarget>,
     mismatch: T::Error,
 ) -> Result<T, T::Error>
 where
     T::SyncTarget: Debug,
 {
+    let Some(expected) = expected else {
+        return Ok(db);
+    };
     let recovered = db.sync_target();
     if recovered != expected {
         tracing::error!(

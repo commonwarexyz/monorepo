@@ -1150,7 +1150,7 @@ pub trait Recovery: Send + Sync + Sized {
     type Journal: Mutable;
 
     /// Available item positions, including the retained pruning boundary.
-    fn bounds(&self) -> std::ops::Range<u64>;
+    fn bounds(&self) -> Range<u64>;
 
     /// Read a retained item for initialization validation.
     fn read(
@@ -1207,7 +1207,8 @@ pub trait Backing<E: Context>: Mutable {
     type Recovery: Recovery<Journal = Self>;
 
     /// Open recovery storage for an optional exclusive item end. Implementations may inspect
-    /// later storage to validate recovery boundaries.
+    /// later storage to validate recovery boundaries. Returns [JournalError::ItemPruned] when
+    /// `max_size` lies below the retained start.
     fn recover(
         context: E,
         cfg: Self::Config,
@@ -1263,7 +1264,7 @@ mod tests {
         },
         utils::detached::{DropMonitor, block_strategy},
     };
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::{Manual, Rayon, Sequential};
@@ -1277,11 +1278,11 @@ mod tests {
         },
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use futures::StreamExt as _;
     use std::{
         future::Future,
-        num::{NonZeroU16, NonZeroUsize},
+        num::{NonZeroU16, NonZeroU64, NonZeroUsize},
         time::Duration,
     };
 
@@ -1974,6 +1975,168 @@ mod tests {
     fn test_initialization_selection_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_initialization_selection_inner::<mmb::Family>);
+    }
+
+    /// Commit A then B, reopen at A, append an equal-length branch without syncing, then crash
+    /// with the appends retained and any unsynced resize lost. Recovery must yield A or a prefix
+    /// of the new branch, never B's operations or B's Merkle nodes.
+    fn init_at_most_equal_length_branch_crash_inner<F: Family + PartialEq>() {
+        const A: u64 = 4;
+        fn is_commit<F: Family>(op: &TestOp<F>) -> bool {
+            op.is_commit()
+        }
+        // One operation per page makes the reopen bound page aligned in the operation journal.
+        // The two-page write buffer floor flushes the branch in whole-buffer bursts.
+        fn journal_cfg<F: Family + PartialEq>(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+            let page = NonZeroU16::new(<TestOp<F> as FixedSize>::SIZE as u16).unwrap();
+            JConfig {
+                partition: format!("journal-{suffix}"),
+                items_per_blob: NZU64!(1000),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+            }
+        }
+        // One node per page makes the reopen bound page aligned in the Merkle journal.
+        fn merkle_cfg(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+            let page = NonZeroU16::new(Digest::SIZE as u16).unwrap();
+            MerkleConfig {
+                journal_partition: format!("mmr-journal-{suffix}"),
+                metadata_partition: format!("mmr-metadata-{suffix}"),
+                items_per_blob: NZU64!(1000),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+            }
+        }
+        fn branch<F: Family + PartialEq>(first: u8, len: u64) -> Vec<TestOp<F>> {
+            let mut ops: Vec<TestOp<F>> = (0..len - 1)
+                .map(|i| create_operation::<F>(first + i as u8))
+                .collect();
+            ops.push(TestOp::<F>::CommitFloor(None, Location::new(0)));
+            ops
+        }
+
+        // A three-operation branch is flushed whole and a five-operation branch only in part,
+        // so recovery sees the new commit in the first case and only A's commit in the second.
+        for len in [3u64, 5] {
+            let suffix = format!("equal-length-branch-{len}");
+            let crash_suffix = suffix.clone();
+            let (roots, checkpoint) =
+                deterministic::Runner::default().start_and_recover(move |context| async move {
+                    let mc = merkle_cfg(&crash_suffix, &context);
+                    let jc = journal_cfg::<F>(&crash_suffix, &context);
+                    let mut journal = TestJournal::<F>::new(
+                        context.child("create"),
+                        mc.clone(),
+                        jc.clone(),
+                        is_commit::<F>,
+                        ForwardFold,
+                    )
+                    .await
+                    .unwrap();
+                    for op in branch::<F>(0, A) {
+                        (journal, _) = journal.append(&op).await.unwrap();
+                    }
+                    let mut journal = journal.sync().await.unwrap();
+                    let root_a = journal_root(&journal);
+                    for op in branch::<F>(50, len) {
+                        (journal, _) = journal.append(&op).await.unwrap();
+                    }
+                    let journal = journal.sync().await.unwrap();
+                    assert_eq!(*journal.size(), A + len);
+                    drop(journal);
+
+                    // Keep unsynced writes and drop unsynced resizes at the crash.
+                    *context.storage_fault_config().write() = deterministic::FaultConfig {
+                        write_rate: Some(deterministic::WriteConfig {
+                            failure_rate: probability!(0.0),
+                            retention_rate: probability!(1.0),
+                            mode: deterministic::PartialWriteMode::Prefix,
+                        }),
+                        resize_rate: Some(deterministic::ResizeConfig {
+                            failure_rate: probability!(0.0),
+                            partial_rate: probability!(0.0),
+                        }),
+                        ..Default::default()
+                    };
+                    let mut journal = TestJournal::<F>::init_at_most(
+                        context.child("cap"),
+                        mc,
+                        jc,
+                        A,
+                        is_commit::<F>,
+                        ForwardFold,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(*journal.size(), A);
+                    assert_eq!(journal_root(&journal), root_a);
+                    let mut roots = vec![root_a];
+                    for op in branch::<F>(100, len) {
+                        (journal, _) = journal.append(&op).await.unwrap();
+                        roots.push(journal_root(&journal));
+                    }
+                    drop(journal);
+                    roots
+                });
+
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let journal = TestJournal::<F>::new(
+                    context.child("reopen"),
+                    merkle_cfg(&suffix, &context),
+                    journal_cfg::<F>(&suffix, &context),
+                    is_commit::<F>,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+                let size = *journal.size();
+                assert!(
+                    (A..=A + len).contains(&size),
+                    "recovered size {size} is not a prefix of the new branch"
+                );
+                let expected = branch::<F>(100, len);
+                for pos in A..size {
+                    assert_eq!(
+                        journal.read(pos).await.unwrap(),
+                        expected[(pos - A) as usize],
+                        "operation at retained position {pos} was never written there"
+                    );
+                }
+                let root = journal_root(&journal);
+                assert_eq!(
+                    root,
+                    roots[(size - A) as usize],
+                    "root does not match the recovered operations"
+                );
+                let (proof, ops) = journal
+                    .proof(Location::new(0), NonZeroU64::new(size).unwrap(), 0)
+                    .await
+                    .unwrap();
+                assert_eq!(ops.len() as u64, size);
+                assert!(verify_proof(
+                    &proof,
+                    &ops,
+                    Location::new(0),
+                    &root,
+                    &StandardHasher::new(ForwardFold)
+                ));
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_init_at_most_equal_length_branch_crash_mmr() {
+        init_at_most_equal_length_branch_crash_inner::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_init_at_most_equal_length_branch_crash_mmb() {
+        init_at_most_equal_length_branch_crash_inner::<mmb::Family>();
     }
 
     /// Verify that append() increments the operation count, returns correct locations, and

@@ -827,6 +827,11 @@ async fn run_ops<J: FuzzJournal>(
                     drop(synced);
                     match J::init_at_most(ctx.child("capped"), cfg.clone(), target).await {
                         Ok(journal) => {
+                            assert_eq!(
+                                journal.bounds().end,
+                                target.min(bounds.end),
+                                "bounded initialization landed off its cap"
+                            );
                             expected.reopened(journal.bounds().end);
                             journal
                         }

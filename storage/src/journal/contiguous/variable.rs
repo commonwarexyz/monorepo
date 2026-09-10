@@ -1149,6 +1149,9 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 )));
             }
             warn!(blob, valid, size, "truncating to last well-formed page");
+
+            // A cap can place the hole below the on-disk watermark, so this data is still
+            // acknowledged. Truncate it in `finish` after the offsets watermark is lowered.
             if max_size.is_some() {
                 valid_lengths.insert(blob, valid);
                 continue;
@@ -6381,6 +6384,90 @@ mod tests {
                 3,
                 "corruption evidence should not be removed"
             );
+        });
+    }
+
+    /// Reopen at a page-aligned bound, append over the freed data pages, then crash with the
+    /// appends retained and any unsynced resize lost. Recovery must not join the new frames with
+    /// the discarded suffix.
+    #[test_traced]
+    fn test_variable_init_at_most_truncation_survives_crash() {
+        // A u64 frame is nine bytes, so four frames fill a 36-byte page and the eight-item bound
+        // is page aligned. The two-page write buffer floor sends a nine-item append down the
+        // direct path: eight items land in two full pages and the ninth stays buffered, so the
+        // old pages behind them are never rewritten.
+        const PAGE_SIZE: NonZeroU16 = NZU16!(36);
+        const BOUND: u64 = 8;
+        fn cfg(pooler: &impl BufferPooler) -> Config<()> {
+            Config {
+                partition: "variable-init-at-most-truncation-crash".into(),
+                items_per_section: NZU64!(100),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(3)),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(2048),
+            }
+        }
+        let appended: Vec<u64> = (100..109).collect();
+
+        let executor = deterministic::Runner::default();
+        let (appended, checkpoint) = executor.start_and_recover(|context| async move {
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg(&context))
+                .await
+                .unwrap();
+            for value in 0..24u64 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Keep unsynced writes and drop unsynced resizes at the crash.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            let journal =
+                Journal::<_, u64>::init_at_most(context.child("cap"), cfg(&context), BOUND)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 0..BOUND);
+            let (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            drop(journal);
+            appended
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg(&context))
+                .await
+                .unwrap();
+            let bounds = journal.bounds();
+            assert_eq!(bounds.start, 0);
+            assert!(
+                (BOUND..=BOUND + appended.len() as u64).contains(&bounds.end),
+                "recovered size {} is not a prefix of the new history",
+                bounds.end
+            );
+            for pos in 0..BOUND {
+                assert_eq!(journal.read(pos).await.unwrap(), pos);
+            }
+            for pos in BOUND..bounds.end {
+                assert_eq!(
+                    journal.read(pos).await.unwrap(),
+                    appended[(pos - BOUND) as usize],
+                    "content at retained position {pos} was never written there"
+                );
+            }
+            journal.destroy().await.unwrap();
         });
     }
 
