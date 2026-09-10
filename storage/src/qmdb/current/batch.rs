@@ -15,7 +15,7 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
         batch_chain::Bounds,
@@ -715,22 +715,10 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
-        let inner = inner
-            .merkleize_with_floor_scan(
-                &db.any,
-                metadata,
-                StagedUpdates::<F, update::Unordered<K, V>>::new(),
-                None,
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
-            .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let prepared = self.prepare(db).await?;
+        let budget = prepared.default_compaction_budget();
+        let (prepared, _) = prepared.compact(db, budget).await?;
+        prepared.merkleize(db, metadata).await
     }
 
     /// Resolve user operations without automatic compaction or finalization.
@@ -785,21 +773,10 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
-        let inner = inner
-            .merkleize_with_floor_scan(
-                &db.any,
-                metadata,
-                StagedUpdates::<F, update::Ordered<K, V>>::new(),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
-            .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let prepared = self.prepare(db).await?;
+        let budget = prepared.default_compaction_budget();
+        let (prepared, _) = prepared.compact(db, budget).await?;
+        prepared.merkleize(db, metadata).await
     }
 
     /// Resolve user operations without automatic compaction or finalization.
