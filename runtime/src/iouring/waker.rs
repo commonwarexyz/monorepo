@@ -20,7 +20,7 @@
 //! the loop is truly idle, and avoids repeated wake writes while a wake is
 //! already pending.
 
-use super::UserData;
+use super::waiter::UserData;
 use io_uring::squeue::SubmissionQueue;
 #[cfg(not(feature = "loom"))]
 use io_uring::{opcode::PollAdd, types::Fd};

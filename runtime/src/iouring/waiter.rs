@@ -14,7 +14,6 @@
 //! to [`Deferred`]. The worker invokes callbacks after releasing its local borrow.
 
 use super::{
-    UserData,
     request::{Request, RequestOutput},
     runtime::Deferred,
     slab::{Id, Slab},
@@ -25,6 +24,9 @@ use commonware_utils::channel::oneshot;
 use io_uring::squeue::Entry as SqueueEntry;
 use std::{mem, task::Waker, time::Instant};
 use tracing::warn;
+
+/// Kernel completion identity packed into an SQE's `user_data` field.
+pub type UserData = u64;
 
 /// Full-width identity for a tracked request.
 ///

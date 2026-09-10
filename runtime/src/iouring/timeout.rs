@@ -24,7 +24,7 @@
 //!
 //! Reference: <https://www.cs.columbia.edu/~nahum/w6998/papers/sosp87-timing-wheels.pdf>
 
-use super::WaiterId;
+use super::waiter::WaiterId;
 use std::time::{Duration, Instant};
 
 /// Monotonic timeout-wheel tick in the wheel's local time domain.
