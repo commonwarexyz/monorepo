@@ -157,6 +157,8 @@ where
 ///
 /// Maintains a monotonically increasing position counter where each appended item receives a unique
 /// position starting from 0.
+///
+/// Returned items may retain shared backing allocations larger than their byte fields.
 pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item: Send;

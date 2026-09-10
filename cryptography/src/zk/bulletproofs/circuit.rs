@@ -133,8 +133,8 @@
 
 use super::ipa;
 use crate::transcript::Transcript;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space, powers},
     synthetic::Synthetic,

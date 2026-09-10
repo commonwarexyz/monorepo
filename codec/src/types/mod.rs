@@ -1,7 +1,6 @@
 //! Codec implementations for common types
 
-use crate::{Error, Read};
-use ::bytes::Buf;
+use crate::{Buf, Error, Read};
 use core::cmp::Ordering;
 
 pub mod btree_map;
@@ -107,8 +106,8 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{BufsMut, Error, Read, Write};
-    use bytes::{Buf, BufMut, Bytes, BytesMut, buf::UninitSlice};
+    use crate::{Buf, BufsMut, Error, Read, Write};
+    use bytes::{BufMut, Bytes, BytesMut, buf::UninitSlice};
 
     /// One-byte test type that uses the default aggregate hooks.
     ///
@@ -142,8 +141,8 @@ pub(crate) mod tests {
         pub put_slice_calls: usize,
         /// Number of single-byte writes.
         pub put_u8_calls: usize,
-        /// Number of externally pushed chunks.
-        pub push_calls: usize,
+        /// Externally pushed chunks, in order.
+        pub pushed: Vec<Bytes>,
     }
 
     impl TrackingWriteBuf {
@@ -152,7 +151,7 @@ pub(crate) mod tests {
                 inner: BytesMut::new(),
                 put_slice_calls: 0,
                 put_u8_calls: 0,
-                push_calls: 0,
+                pushed: Vec::new(),
             }
         }
 
@@ -194,16 +193,16 @@ pub(crate) mod tests {
     impl BufsMut for TrackingWriteBuf {
         fn push(&mut self, bytes: impl Into<Bytes>) {
             let bytes = bytes.into();
-            self.push_calls += 1;
             self.inner.extend_from_slice(&bytes);
+            self.pushed.push(bytes);
         }
     }
 
-    /// Test [`Buf`] implementation that records how values are read.
+    /// Test [`bytes::Buf`] implementation that records how values are read.
     ///
     /// Specialization-selection tests use this to assert whether a container
-    /// read its payload with one aggregate [`Buf::copy_to_slice`] call or with
-    /// per-element [`Buf::get_u8`] calls.
+    /// read its payload with one aggregate [`bytes::Buf::copy_to_slice`] call or with
+    /// per-element [`bytes::Buf::get_u8`] calls.
     pub struct TrackingReadBuf {
         inner: Bytes,
         /// Number of aggregate slice reads.
@@ -222,7 +221,9 @@ pub(crate) mod tests {
         }
     }
 
-    impl Buf for TrackingReadBuf {
+    impl Buf for TrackingReadBuf {}
+
+    impl bytes::Buf for TrackingReadBuf {
         fn remaining(&self) -> usize {
             self.inner.remaining()
         }
@@ -238,6 +239,10 @@ pub(crate) mod tests {
         fn copy_to_slice(&mut self, dst: &mut [u8]) {
             self.copy_to_slice_calls += 1;
             self.inner.copy_to_slice(dst);
+        }
+
+        fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+            self.inner.copy_to_bytes(len)
         }
 
         fn get_u8(&mut self) -> u8 {

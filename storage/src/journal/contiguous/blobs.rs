@@ -4,9 +4,11 @@ use crate::{
     Context, SyncCompletion,
     journal::{Error, frame::FrameReader},
 };
+use bytes::Bytes;
+use commonware_codec::Buf;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
+    Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -679,7 +681,16 @@ impl<'a, B: RBlob> Replay<'a, B> {
     }
 }
 
-impl<B: RBlob> Buf for Replay<'_, B> {
+impl<B: RBlob> Buf for Replay<'_, B> {}
+
+impl<B: RBlob> bytes::Buf for Replay<'_, B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.copy_to_bytes(len),
+            ReplayInner::View(replay) => replay.copy_to_bytes(len),
+        }
+    }
+
     fn remaining(&self) -> usize {
         match &self.inner {
             ReplayInner::Paged(replay) => replay.remaining(),
@@ -711,9 +722,7 @@ struct ViewReplay<'a, B: RBlob> {
     /// Minimum read size when more bytes are needed.
     buffer_size: NonZeroUsize,
     /// Buffered logical bytes.
-    buf: Vec<u8>,
-    /// Offset of the next unread byte in `buf`.
-    cursor: usize,
+    buf: IoBufs,
     /// Whether `offset` has reached the source blob's logical size.
     exhausted: bool,
 }
@@ -729,8 +738,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
             blob,
             offset,
             buffer_size,
-            buf: Vec::new(),
-            cursor: 0,
+            buf: IoBufs::default(),
             exhausted: false,
         })
     }
@@ -740,11 +748,9 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
         self.exhausted
     }
 
-    /// Ensure at least `n` bytes are available through the [`Buf`] implementation.
+    /// Ensure at least `n` bytes are available through the [`bytes::Buf`] implementation.
     async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.remaining() < n && !self.exhausted {
-            self.compact();
-
             let blob_size = self.blob.size();
             let remaining = blob_size.saturating_sub(self.offset);
             if remaining == 0 {
@@ -768,7 +774,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .offset
                 .checked_add(read as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            self.buf.extend_from_slice(&buf.chunk()[..read]);
+            self.buf.append(IoBuf::from(Bytes::from(buf.freeze())));
             if self.offset == blob_size {
                 self.exhausted = true;
             }
@@ -776,38 +782,25 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
 
         Ok(self.remaining() >= n)
     }
-
-    /// Discard bytes already consumed through [`Buf::advance`].
-    fn compact(&mut self) {
-        match self.cursor {
-            0 => {}
-            cursor if cursor == self.buf.len() => {
-                self.buf.clear();
-                self.cursor = 0;
-            }
-            cursor => {
-                self.buf.drain(..cursor);
-                self.cursor = 0;
-            }
-        }
-    }
 }
 
-impl<B: RBlob> Buf for ViewReplay<'_, B> {
+impl<B: RBlob> Buf for ViewReplay<'_, B> {}
+
+impl<B: RBlob> bytes::Buf for ViewReplay<'_, B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        self.buf.copy_to_bytes(len)
+    }
+
     fn remaining(&self) -> usize {
-        self.buf.len() - self.cursor
+        self.buf.remaining()
     }
 
     fn chunk(&self) -> &[u8] {
-        &self.buf[self.cursor..]
+        self.buf.chunk()
     }
 
     fn advance(&mut self, cnt: usize) {
-        self.cursor = self
-            .cursor
-            .checked_add(cnt)
-            .expect("advance overflowed replay cursor");
-        assert!(self.cursor <= self.buf.len(), "advanced past replay buffer");
+        self.buf.advance(cnt);
     }
 }
 
@@ -866,6 +859,43 @@ mod tests {
             self.partition.open(blob).await?.sync().await?;
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_replay_preserves_byte_views_across_fills() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
+            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            writer.append(b"abcdefgh").await.unwrap();
+            let snapshot = writer.snapshot().await.unwrap();
+
+            for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
+                let paged = matches!(source, Blob::Sealed(_));
+                let mut replay = source
+                    .replay_from(0, NZUsize!(4), ReadOptions::default())
+                    .unwrap();
+                assert!(replay.ensure(4).await.unwrap());
+                let first_range = replay.chunk().as_ptr_range();
+                let first = replay.copy_to_bytes(2);
+                assert_eq!(first.as_ref(), b"ab");
+                assert!(first_range.contains(&first.as_ptr()));
+
+                assert!(replay.ensure(6).await.unwrap());
+                let middle = replay.copy_to_bytes(4);
+                assert_eq!(middle.as_ref(), b"cdef");
+                assert_eq!(first_range.contains(&middle.as_ptr()), paged);
+
+                let last_range = replay.chunk().as_ptr_range();
+                let last = replay.copy_to_bytes(2);
+                assert_eq!(last.as_ref(), b"gh");
+                assert!(last_range.contains(&last.as_ptr()));
+                assert_eq!(replay.remaining(), 0);
+                assert!(!replay.ensure(1).await.unwrap());
+                assert!(replay.is_exhausted());
+            }
+        });
     }
 
     #[test]

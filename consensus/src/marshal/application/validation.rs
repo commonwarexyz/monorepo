@@ -8,7 +8,6 @@ use crate::{
     types::{Epoch, Epocher, Height, Round},
 };
 use commonware_cryptography::certificate::Scheme;
-use std::sync::Arc;
 
 /// Which marshal cache should hold a structurally valid candidate.
 ///
@@ -32,7 +31,7 @@ impl Stage {
         self,
         marshal: &Mailbox<S, V>,
         round: Round,
-        block: Arc<V::Block>,
+        block: V::Block,
     ) -> bool {
         match self {
             Self::Verified => marshal.verified(round, block).await,

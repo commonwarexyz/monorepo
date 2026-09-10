@@ -22,11 +22,11 @@
 //! with the deep clone added.
 
 use bytes::{BufMut, Bytes};
-use commonware_codec::DecodeExt as _;
+use commonware_codec::{Copying, DecodeExt as _};
 use commonware_runtime::{IoBuf, IoBufMut};
 use commonware_utils::sequence::FixedBytes;
 use criterion::Criterion;
-use std::{hint::black_box, io::Cursor, num::NonZeroUsize};
+use std::{hint::black_box, num::NonZeroUsize};
 
 macro_rules! bench_sizes {
     ($c:expr, $($size:literal),+ $(,)?) => {
@@ -67,17 +67,17 @@ macro_rules! bench_sizes {
                 FixedBytes::<$size>::decode(&mut iobuf_aligned).unwrap()
             });
 
-            bench_decode_fixed::<$size, _>($c, "vec_cursor", || {
-                FixedBytes::<$size>::decode(Cursor::new(black_box(vec.clone()))).unwrap()
+            bench_decode_fixed::<$size, _>($c, "vec", || {
+                FixedBytes::<$size>::decode(black_box(vec.clone())).unwrap()
             });
 
             bench_decode_fixed::<$size, _>($c, "vec_slice", || {
                 let vec = black_box(vec.clone());
-                FixedBytes::<$size>::decode(vec.as_slice()).unwrap()
+                FixedBytes::<$size>::decode(Copying(vec.as_slice())).unwrap()
             });
 
             bench_decode_fixed::<$size, _>($c, "slice", || {
-                FixedBytes::<$size>::decode(vec.as_slice()).unwrap()
+                FixedBytes::<$size>::decode(Copying(vec.as_slice())).unwrap()
             });
         )+
     };

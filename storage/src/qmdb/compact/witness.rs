@@ -11,7 +11,7 @@ use crate::{
     merkle::{Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{self, Error, sync::CompactTarget},
 };
-use commonware_codec::{EncodeSize, Read, Write};
+use commonware_codec::{Buf, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 
@@ -44,7 +44,7 @@ impl<F: Family, D: Digest, O: Operation<F>> Write for Witness<F, D, O> {
 impl<F: Family, D: Digest, O: Operation<F>> Read for Witness<F, D, O> {
     type Cfg = O::Cfg;
 
-    fn read_cfg(buf: &mut impl bytes::Buf, cfg: &O::Cfg) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &O::Cfg) -> Result<Self, commonware_codec::Error> {
         let commit = O::read_cfg(buf, cfg)?;
         let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
