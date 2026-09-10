@@ -1469,7 +1469,8 @@ pub mod tests {
                 }
 
                 // ReadAt reports a retry or partial progress even after
-                // cancellation. The orphan guard must retire it at this CQE.
+                // cancellation. CancelRequested prevents a follow-up SQE
+                // and retires the request at this CQE.
                 harness.simulated_completion(id, result);
 
                 assert!(harness.driver.state.ready_queue.is_empty());
