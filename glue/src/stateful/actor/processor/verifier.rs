@@ -1,12 +1,12 @@
 use super::{
     Application, Cancellation, Execution, PendingDigest, PrepareBatchesError, ReplayFlights,
-    ReplayTracking, VerificationProgress, await_or_cancel, fetch_ancestor, is_already_processed,
+    ReplayTracking, VerificationProgress, await_or_cancel, is_already_processed,
 };
 use crate::stateful::{actor::core::Verification, db::DatabaseSet};
 use commonware_consensus::{
-    Heightable, Roundable,
+    Block as _, Heightable, Roundable,
     marshal::{
-        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
+        blocks::Blocks,
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
 };
@@ -45,7 +45,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Parent block consumed while preparing the candidate's state.
+    /// Parent block used to fork the candidate's batches.
     block: Arc<A::Block>,
     /// Digest of `block`.
     digest: PendingDigest<A, E>,
@@ -85,39 +85,24 @@ where
 {
     /// Runs one verification request while allowing unrelated requests to be
     /// polled.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::stateful::actor) async fn run<S, V>(
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
         consensus_context: A::Context,
-        ancestry: impl Ancestry<A::Block>,
+        block: Arc<A::Block>,
+        parent: Arc<A::Block>,
+        blocks: Blocks<A::Block>,
         progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
     ) -> Option<bool>
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
         let timer = self.execution.metrics.verify_duration.timer(context);
-        let mut ancestry = ancestry;
-
-        // Acquire the candidate independently for each request. Availability is
-        // round-scoped, so requests cannot safely share this part of the work.
-        let block = match fetch_ancestor(verification, &mut ancestry).await {
-            Some(Some(block)) => block,
-            Some(None) => {
-                debug!("verification request waiting on incomplete block ancestry");
-                verification.cancelled().await;
-                return None;
-            }
-            None => {
-                debug!("verification request cancelled before initial block arrived");
-                return None;
-            }
-        };
         let block_digest = block.digest();
-
         // Only skip verification for blocks the application built or verified.
         if self.execution.pending_verified(&block_digest) {
             timer.observe(context);
@@ -139,14 +124,18 @@ where
             ProcessedBlock::Cancelled => return None,
         }
 
+        if block.height().previous() != Some(parent.height()) || block.parent() != parent.digest() {
+            return Some(false);
+        }
+
         // Reconstruct the candidate's parent state. This is the only phase
         // shared across requests, keyed by the acquired parent's block digest.
         let parent = match self
             .prepare_parent(
                 context,
-                marshal,
+                blocks.clone(),
                 block_digest,
-                &mut ancestry,
+                parent,
                 progress,
                 verification,
             )
@@ -164,7 +153,7 @@ where
                 consensus_context,
                 block,
                 parent,
-                ancestry,
+                blocks,
                 verification,
             )
             .await;
@@ -185,7 +174,6 @@ where
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
         let block_digest = block.digest();
         let last_processed = self.execution.last_processed();
@@ -218,48 +206,22 @@ where
     }
 
     /// Reconstructs and forks the candidate's parent state.
-    async fn prepare_parent<S, V>(
+    async fn prepare_parent(
         &mut self,
         context: &E,
-        marshal: MarshalMailbox<S, V>,
+        blocks: Blocks<A::Block>,
         block_digest: PendingDigest<A, E>,
-        ancestry: &mut impl Ancestry<A::Block>,
+        block: Arc<A::Block>,
         progress: &VerificationProgress<PendingDigest<A, E>>,
         verification: &mut Verification,
-    ) -> Result<PreparedParent<A, E>, PrepareFailure>
-    where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    {
-        let block = match fetch_ancestor(verification, ancestry).await {
-            Some(Some(block)) => block,
-            Some(None) => {
-                debug!(
-                    ?block_digest,
-                    "verification request waiting on incomplete parent ancestry"
-                );
-
-                // As with incomplete candidate ancestry, only cancellation or
-                // actor-driven invalidation should release this pending request.
-                verification.cancelled().await;
-                return Err(PrepareFailure::Cancelled);
-            }
-            None => {
-                debug!(
-                    ?block_digest,
-                    "verification request cancelled before parent ancestry arrived"
-                );
-                return Err(PrepareFailure::Cancelled);
-            }
-        };
+    ) -> Result<PreparedParent<A, E>, PrepareFailure> {
         let digest = block.digest();
         let batches = match self
             .execution
             .prepare_batches(
                 &mut self.app,
                 context,
-                marshal,
+                blocks,
                 block.clone(),
                 verification,
                 Some(ReplayTracking {
@@ -313,15 +275,12 @@ where
         consensus_context: A::Context,
         block: Arc<A::Block>,
         parent: PreparedParent<A, E>,
-        ancestry: impl Ancestry<A::Block>,
+        blocks: Blocks<A::Block>,
         verification: &mut Verification,
     ) -> Option<bool> {
         let block_digest = block.digest();
         let round = consensus_context.round();
 
-        // The application expects the full candidate-first ancestry even
-        // though the processor consumed those two entries while preparing state.
-        let ancestry = marshal_ancestry::with_prefix([block.clone(), parent.block], ancestry);
         let verified = match await_or_cancel(
             verification,
             self.app.verify(
@@ -329,7 +288,9 @@ where
                     context.child("application").child("verify_attempt"),
                     consensus_context,
                 ),
-                ancestry,
+                block.clone(),
+                parent.block,
+                blocks,
                 parent.batches,
             ),
         )

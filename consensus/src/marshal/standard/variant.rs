@@ -5,19 +5,15 @@
 
 use crate::{
     Block,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
-    },
-    simplex::scheme::Scheme as SimplexScheme,
+    marshal::core::{Buffer, ExpectedCommitment, Retirement, Variant},
     types::Round,
 };
 use commonware_broadcast::buffered;
 use commonware_codec::Read;
-use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
+use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -51,13 +47,6 @@ where
     fn parent_commitment(block: &Self::Block) -> Self::Commitment {
         // In standard mode, commitments are digests, so parent commitment is parent digest.
         block.parent()
-    }
-
-    fn check_payload<S>(_scheme: &S, _payload: Self::Commitment) -> bool
-    where
-        S: SimplexScheme<Self::Commitment>,
-    {
-        true
     }
 
     fn block_cfg(
@@ -94,40 +83,13 @@ where
         self.find_by_digest(commitment).await
     }
 
-    fn subscribe_by_digest(&self, digest: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
-        Some(self.subscribe(digest))
-    }
-
     fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
-        self.subscribe_by_digest(commitment)
+        Some(self.subscribe(commitment))
     }
 
     fn retire(&self, _update: Retirement<B::Digest>) {}
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
         self.broadcast_shared(recipients, block);
-    }
-}
-
-impl<S, B> BlockProvider for Mailbox<S, Standard<B>>
-where
-    S: Scheme,
-    B: Block,
-{
-    type Block = B;
-
-    fn subscribe_parent(
-        &self,
-        block: &Self::Block,
-    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
-        let receiver = block.height().previous().map(|parent_height| {
-            self.subscribe_by_commitment(
-                block.parent(),
-                CommitmentFallback::FetchByCommitment {
-                    height: parent_height,
-                },
-            )
-        });
-        async move { receiver?.await.ok() }
     }
 }

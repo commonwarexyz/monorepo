@@ -78,7 +78,7 @@ use crate::{
             gates::{self, GateOutcome, Gates},
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
-        core::{CommitmentFallback, DigestFallback, Mailbox},
+        core::Mailbox,
         standard::{
             Standard, relay,
             validation::{
@@ -156,7 +156,6 @@ where
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
-    ancestor_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
@@ -176,7 +175,6 @@ where
             gates: self.gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
-            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
         }
     }
 }
@@ -209,12 +207,6 @@ where
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
-        let ancestor_fetch_histogram = context.histogram(
-            "ancestor_fetch_duration",
-            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::LOCAL,
-        );
-        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
             context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
@@ -225,7 +217,6 @@ where
 
             build_duration,
             proposal_parent_fetch_duration,
-            ancestor_fetch_duration,
         }
     }
 
@@ -248,11 +239,11 @@ where
         block: Arc<B>,
         parent_request: oneshot::Receiver<Arc<B>>,
         stage: Stage,
+        ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let runtime_context = self
             .context
             .lock()
@@ -296,7 +287,7 @@ where
                         &mut application,
                         &marshal,
                         &mut tx,
-                        ancestor_fetch_duration,
+                        ancestry,
                     )
                     .await
                 };
@@ -319,6 +310,7 @@ where
         &mut self,
         round: Round,
         digest: B::Digest,
+        ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<bool> {
         // No in-progress task means we never verified this proposal locally. We can use the
         // block's embedded context to help complete finalization when Byzantine validators
@@ -326,22 +318,13 @@ where
         // the f+1 honest validators from the notarizing quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
-        // We must fetch here rather than only wait for local broadcast delivery. A Byzantine
-        // leader can send a proposal to just f+1 honest validators, collect enough honest
-        // notarize votes to form a notarization, and leave the remaining honest validators
-        // without the block. Those validators need the notarized round to recover the block
-        // and certify; otherwise they can remain stuck if the Byzantine validators stop
-        // participating in the next view.
-        //
-        // Subscribe to the block and verify using its embedded context once available.
+        // Acquire the notarized commitment and verify its embedded context when available.
         debug!(
             ?round,
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
+        let block_rx = self.marshal.acquire(digest);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -400,21 +383,22 @@ where
 
                 // Start the parent fetch for the deferred verification below,
                 // which expects a caller-started subscription. Certify does not
-                // carry the consensus context, so the parent round comes from
+                // carry the consensus context, so the parent commitment comes from
                 // the block's embedded context. That context is trustworthy
                 // because the digest is notarized and the notarizing quorum's
                 // f+1 honest validators verified it against the consensus
                 // context before voting.
-                let (parent_view, parent_commitment) = embedded_context.parent;
-                let parent_request = marshaled.marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    CommitmentFallback::FetchByRound {
-                        round: Round::new(embedded_context.epoch(), parent_view),
-                    },
-                );
+                let (_, parent_commitment) = embedded_context.parent;
+                let parent_request = marshaled.marshal.acquire(parent_commitment);
 
                 let verify_rx = marshaled
-                    .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
+                    .deferred_verify(
+                        embedded_context,
+                        block,
+                        parent_request,
+                        Stage::Certified,
+                        ancestry,
+                    )
                     .await;
                 gates::forward(tx, verify_rx, |result| match result {
                     GateOutcome::Ready(result) => Some(result),
@@ -437,13 +421,8 @@ where
         round: Round,
         digest: B::Digest,
         task: oneshot::Receiver<GateOutcome>,
+        ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<bool> {
-        // `verify()` waits only on local broadcast delivery, so nudge a
-        // round-bound notarized fetch that can unblock the existing waiter
-        // if local broadcast never arrives. For the standard variant, the
-        // digest is also the variant commitment.
-        self.marshal.hint_notarized(round, digest);
-
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
         // recovers via the embedded-context fetch path.
@@ -457,7 +436,9 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, digest, move || async move {
-                marshaled.certify_from_embedded_context(round, digest).await
+                marshaled
+                    .certify_from_embedded_context(round, digest, ancestry)
+                    .await
             })
             .instrument(info_span!(
                 "marshal.deferred.certify.existing",
@@ -504,6 +485,7 @@ where
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -513,7 +495,6 @@ where
         // Metrics
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -584,21 +565,9 @@ where
                     return;
                 }
 
-                // The parent for any consensus context is in the same epoch: the
-                // boundary block of the previous epoch is the genesis block of the
-                // current epoch.
-                //
-                // Proposal context carries the certified parent view/commitment but
-                // not the parent height. The parent may be certified above the
-                // finalized tip, so this must stay round-bound until the block is
-                // returned.
+                // Consensus supplies the exact parent commitment.
                 let (parent_view, parent_commitment) = consensus_context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
+                let parent_request = marshal.acquire(parent_commitment);
 
                 let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
                 let parent = select! {
@@ -637,18 +606,15 @@ where
                     return;
                 }
 
-                let ancestor_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
-                    ancestor_fetch_duration,
-                );
+                let blocks = marshal.blocks(parent.height(), ancestry);
                 let build_request = application
                     .propose(
                         (
                             runtime_context.child("app_propose"),
                             consensus_context.clone(),
                         ),
-                        ancestor_stream,
+                        parent,
+                        blocks,
                         (),
                     )
                     .instrument(info_span!(
@@ -700,17 +666,14 @@ where
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
         let mut marshaled = self.clone();
         let round = context.round;
 
-        // Verification needs the full block but waits only for local delivery. Certification starts
-        // recovery only when the block is not buffered. If a buffered block is evicted before
-        // verification registers its wait, verification is left with neither the block nor an
-        // active fetch. Register the wait before publishing the gate so it receives the buffered
-        // block or is waiting when recovery delivers it.
-        let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
+        // Register acquisition before publishing the gate so certification shares its work.
+        let block_request = marshal.acquire(digest);
         let (task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);
 
@@ -723,20 +686,10 @@ where
             .with_attribute("round", round);
         runtime_context.spawn(move |_| {
             async move {
-                // Start the parent fetch immediately: its commitment and certified
-                // round are known from the consensus context, so it can proceed in
-                // parallel with broadcast delivery of the candidate block.
-                // Reproposals (digest == context.parent.1) skip parent validation
-                // entirely, so they must not fetch: the "parent" is the candidate
-                // itself, and candidate acquisition is deliberately local-only.
+                // Acquire the parent concurrently with the candidate, except when they coincide.
                 let parent_request = (digest != context.parent.1).then(|| {
-                    let (parent_view, parent_commitment) = context.parent;
-                    marshal.subscribe_by_commitment(
-                        parent_commitment,
-                        CommitmentFallback::FetchByRound {
-                            round: Round::new(context.epoch(), parent_view),
-                        },
-                    )
+                    let (_, parent_commitment) = context.parent;
+                    marshal.acquire(parent_commitment)
                 });
 
                 // Stop waiting for the block if consensus drops the verification request.
@@ -832,7 +785,7 @@ where
                 // gate owns the deferred work. Nullification keeps that gate
                 // alive, while finalization drops it.
                 let deferred_rx = marshaled
-                    .deferred_verify(context, block, parent_request, Stage::Verified)
+                    .deferred_verify(context, block, parent_request, Stage::Verified, ancestry)
                     .await;
                 tx.send_lossy(true);
                 gates::forward(task_tx, deferred_rx, Some).await;
@@ -863,16 +816,24 @@ where
 {
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
-    async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        digest: Self::Digest,
+        ancestry: Arc<[Self::Digest]>,
+    ) -> oneshot::Receiver<bool> {
         self.gates.flush_unrelayed(&self.marshal, round, digest);
 
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.take(round, digest);
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, digest, task).await;
+            return self
+                .certify_from_existing_task(round, digest, task, ancestry)
+                .await;
         }
 
-        self.certify_from_embedded_context(round, digest).await
+        self.certify_from_embedded_context(round, digest, ancestry)
+            .await
     }
 }
 
@@ -938,7 +899,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {
@@ -1012,20 +973,38 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Step 1: Verify block A at view 5
-            let _ = marshaled.verify(context_a, commitment_a).await.await;
+            let _ = marshaled
+                .verify(
+                    context_a.clone(),
+                    commitment_a,
+                    Arc::from([context_a.parent.1]),
+                )
+                .await
+                .await;
 
             // Step 2: Verify block B at view 10
-            let _ = marshaled.verify(context_b, commitment_b).await.await;
+            let _ = marshaled
+                .verify(
+                    context_b.clone(),
+                    commitment_b,
+                    Arc::from([context_b.parent.1]),
+                )
+                .await
+                .await;
 
             // Step 3: Certify block B at view 10 FIRST
-            let certify_b = marshaled.certify(round_b, commitment_b).await;
+            let certify_b = marshaled
+                .certify(round_b, commitment_b, Arc::from([]))
+                .await;
             assert!(
                 certify_b.await.unwrap(),
                 "Block B certification should succeed"
             );
 
             // Step 4: Certify block A at view 5 - should succeed
-            let certify_a = marshaled.certify(round_a, commitment_a).await;
+            let certify_a = marshaled
+                .certify(round_a, commitment_a, Arc::from([]))
+                .await;
 
             select! {
                 result = certify_a => {
@@ -1156,7 +1135,11 @@ mod tests {
             // Call verify and wait for the result (verify returns optimistic result,
             // but also spawns deferred verification)
             let verify_result = marshaled
-                .verify(unsupported_context, block_commitment)
+                .verify(
+                    unsupported_context.clone(),
+                    block_commitment,
+                    Arc::from([unsupported_context.parent.1]),
+                )
                 .await;
 
             // Wait for optimistic verify to complete so the certification gate task is registered
@@ -1249,7 +1232,13 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
 
-            let verify_rx = marshaled.verify(context_b, commitment_a).await;
+            let verify_rx = marshaled
+                .verify(
+                    context_b.clone(),
+                    commitment_a,
+                    Arc::from([context_b.parent.1]),
+                )
+                .await;
             select! {
                 result = verify_rx => {
                     assert!(
@@ -1312,7 +1301,13 @@ mod tests {
                 B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
-            let verify_rx = marshaled.verify(block_context, digest).await;
+            let verify_rx = marshaled
+                .verify(
+                    block_context.clone(),
+                    digest,
+                    Arc::from([block_context.parent.1]),
+                )
+                .await;
             drop(verify_rx);
 
             // Give the optimistic task a chance to observe the dropped receiver while its
@@ -1320,7 +1315,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(marshal.verified(round, block).await);
-            let certify_rx = marshaled.certify(round, digest).await;
+            let certify_rx = marshaled.certify(round, digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1409,7 +1404,7 @@ mod tests {
 
             // Kick off the optimistic verify, which spawns `deferred_verify`. Its gated
             // `app.verify` blocks until we release it.
-            let optimistic_rx = marshaled.verify(child_ctx, child_digest).await;
+            let optimistic_rx = marshaled.verify(child_ctx.clone(), child_digest, Arc::from([child_ctx.parent.1])).await;
             assert!(
                 optimistic_rx
                     .await
@@ -1430,7 +1425,7 @@ mod tests {
 
             // Releasing verification lets certification succeed (valid and durable).
             release_verify.send_lossy(());
-            let certify_rx = marshaled.certify(child_round, child_digest).await;
+            let certify_rx = marshaled.certify(child_round, child_digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1503,7 +1498,9 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            let digest_rx = marshaled.propose(ctx).await;
+            let digest_rx = marshaled
+                .propose(ctx.clone(), Arc::from([ctx.parent.1]))
+                .await;
             let digest = digest_rx.await.expect("propose must return a digest");
             assert_eq!(
                 digest, digest_a,
@@ -1515,7 +1512,7 @@ mod tests {
             // write), resolving the certification gate registered by the
             // recovery path.
             let _ = marshaled.broadcast(digest, Plan::Propose { round });
-            let certify_rx = marshaled.certify(round, digest).await;
+            let certify_rx = marshaled.certify(round, digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1600,7 +1597,7 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            let digest_rx = marshaled.propose(ctx).await;
+            let digest_rx = marshaled.propose(ctx.clone(), Arc::from([ctx.parent.1])).await;
             let digest = digest_rx.await.expect("propose must return a digest");
             assert_eq!(
                 digest, boundary_digest,
@@ -1608,7 +1605,7 @@ mod tests {
             );
 
             let _ = marshaled.broadcast(digest, Plan::Propose { round });
-            let certify_rx = marshaled.certify(round, digest).await;
+            let certify_rx = marshaled.certify(round, digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1686,7 +1683,9 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            let digest_rx = marshaled.propose(new_ctx).await;
+            let digest_rx = marshaled
+                .propose(new_ctx.clone(), Arc::from([new_ctx.parent.1]))
+                .await;
             assert!(
                 digest_rx.await.is_err(),
                 "propose must drop the receiver when the cached block's context no longer matches"
@@ -1757,7 +1756,7 @@ mod tests {
             );
 
             let digest = marshaled
-                .propose(ctx)
+                .propose(ctx.clone(), Arc::from([ctx.parent.1]))
                 .await
                 .await
                 .expect("propose must return a digest");
@@ -1769,7 +1768,7 @@ mod tests {
             // The leader certifies its own proposal; this awaits the deferred propose sync handle.
             assert!(
                 marshaled
-                    .certify(round, child_digest)
+                    .certify(round, child_digest, Arc::from([]))
                     .await
                     .await
                     .expect("certify result missing"),
@@ -1933,7 +1932,7 @@ mod tests {
 
             let verify_rx = fixture
                 .marshaled
-                .verify(fixture.equivocating_ctx.clone(), fixture.digest)
+                .verify(fixture.equivocating_ctx.clone(), fixture.digest, Arc::from([fixture.equivocating_ctx.parent.1]))
                 .await;
             assert!(
                 !verify_rx.await.expect("verify result missing"),
@@ -1942,7 +1941,7 @@ mod tests {
 
             let certify_rx = fixture
                 .marshaled
-                .certify(fixture.round, fixture.digest)
+                .certify(fixture.round, fixture.digest, Arc::from([]))
                 .await;
             select! {
                 result = certify_rx => {
@@ -1972,7 +1971,11 @@ mod tests {
 
             let verify_rx = fixture
                 .marshaled
-                .verify(fixture.embedded_ctx.clone(), fixture.digest)
+                .verify(
+                    fixture.embedded_ctx.clone(),
+                    fixture.digest,
+                    Arc::from([fixture.embedded_ctx.parent.1]),
+                )
                 .await;
             assert!(
                 verify_rx.await.expect("verify result missing"),
@@ -1981,7 +1984,7 @@ mod tests {
 
             let certify_rx = fixture
                 .marshaled
-                .certify(fixture.round, fixture.digest)
+                .certify(fixture.round, fixture.digest, Arc::from([]))
                 .await;
             select! {
                 result = certify_rx => {
@@ -2012,7 +2015,7 @@ mod tests {
             // the embedded-context path.
             let certify_rx = fixture
                 .marshaled
-                .certify(fixture.round, fixture.digest)
+                .certify(fixture.round, fixture.digest, Arc::from([]))
                 .await;
             select! {
                 result = certify_rx => {

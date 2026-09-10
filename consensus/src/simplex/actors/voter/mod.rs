@@ -1723,7 +1723,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            let view = View::new(2);
+            let view = View::new(1);
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -1910,7 +1910,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            let view = View::new(2);
+            let view = View::new(1);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -4106,6 +4106,75 @@ mod tests {
     fn test_missed_notarization_is_fetched() {
         // Request routing is scheme-independent; one scheme is enough.
         missed_notarization_is_fetched(ed25519::fixture);
+    }
+
+    #[test]
+    fn test_certification_repairs_missing_cross_term_ancestry() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let epoch = Epoch::new(333);
+            let Fixture { participants, schemes, .. } =
+                ed25519::fixture(&mut context, b"certification-ancestry", 4);
+            let oracle = start_test_network_with_peers(
+                context.child("network"), participants.clone(), true,
+            ).await;
+            let parent = Proposal::new(
+                Round::new(epoch, View::new(1)), View::zero(), Sha256::hash(&[b"parent"]),
+            );
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(6)), parent.view(), Sha256::hash(&[b"candidate"]),
+            );
+            let expected = vec![mocks::application::genesis::<Sha256>(epoch), parent.payload];
+            let candidate_view = candidate.view();
+            let candidate_payload = candidate.payload;
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(5)), Duration::from_secs(30), ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, mut resolver, _, _) = setup_voter(
+                &context, &oracle, &participants, &schemes, elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(20),
+                    certifier: mocks::application::Certifier::WithAncestry(Box::new(move |round, payload, ancestry| {
+                        if round.view() == candidate_view {
+                            assert_eq!(payload, candidate_payload);
+                            assert_eq!(&*ancestry, expected.as_slice(), "certification must receive the selected unfinalized parent, not canonical history");
+                        }
+                        true
+                    })),
+                    ..VoterOptions::default()
+                },
+            ).await;
+            let (_, parent_notarization) = build_notarization(&schemes, &parent, quorum(4));
+            let (_, candidate_notarization) = build_notarization(&schemes, &candidate, quorum(4));
+            mailbox.recovered(Certificate::Notarization(candidate_notarization));
+            let mut repaired = false;
+            loop {
+                select! {
+                    message = resolver.recv() => {
+                        match message.unwrap() {
+                            MailboxMessage::Resolve { view, kind: crate::simplex::actors::Kind::Notarization, .. } if view == parent.view() => {
+                                assert!(!repaired, "one missing dependency should issue one repair");
+                                repaired = true;
+                                mailbox.recovered(Certificate::Notarization(parent_notarization.clone()));
+                            }
+                            MailboxMessage::Certified { view, success, .. } if view == candidate.view() => {
+                                assert!(success);
+                                assert!(repaired, "certification must acquire the missing parent certificate");
+                            }
+                            _ => {}
+                        }
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
+                            && vote.view() == candidate.view()
+                        {
+                            assert!(repaired);
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) => panic!("missing ancestry prevented certification"),
+                }
+            }
+        });
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote

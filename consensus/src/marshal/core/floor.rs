@@ -4,8 +4,7 @@ use crate::{
     types::{Height, Round},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
-use commonware_resolver::{Resolver, TargetedResolver};
-use commonware_utils::vec::NonEmptyVec;
+use commonware_resolver::Resolver;
 
 /// Durable height and round bounds restored when marshal initializes.
 ///
@@ -150,44 +149,9 @@ impl<S: Scheme, C: Digest> State<S, C> {
         resolver.fetch(fetch);
         FetchAdmission::Issued
     }
-
-    pub(super) fn fetch_targeted_if_permitted<R>(
-        &self,
-        resolver: &mut R,
-        fetch: Request<C>,
-        targets: NonEmptyVec<R::PublicKey>,
-    ) -> FetchAdmission
-    where
-        R: TargetedResolver<Key = Key<C>, Subscriber = Annotation>,
-    {
-        if !self.permits(&fetch) {
-            return FetchAdmission::Denied;
-        }
-        resolver.fetch_targeted(fetch, targets);
-        FetchAdmission::Issued
-    }
-
-    pub(super) fn fetch_all_if_permitted<R>(
-        &self,
-        resolver: &mut R,
-        fetches: Vec<Request<C>>,
-    ) -> FetchAdmission
-    where
-        R: Resolver<Key = Key<C>, Subscriber = Annotation>,
-    {
-        let fetches = fetches
-            .into_iter()
-            .filter(|fetch| self.permits(fetch))
-            .collect::<Vec<_>>();
-        if fetches.is_empty() {
-            return FetchAdmission::Denied;
-        }
-        resolver.fetch_all(fetches);
-        FetchAdmission::Issued
-    }
 }
 
-/// Whether floor admission issued at least one resolver fetch.
+/// Whether floor admission issued the resolver fetch.
 #[must_use = "fetch admission must be handled explicitly"]
 pub(super) enum FetchAdmission {
     Issued,
@@ -202,13 +166,11 @@ impl FetchAdmission {
 mod tests {
     use super::*;
     use crate::{
-        marshal::resolver::handler::Finalized,
         simplex::scheme::ed25519 as simplex_ed25519,
         types::{Epoch, View},
     };
     use commonware_actor::Feedback;
-    use commonware_cryptography::{Signer as _, ed25519 as crypto_ed25519, sha256::Sha256};
-    use commonware_math::algebra::Random as _;
+    use commonware_cryptography::sha256::Sha256;
     use commonware_resolver::Fetch;
     use commonware_utils::sync::Mutex;
     use std::sync::Arc;
@@ -217,21 +179,15 @@ mod tests {
     type TestScheme = simplex_ed25519::Scheme;
     type FetchRecord = Fetch<Key<TestDigest>, Annotation>;
     type RecordedFetches = Arc<Mutex<Vec<FetchRecord>>>;
-    type RecordedTargets = Arc<Mutex<Vec<Key<TestDigest>>>>;
 
     #[derive(Clone, Default)]
     struct TestResolver {
         fetches: RecordedFetches,
-        targeted: RecordedTargets,
     }
 
     impl TestResolver {
         fn fetches(&self) -> Vec<FetchRecord> {
             self.fetches.lock().clone()
-        }
-
-        fn targeted(&self) -> Vec<Key<TestDigest>> {
-            self.targeted.lock().clone()
         }
     }
 
@@ -265,32 +221,6 @@ mod tests {
         }
     }
 
-    impl TargetedResolver for TestResolver {
-        type PublicKey = crypto_ed25519::PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            self.targeted.lock().push(fetch.into().key);
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            self.targeted
-                .lock()
-                .extend(fetches.into_iter().map(|(fetch, _)| fetch.into().key));
-            Feedback::Ok
-        }
-    }
-
     fn round(view: u64) -> Round {
         Round::new(Epoch::zero(), View::new(view))
     }
@@ -308,155 +238,50 @@ mod tests {
         let floor = floor();
         let mut resolver = TestResolver::default();
 
-        assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(5))),
-            FetchAdmission::Denied
-        ));
-        assert!(matches!(
-            floor.fetch_if_permitted(
-                &mut resolver,
-                Request::finalized_by_height(digest(1), Height::new(4)),
-            ),
-            FetchAdmission::Denied
-        ));
-        assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(5))),
-            FetchAdmission::Denied
-        ));
+        for retention in [
+            Annotation::Height(Height::new(4)),
+            Annotation::Height(Height::new(5)),
+            Annotation::Round(round(4)),
+            Annotation::Round(round(5)),
+        ] {
+            assert!(matches!(
+                floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention)),
+                FetchAdmission::Denied
+            ));
+        }
         assert!(resolver.fetches().is_empty());
 
-        assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(6))),
-            FetchAdmission::Issued
-        ));
-        assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(6))),
-            FetchAdmission::Issued
-        ));
-
+        let retained = [
+            Annotation::Height(Height::new(6)),
+            Annotation::Round(round(6)),
+            Annotation::Subscription,
+        ];
+        for retention in retained {
+            assert!(matches!(
+                floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention)),
+                FetchAdmission::Issued
+            ));
+        }
         let fetches = resolver.fetches();
-        assert_eq!(fetches.len(), 2);
-        assert!(matches!(
-            fetches[0],
-            Fetch {
-                key: Key::Finalized {
-                    height
-                },
-                subscriber: Annotation::Finalized(Finalized::ByHeight {
-                    height: subscriber_height
-                }),
-                ..
-            } if height == Height::new(6) && subscriber_height == Height::new(6)
-        ));
-        assert!(matches!(
-            fetches[1],
-            Fetch {
-                key: Key::Notarized {
-                    round: request_round
-                },
-                subscriber: Annotation::Notarization {
-                    round: subscriber_round
-                },
-                ..
-            } if request_round == round(6) && subscriber_round == round(6)
-        ));
-    }
-
-    #[test]
-    fn fetch_targeted_if_permitted_returns_denied_without_fetching() {
-        let floor = floor();
-        let mut resolver = TestResolver::default();
-        let mut rng = commonware_utils::test_rng();
-        let target = crypto_ed25519::PrivateKey::random(&mut rng).public_key();
-
-        assert!(matches!(
-            floor.fetch_targeted_if_permitted(
-                &mut resolver,
-                Request::finalized(Height::new(5)),
-                NonEmptyVec::new(target.clone()),
-            ),
-            FetchAdmission::Denied
-        ));
-        assert!(resolver.targeted().is_empty());
-
-        assert!(matches!(
-            floor.fetch_targeted_if_permitted(
-                &mut resolver,
-                Request::finalized(Height::new(6)),
-                NonEmptyVec::new(target),
-            ),
-            FetchAdmission::Issued
-        ));
-        assert_eq!(
-            resolver.targeted(),
-            vec![Key::Finalized {
-                height: Height::new(6)
-            }]
-        );
-    }
-
-    #[test]
-    fn fetch_all_if_permitted_filters_denied_requests() {
-        let floor = floor();
-        let mut resolver = TestResolver::default();
-
-        assert!(matches!(
-            floor.fetch_all_if_permitted(
-                &mut resolver,
-                vec![
-                    Request::finalized(Height::new(5)),
-                    Request::finalized(Height::new(6)),
-                    Request::notarized(round(5)),
-                    Request::notarized(round(6)),
-                ],
-            ),
-            FetchAdmission::Issued
-        ));
-
-        let fetches = resolver.fetches();
-        assert_eq!(fetches.len(), 2);
-        assert!(matches!(fetches[0].key, Key::Finalized { height } if height == Height::new(6)));
-        assert!(
-            matches!(fetches[1].key, Key::Notarized { round: request_round } if request_round == round(6))
-        );
-
-        let mut resolver = TestResolver::default();
-        assert!(matches!(
-            floor.fetch_all_if_permitted(
-                &mut resolver,
-                vec![
-                    Request::finalized(Height::new(5)),
-                    Request::notarized(round(5)),
-                ],
-            ),
-            FetchAdmission::Denied
-        ));
-        assert!(resolver.fetches().is_empty());
+        assert_eq!(fetches.len(), retained.len());
+        for (fetch, retention) in fetches.iter().zip(retained) {
+            assert_eq!(fetch.key, Key::Block(digest(1)));
+            assert_eq!(fetch.subscriber, retention);
+        }
     }
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
         let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
         let mut resolver = TestResolver::default();
-
+        let retention = Annotation::Height(Height::zero());
         assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::zero())),
+            floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention)),
             FetchAdmission::Issued
         ));
-
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 1);
-        assert!(matches!(
-            fetches[0],
-            Fetch {
-                key: Key::Finalized {
-                    height
-                },
-                subscriber: Annotation::Finalized(Finalized::ByHeight {
-                    height: subscriber_height
-                }),
-                ..
-            } if height == Height::zero() && subscriber_height == Height::zero()
-        ));
+        assert_eq!(fetches[0].key, Key::Block(digest(1)));
+        assert_eq!(fetches[0].subscriber, retention);
     }
 }

@@ -46,19 +46,16 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
-            ancestry::BlockProvider,
             application::gates::{GateOutcome, Gates},
             config::{Config, Start},
-            core::{
-                Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _,
-            },
+            core::{Actor, Mailbox, cache, durability::Durable as _},
             mocks::{
                 application::Application,
                 harness::{
-                    self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
-                    InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
-                    QUORUM, S, StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V,
-                    ValidatorHandle, default_leader, make_raw_block, setup_network_links,
+                    self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, InlineHarness, LINK,
+                    NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S,
+                    StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V, ValidatorHandle,
+                    default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants,
                 },
                 store::{Op, Recording},
@@ -80,7 +77,7 @@ mod tests {
     };
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
-    use commonware_broadcast::{Broadcaster as _, buffered};
+    use commonware_broadcast::Broadcaster as _;
     use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write};
     use commonware_cryptography::{
         Digestible, Hasher as _,
@@ -102,7 +99,7 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        Acknowledgement as _, NZU16, NZU64, NZUsize,
+        Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         non_empty,
@@ -112,8 +109,8 @@ mod tests {
         sync::Mutex,
         vec::NonEmptyVec,
     };
+    use futures::StreamExt as _;
     use std::{
-        collections::BTreeMap,
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
         sync::{
             Arc, Weak,
@@ -121,12 +118,6 @@ mod tests {
         },
         time::Duration,
     };
-
-    #[test]
-    fn mailbox_provides_application_blocks() {
-        fn assert_provider<P: BlockProvider<Block = B>>() {}
-        assert_provider::<Mailbox<S, Standard<B>>>();
-    }
 
     #[derive(Clone)]
     struct VerifierProvider {
@@ -150,45 +141,8 @@ mod tests {
         }
     }
 
-    /// A signing provider whose scopes each survive a fixed number of lookups
-    /// and then retire, modeling an application that prunes an epoch between a
-    /// delivery's admission and its batched verification.
-    #[derive(Clone, Default)]
-    struct RetiringProvider {
-        scopes: BTreeMap<Epoch, (Arc<S>, Arc<AtomicUsize>)>,
-    }
-
-    impl RetiringProvider {
-        fn with(mut self, epoch: Epoch, scheme: S, remaining: usize) -> Self {
-            self.scopes.insert(
-                epoch,
-                (Arc::new(scheme), Arc::new(AtomicUsize::new(remaining))),
-            );
-            self
-        }
-
-        /// Returns true once `epoch` has been looked up as many times as allowed,
-        /// which confirms the admission path consulted the provider.
-        fn retired(&self, epoch: Epoch) -> bool {
-            self.scopes[&epoch].1.load(Ordering::Acquire) == 0
-        }
-    }
-
-    impl Provider for RetiringProvider {
-        type Scope = Epoch;
-        type Scheme = S;
-
-        fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
-            let (scheme, remaining) = self.scopes.get(&epoch)?;
-            remaining
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-                .ok()?;
-            Some(Scoped::scheme(Arc::clone(scheme)))
-        }
-    }
-
     #[test_traced("WARN")]
-    fn test_standard_block_provider_parent_fetches_by_commitment() {
+    fn test_standard_acquire_fetches_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -207,13 +161,13 @@ mod tests {
 
             let parent = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 200);
-            let subscription = mailbox.subscribe_parent(&child);
+            let subscription = mailbox.acquire(child.parent);
 
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
                 buffer.commitment_subscription_count(),
                 1,
-                "parent walkback should use the standard parent commitment"
+                "acquisition should use the standard parent commitment"
             );
             drop(subscription);
         });
@@ -372,12 +326,6 @@ mod tests {
     fn test_standard_reject_stale_block_delivery_after_floor_update() {
         harness::reject_stale_block_delivery_after_floor_update::<InlineHarness>();
         harness::reject_stale_block_delivery_after_floor_update::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_commitment_fetch_height_hint_mismatch_wakes_subscriber() {
-        harness::commitment_fetch_height_hint_mismatch_wakes_subscriber::<InlineHarness>();
-        harness::commitment_fetch_height_hint_mismatch_wakes_subscriber::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -1401,15 +1349,9 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_hint_finalized_triggers_fetch() {
-        harness::hint_finalized_triggers_fetch::<InlineHarness>();
-        harness::hint_finalized_triggers_fetch::<DeferredHarness>();
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_ancestry_stream() {
-        harness::ancestry_stream::<InlineHarness>();
-        harness::ancestry_stream::<DeferredHarness>();
+    fn test_standard_blocks_forward_range() {
+        harness::blocks_forward_range::<InlineHarness>();
+        harness::blocks_forward_range::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -1477,7 +1419,7 @@ mod tests {
             let anchor = anchor.unwrap();
 
             // Subscribe to the anchor, creating a buffer-backed waiter.
-            let subscription = mailbox.subscribe_by_digest(anchor.digest(), DigestFallback::Wait);
+            let subscription = mailbox.acquire(anchor.digest());
 
             // Set a floor whose anchor block is not yet available locally.
             let round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
@@ -1563,34 +1505,15 @@ mod tests {
             let anchor = anchor.unwrap();
             let anchor_round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
 
-            // Register every acquisition mode for the same unavailable parent.
-            // The parent subscription models verification that remains active
-            // while unrelated application progress advances the floor.
+            // Independent callers wait for the same commitment while unrelated
+            // application progress advances the floor.
             let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), Height::new(2), 999);
             let missing_digest = missing.digest();
-            let child = make_raw_block(missing_digest, Height::new(3), 1_000);
-            let mut by_round = mailbox.subscribe_by_digest(
-                missing_digest,
-                DigestFallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(2)),
-                },
-            );
-            let mut by_height = mailbox.subscribe_by_commitment(
-                missing_digest,
-                CommitmentFallback::FetchByCommitment {
-                    height: Height::new(2),
-                },
-            );
-            let mut wait = mailbox.subscribe_by_digest(missing_digest, DigestFallback::Wait);
-            let mut parent = Box::pin(mailbox.subscribe_parent(&child));
+            let mut first = mailbox.acquire(missing_digest);
+            let mut second = mailbox.acquire(missing_digest);
 
             // The anchor subscription resolves when the block arrives.
-            let anchor_wait = mailbox.subscribe_by_digest(
-                anchor.digest(),
-                DigestFallback::FetchByRound {
-                    round: anchor_round,
-                },
-            );
+            let anchor_wait = mailbox.acquire(anchor.digest());
 
             // Install the floor and deliver the anchor through the buffer.
             let finalization = StandardHarness::make_finalization(
@@ -1607,49 +1530,23 @@ mod tests {
             let received = anchor_wait.await.unwrap();
             assert_eq!(received.digest(), anchor.digest());
 
-            // Wait for the application to process the anchor so the processed
-            // floors advance past the subscriptions' fetch coordinates.
+            // Wait until processed progress passes the unavailable block's height.
             while mailbox.get_processed_height().await != Some(Height::new(ANCHOR_HEIGHT)) {
                 context.sleep(Duration::from_millis(50)).await;
             }
 
             // Parent availability determines subscription lifetime.
-            assert!(matches!(by_round.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(by_height.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(wait.try_recv(), Err(TryRecvError::Empty)));
-            select! {
-                result = &mut parent => {
-                    panic!("parent subscription resolved at processed floor: {result:?}");
-                },
-                _ = context.sleep(Duration::from_millis(100)) => {},
-            };
-
-            // A below-floor request skips remote acquisition and keeps a
-            // subscription for local ingress.
-            let mut late_by_round = mailbox.subscribe_by_digest(
-                missing_digest,
-                DigestFallback::FetchByRound {
-                    round: Round::new(Epoch::zero(), View::new(3)),
-                },
-            );
-            let mut late_parent = Box::pin(mailbox.subscribe_parent(&child));
+            assert!(matches!(first.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
+            // A new caller joins acquisition even after progress passed its height.
+            let mut late_first = mailbox.acquire(missing_digest);
             let _ = mailbox.get_processed_height().await;
-            assert!(matches!(late_by_round.try_recv(), Err(TryRecvError::Empty)));
-            select! {
-                result = &mut late_parent => {
-                    panic!("late parent subscription resolved before availability: {result:?}");
-                },
-                _ = context.sleep(Duration::from_millis(100)) => {},
-            };
-
+            assert!(matches!(late_first.try_recv(), Err(TryRecvError::Empty)));
             // Later local availability satisfies every registered caller.
             let _ = buffer.broadcast(Recipients::All, missing.clone());
-            assert_eq!(by_round.await.unwrap().digest(), missing_digest);
-            assert_eq!(by_height.await.unwrap().digest(), missing_digest);
-            assert_eq!(wait.await.unwrap().digest(), missing_digest);
-            assert_eq!(parent.await.unwrap().digest(), missing_digest);
-            assert_eq!(late_by_round.await.unwrap().digest(), missing_digest);
-            assert_eq!(late_parent.await.unwrap().digest(), missing_digest);
+            assert_eq!(first.await.unwrap().digest(), missing_digest);
+            assert_eq!(second.await.unwrap().digest(), missing_digest);
+            assert_eq!(late_first.await.unwrap().digest(), missing_digest);
         })
     }
 
@@ -1710,7 +1607,7 @@ mod tests {
             StandardHarness::propose(&mut server_handle, round, &anchor).await;
 
             // Subscribe while the anchor is unavailable on the victim.
-            let subscription = mailbox.subscribe_by_digest(anchor.digest(), DigestFallback::Wait);
+            let subscription = mailbox.acquire(anchor.digest());
 
             // Record a pending floor anchor and start the resolver fetch.
             let finalization = StandardHarness::make_finalization(
@@ -1836,7 +1733,7 @@ mod tests {
             StandardHarness::propose(&mut server_handle, fork_round, &fork).await;
 
             // Subscribe while the fork block is unavailable on the victim.
-            let subscription = mailbox.subscribe_by_digest(fork.digest(), DigestFallback::Wait);
+            let subscription = mailbox.acquire(fork.digest());
 
             // Record a pending floor anchor for the unavailable fork block and
             // start the resolver fetch.
@@ -1943,24 +1840,34 @@ mod tests {
             }
         }
 
-        async fn propose(&mut self, context: Ctx) -> oneshot::Receiver<D> {
+        async fn propose(&mut self, context: Ctx, ancestry: Arc<[D]>) -> oneshot::Receiver<D> {
             match self {
-                Self::Inline(inline) => inline.propose(context).await,
-                Self::Deferred(deferred) => deferred.propose(context).await,
+                Self::Inline(inline) => inline.propose(context, ancestry).await,
+                Self::Deferred(deferred) => deferred.propose(context, ancestry).await,
             }
         }
 
-        async fn verify(&mut self, context: Ctx, digest: D) -> oneshot::Receiver<bool> {
+        async fn verify(
+            &mut self,
+            context: Ctx,
+            digest: D,
+            ancestry: Arc<[D]>,
+        ) -> oneshot::Receiver<bool> {
             match self {
-                Self::Inline(inline) => inline.verify(context, digest).await,
-                Self::Deferred(deferred) => deferred.verify(context, digest).await,
+                Self::Inline(inline) => inline.verify(context, digest, ancestry).await,
+                Self::Deferred(deferred) => deferred.verify(context, digest, ancestry).await,
             }
         }
 
-        async fn certify(&mut self, round: Round, digest: D) -> oneshot::Receiver<bool> {
+        async fn certify(
+            &mut self,
+            round: Round,
+            digest: D,
+            ancestry: Arc<[D]>,
+        ) -> oneshot::Receiver<bool> {
             match self {
-                Self::Inline(inline) => inline.certify(round, digest).await,
-                Self::Deferred(deferred) => deferred.certify(round, digest).await,
+                Self::Inline(inline) => inline.certify(round, digest, ancestry).await,
+                Self::Deferred(deferred) => deferred.certify(round, digest, ancestry).await,
             }
         }
     }
@@ -1969,22 +1876,32 @@ mod tests {
         type Context = Ctx;
         type Digest = D;
 
-        async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
-            Self::propose(self, context).await
+        async fn propose(
+            &mut self,
+            context: Self::Context,
+            ancestry: Arc<[D]>,
+        ) -> oneshot::Receiver<Self::Digest> {
+            Self::propose(self, context, ancestry).await
         }
 
         async fn verify(
             &mut self,
             context: Self::Context,
             digest: Self::Digest,
+            ancestry: Arc<[D]>,
         ) -> oneshot::Receiver<bool> {
-            Self::verify(self, context, digest).await
+            Self::verify(self, context, digest, ancestry).await
         }
     }
 
     impl CertifiableAutomaton for Wrapper {
-        async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-            Self::certify(self, round, digest).await
+        async fn certify(
+            &mut self,
+            round: Round,
+            digest: Self::Digest,
+            ancestry: Arc<[D]>,
+        ) -> oneshot::Receiver<bool> {
+            Self::certify(self, round, digest, ancestry).await
         }
     }
 
@@ -2086,8 +2003,8 @@ mod tests {
             // until the leader's block arrives. A notarization can arrive in
             // this window, causing Simplex's sole `certify` request to consume
             // and await that still-pending gate.
-            let verify_rx = wrapper.verify(conflicting_context, digest).await;
-            let certify_rx = wrapper.certify(round, digest).await;
+            let verify_rx = wrapper.verify(conflicting_context, digest, Arc::from([genesis.digest(), certified_digest])).await;
+            let certify_rx = wrapper.certify(round, digest, Arc::from([genesis.digest(), certified_digest, skipped_digest])).await;
             assert!(
                 buffer
                     .broadcast(Recipients::Some(vec![]), block)
@@ -2335,6 +2252,19 @@ mod tests {
             }
             context.sleep(Duration::from_millis(250)).await;
 
+            // The selected parent certificate reaches Simplex after rejection of
+            // the conflicting header. Its body is already available in Marshal.
+            let parent_notarization = StandardHarness::make_notarization(
+                Proposal::new(skipped_round, View::new(1), skipped_digest),
+                &schemes,
+                QUORUM,
+            );
+            byzantine_certificate_sender.send(
+                Recipients::One(victim.clone()),
+                Certificate::<S, D>::Notarization(parent_notarization).encode(),
+                true,
+            );
+
             // The Byzantine validator and the other two honest validators
             // notarize the header naming view 2 without the victim's vote.
             let good_votes: Vec<_> = [0usize, 2, 3]
@@ -2431,7 +2361,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
 
                 let verify_result = wrapper
-                    .verify(block_context, digest)
+                    .verify(block_context, digest, Arc::from([genesis.digest()]))
                     .await
                     .await
                     .expect("verify result missing");
@@ -2441,7 +2371,7 @@ mod tests {
                 );
 
                 let certify_result = wrapper
-                    .certify(round, digest)
+                    .certify(round, digest, Arc::from([genesis.digest()]))
                     .await
                     .await
                     .expect("certify result missing");
@@ -2454,7 +2384,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_verify_missing_candidate_waits_without_fetching() {
+    fn test_standard_verify_missing_candidate_fetches_until_canceled() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
@@ -2491,16 +2421,16 @@ mod tests {
                     parent: (View::zero(), genesis.digest()),
                 };
                 let missing = Sha256::hash(&[b"missing candidate"]);
-                let mut verify = wrapper.verify(consensus_context, missing).await;
+                let mut verify = wrapper.verify(consensus_context, missing, Arc::from([genesis.digest()])).await;
 
                 context.sleep(Duration::from_millis(50)).await;
                 assert!(
-                    buffer.subscription_count() > 0,
+                    buffer.commitment_subscription_count() > 0,
                     "{kind:?}: unavailable candidate verification must register a local wait"
                 );
                 assert!(
-                    resolver.fetches().is_empty(),
-                    "{kind:?}: unavailable candidate verification must not fetch from peers"
+                    resolver.fetches().iter().any(|fetch| matches!((&fetch.key, &fetch.subscriber), (handler::Key::Block(commitment), handler::Annotation::Subscription) if *commitment == missing)),
+                    "{kind:?}: unavailable candidate verification must fetch its exact commitment"
                 );
                 assert!(
                     resolver.targeted_is_empty(),
@@ -2517,20 +2447,17 @@ mod tests {
                 drop(verify);
                 context.sleep(Duration::from_millis(10)).await;
                 assert!(
-                    resolver.fetches().is_empty(),
-                    "{kind:?}: canceling a missing candidate wait must not fetch from peers"
+                    resolver.active_fetches().is_empty(),
+                    "{kind:?}: canceling the final waiter must cancel acquisition"
                 );
             });
         }
     }
 
-    /// Crash-recovery shape: after an unclean shutdown, Simplex may recover a
-    /// notarized payload while marshal has no local certification gate task and no
-    /// durable block. If another participant has the block, certification should
-    /// fetch it by notarized round and persist it instead of treating the missing
-    /// local copy as a hard failure.
+    /// Certification acquires and persists a recovered consensus commitment when
+    /// its local gate and durable body are absent after an unclean shutdown.
     #[test_traced("WARN")]
-    fn test_standard_certify_missing_candidate_fetches_by_round() {
+    fn test_standard_certify_missing_candidate_fetches_by_commitment() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
@@ -2568,10 +2495,10 @@ mod tests {
                 };
                 let block = B::new::<Sha256>(block_context, genesis.digest(), Height::new(1), 100);
                 let digest = block.digest();
-                let proposal = Proposal::new(round, View::zero(), digest);
-                let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-                resolver.respond_to_next_fetch((notarization, block).encode());
-                let certify = wrapper.certify(round, digest).await;
+                resolver.respond_to_next_fetch(block.encode());
+                let certify = wrapper
+                    .certify(round, digest, Arc::from([genesis.digest()]))
+                    .await;
 
                 let result = certify.await.expect("certify result missing");
                 assert!(
@@ -2580,21 +2507,21 @@ mod tests {
                 );
                 assert!(
                     resolver.wait_for_delivery_response().await,
-                    "{kind:?}: notarized delivery should validate"
+                    "{kind:?}: block delivery should validate"
                 );
                 assert!(
                     resolver.fetches().iter().any(|fetch| matches!(
                         (&fetch.key, &fetch.subscriber),
                         (
-                            handler::Key::Notarized { round: request_round },
-                            handler::Annotation::Notarization { round: subscriber_round },
-                        ) if *request_round == round && *subscriber_round == round
+                            handler::Key::Block(commitment),
+                            handler::Annotation::Subscription,
+                        ) if *commitment == digest
                     )),
-                    "{kind:?}: certify should fetch notarized block by round"
+                    "{kind:?}: certify should fetch the candidate commitment"
                 );
 
                 assert!(
-                    buffer.subscription_count() > 0,
+                    buffer.commitment_subscription_count() > 0,
                     "{kind:?}: unavailable candidate certification must register a local wait"
                 );
                 assert!(
@@ -2610,7 +2537,6 @@ mod tests {
         marshal: Mailbox<S, Standard<B>>,
         buffer: RecordingBuffer,
         resolver: RecordingResolver,
-        schemes: Vec<S>,
         block_context: Ctx,
         block: B,
     }
@@ -2658,51 +2584,32 @@ mod tests {
             marshal,
             buffer,
             resolver,
-            schemes,
             block_context,
             block,
         }
     }
 
-    /// Regression for certify's `hint_notarized` bump. When `verify` has an
-    /// in-progress certification gate with the block still missing locally,
-    /// `certify` must take that gate AND nudge a round-bound notarized fetch.
-    /// Otherwise the gate's verify task would wait forever on a local-only
-    /// subscription that nothing drives. Removing the `hint_notarized` call
-    /// makes this test hang.
+    /// Concurrent verification and certification share candidate acquisition and
+    /// both complete when its exact body arrives.
     #[test_traced("WARN")]
-    fn test_standard_certify_bumps_notarized_fetch_for_pending_verify() {
+    fn test_standard_certify_shares_pending_verification_fetch() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut case = certification_case(
-                    &mut context,
-                    kind,
-                    format!("certify-bumps-fetch-{kind:?}"),
-                )
-                .await;
+                let mut case =
+                    certification_case(&mut context, kind, format!("certify-bumps-fetch-{kind:?}"))
+                        .await;
                 let round = case.block_context.round;
                 let digest = case.block.digest();
 
-                // `verify` registers a pending certification gate whose `Wait`
-                // block subscription cannot pull from peers, so it stays parked
-                // until something delivers the block locally.
+                case.resolver.respond_to_next_fetch(case.block.encode());
                 let block_context = case.block_context.clone();
-                let verify_rx = case.wrapper.verify(block_context, digest).await;
-
-                // Stage the notarized response so the bump's fetch can resolve.
-                let proposal = Proposal::new(round, View::zero(), digest);
-                let notarization =
-                    StandardHarness::make_notarization(proposal, &case.schemes, QUORUM);
-                case.resolver
-                    .respond_to_next_fetch((notarization, case.block.clone()).encode());
-
-                // `certify` takes the in-progress gate and calls `hint_notarized`,
-                // which issues a round-bound `Key::Notarized`. The recording
-                // resolver delivers, and the marshal stores the block and wakes
-                // verify's digest subscription, letting the pending verify task
-                // resolve the gate that certify awaits.
-                let certify_rx = case.wrapper.certify(round, digest).await;
+                let ancestry = Arc::from([block_context.parent.1]);
+                let verify_rx = case
+                    .wrapper
+                    .verify(block_context, digest, Arc::clone(&ancestry))
+                    .await;
+                let certify_rx = case.wrapper.certify(round, digest, ancestry).await;
 
                 select! {
                     result = verify_rx => {
@@ -2713,7 +2620,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!(
-                            "{kind:?}: verify must resolve after certification bumps a notarized fetch"
+                            "{kind:?}: verify must resolve after candidate acquisition"
                         );
                     },
                 }
@@ -2725,7 +2632,7 @@ mod tests {
                         );
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("{kind:?}: certify must resolve via the bumped notarized fetch");
+                        panic!("{kind:?}: certify must resolve through shared acquisition");
                     },
                 }
 
@@ -2733,20 +2640,18 @@ mod tests {
                     case.resolver.fetches().iter().any(|fetch| matches!(
                         (&fetch.key, &fetch.subscriber),
                         (
-                            handler::Key::Notarized { round: request_round },
-                            handler::Annotation::Notarization { round: subscriber_round },
-                        ) if *request_round == round && *subscriber_round == round
+                            handler::Key::Block(commitment),
+                            handler::Annotation::Subscription,
+                        ) if *commitment == digest
                     )),
-                    "{kind:?}: certify must bump a notarized round fetch when verify is in progress"
+                    "{kind:?}: certify must share the exact candidate fetch with verify"
                 );
             });
         }
     }
 
-    /// Pending verification must own a transiently buffered block before
-    /// certification waits on its gate. Otherwise a cache hit can suppress the
-    /// round-bound fetch before the verifier installs its local subscription,
-    /// and eviction leaves both operations pending indefinitely.
+    /// Pending verification owns an acquired body across buffer eviction while
+    /// certification waits for the same verification gate.
     #[test_traced("WARN")]
     fn test_standard_certify_retains_transient_buffer_hit_through_eviction() {
         for kind in wrapper_kinds() {
@@ -2765,12 +2670,20 @@ mod tests {
                 // The next lookup returns ownership while removing the buffer entry, modeling
                 // same-peer cache pressure.
                 let block_context = case.block_context.clone();
-                let verify_rx = case.wrapper.verify(block_context, digest).await;
-                let certify_rx = case.wrapper.certify(round, digest).await;
+                let verify_rx = case
+                    .wrapper
+                    .verify(
+                        block_context,
+                        digest,
+                        Arc::from([case.block_context.parent.1]),
+                    )
+                    .await;
+                let certify_rx = case
+                    .wrapper
+                    .certify(round, digest, Arc::from([case.block_context.parent.1]))
+                    .await;
 
-                // This request is ordered after the verification subscription and
-                // certification hint in the marshal mailbox. Once it returns, the
-                // one-shot buffer hit and eviction have both occurred.
+                // The mailbox barrier follows acquisition of the transient body.
                 case.marshal.get_processed_height().await;
                 assert!(
                     !case.buffer.contains(digest),
@@ -2848,14 +2761,16 @@ mod tests {
                 B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
-            let verify_rx = wrapper.verify(block_context, digest).await;
+            let verify_rx = wrapper
+                .verify(block_context, digest, Arc::from([genesis.digest()]))
+                .await;
             drop(verify_rx);
             context.sleep(Duration::from_millis(10)).await;
 
-            let proposal = Proposal::new(round, View::zero(), digest);
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-            resolver.respond_to_next_fetch((notarization, block).encode());
-            let certify_rx = wrapper.certify(round, digest).await;
+            resolver.respond_to_next_fetch(block.encode());
+            let certify_rx = wrapper
+                .certify(round, digest, Arc::from([genesis.digest()]))
+                .await;
 
             select! {
                 result = certify_rx => {
@@ -2870,23 +2785,23 @@ mod tests {
             }
             assert!(
                 resolver.wait_for_delivery_response().await,
-                "notarized delivery should validate"
+                "block delivery should validate"
             );
             assert!(
                 resolver.fetches().iter().any(|fetch| matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
-                        handler::Key::Notarized { round: request_round },
-                        handler::Annotation::Notarization { round: subscriber_round },
-                    ) if *request_round == round && *subscriber_round == round
+                        handler::Key::Block(commitment),
+                            handler::Annotation::Subscription,
+                        ) if *commitment == digest
                 )),
-                "certify must recover by fetching the notarized round"
+                "certify must recover by fetching the candidate commitment"
             );
         });
     }
 
     #[test_traced("WARN")]
-    fn test_standard_verify_height_lie_parent_fetch_is_round_bound() {
+    fn test_standard_verify_height_lie_parent_fetch_uses_commitment() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
@@ -2936,39 +2851,29 @@ mod tests {
                 let child_digest = child.digest();
                 assert!(marshal.verified(child_round, child).await);
 
-                let verify = wrapper.verify(child_context, child_digest).await;
+                let verify = wrapper.verify(child_context, child_digest, Arc::from([genesis.digest(), parent_digest])).await;
                 wait_until(
                     &context,
                     Duration::from_secs(5),
-                    "round-bound parent fetch",
+                    "exact parent commitment fetch",
                     || {
                         resolver.fetches().iter().any(|fetch| {
                             matches!(
                                 fetch.key,
-                                handler::Key::Notarized { round } if round == parent_round
+                                handler::Key::Block(commitment) if commitment == parent_digest
                             ) && matches!(
                                 fetch.subscriber,
-                                handler::Annotation::Notarization { round }
-                                    if round == parent_round
+                                handler::Annotation::Subscription
                             )
                         })
                     },
                 )
                 .await;
 
-                let fetches = resolver.fetches();
-                assert!(
-                    fetches.iter().all(|fetch| {
-                        !matches!(fetch.key, handler::Key::Block(_))
-                            && !matches!(
-                                fetch.subscriber,
-                                handler::Annotation::Certified { height }
-                                | handler::Annotation::Untrusted { height }
-                                    if height == Height::new(2)
-                            )
-                    }),
-                    "{kind:?}: malicious child height must not drive parent fetches"
-                );
+                assert!(resolver.fetches().iter().all(|fetch| {
+                    matches!(fetch.key, handler::Key::Block(commitment) if commitment == parent_digest)
+                        && matches!(fetch.subscriber, handler::Annotation::Subscription)
+                }), "{kind:?}: malicious child height must not select a different parent");
 
                 assert!(marshal.verified(parent_round, parent).await);
                 let verify_result = verify.await.expect("verify result missing");
@@ -2982,7 +2887,7 @@ mod tests {
                         verify_result,
                         "deferred verify should optimistically pass pre-checks"
                     );
-                    let certify = wrapper.certify(child_round, child_digest).await;
+                    let certify = wrapper.certify(child_round, child_digest, Arc::from([genesis.digest(), parent_digest])).await;
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should reject non-contiguous ancestry"
@@ -3072,10 +2977,8 @@ mod tests {
                         blocker: oracle.control(malicious.clone()),
                         consumer: NoopConsumer,
                         producer: StaticProducer::new(
-                            handler::Key::Notarized {
-                                round: parent_round,
-                            },
-                            Bytes::from_static(b"not a valid notarization"),
+                            handler::Key::Block(parent_digest),
+                            Bytes::from_static(b"not a valid block"),
                         ),
                         mailbox_size: NZUsize!(100),
                         me: Some(malicious.clone()),
@@ -3105,11 +3008,11 @@ mod tests {
                     mock_app,
                     victim_mailbox.clone(),
                 );
-                let verify = wrapper.verify(child_context, child_digest).await;
+                let verify = wrapper.verify(child_context, child_digest, Arc::from([genesis.digest(), parent_digest])).await;
                 let verify_or_certify = if kind == WrapperKind::Deferred {
                     let optimistic = verify.await.expect("verify result missing");
                     assert!(optimistic, "deferred verify should optimistically succeed");
-                    wrapper.certify(child_round, child_digest).await
+                    wrapper.certify(child_round, child_digest, Arc::from([genesis.digest(), parent_digest])).await
                 } else {
                     verify
                 };
@@ -3165,6 +3068,31 @@ mod tests {
         }
     }
 
+    async fn verified_chain(
+        marshal: &Mailbox<S, Standard<B>>,
+        genesis: &B,
+        tip: Height,
+    ) -> Arc<[D]> {
+        let mut commitments = vec![genesis.digest()];
+        for height in 1..=tip.get() {
+            let parent = *commitments.last().unwrap();
+            let round = Round::new(Epoch::zero(), View::new(height));
+            let block = B::new::<Sha256>(
+                Ctx {
+                    round,
+                    leader: default_leader(),
+                    parent: (View::new(height - 1), parent),
+                },
+                parent,
+                Height::new(height),
+                height * 100,
+            );
+            commitments.push(block.digest());
+            assert!(marshal.verified(round, block).await);
+        }
+        commitments.into()
+    }
+
     #[test_traced("WARN")]
     fn test_propose_paths() {
         for kind in wrapper_kinds() {
@@ -3211,7 +3139,9 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::zero(), genesis.digest()),
                 };
-                let proposal_rx = wrapper.propose(non_boundary_context).await;
+                let proposal_rx = wrapper
+                    .propose(non_boundary_context, Arc::from([genesis.digest()]))
+                    .await;
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
@@ -3225,25 +3155,8 @@ mod tests {
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
-                let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
-                let boundary_block = B::new::<Sha256>(
-                    Ctx {
-                        round: boundary_round,
-                        leader: default_leader(),
-                        parent: (View::zero(), genesis.digest()),
-                    },
-                    genesis.digest(),
-                    boundary_height,
-                    1900,
-                );
-                let boundary_digest = boundary_block.digest();
-
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(boundary_round, boundary_block.clone())
-                        .await
-                );
+                let selected = verified_chain(&marshal, &genesis, boundary_height).await;
+                let boundary_digest = *selected.last().unwrap();
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -3254,7 +3167,9 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
-                let reproposal_rx = wrapper.propose(reproposal_context).await;
+                let reproposal_rx = wrapper
+                    .propose(reproposal_context, Arc::clone(&selected))
+                    .await;
                 assert_eq!(
                     reproposal_rx.await.expect("reproposal result missing"),
                     boundary_digest,
@@ -3263,7 +3178,9 @@ mod tests {
 
                 // The re-proposal registers a certification gate whose durability
                 // certify awaits before the finalize vote.
-                let certify_rx = wrapper.certify(reproposal_round, boundary_digest).await;
+                let certify_rx = wrapper
+                    .certify(reproposal_round, boundary_digest, Arc::clone(&selected))
+                    .await;
                 assert!(
                     certify_rx.await.expect("certify result missing"),
                     "{kind:?}: certify must succeed for the re-proposed boundary block"
@@ -3313,25 +3230,8 @@ mod tests {
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
-                let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
-                let boundary_block = B::new::<Sha256>(
-                    Ctx {
-                        round: boundary_round,
-                        leader: default_leader(),
-                        parent: (View::zero(), genesis.digest()),
-                    },
-                    genesis.digest(),
-                    boundary_height,
-                    1900,
-                );
-                let boundary_digest = boundary_block.digest();
-
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(boundary_round, boundary_block)
-                        .await
-                );
+                let selected = verified_chain(&marshal, &genesis, boundary_height).await;
+                let boundary_digest = *selected.last().unwrap();
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -3343,7 +3243,11 @@ mod tests {
                 };
                 assert!(
                     wrapper
-                        .verify(valid_reproposal_context, boundary_digest)
+                        .verify(
+                            valid_reproposal_context,
+                            boundary_digest,
+                            Arc::clone(&selected)
+                        )
                         .await
                         .await
                         .expect("verify result missing"),
@@ -3352,28 +3256,9 @@ mod tests {
 
                 // Invalid re-proposal: non-boundary block.
                 let non_boundary_height = Height::new(10);
-                let non_boundary_round =
-                    Round::new(Epoch::zero(), View::new(non_boundary_height.get()));
-                let non_boundary_block = B::new::<Sha256>(
-                    Ctx {
-                        round: non_boundary_round,
-                        leader: default_leader(),
-                        parent: (View::zero(), genesis.digest()),
-                    },
-                    genesis.digest(),
-                    non_boundary_height,
-                    1000,
-                );
-                let non_boundary_digest = non_boundary_block.digest();
-
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(non_boundary_round, non_boundary_block)
-                        .await
-                );
-
-                context.sleep(Duration::from_millis(10)).await;
+                let non_boundary_digest = selected[non_boundary_height.get() as usize];
+                let non_boundary_selected: Arc<[D]> =
+                    selected[..=non_boundary_height.get() as usize].into();
 
                 // Attempt to re-propose a non-boundary block.
                 let invalid_reproposal_context = Ctx {
@@ -3383,7 +3268,11 @@ mod tests {
                 };
                 assert!(
                     !wrapper
-                        .verify(invalid_reproposal_context, non_boundary_digest)
+                        .verify(
+                            invalid_reproposal_context,
+                            non_boundary_digest,
+                            non_boundary_selected
+                        )
                         .await
                         .await
                         .expect("verify result missing"),
@@ -3398,7 +3287,7 @@ mod tests {
                 };
                 assert!(
                     !wrapper
-                        .verify(cross_epoch_context, boundary_digest)
+                        .verify(cross_epoch_context, boundary_digest, Arc::clone(&selected))
                         .await
                         .await
                         .expect("verify result missing"),
@@ -3409,7 +3298,7 @@ mod tests {
                     // Deferred-only crash-recovery path: certify without prior verify.
                     let certify_only_round = Round::new(Epoch::zero(), View::new(21));
                     let certify_result = wrapper
-                        .certify(certify_only_round, boundary_digest)
+                        .certify(certify_only_round, boundary_digest, Arc::clone(&selected))
                         .await
                         .await;
                     assert!(
@@ -3483,7 +3372,11 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
 
                 let malformed_verify = wrapper
-                    .verify(malformed_context.clone(), malformed_digest)
+                    .verify(
+                        malformed_context.clone(),
+                        malformed_digest,
+                        Arc::from([genesis.digest()]),
+                    )
                     .await
                     .await
                     .expect("verify result missing");
@@ -3499,7 +3392,13 @@ mod tests {
                         malformed_verify,
                         "deferred verify should optimistically pass pre-checks"
                     );
-                    let certify = wrapper.certify(malformed_round, malformed_digest).await;
+                    let certify = wrapper
+                        .certify(
+                            malformed_round,
+                            malformed_digest,
+                            Arc::from([genesis.digest()]),
+                        )
+                        .await;
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should reject non-contiguous ancestry"
@@ -3542,7 +3441,11 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
 
                 let mismatch_verify = wrapper
-                    .verify(mismatched_context, mismatched_digest)
+                    .verify(
+                        mismatched_context,
+                        mismatched_digest,
+                        Arc::from([genesis.digest(), parent_digest]),
+                    )
                     .await
                     .await
                     .expect("verify result missing");
@@ -3558,7 +3461,13 @@ mod tests {
                         mismatch_verify,
                         "deferred verify should optimistically pass pre-checks"
                     );
-                    let certify = wrapper.certify(mismatch_round, mismatched_digest).await;
+                    let certify = wrapper
+                        .certify(
+                            mismatch_round,
+                            mismatched_digest,
+                            Arc::from([genesis.digest(), parent_digest]),
+                        )
+                        .await;
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should reject mismatched parent digest"
@@ -3628,7 +3537,7 @@ mod tests {
                 //    - Inline fails in `verify`.
                 //    - Deferred returns optimistic success and fails in `certify`.
                 let verify_result = wrapper
-                    .verify(verify_context, digest)
+                    .verify(verify_context, digest, Arc::from([genesis.digest(), parent_digest]))
                     .await
                     .await
                     .expect("verify result missing");
@@ -3642,7 +3551,7 @@ mod tests {
                         verify_result,
                         "deferred verify should pass pre-checks and schedule deferred verification"
                     );
-                    let certify = wrapper.certify(round, digest).await;
+                    let certify = wrapper.certify(round, digest, Arc::from([genesis.digest(), parent_digest])).await;
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should propagate deferred application verification failure"
@@ -3892,6 +3801,366 @@ mod tests {
         });
     }
 
+    async fn deliver_acquisition_test_block(
+        resolver: &RecordingResolver,
+        fetch: FetchRecord,
+        block: &B,
+    ) {
+        assert_eq!(
+            fetch.key,
+            handler::Key::Block(StandardHarness::commitment(block))
+        );
+        let (response, response_rx) = oneshot::channel();
+        assert!(
+            resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: fetch.key,
+                        subscribers: NonEmptyVec::new((fetch.subscriber, tracing::Span::none())),
+                    },
+                    value: block.encode(),
+                    response,
+                })
+                .accepted()
+        );
+        assert!(
+            response_rx
+                .await
+                .expect("exact block delivery response missing")
+        );
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_acquire_coalesces_and_cancels_last_caller_while_idle() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquire-shared-idle-cancel",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            )
+            .await;
+            let buffer = buffer.unwrap();
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::zero()));
+            let commitment = Sha256::hash(&[b"shared-acquisition"]);
+            let first = mailbox.acquire(commitment);
+            let mut second = mailbox.acquire(commitment);
+            assert!(mailbox.get_block(&commitment).await.is_none());
+            assert_eq!(buffer.commitment_subscription_count(), 1);
+            let is_acquisition = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(commitment)
+                    && fetch.subscriber == handler::Annotation::Subscription
+            };
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|f| is_acquisition(f))
+                    .count(),
+                1
+            );
+
+            // Only cancellation can wake cleanup after this point: neither mailbox
+            // traffic nor a block arrival can hide a missing cancellation wakeup.
+            drop(first);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
+            assert_eq!(
+                resolver
+                    .active_fetches()
+                    .iter()
+                    .filter(|f| is_acquisition(f))
+                    .count(),
+                1
+            );
+            assert!(!buffer.commitment_subscriptions.lock()[0].is_closed());
+            drop(second);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "idle acquisition cancellation",
+                || {
+                    !resolver.active_fetches().iter().any(is_acquisition)
+                        && buffer.commitment_subscriptions.lock()[0].is_closed()
+                },
+            )
+            .await;
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|f| is_acquisition(f))
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_direct_transfer_preserves_cancellation_ownership() {
+        const PARTITION: &str = "prefetch-direct-transfer";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
+            let mut config = test_config(&context, PARTITION,
+                ConstantProvider::new(schemes[0].clone()), NZUsize!(1));
+            config.max_repair = NZUsize!(1);
+            let (actor, mailbox, _) = Actor::init(
+                context.child("actor"), finalizations, blocks, config,
+            ).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(application.clone(), buffer.clone(),
+                (resolver_rx, resolver.clone()));
+            wait_until(&context, Duration::from_secs(1), "held genesis acknowledgement", || {
+                application.pending_ack_heights() == vec![Height::zero()]
+            }).await;
+            let _ = mailbox.get_processed_height().await;
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let first = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let first_key = handler::Key::Block(first.digest());
+            let second = Sha256::hash(&[b"queued behind first prefetch"]);
+            let second_key = handler::Key::Block(second);
+            let old = mailbox.prefetch(Arc::from([first.digest(), second]), 0..2);
+            wait_until(&context, Duration::from_secs(1), "first speculative request", || {
+                resolver.active_fetches().iter().any(|fetch| fetch.key == first_key)
+            }).await;
+            assert!(!resolver.fetches().iter().any(|fetch| fetch.key == second_key));
+
+            let mut direct = mailbox.acquire(first.digest());
+            wait_until(&context, Duration::from_secs(1), "direct claim releases speculative capacity", || {
+                resolver.active_fetches().iter().any(|fetch| fetch.key == second_key)
+            }).await;
+            let duplicate = mailbox.prefetch(Arc::from([first.digest()]), 0..1);
+            let _ = mailbox.get_processed_height().await;
+            assert_eq!(resolver.fetches().iter().filter(|fetch| fetch.key == first_key).count(), 1);
+
+            // Both lease closures are the only actor inputs until the second
+            // request is retired; the first request now belongs to its caller.
+            drop(old);
+            drop(duplicate);
+            wait_until(&context, Duration::from_secs(1), "old leases release only speculative request", || {
+                !resolver.active_fetches().iter().any(|fetch| fetch.key == second_key)
+            }).await;
+            assert!(matches!(direct.try_recv(), Err(TryRecvError::Empty)));
+            assert!(!buffer.commitment_subscriptions.lock()[0].is_closed());
+            let fetch = resolver.active_fetches().into_iter()
+                .find(|fetch| fetch.key == first_key).expect("direct request canceled by old lease");
+            assert_eq!(fetch.subscriber, handler::Annotation::Subscription);
+            deliver_acquisition_test_block(&resolver, fetch, &first).await;
+            select! {
+                result = direct => assert_eq!(result.unwrap().digest(), first.digest()),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("direct caller did not receive its block"),
+            }
+
+            let inverse = Sha256::hash(&[b"direct before speculative lease"]);
+            let inverse_key = handler::Key::Block(inverse);
+            let direct = mailbox.acquire(inverse);
+            wait_until(&context, Duration::from_secs(1), "inverse direct request", || {
+                resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
+            }).await;
+            let old = mailbox.prefetch(Arc::from([inverse]), 0..1);
+            let _ = mailbox.get_processed_height().await;
+            assert_eq!(resolver.fetches().iter().filter(|fetch| fetch.key == inverse_key).count(), 1);
+
+            // A best-effort lease cannot extend a direct caller's lifetime.
+            // No mailbox traffic or body delivery drives cancellation here.
+            drop(direct);
+            wait_until(&context, Duration::from_secs(1), "last direct caller cancels despite lease", || {
+                !resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
+                    && buffer.commitment_subscriptions.lock().iter().all(|sender| sender.is_closed())
+            }).await;
+
+            let mut renewed = mailbox.prefetch(Arc::from([inverse]), 0..1);
+            wait_until(&context, Duration::from_secs(1), "renewed speculative request", || {
+                resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
+            }).await;
+            assert_eq!(resolver.fetches().iter().filter(|fetch| fetch.key == inverse_key).count(), 2);
+            drop(old);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key));
+            assert!(matches!(renewed.try_recv(), Err(TryRecvError::Empty)));
+            drop(renewed);
+            wait_until(&context, Duration::from_secs(1), "renewed lease owns cancellation", || {
+                !resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
+            }).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_acquire_cancellation_preserves_shared_finality_request() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let application = Application::<B>::manual_ack();
+            let (mut mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquire-cancel-preserves-finality",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone().into()),
+            )
+            .await;
+            let buffer = buffer.unwrap();
+            assert_eq!(application.acknowledged().await, Height::zero());
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = StandardHarness::commitment(&block);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let acquisition = mailbox.acquire(commitment);
+            StandardHarness::report_finalization(
+                &mut mailbox,
+                StandardHarness::make_finalization(
+                    Proposal::new(round, View::zero(), commitment),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            let is_finality = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(commitment)
+                    && fetch.subscriber == handler::Annotation::Round(round)
+            };
+            let is_acquisition = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(commitment)
+                    && fetch.subscriber == handler::Annotation::Subscription
+            };
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "shared acquisition and finality",
+                || {
+                    let active = resolver.active_fetches();
+                    active.iter().any(is_finality) && active.iter().any(is_acquisition)
+                },
+            )
+            .await;
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(buffer.commitment_subscription_count(), 1);
+            assert!(!buffer.commitment_subscriptions.lock()[0].is_closed());
+
+            drop(acquisition);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "independent finality retention",
+                || {
+                    let active = resolver.active_fetches();
+                    active.iter().any(is_finality)
+                        && !active.iter().any(is_acquisition)
+                        && buffer.commitment_subscriptions.lock()[0].is_closed()
+                },
+            )
+            .await;
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(is_finality)
+                .unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &block).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "finalized body after acquisition cancellation",
+                || application.pending_ack_heights() == vec![Height::new(1)],
+            )
+            .await;
+            assert_eq!(application.blocks()[&Height::new(1)].digest(), commitment);
+            assert_eq!(
+                mailbox
+                    .get_finalization(Height::new(1))
+                    .await
+                    .unwrap()
+                    .proposal
+                    .payload,
+                commitment
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_waiter_survives_sibling_cancel_and_gap_repair_with_held_ack() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let application = Application::<B>::manual_ack();
+            let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-waiter-gap-held-ack",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone().into()),
+            ).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            let first_round = Round::new(Epoch::zero(), View::new(1));
+            let first = make_raw_block(genesis.digest(), Height::new(1), 100);
+            assert!(mailbox.verified(first_round, first.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox,
+                StandardHarness::make_finalization(
+                    Proposal::new(first_round, View::zero(), StandardHarness::commitment(&first)),
+                    &schemes, QUORUM,
+                ),
+            ).await;
+            wait_until(&context, Duration::from_secs(1), "held height one ack", || {
+                application.pending_ack_heights() == vec![Height::new(1)]
+            }).await;
+            let missing = make_raw_block(first.digest(), Height::new(2), 200);
+            let upper = make_raw_block(missing.digest(), Height::new(3), 300);
+            let fetches_before = resolver.fetches().len();
+            let canceled = mailbox.finalized(Height::new(2));
+            let mut survivor = mailbox.finalized(Height::new(2));
+            assert!(mailbox.get_block(Height::new(2)).await.is_none());
+            assert_eq!(resolver.fetches().len(), fetches_before);
+            drop(canceled);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(survivor.try_recv(), Err(TryRecvError::Empty)));
+
+            let upper_round = Round::new(Epoch::zero(), View::new(3));
+            assert!(mailbox.verified(upper_round, upper.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox,
+                StandardHarness::make_finalization(
+                    Proposal::new(upper_round, View::new(2), StandardHarness::commitment(&upper)),
+                    &schemes, QUORUM,
+                ),
+            ).await;
+            let is_repair = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(StandardHarness::commitment(&missing))
+                    && fetch.subscriber == handler::Annotation::Height(Height::new(2))
+            };
+            wait_until(&context, Duration::from_secs(1), "missing parent repair", || {
+                resolver.active_fetches().iter().any(is_repair)
+            }).await;
+            assert!(matches!(survivor.try_recv(), Err(TryRecvError::Empty)));
+            assert!(mailbox.get_block(Height::new(2)).await.is_none());
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
+            let fetch = resolver.active_fetches().into_iter().find(is_repair).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &missing).await;
+            select! {
+                result = survivor => {
+                    assert_eq!(result.expect("finalized sibling canceled survivor").digest(), missing.digest());
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("gap repair did not wake preregistered finalized-height waiter");
+                },
+            }
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::zero()));
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
+            assert!(!application.blocks().contains_key(&Height::new(2)));
+            assert_eq!(mailbox.get_block(Height::new(2)).await.unwrap().digest(), missing.digest());
+        });
+    }
+
     /// Recorded `send` call on the [`RecordingBuffer`].
     type BufferSend = (Round, Arc<B>, Recipients<PublicKey>);
 
@@ -3902,7 +4171,6 @@ mod tests {
         blocks: Arc<Mutex<Vec<B>>>,
         last_handed: Arc<Mutex<Option<Weak<B>>>>,
         evict_on_next_hit: Arc<Mutex<bool>>,
-        digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<B>>>>>,
         sends: Arc<Mutex<Vec<BufferSend>>>,
     }
@@ -3946,10 +4214,6 @@ mod tests {
             self.sends.lock().clone()
         }
 
-        fn subscription_count(&self) -> usize {
-            self.digest_subscriptions.lock().len() + self.commitment_subscriptions.lock().len()
-        }
-
         fn commitment_subscription_count(&self) -> usize {
             self.commitment_subscriptions.lock().len()
         }
@@ -3964,12 +4228,6 @@ mod tests {
 
         async fn find_by_commitment(&self, commitment: D) -> Option<Arc<B>> {
             self.find(commitment)
-        }
-
-        fn subscribe_by_digest(&self, _digest: D) -> Option<oneshot::Receiver<Arc<B>>> {
-            let (sender, receiver) = oneshot::channel();
-            self.digest_subscriptions.lock().push(sender);
-            Some(receiver)
         }
 
         fn subscribe_by_commitment(&self, _commitment: D) -> Option<oneshot::Receiver<Arc<B>>> {
@@ -4067,10 +4325,6 @@ mod tests {
 
         fn active_fetches(&self) -> Vec<FetchRecord> {
             self.active_fetches.lock().clone()
-        }
-
-        fn targeted(&self) -> Vec<TargetedFetch> {
-            self.targeted.lock().clone()
         }
 
         fn targeted_is_empty(&self) -> bool {
@@ -4988,22 +5242,14 @@ mod tests {
                 floor_block.digest()
             );
 
-            // Release the stale ack after the remote floor has been applied.
-            // It must not lower the processed floor back below height 5.
-            let fetches_after_floor = resolver.fetches().len();
+            // The unacknowledged anchor owns the dispatch floor at height 4.
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(4)));
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
 
-            let _subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(&[b"below-floor-after-stale-ack"]),
-                CommitmentFallback::FetchByCommitment {
-                    height: Height::new(2),
-                },
-            );
-            let _ = mailbox.get_block(Height::new(5)).await;
             assert_eq!(
-                resolver.fetches().len(),
-                fetches_after_floor,
+                mailbox.get_processed_height().await,
+                Some(Height::new(4)),
                 "stale pre-floor ack must not lower the processed height floor"
             );
         });
@@ -5081,22 +5327,14 @@ mod tests {
                 "local floor anchor must not be fetched"
             );
 
-            // Release the old ack after the local floor is installed. It must
-            // not make lower-height commitment subscriptions eligible again.
-            let fetches_after_floor = resolver.fetches().len();
+            // The unacknowledged anchor owns the dispatch floor at height 4.
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(4)));
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
 
-            let _subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(&[b"below-local-floor-after-stale-ack"]),
-                CommitmentFallback::FetchByCommitment {
-                    height: Height::new(2),
-                },
-            );
-            let _ = mailbox.get_block(Height::new(5)).await;
             assert_eq!(
-                resolver.fetches().len(),
-                fetches_after_floor,
+                mailbox.get_processed_height().await,
+                Some(Height::new(4)),
                 "stale pre-floor ack must not lower a locally installed floor"
             );
         });
@@ -5170,7 +5408,7 @@ mod tests {
                         (&fetch.key, &fetch.subscriber),
                         (
                             handler::Key::Block(commitment),
-                            handler::Annotation::Finalized(handler::Finalized::ByHeight { height })
+                            handler::Annotation::Height(height)
                         ) if *commitment == missing.digest() && *height == Height::new(6)
                     )
                 }),
@@ -5188,9 +5426,7 @@ mod tests {
                             (&fetch.key, &fetch.subscriber),
                             (
                                 handler::Key::Block(commitment),
-                                handler::Annotation::Finalized(
-                                    handler::Finalized::ByHeight { height }
-                                )
+                                handler::Annotation::Height(height)
                             ) if *commitment == missing.digest() && *height == Height::new(6)
                         )
                     })
@@ -5801,12 +6037,15 @@ mod tests {
             // round-floor side effect is covered separately from ack handling.
             let stale_floor_round = Round::new(Epoch::zero(), View::new(5));
             let missing = Sha256::hash(&[b"missing-before-stale-lower-floor"]);
-            let _subscription = mailbox.subscribe_by_commitment(
-                missing,
-                CommitmentFallback::FetchByRound {
-                    round: stale_floor_round,
-                },
-            );
+            StandardHarness::report_finalization(
+                &mut mailbox.clone(),
+                StandardHarness::make_finalization(
+                    Proposal::new(stale_floor_round, View::zero(), missing),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -5815,7 +6054,7 @@ mod tests {
                     resolver.active_fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == stale_floor_round
+                            handler::Key::Block(commitment) if commitment == missing
                         )
                     })
                 },
@@ -5850,7 +6089,7 @@ mod tests {
                     resolver.active_fetches().iter().all(|fetch| {
                         !matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == stale_floor_round
+                            handler::Key::Block(commitment) if commitment == missing
                         )
                     })
                 },
@@ -5989,10 +6228,15 @@ mod tests {
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let missing = Sha256::hash(&[b"missing-before-stale-floor"]);
-            let _subscription = mailbox.subscribe_by_commitment(
-                missing,
-                CommitmentFallback::FetchByRound { round: floor_round },
-            );
+            StandardHarness::report_finalization(
+                &mut mailbox.clone(),
+                StandardHarness::make_finalization(
+                    Proposal::new(floor_round, View::zero(), missing),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -6001,7 +6245,7 @@ mod tests {
                     resolver.active_fetches().iter().any(|fetch| {
                         matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == floor_round
+                            handler::Key::Block(commitment) if commitment == missing
                         )
                     })
                 },
@@ -6026,7 +6270,7 @@ mod tests {
                     resolver.active_fetches().iter().all(|fetch| {
                         !matches!(
                             fetch.key,
-                            handler::Key::Notarized { round } if round == floor_round
+                            handler::Key::Block(commitment) if commitment == missing
                         )
                     })
                 },
@@ -6034,7 +6278,19 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(floor_round, Sha256::hash(&[b"missing-after-stale-floor"]));
+            StandardHarness::report_finalization(
+                &mut mailbox.clone(),
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        floor_round,
+                        View::zero(),
+                        Sha256::hash(&[b"missing-after-stale-floor"]),
+                    ),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
 
             assert!(
@@ -6133,20 +6389,17 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_wakes_fetch_by_round_subscriber() {
+    fn test_standard_block_delivery_wakes_commitment_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "notarized-delivery-wakes-subscriber",
+                "block-delivery-wakes-subscriber",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
@@ -6154,23 +6407,20 @@ mod tests {
             )
             .await;
 
-            let subscription = mailbox.subscribe_by_commitment(
-                notarization.proposal.payload,
-                CommitmentFallback::FetchByRound { round },
-            );
+            let subscription = mailbox.acquire(block.digest());
 
             wait_until(
                 &context,
                 Duration::from_secs(5),
-                "fetch-by-round request",
+                "commitment request",
                 || {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             (&fetch.key, &fetch.subscriber),
                             (
-                                handler::Key::Notarized { round: request_round },
-                                handler::Annotation::Notarization { round: subscriber_round },
-                            ) if *request_round == round && *subscriber_round == round
+                                handler::Key::Block(commitment),
+                                handler::Annotation::Subscription,
+                            ) if *commitment == block.digest()
                         )
                     })
                 },
@@ -6182,20 +6432,20 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Notarized { round },
+                            key: handler::Key::Block(block.digest()),
                             subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
+                                handler::Annotation::Subscription,
                                 tracing::Span::none(),
                             )),
                         },
-                        value: (notarization, block.clone()).encode(),
+                        value: block.encode(),
                         response,
                     })
                     .accepted()
             );
             assert!(
                 response_rx.await.expect("delivery response missing"),
-                "notarized delivery should validate"
+                "block delivery should validate"
             );
 
             select! {
@@ -6204,113 +6454,14 @@ mod tests {
                     assert_eq!(delivered.digest(), block.digest());
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("notarized delivery did not wake block subscriber");
+                    panic!("block delivery did not wake block subscriber");
                 },
             }
         });
     }
 
     #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_rejects_wrong_round() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let requested_round = Round::new(Epoch::new(1), View::new(1));
-            let delivered_round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let proposal = Proposal::new(
-                delivered_round,
-                View::zero(),
-                StandardHarness::commitment(&block),
-            );
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "notarized-delivery-wrong-round",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized {
-                                round: requested_round,
-                            },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization {
-                                    round: requested_round,
-                                },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
-                "wrong-round notarized delivery must not satisfy the request"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_acknowledges_stale_without_full_scheme() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "notarized-delivery-stale-certificate-only",
-                VerifierProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized { round },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
-                "stale notarized delivery should acknowledge without blaming the peer"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
+    fn test_standard_finalized_commitment_delivery_survives_recovery() {
         const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
 
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -6336,27 +6487,27 @@ mod tests {
             )
             .await;
 
+            StandardHarness::report_finalization(&mut mailbox.clone(), finalization.clone()).await;
+            let _ = mailbox.get_processed_height().await;
             let (response, response_rx) = oneshot::channel();
             assert!(
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Finalized { height },
+                            key: handler::Key::Block(block.digest()),
                             subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
+                                handler::Annotation::Height(height),
                                 tracing::Span::none(),
                             )),
                         },
-                        value: (finalization.clone(), block.clone()).encode(),
+                        value: block.encode(),
                         response,
                     })
                     .accepted()
             );
             assert!(
                 response_rx.await.expect("delivery response missing"),
-                "finalization verified through a verify-only scope should be accepted"
+                "body matching the locally finalized commitment should be accepted"
             );
             assert_eq!(application.acknowledged().await, Height::zero());
             assert_eq!(application.acknowledged().await, height);
@@ -6392,355 +6543,6 @@ mod tests {
                 .await
                 .expect("delivered finalization must be durable");
             assert_eq!(recovered_finalization.proposal, finalization.proposal);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_rejects_epoch_mismatch() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            // Height 1 lives in epoch 0 under `FixedEpocher`, but the finalization claims epoch 1.
-            // The certificate decodes against epoch 0's config, so the epoch-equality guard must
-            // reject it and blame the peer before any verification.
-            let height = Height::new(1);
-            let round = Round::new(Epoch::new(1), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
-            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-epoch-mismatch",
-                VerifierProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
-                "finalization whose epoch mismatches the height's epoch must blame the peer"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_verifies_after_scope_retires() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let height = Height::new(1);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
-            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-            let application = Application::<B>::manual_ack();
-
-            // The scope survives exactly the admission lookup, so it is gone by
-            // the time the batched verification runs.
-            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-scope-retires",
-                provider.clone(),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-            assert!(
-                !provider.retired(Epoch::zero()),
-                "no lookup may consume the scope before admission"
-            );
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
-                "finalization admitted under a live scope must not blame the peer"
-            );
-            assert!(
-                provider.retired(Epoch::zero()),
-                "admission must have consumed the scope"
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            assert_eq!(application.acknowledged().await, height);
-            assert_eq!(
-                application.blocks().get(&height).unwrap().digest(),
-                block.digest()
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_verifies_after_scope_retires() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-
-            // The scope survives exactly the admission lookup, so it is gone by
-            // the time the batched verification runs.
-            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "notarized-delivery-scope-retires",
-                provider.clone(),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-            assert!(
-                !provider.retired(Epoch::zero()),
-                "no lookup may consume the scope before admission"
-            );
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized { round },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
-                "notarization admitted under a live scope must not blame the peer"
-            );
-            assert!(
-                provider.retired(Epoch::zero()),
-                "admission must have consumed the scope"
-            );
-            assert_eq!(
-                mailbox
-                    .get_block(&block.digest())
-                    .await
-                    .map(|cached| cached.digest()),
-                Some(block.digest()),
-                "notarized block verified under the admission scope must be cached"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_rejects_foreign_certificate_after_scope_retires() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let Fixture {
-                schemes: foreign, ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            // The certificate decodes under epoch 0's scope but was signed by a
-            // committee marshal does not know.
-            let height = Height::new(1);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
-            let finalization = StandardHarness::make_finalization(proposal, &foreign, QUORUM);
-
-            // Retiring the scope after admission must not turn the rejection into
-            // an acceptance: the retained scope still verifies the certificate.
-            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-foreign-certificate-scope-retires",
-                provider.clone(),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-            assert!(
-                !provider.retired(Epoch::zero()),
-                "no lookup may consume the scope before admission"
-            );
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
-                "certificate from a foreign committee must be rejected"
-            );
-            assert!(
-                provider.retired(Epoch::zero()),
-                "admission must have consumed the scope"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_batch_verifies_each_epoch_under_admission_scope() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            // Distinct committees per epoch, so a certificate only verifies under
-            // its own epoch's scope.
-            let Fixture { schemes: first, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let Fixture {
-                schemes: second, ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let early_height = Height::new(1);
-            let early_block = make_raw_block(Sha256::hash(&[b""]), early_height, 100);
-            let early_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    StandardHarness::commitment(&early_block),
-                ),
-                &first,
-                QUORUM,
-            );
-            let late_height = Height::new(BLOCKS_PER_EPOCH.get() + 1);
-            let late_block = make_raw_block(Sha256::hash(&[b"late"]), late_height, 2100);
-            let late_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::new(1), View::new(late_height.get())),
-                    View::zero(),
-                    StandardHarness::commitment(&late_block),
-                ),
-                &second,
-                QUORUM,
-            );
-            let application = Application::<B>::manual_ack();
-
-            // Epoch 0 retires right after its admission lookup while epoch 1
-            // stays live. Both deliveries land in one batch, so each epoch group
-            // must be verified under the scope its own items were admitted with.
-            let provider = RetiringProvider::default()
-                .with(Epoch::zero(), first[0].clone(), 1)
-                .with(Epoch::new(1), second[0].clone(), usize::MAX);
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-batch-mixed-scopes",
-                provider.clone(),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-            assert!(
-                !provider.retired(Epoch::zero()),
-                "no lookup may consume the scope before admission"
-            );
-
-            let mut responses = Vec::new();
-            for (height, finalization, block) in [
-                (early_height, early_finalization, early_block.clone()),
-                (late_height, late_finalization, late_block.clone()),
-            ] {
-                let (response, response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: handler::Key::Finalized { height },
-                                subscribers: NonEmptyVec::new((
-                                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                        height
-                                    }),
-                                    tracing::Span::none(),
-                                )),
-                            },
-                            value: (finalization, block).encode(),
-                            response,
-                        })
-                        .accepted()
-                );
-                responses.push(response_rx);
-            }
-            for response_rx in responses {
-                assert!(
-                    response_rx.await.expect("delivery response missing"),
-                    "every delivery admitted under a live scope must be accepted"
-                );
-            }
-            assert!(
-                provider.retired(Epoch::zero()),
-                "admission must have consumed the retired scope"
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            assert_eq!(application.acknowledged().await, early_height);
-            assert_eq!(
-                mailbox
-                    .get_finalization(late_height)
-                    .await
-                    .map(|finalization| finalization.proposal.payload),
-                Some(StandardHarness::commitment(&late_block)),
-                "finalization verified under the live epoch's scope must be stored"
-            );
         });
     }
 
@@ -6790,13 +6592,28 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(round, Sha256::hash(&[b"missing-at-processed-round"]));
+            StandardHarness::report_finalization(
+                &mut mailbox.clone(),
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        round,
+                        View::zero(),
+                        Sha256::hash(&[b"missing-at-processed-round"]),
+                    ),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            let _ = mailbox.get_processed_height().await;
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "processed round must suppress stale finalization acquisition"
+            );
             let missing = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 101);
             let missing_digest = missing.digest();
-            let mut subscription = mailbox.subscribe_by_commitment(
-                missing_digest,
-                CommitmentFallback::FetchByRound { round },
-            );
+            let mut subscription = mailbox.acquire(missing_digest);
 
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
 
@@ -6808,8 +6625,8 @@ mod tests {
             );
             assert_eq!(
                 resolver.fetches().len(),
-                fetches_before,
-                "hint_notarized must not enqueue the already-pruned processed round"
+                fetches_before + 1,
+                "a live caller must acquire despite the processed round"
             );
             assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 
@@ -7004,13 +6821,28 @@ mod tests {
             let buffer = buffer.expect("buffer was provided");
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(round, Sha256::hash(&[b"missing-after-restart"]));
+            StandardHarness::report_finalization(
+                &mut mailbox.clone(),
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        round,
+                        View::zero(),
+                        Sha256::hash(&[b"missing-after-restart"]),
+                    ),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            let _ = mailbox.get_processed_height().await;
+            assert_eq!(
+                resolver.fetches().len(),
+                fetches_before,
+                "processed round must suppress stale finalization acquisition"
+            );
             let missing = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 101);
             let missing_digest = missing.digest();
-            let mut subscription = mailbox.subscribe_by_commitment(
-                missing_digest,
-                CommitmentFallback::FetchByRound { round },
-            );
+            let mut subscription = mailbox.acquire(missing_digest);
 
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
 
@@ -7021,13 +6853,12 @@ mod tests {
             );
             assert_eq!(
                 resolver.fetches().len(),
-                fetches_before,
-                "restart must restore the processed round floor"
+                fetches_before + 1,
+                "a live caller must acquire despite restored progress"
             );
             assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 
-            // Restored progress controls network acquisition. Local ingress
-            // remains a valid source for the block.
+            // Local ingress satisfies the same commitment acquisition.
             buffer
                 .commitment_subscriptions
                 .lock()
@@ -7049,8 +6880,6 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
-            let notarization =
-                StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
             seed_processed_height(context.child("metadata"), partition_prefix, Height::zero())
@@ -7059,7 +6888,7 @@ mod tests {
                 context.child("storage"),
                 partition_prefix,
                 &[],
-                &[(Height::new(1), finalization)],
+                &[(Height::new(1), finalization.clone())],
             )
             .await;
 
@@ -7073,10 +6902,8 @@ mod tests {
             )
             .await;
 
-            let mut subscription = mailbox.subscribe_by_commitment(
-                StandardHarness::commitment(&block),
-                CommitmentFallback::FetchByRound { round },
-            );
+            StandardHarness::report_finalization(&mut mailbox.clone(), finalization).await;
+            let mut subscription = mailbox.acquire(StandardHarness::commitment(&block));
             context.sleep(Duration::from_millis(100)).await;
             assert!(
                 matches!(subscription.try_recv(), Err(TryRecvError::Empty)),
@@ -7085,15 +6912,15 @@ mod tests {
             wait_until(
                 &context,
                 Duration::from_secs(5),
-                "fetch-by-round after missing-next restart",
+                "commitment fetch after missing-next restart",
                 || {
                     resolver.fetches().iter().any(|fetch| {
                         matches!(
                             (&fetch.key, &fetch.subscriber),
                             (
-                                handler::Key::Notarized { round: request_round },
-                                handler::Annotation::Notarization { round: subscriber_round },
-                            ) if *request_round == round && *subscriber_round == round
+                                handler::Key::Block(commitment),
+                                handler::Annotation::Round(request_round),
+                            ) if *commitment == block.digest() && *request_round == round
                         )
                     })
                 },
@@ -7105,20 +6932,20 @@ mod tests {
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Notarized { round },
+                            key: handler::Key::Block(block.digest()),
                             subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
+                                handler::Annotation::Subscription,
                                 tracing::Span::none(),
                             )),
                         },
-                        value: (notarization, block.clone()).encode(),
+                        value: block.encode(),
                         response,
                     })
                     .accepted()
             );
             assert!(
                 response_rx.await.expect("delivery response missing"),
-                "notarized delivery should validate"
+                "block delivery should validate"
             );
             select! {
                 result = subscription => {
@@ -7197,10 +7024,22 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            let mut subscription = mailbox.subscribe_by_commitment(
-                Sha256::hash(&[b"missing-before-anchor-ack"]),
-                CommitmentFallback::FetchByRound { round: floor_round },
-            );
+            StandardHarness::report_finalization(
+                &mut mailbox.clone(),
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        floor_round,
+                        View::zero(),
+                        Sha256::hash(&[b"stale-finality-before-anchor-ack"]),
+                    ),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            let _ = mailbox.get_processed_height().await;
+            assert_eq!(resolver.fetches().len(), fetches_before);
+            let mut subscription = mailbox.acquire(Sha256::hash(&[b"missing-before-anchor-ack"]));
             let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
 
             assert!(
@@ -7211,8 +7050,8 @@ mod tests {
             );
             assert_eq!(
                 resolver.fetches().len(),
-                fetches_before,
-                "durable floor round must suppress round-bound fetches after restart"
+                fetches_before + 1,
+                "live acquisition must survive the restored floor"
             );
             assert!(
                 matches!(subscription.try_recv(), Err(TryRecvError::Empty)),
@@ -7245,15 +7084,16 @@ mod tests {
             )
             .await;
             let missing = Sha256::hash(&[b"missing-before-set-floor"]);
-            let _subscription = mailbox
-                .subscribe_by_commitment(missing, CommitmentFallback::FetchByRound { round });
+            StandardHarness::report_finalization(&mut mailbox.clone(), StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), missing), &schemes, QUORUM,
+            )).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
                 "round-bound fetch",
                 || {
                     resolver.active_fetches().iter().any(|fetch| {
-                        matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
+                        matches!(fetch.key, handler::Key::Block(commitment) if commitment == missing)
                     })
                 },
             )
@@ -7267,20 +7107,22 @@ mod tests {
                 "round-bound prune",
                 || {
                     resolver.active_fetches().iter().all(|fetch| {
-                        !matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
+                        !matches!(fetch.key, handler::Key::Block(commitment) if commitment == missing)
                     })
                 },
             )
             .await;
             assert!(
                 resolver.active_fetches().iter().all(|fetch| {
-                    !matches!(fetch.key, handler::Key::Notarized { round: r } if r == round)
+                    !matches!(fetch.key, handler::Key::Block(commitment) if commitment == missing)
                 }),
                 "processed finalization after set_floor must prune existing round-bound fetches"
             );
 
             let fetches_before = resolver.fetches().len();
-            mailbox.hint_notarized(round, Sha256::hash(&[b"missing-after-set-floor"]));
+            StandardHarness::report_finalization(&mut mailbox.clone(), StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), Sha256::hash(&[b"missing-after-set-floor"])), &schemes, QUORUM,
+            )).await;
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
 
             assert!(
@@ -7363,7 +7205,7 @@ mod tests {
                     (&fetch.key, &fetch.subscriber),
                     (
                         handler::Key::Block(commitment),
-                        handler::Annotation::Finalized(handler::Finalized::ByRound { round }),
+                        handler::Annotation::Round(round),
                     ) if *commitment == StandardHarness::commitment(&anchor)
                         && *round == anchor_round
                 )
@@ -7430,162 +7272,6 @@ mod tests {
                     );
                 },
             }
-        });
-    }
-
-    /// When the provider has no verifier for an epoch, in-flight deliveries
-    /// for that epoch must be acknowledged (`true`) so the serving peer is
-    /// not blamed, rather than rejected (`false`).
-    #[test_traced("WARN")]
-    fn test_standard_stale_finalized_delivery_does_not_block_peer() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|context| async move {
-            let me = default_leader();
-            let oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                [me.clone()],
-            )
-            .await;
-            let control = oracle.control(me.clone());
-            let network_channel = control
-                .register(0, Quota::per_second(NonZeroU32::MAX))
-                .await
-                .unwrap();
-
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
-            let partition_prefix = "stale-finalized-test".to_string();
-            let config = Config {
-                provider: EmptyProvider,
-                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-                mailbox_size: NZUsize!(100),
-                view_retention: ViewDelta::new(10),
-                max_repair: NZUsize!(10),
-                max_pending_acks: NZUsize!(1),
-                block_codec_config: (),
-                partition_prefix: partition_prefix.clone(),
-                prunable_items_per_section: NZU64!(10),
-                replay_buffer: NZUsize!(1024),
-                key_write_buffer: NZUsize!(1024),
-                value_write_buffer: NZUsize!(1024),
-                page_cache: page_cache.clone(),
-                strategy: Sequential,
-            };
-            let finalizations_by_height = prunable::Archive::init(
-                context.child("finalizations_by_height"),
-                prunable::Config {
-                    translator: EightCap,
-                    metadata_partition: format!("{partition_prefix}-fbh-metadata"),
-                    key_partition: format!("{partition_prefix}-fbh-key"),
-                    key_page_cache: page_cache.clone(),
-                    value_partition: format!("{partition_prefix}-fbh-value"),
-                    compression: None,
-                    codec_config: S::certificate_codec_config_unbounded(),
-                    items_per_section: NZU64!(10),
-                    key_write_buffer: NZUsize!(1024),
-                    value_write_buffer: NZUsize!(1024),
-                    replay_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .expect("failed to initialize finalizations archive");
-            let finalized_blocks = prunable::Archive::init(
-                context.child("finalized_blocks"),
-                prunable::Config {
-                    translator: EightCap,
-                    metadata_partition: format!("{partition_prefix}-fb-metadata"),
-                    key_partition: format!("{partition_prefix}-fb-key"),
-                    key_page_cache: page_cache,
-                    value_partition: format!("{partition_prefix}-fb-value"),
-                    compression: None,
-                    codec_config: (),
-                    items_per_section: NZU64!(10),
-                    key_write_buffer: NZUsize!(1024),
-                    value_write_buffer: NZUsize!(1024),
-                    replay_buffer: NZUsize!(1024),
-                },
-            )
-            .await
-            .expect("failed to initialize finalized blocks archive");
-
-            let broadcast_config = buffered::Config {
-                public_key: me.clone(),
-                mailbox_size: NZUsize!(100),
-                deque_size: 10,
-                priority: false,
-                codec_config: (),
-                peer_provider: oracle.manager(),
-            };
-            let (broadcast_engine, buffer) =
-                buffered::Engine::new(context.child("broadcast"), broadcast_config);
-            broadcast_engine.start(network_channel);
-
-            let (resolver_tx, resolver_rx) = mailbox::new(context.child("mailbox"), NZUsize!(100));
-
-            let (actor, _mailbox, _) = Actor::init(
-                context.child("actor"),
-                finalizations_by_height,
-                finalized_blocks,
-                config,
-            )
-            .await;
-            actor.start(
-                Application::<B>::default(),
-                buffer,
-                (
-                    handler::Receiver::new(resolver_rx),
-                    RecordingResolver::default(),
-                ),
-            );
-
-            // Inject a Finalized delivery with garbage payload. The
-            // provider has no verifier, so the marshal cannot decode it and
-            // must ack (true) rather than blame the peer (false).
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver_tx
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized {
-                                height: Height::new(5),
-                            },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height: Height::new(5),
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: Bytes::from_static(b"unverifiable"),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(response_rx.await.unwrap());
-
-            // Same for a Notarized delivery.
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver_tx
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized {
-                                round: Round::new(Epoch::zero(), View::new(1)),
-                            },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization {
-                                    round: Round::new(Epoch::zero(), View::new(1)),
-                                },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: Bytes::from_static(b"unverifiable"),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(response_rx.await.unwrap());
         });
     }
 
@@ -7717,6 +7403,13 @@ mod tests {
                     handle.await
                 }),
             ))
+        }
+
+        async fn has(
+            &self,
+            digest: &<Self::Block as Digestible>::Digest,
+        ) -> Result<bool, Self::Error> {
+            self.inner.has(digest).await
         }
 
         async fn get(
@@ -8227,12 +7920,27 @@ mod tests {
                 })
                 .expect("anchor fetch missing");
 
+            let next = make_raw_block(block.digest(), Height::new(2), 200);
+            let above = make_raw_block(next.digest(), Height::new(3), 300);
+            for block in [&next, &above] {
+                let round = Round::new(Epoch::zero(), View::new(block.height().get()));
+                StandardHarness::report_finalization(&mut mailbox, StandardHarness::make_finalization(
+                    Proposal::new(round, View::zero(), block.digest()), &schemes, QUORUM,
+                )).await;
+            }
+            let _ = mailbox.get_processed_height().await;
+            for block in [&next, &above] {
+                assert!(resolver.fetches().iter().any(|fetch| matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (handler::Key::Block(commitment), handler::Annotation::Round(_)) if *commitment == block.digest()
+                )));
+            }
+
             // Enqueue all deliveries back-to-back (no intervening await) so
             // the actor drains them in a single resolver batch: two repair
             // blocks at and above the dispatch frontier (buffered
             // finalized-archive writes, ascending), then the stale floor
             // anchor.
-            let next = make_raw_block(block.digest(), Height::new(2), 200);
             let (next_response, next_response_rx) = oneshot::channel();
             assert!(
                 resolver
@@ -8240,9 +7948,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Block(StandardHarness::commitment(&next)),
                             subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height: Height::new(2),
-                                }),
+                                handler::Annotation::Height(Height::new(2)),
                                 tracing::Span::none(),
                             )),
                         },
@@ -8251,7 +7957,6 @@ mod tests {
                     })
                     .accepted()
             );
-            let above = make_raw_block(next.digest(), Height::new(3), 300);
             let (above_response, above_response_rx) = oneshot::channel();
             assert!(
                 resolver
@@ -8259,9 +7964,7 @@ mod tests {
                         delivery: Delivery {
                             key: handler::Key::Block(StandardHarness::commitment(&above)),
                             subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height: Height::new(3),
-                                }),
+                                handler::Annotation::Height(Height::new(3)),
                                 tracing::Span::none(),
                             )),
                         },
@@ -8459,6 +8162,237 @@ mod tests {
                 second_dispatched >= STAGGER + PACE,
                 "block dispatched before its sync completed: {second_dispatched:?}"
             );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalization_reuses_ready_prefetch_without_refetch() {
+        const PARTITION: &str = "finalization-reuses-ready-prefetch";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
+            let mut config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(1);
+            let (actor, mut mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, blocks, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(
+                application.clone(),
+                RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = block.digest();
+            resolver.respond_to_next_fetch(block.encode());
+            let mut lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "prefetched body delivered",
+                || !resolver.delivery_responses.lock().is_empty(),
+            )
+            .await;
+            assert!(resolver.wait_for_delivery_response().await);
+            assert_eq!(resolver.fetches().len(), 1);
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+
+            // The resolver's one response is exhausted. Finality must find the
+            // completed body while its speculative lease still owns it.
+            let finalized = mailbox.finalized(Height::new(1));
+            let round = Round::new(Epoch::zero(), View::new(1));
+            StandardHarness::report_finalization(
+                &mut mailbox,
+                StandardHarness::make_finalization(
+                    Proposal::new(round, View::zero(), commitment),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            let _ = mailbox.get_processed_height().await;
+            assert_eq!(
+                resolver.fetches().len(),
+                1,
+                "finalization must reuse the completed prefetch without another network request"
+            );
+            select! {
+                result = finalized => {
+                    assert_eq!(result.expect("finalized waiter canceled").digest(), commitment);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("finalization could not find the completed prefetched body");
+                },
+            }
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+
+            let next = Sha256::hash(&[b"next speculative commitment"]);
+            let mut next_lease = mailbox.prefetch(Arc::from([next]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "canonical storage releases prefetch capacity",
+                || {
+                    resolver
+                        .fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == handler::Key::Block(next))
+                },
+            )
+            .await;
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(next_lease.try_recv(), Err(TryRecvError::Empty)));
+        });
+    }
+
+    fn independent_acquisition_with_parked_request(speculative: bool) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition = format!("independent-acquisition-{speculative}");
+            let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
+            let mut config = test_config(&context, &partition,
+                ConstantProvider::new(schemes[0].clone()), NZUsize!(1));
+            config.max_repair = NZUsize!(1);
+            let (actor, mailbox, _) = Actor::init(
+                context.child("actor"), finalizations, blocks, config,
+            ).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(application.clone(), RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()));
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let withheld = Sha256::hash(&[b"indefinitely withheld"]);
+            let mut lease = speculative.then(|| mailbox.prefetch(Arc::from([withheld]), 0..1));
+            let mut caller = (!speculative).then(|| mailbox.acquire(withheld));
+            wait_until(&context, Duration::from_secs(1), "first request occupies capacity", || {
+                resolver.fetches().iter().any(|fetch| fetch.key == handler::Key::Block(withheld))
+            }).await;
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let available = make_raw_block(genesis.digest(), Height::new(1), 100);
+            resolver.respond_to_next_fetch(available.encode());
+            let independent = mailbox.acquire(available.digest());
+            select! {
+                result = independent => {
+                    assert_eq!(result.expect("independent acquisition canceled").digest(), available.digest());
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("parked request blocked independent acquisition (speculative={speculative})");
+                },
+            }
+            assert!(resolver.wait_for_delivery_response().await);
+            assert!(resolver.fetches().iter().any(|fetch| fetch.key == handler::Key::Block(available.digest())));
+            if let Some(lease) = &mut lease {
+                assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+            }
+            if let Some(caller) = &mut caller {
+                assert!(matches!(caller.try_recv(), Err(TryRecvError::Empty)));
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_parked_prefetch_does_not_block_direct_acquisition() {
+        independent_acquisition_with_parked_request(true);
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_parked_direct_caller_does_not_block_independent_acquisition() {
+        independent_acquisition_with_parked_request(false);
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_parked_local_range_bounds_body_reads() {
+        const PARTITION: &str = "parked-local-range-body-reads";
+        const LENGTH: u64 = 64;
+        const BODY_WINDOW: usize = 8;
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, mut stored) = prunable_finalized_stores(&context, PARTITION).await;
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let mut selected = vec![genesis.digest()];
+            for height in 1..=LENGTH {
+                let block = Arc::new(make_raw_block(
+                    *selected.last().unwrap(),
+                    Height::new(height),
+                    height,
+                ));
+                selected.push(block.digest());
+                stored = stored
+                    .put_sync(height, block.digest(), &block)
+                    .await
+                    .unwrap();
+            }
+            let stored = Recording::new(stored, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let operations = stored.ops();
+            let config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            assert!(LENGTH as usize > config.max_repair.get());
+            let (actor, mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, stored, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(
+                application.clone(),
+                RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
+            let _ = mailbox.get_processed_height().await;
+            operations.lock().clear();
+
+            let expected = selected[1];
+            let source = mailbox
+                .blocks(Height::new(LENGTH), selected.into())
+                .with_prefetch(NZUsize!(BODY_WINDOW));
+            let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
+            let first = range.next().await.unwrap().unwrap();
+            assert_eq!(first.digest(), expected);
+
+            // Keep the range alive without polling again. Speculative scheduling
+            // must use metadata while the application holds its first body.
+            context.sleep(Duration::from_millis(100)).await;
+            let reads = operations
+                .lock()
+                .iter()
+                .filter(|op| matches!(op, Op::Get(None)))
+                .count();
+            assert!(
+                reads <= BODY_WINDOW,
+                "parked range decoded {reads} stored bodies for a {BODY_WINDOW}-body window"
+            );
+            assert!(
+                reads > 0,
+                "the range must acquire bodies from recorded storage"
+            );
+            assert!(
+                resolver.fetches().is_empty(),
+                "locally stored bodies must not be fetched"
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::zero()]);
+            drop(range);
         });
     }
 
@@ -9328,153 +9262,6 @@ mod tests {
                 Recipients::Some(peers) => assert_eq!(peers, &targets),
                 other => panic!("expected Recipients::Some, got {other:?}"),
             }
-        });
-    }
-
-    /// `HintFinalized` at or below the floor must be a no-op: marshal must
-    /// not fire a targeted resolver fetch since the hint is stale.
-    #[test_traced("WARN")]
-    fn test_standard_hint_finalized_below_floor_is_noop() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
-                &format!("hint-below-floor-{me}"),
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-
-            // Raise the floor above the hint we are about to send.
-            let floor_anchor = StandardHarness::make_test_block(
-                Sha256::hash(&[b"floor-parent"]),
-                StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
-                Height::new(10),
-                10,
-                NUM_VALIDATORS as u16,
-            );
-            let floor_round = Round::new(Epoch::zero(), View::new(10));
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    floor_round,
-                    View::new(9),
-                    StandardHarness::commitment(&floor_anchor),
-                ),
-                &schemes,
-                QUORUM,
-            );
-            mailbox.set_floor(finalization);
-            assert!(mailbox.verified(floor_round, floor_anchor).await);
-            context.sleep(Duration::from_millis(50)).await;
-
-            mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
-            context.sleep(Duration::from_millis(50)).await;
-
-            assert!(
-                resolver.targeted_is_empty(),
-                "hint at or below floor must not fetch"
-            );
-        });
-    }
-
-    /// `HintFinalized` for a height whose finalization is already durable must
-    /// be a no-op: marshal already has everything needed and must not
-    /// initiate a redundant fetch.
-    #[test_traced("WARN")]
-    fn test_standard_hint_finalized_skips_when_already_finalized() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), StandardHarness::commitment(&block)),
-                &schemes,
-                QUORUM,
-            );
-
-            let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
-                &format!("hint-already-final-{me}"),
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-
-            assert!(mailbox.verified(round, block.clone()).await);
-            StandardHarness::report_finalization(&mut mailbox, finalization).await;
-
-            // Wait until marshal has durably stored the finalization.
-            while mailbox.get_finalization(Height::new(1)).await.is_none() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-
-            mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
-            context.sleep(Duration::from_millis(50)).await;
-
-            assert!(
-                resolver.targeted_is_empty(),
-                "hint for a locally-finalized height must not fetch"
-            );
-        });
-    }
-
-    /// `HintFinalized` above the floor for a not-yet-finalized height must
-    /// trigger exactly one targeted fetch via the resolver.
-    #[test_traced("WARN")]
-    fn test_standard_hint_finalized_emits_targeted_fetch() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
-                &format!("hint-targets-{me}"),
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-
-            let target = participants[1].clone();
-            mailbox.hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()));
-            wait_until(&context, Duration::from_secs(5), "fetch_targeted", || {
-                !resolver.targeted.lock().is_empty()
-            })
-            .await;
-
-            let targeted = resolver.targeted();
-            assert_eq!(targeted.len(), 1);
-            let (request, targets) = &targeted[0];
-            assert_eq!(
-                request,
-                &handler::Key::Finalized {
-                    height: Height::new(7)
-                }
-            );
-            assert_eq!(&targets[..], &[target]);
         });
     }
 

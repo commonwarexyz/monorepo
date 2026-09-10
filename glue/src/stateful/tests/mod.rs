@@ -28,7 +28,7 @@ use commonware_consensus::{
     CertifiableAutomaton as _, Reporter,
     marshal::{
         self,
-        ancestry::Ancestry,
+        blocks::Blocks,
         core::Actor as MarshalActor,
         resolver::handler,
         standard::{Deferred, Standard},
@@ -963,14 +963,16 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
         let proposed = <MultiApp as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
-            ancestry,
+            parent,
+            blocks,
             batches,
             input,
         )
@@ -984,7 +986,9 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn verify(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Arc<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         let gate = self.verify_gates.lock().pop_front();
@@ -995,7 +999,9 @@ impl Application<deterministic::Context> for GatedMultiApp {
         <MultiApp as Application<deterministic::Context>>::verify(
             &mut self.inner,
             context,
-            ancestry,
+            block,
+            parent,
+            blocks,
             batches,
         )
         .await
@@ -1168,6 +1174,7 @@ async fn build_multi_chain(
 fn out_of_order_certifications_complete_on_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1261,7 +1268,15 @@ fn out_of_order_certifications_complete_on_qmdb() {
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+            certifications.push(
+                deferred
+                    .certify(
+                        block.context.round,
+                        block.digest(),
+                        ancestor_commitments[..=index].into(),
+                    )
+                    .await,
+            );
         }
 
         select! {
@@ -1486,6 +1501,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
 fn overlapping_finalizations_complete_on_multi_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1591,8 +1607,14 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
 
         // Cache the batches that will be finalized so the held descendant
         // verification does not own their replay.
-        for block in &blocks[..3] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..3].iter().enumerate() {
+            let certification = deferred
+                .certify(
+                    block.context.round,
+                    block.digest(),
+                    ancestor_commitments[..=index].into(),
+                )
+                .await;
             assert!(
                 certification
                     .await
@@ -1619,7 +1641,13 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred.certify(block.context.round, block.digest()).await,
+                deferred
+                    .certify(
+                        block.context.round,
+                        block.digest(),
+                        ancestor_commitments[..=index].into(),
+                    )
+                    .await,
             ));
         }
         for started in verify_started {
@@ -1740,6 +1768,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
 fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 5).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1851,8 +1880,14 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
 
         // Keep the first four batches available so block 5 reaches application
         // verification without owning ancestor replay.
-        for block in &blocks[..4] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..4].iter().enumerate() {
+            let certification = deferred
+                .certify(
+                    block.context.round,
+                    block.digest(),
+                    ancestor_commitments[..=index].into(),
+                )
+                .await;
             assert!(
                 certification
                     .await
@@ -1897,7 +1932,13 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         );
 
         let block = &blocks[4];
-        let mut certification = reporter.certify(block.context.round, block.digest()).await;
+        let mut certification = reporter
+            .certify(
+                block.context.round,
+                block.digest(),
+                ancestor_commitments[..=4].into(),
+            )
+            .await;
         first_started
             .await
             .expect("verification should start before pruning");

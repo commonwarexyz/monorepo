@@ -238,7 +238,7 @@ mod tests {
     };
     use commonware_consensus::{
         Heightable as _, Reporter as _,
-        marshal::ancestry::Ancestry,
+        marshal::blocks::Blocks,
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Activity, Context as SimplexContext},
@@ -256,7 +256,7 @@ mod tests {
         NZU64, NZUsize,
         channel::{oneshot, ring},
     };
-    use std::{convert::Infallible, time::Duration};
+    use std::{convert::Infallible, sync::Arc, time::Duration};
 
     /// Database set whose sync holds the tip-update ring receiver without draining it, then
     /// completes once the actor has parked a forwarded update in the ring buffer.
@@ -359,7 +359,8 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -369,7 +370,9 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _block: Arc<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             unreachable!("WedgeApp only serves the syncer harness")

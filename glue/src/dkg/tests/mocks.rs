@@ -77,6 +77,36 @@ pub(crate) type TestManager = SimManager<TestPublicKey, deterministic::Context>;
 pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock>;
 pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVariant>;
 
+/// Provides encoded test storage with selected branch metadata and no retained bodies.
+pub(crate) fn blocks(
+    blocks: impl IntoIterator<Item = Arc<TestBlock>>,
+) -> marshal::blocks::Blocks<TestBlock> {
+    let mut digests = BTreeMap::new();
+    let mut encoded = BTreeMap::new();
+    for block in blocks {
+        if let Some(height) = block.height().previous() {
+            digests.insert(height, block.parent());
+        }
+        digests.insert(block.height(), block.digest());
+        encoded.insert(block.height(), block.encode());
+    }
+    let tip = encoded
+        .last_key_value()
+        .map_or(Height::zero(), |(height, _)| *height);
+    let encoded = Arc::new(encoded);
+    marshal::blocks::Blocks::new(
+        tip,
+        move |height| digests.get(&height).copied(),
+        move |height| {
+            let encoded = encoded.get(&height).cloned();
+            async move {
+                encoded
+                    .map(|bytes| Arc::new(TestBlock::decode_cfg(bytes, &()).expect("test block")))
+            }
+        },
+    )
+}
+
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("peer set unavailable")]
 pub(crate) struct TrackFailed;
@@ -527,7 +557,11 @@ impl Automaton for MockApplication {
     type Context = TestContext;
     type Digest = TestDigest;
 
-    async fn propose(&mut self, _context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        _context: Self::Context,
+        _ancestry: Arc<[Self::Digest]>,
+    ) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
         self.proposals.lock().push(_context);
         sender.send_lossy(Sha256::hash(&[b"proposal"]));
@@ -538,6 +572,7 @@ impl Automaton for MockApplication {
         &mut self,
         _context: Self::Context,
         _payload: Self::Digest,
+        _ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         let (sender, receiver) = oneshot::channel();
         sender.send_lossy(true);
