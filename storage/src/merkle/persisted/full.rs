@@ -4058,17 +4058,16 @@ pub(crate) mod node_cache {
 
         /// Caches the digest at `position` unless already present.
         pub(crate) fn insert(&self, position: u64, node: D) {
-            let mut shard = self.shards[shard_index(position)].write();
-            if shard.get(&position).is_none() {
-                shard.put(position, node);
-            }
+            self.shards[shard_index(position)]
+                .write()
+                .get_or_insert_with(position, || node);
         }
 
         /// Removes every entry. Called on rewind: truncated positions can be reused by
         /// new appends, the one event that breaks position immutability.
         pub(crate) fn clear(&self) {
             for shard in self.shards.iter() {
-                shard.write().retain(|_, _| false);
+                shard.write().clear();
             }
         }
     }
