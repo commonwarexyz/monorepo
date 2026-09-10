@@ -256,7 +256,7 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             }
 
             let before_remaining = self.replay.remaining();
-            let (item_size, varint_len) = match decode_length_prefix(&mut self.replay) {
+            let (item_size, varint_len) = match self.replay.read_length() {
                 Ok(result) => result,
                 Err(err) => {
                     if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
@@ -300,13 +300,10 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             };
             let item_len = next_offset - self.offset;
 
-            // `take(item_size)` advances past exactly the payload bytes after the header was
-            // consumed by `decode_length_prefix`.
-            match decode_item::<V>(
-                (&mut self.replay).take(item_size),
-                &self.codec_config,
-                self.compressed,
-            ) {
+            match self
+                .replay
+                .decode::<V>(item_size, &self.codec_config, self.compressed)
+            {
                 Ok(item) => {
                     let pos = self.pos;
                     let Some(next_pos) = self.pos.checked_add(1) else {

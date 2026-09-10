@@ -2,10 +2,13 @@
 
 use crate::{
     Context, SyncCompletion,
-    journal::{Error, frame::FrameReader},
+    journal::{
+        Error,
+        frame::{FrameReader, decode_item, decode_length_prefix},
+    },
 };
 use bytes::Bytes;
-use commonware_codec::{Buf, Error as CodecError, ReadExt};
+use commonware_codec::{Buf, Codec, Error as CodecError, ReadExt};
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
@@ -635,6 +638,10 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
 }
 
 /// Sequential replay over either a sealed paged blob or a live writer view.
+///
+/// Decoding methods select a concrete backing buffer before reading fields so the
+/// compiler can specialize length checks and field-copy loops. Only the concrete
+/// buffers implement [`Buf`], keeping codec readers behind this dispatch.
 pub(super) struct Replay<'a, B: RBlob> {
     inner: ReplayInner<'a, B>,
 }
@@ -649,14 +656,32 @@ enum ReplayInner<'a, B: RBlob> {
 
 impl<'a, B: RBlob> Replay<'a, B> {
     /// Decode an item through its concrete backing buffer.
-    ///
-    /// The whole `A::read` call stays inside the match so the compiler can specialize
-    /// its length checks and field-copy loops for each backing type. Fixed replay
-    /// relies on this specialization for throughput.
     pub(super) fn read<A: ReadExt>(&mut self) -> Result<A, CodecError> {
         match &mut self.inner {
             ReplayInner::Paged(replay) => A::read(replay),
             ReplayInner::View(replay) => A::read(replay),
+        }
+    }
+
+    /// Decode a frame length through its concrete backing buffer.
+    #[inline]
+    pub(super) fn read_length(&mut self) -> Result<(usize, usize), Error> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => decode_length_prefix(replay),
+            ReplayInner::View(replay) => decode_length_prefix(replay),
+        }
+    }
+
+    /// Decode a frame payload bounded to `len` bytes through its concrete backing buffer.
+    pub(super) fn decode<V: Codec>(
+        &mut self,
+        len: usize,
+        cfg: &V::Cfg,
+        compressed: bool,
+    ) -> Result<V, Error> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
+            ReplayInner::View(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
         }
     }
 
@@ -692,8 +717,6 @@ impl<'a, B: RBlob> Replay<'a, B> {
         }
     }
 }
-
-impl<B: RBlob> Buf for Replay<'_, B> {}
 
 impl<B: RBlob> bytes::Buf for Replay<'_, B> {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
@@ -838,7 +861,7 @@ impl<'a, B: RBlob> Blobs<'a, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::View;
+    use crate::{journal::frame::encode_frame_into, utils::codec::View};
     use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
     use commonware_utils::{NZU16, NZUsize};
 
@@ -908,6 +931,88 @@ mod tests {
                 assert_eq!(first.as_ref(), b"abcdefgh");
                 assert_eq!(middle.as_ref(), b"ijklmnop");
                 assert_eq!(last.as_ref(), b"qrstuvwx");
+            }
+        });
+    }
+
+    #[test]
+    fn test_replay_decodes_bounded_frames() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items = [
+                Bytes::from_static(b"abcdefgh"),
+                Bytes::from_static(b"ijklmnop"),
+                Bytes::from_static(b"qrstuvwx"),
+            ];
+            for compression in [None, Some(1)] {
+                let mut encoded = Vec::new();
+                for item in &items {
+                    encode_frame_into(compression, item, &mut encoded).unwrap();
+                }
+                let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+                let (blob, size) = context
+                    .open("replay-frames", &[compression.unwrap_or(0)])
+                    .await
+                    .unwrap();
+                let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+                writer.append(&encoded).await.unwrap();
+                let snapshot = writer.snapshot().await.unwrap();
+
+                for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
+                    let mut replay = source
+                        .clone()
+                        .replay_from(0, NZUsize!(12), ReadOptions::default())
+                        .unwrap();
+                    let mut retained = Vec::new();
+                    for _ in &items {
+                        assert!(replay.ensure(1).await.unwrap());
+                        let (len, prefix_len) = replay.read_length().unwrap();
+                        assert_eq!(prefix_len, 1);
+                        assert!(replay.ensure(len).await.unwrap());
+                        let contiguous = replay.chunk().len() >= len;
+                        let range = replay.chunk().as_ptr_range();
+                        let item = replay
+                            .decode::<Bytes>(len, &(8..=8).into(), compression.is_some())
+                            .unwrap();
+                        if compression.is_none() && contiguous {
+                            assert!(range.contains(&item.as_ptr()));
+                        }
+                        retained.push(item);
+                    }
+                    assert!(!replay.ensure(1).await.unwrap());
+                    assert_eq!(replay.remaining(), 0);
+                    drop(replay);
+                    assert_eq!(retained, items);
+
+                    if compression.is_none() {
+                        for case in 0..3 {
+                            let mut replay = source
+                                .clone()
+                                .replay_from(0, NZUsize!(12), ReadOptions::default())
+                                .unwrap();
+                            assert!(replay.ensure(12).await.unwrap());
+                            let (len, _) = replay.read_length().unwrap();
+                            match case {
+                                0 => assert!(matches!(
+                                    replay.decode::<Bytes>(len, &(..=7).into(), false),
+                                    Err(Error::Codec(CodecError::InvalidLength(8)))
+                                )),
+                                1 => {
+                                    let remaining = replay.remaining();
+                                    assert!(matches!(
+                                        replay.decode::<u64>(1, &(), false),
+                                        Err(Error::Codec(CodecError::EndOfBuffer))
+                                    ));
+                                    assert_eq!(replay.remaining(), remaining);
+                                }
+                                _ => assert!(matches!(
+                                    replay.decode::<u8>(len, &(), false),
+                                    Err(Error::Codec(CodecError::ExtraData(8)))
+                                )),
+                            }
+                        }
+                    }
+                }
             }
         });
     }
