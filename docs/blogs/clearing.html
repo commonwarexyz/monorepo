@@ -140,15 +140,12 @@ O’Grady</a></div>
         the same to settle.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
         as Browsing the Web</h2>
-        <p>An agent buying an API response should be able to pay and get
-        on with the next request. Bajillion gives the payer an
-        acknowledgment in one round trip to its chosen operator. That
-        response carries a receipt the recipient can verify locally and
-        retain as evidence, while settlement happens later.</p>
-        <p>Payments made through the same operator settle together,
-        netting what each account sent and received across all its
-        counterparties. Reaching a new recipient needs no separate
-        channel or route through funded intermediaries.</p>
+        <p>A payment takes one round trip to the operator. The payer
+        gets a receipt the recipient can verify locally and retain as
+        evidence.</p>
+        <p>Settlement comes later, netting payments across all accounts
+        using that operator. A new counterparty needs no separate
+        channel or funded route.</p>
         <p>Suppose a payer, <span class="math inline">a</span>, has 100
         and wants to pay 20 to a recipient, <span
         class="math inline">b</span>, with 40. The payer signs a request
@@ -213,17 +210,6 @@ O’Grady</a></div>
             margin: 28px 0 6px;
             padding: 20px;
           }
-          .clearing-calculator-assumptions {
-            color: #666;
-            font-size: 13px;
-            margin: 12px 0 24px;
-          }
-          .clearing-calculator-assumptions summary {
-            cursor: pointer;
-            list-style: revert;
-            list-style-position: inside;
-          }
-          .clearing-calculator-assumptions summary::-webkit-details-marker { display: revert; }
           @media (max-width: 640px) {
             .clearing-compression { grid-template-columns: minmax(0, 1fr); gap: 8px; }
             .clearing-compression > span { transform: rotate(90deg); }
@@ -1410,17 +1396,8 @@ O’Grady</a></div>
           </tbody>
         </table>
         </div>
-        <p>Figure 6 estimates the operator’s data sent to validators for
-        one close. A dealing contains the account changes, cumulative
-        payment entries, and proofs a validator needs for its assigned
-        slices, using the prior state it already retains. The calculator
-        averages these downloads across validators; total operator
-        egress is their sum.</p>
-        <p>Each sender signs one batch, and each sender-recipient pair
-        carries one unit payment. All accounts remain live, with no
-        deposits, withdrawals, or external payouts. This workload
-        differs from the measured fixture above, which credits 512
-        recipients.</p>
+        <p>Adjust the workload and committee size below to see how much
+        data the operator sends to validators.</p>
         <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive operator-to-validator dealing calculator. Sliders set live accounts, average recipients per account, and validators. Results show the average dealing per validator with its composition, total operator egress per close, and a full-state size reference.">
           <noscript>At one million accounts each paying its next neighbor, the operator sends an average of 113 MB to each of 100 validators per close, totaling 11.3 GB. The full account state is 129 MB. Enable JavaScript to change the workload.</noscript>
         </div>
@@ -1430,11 +1407,11 @@ O’Grady</a></div>
         total operator egress in parentheses. The dotted line shows the
         full account state (leaves and Merkle tree levels) for
         comparison. Both axes use logarithmic scales.</p>
-        </div>
-        <details class="clearing-calculator-assumptions">
-        <summary>
-        Workload assumptions
-        </summary>
+        <p>Each sender signs one batch, and each sender-recipient pair
+        carries one unit payment. All accounts remain live, with no
+        deposits, withdrawals, or external payouts. This workload
+        differs from the measured fixture above, which credits 512
+        recipients.</p>
         <p>Recipients per account is an average over all <span
         class="math inline">N</span> live accounts, including those that
         send nothing. Accounts follow key order across evenly populated
@@ -1456,13 +1433,10 @@ O’Grady</a></div>
         count the actual spans assigned to each validator, including
         repeated delivery of slices shared by several validators. They
         exclude transport overhead and other protocol messages.</p>
-        </details>
+        </div>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
-        <p>The operator still processes every accepted payment.
-        Settlement combines their effects into one close: one row per
-        changed account and one cumulative entry per sender-recipient
-        pair.</p>
+        <p>A bajillion payments can share one settlement.</p>
         <div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
           <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
           <span aria-hidden="true">&rarr;</span>

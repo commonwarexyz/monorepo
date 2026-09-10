@@ -25,9 +25,9 @@ For a given set of accounts, one payment or a bajillion costs the same to settle
 
 ## Payments as Fast as Browsing the Web
 
-An agent buying an API response should be able to pay and get on with the next request. Bajillion gives the payer an acknowledgment in one round trip to its chosen operator. That response carries a receipt the recipient can verify locally and retain as evidence, while settlement happens later.
+A payment takes one round trip to the operator. The payer gets a receipt the recipient can verify locally and retain as evidence.
 
-Payments made through the same operator settle together, netting what each account sent and received across all its counterparties. Reaching a new recipient needs no separate channel or route through funded intermediaries.
+Settlement comes later, netting payments across all accounts using that operator. A new counterparty needs no separate channel or funded route.
 
 Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. The payer signs a request $S$ advancing its running total for that recipient. The operator verifies the signature and available funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of the recipient's entry. The payer verifies and durably saves both, then forwards the resulting receipt to the recipient.
 
@@ -87,17 +87,6 @@ Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. 
     margin: 28px 0 6px;
     padding: 20px;
   }
-  .clearing-calculator-assumptions {
-    color: #666;
-    font-size: 13px;
-    margin: 12px 0 24px;
-  }
-  .clearing-calculator-assumptions summary {
-    cursor: pointer;
-    list-style: revert;
-    list-style-position: inside;
-  }
-  .clearing-calculator-assumptions summary::-webkit-details-marker { display: revert; }
   @media (max-width: 640px) {
     .clearing-compression { grid-template-columns: minmax(0, 1fr); gap: 8px; }
     .clearing-compression > span { transform: rotate(90deg); }
@@ -710,9 +699,7 @@ Withdrawal claims scale with the claimed close's own withdrawal count $W$, never
 </div>
 ```
 
-Figure 6 estimates the operator's data sent to validators for one close. A dealing contains the account changes, cumulative payment entries, and proofs a validator needs for its assigned slices, using the prior state it already retains. The calculator averages these downloads across validators; total operator egress is their sum.
-
-Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
+Adjust the workload and committee size below to see how much data the operator sends to validators.
 
 ```{=html}
 <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive operator-to-validator dealing calculator. Sliders set live accounts, average recipients per account, and validators. Results show the average dealing per validator with its composition, total operator egress per close, and a full-state size reference.">
@@ -723,20 +710,17 @@ Each sender signs one batch, and each sender-recipient pair carries one unit pay
 
 ::: {.image-caption}
 Figure 6: Average dealing size per validator per close, with total operator egress in parentheses. The dotted line shows the full account state (leaves and Merkle tree levels) for comparison. Both axes use logarithmic scales.
-:::
 
-<details class="clearing-calculator-assumptions">
-<summary>Workload assumptions</summary>
+Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
 
 Recipients per account is an average over all $N$ live accounts, including those that send nothing. Accounts follow key order across evenly populated slices. Below an average of one, the first $E$ accounts each pay one of the last $E$, giving $E$ sender-recipient pairs and $\min(N,2E)$ accounts with activity. At integer average $k\ge1$, every account pays its next $k$ neighbors cyclically.
 
 Accounts and pairs are limited to $2^{24}$; recipients per sender are capped at $\min(1024,N-1)$. Validator counts follow $n=3f+1$, with $S=\min(256,2^{\lceil\log_2 n\rceil})$ slices (128 for 100 validators). Each validator receives one or two spans, each with one proof. Dealing sizes count the actual spans assigned to each validator, including repeated delivery of slices shared by several validators. They exclude transport overhead and other protocol messages.
-
-</details>
+:::
 
 ## A Bajillion Payments, One Settlement
 
-The operator still processes every accepted payment. Settlement combines their effects into one close: one row per changed account and one cumulative entry per sender-recipient pair.
+A bajillion payments can share one settlement.
 
 ```{=html}
 <div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
