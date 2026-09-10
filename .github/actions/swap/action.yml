@@ -8,6 +8,8 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
+        echo 1 | sudo tee /sys/module/zswap/parameters/enabled
+        cat /sys/module/zswap/parameters/enabled
         sudo apt-get update
         sudo apt-get install --yes --no-install-recommends swapspace
         sudo install -d -m 700 /mnt/swapspace
