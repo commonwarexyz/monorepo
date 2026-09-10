@@ -291,9 +291,9 @@ where
 ///
 /// Supervision ties spawned tasks to their spawning task's lifetime, but work spawned from a plain
 /// future outlives that future's drop. Wrapping the handle (see [`Handle::abort_on_drop`]) ties the
-/// task's cancellation to the guard instead. Dropping the guard signals cancellation; use
-/// [`AbortOnDrop::abort`] to also join the handle. Completion handles only stop waiting and do
-/// not cancel the underlying work (see [`Handle`]).
+/// task's cancellation to the guard instead. Dropping the guard signals cancellation. Use
+/// [`AbortOnDrop::abort`] to also join the handle. Completion handles only stop waiting and
+/// do not cancel the underlying work (see [`Handle`]).
 pub struct AbortOnDrop<T: Send + 'static>(Handle<T>);
 
 impl<T: Send + 'static> AbortOnDrop<T> {
@@ -316,28 +316,39 @@ where
     T: Send + 'static,
     E1: Send + 'static,
 {
-    /// Join `guards` in order, collecting each task's output. On the first failure (a task
-    /// error or a failed join), abort and join every remaining guard before surfacing it.
-    /// Spawned tasks are cancelled and joined; completion handles only stop waiting for their
-    /// underlying work. Joining in order makes the surfaced failure deterministic.
+    /// Join `guards` in order, collecting each task's output.
+    ///
+    /// On the first failure (a task error or a failed join), abort every remaining guard, discard
+    /// collected outputs, and drain the remaining guards concurrently before surfacing the error.
+    /// Joining in order makes the surfaced failure deterministic.
+    ///
+    /// Spawned tasks are cancelled and joined. Completion handles only stop waiting for their
+    /// underlying work.
     pub async fn join_all<E2>(guards: Vec<Self>) -> Result<Vec<T>, E2>
     where
         E2: From<E1> + From<Error>,
     {
         let mut joined = Vec::with_capacity(guards.len());
-        let mut failure: Option<E2> = None;
-        for guard in guards {
-            if failure.is_some() {
-                guard.abort().await;
-                continue;
+        let mut guards = guards.into_iter();
+        while let Some(guard) = guards.next() {
+            let error = match guard.join().await {
+                Ok(Ok(output)) => {
+                    joined.push(output);
+                    continue;
+                }
+                Ok(Err(err)) => err.into(),
+                Err(err) => err.into(),
+            };
+
+            // Signal every cancellation before destroying outputs that may depend on other tasks.
+            for guard in guards.as_slice() {
+                guard.0.abort();
             }
-            match guard.join().await {
-                Ok(Ok(output)) => joined.push(output),
-                Ok(Err(err)) => failure = Some(err.into()),
-                Err(err) => failure = Some(err.into()),
-            }
+            drop(joined);
+            futures::future::join_all(guards.map(Self::abort)).await;
+            return Err(error);
         }
-        failure.map_or_else(|| Ok(joined), Err)
+        Ok(joined)
     }
 }
 

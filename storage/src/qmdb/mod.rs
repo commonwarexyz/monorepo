@@ -503,7 +503,7 @@ const SNAPSHOT_ROUTE_BATCH: usize = 3;
 /// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
 /// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
 /// partition-routed) on concurrent tasks while the coordinator forwards finished chunks in position
-/// order. Together with the decoder count this bounds the queued operations; each decoder also
+/// order. Together with the decoder count, this bounds the queued operations. Each decoder also
 /// reserves one batch per worker. Small in tests so ordinary logs exercise chunk boundaries.
 #[cfg(not(test))]
 const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
@@ -511,8 +511,10 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
 /// Replay `range` and send each worker's keyed operations in log order, in batches of at most
-/// [SNAPSHOT_ROUTE_BATCH] operations. Stops if `send` returns false; the caller owns the
-/// receiving tasks and observes their errors when joining them.
+/// [SNAPSHOT_ROUTE_BATCH] operations.
+///
+/// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
+/// joining them.
 async fn route_snapshot<F, C, Fut>(
     log: &C,
     range: Range<u64>,
