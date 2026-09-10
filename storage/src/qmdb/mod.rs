@@ -799,12 +799,15 @@ where
             true
         };
 
+        // Start decoding ahead of forwarding, with at most `decoders` chunks in flight.
         for _ in 0..decoders {
             if !spawn_next(&mut pending) {
                 break;
             }
         }
 
+        // Workers need operations in log order even when later chunks finish decoding first.
+        // Reuse each decoder slot only after forwarding its chunk and joining its task.
         while let Some((rx, _)) = pending.front_mut() {
             while let Some((w, batch)) = rx.recv().await {
                 if senders[w].send(batch).await.is_err() {
