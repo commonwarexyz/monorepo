@@ -3,7 +3,6 @@
 // occupy the first ranks and pay the last ranks; dense senders pay their next k neighbors.
 
 const BLUE = '#2424d4';
-const GREEN = '#2f7d3d';
 const GRAY = '#666666';
 const GRID = '#e4e4e4';
 const INK = '#111111';
@@ -39,6 +38,12 @@ function varint(v) {
 function levels(leafCount) {
   if (leafCount <= 1) return 1;
   return Math.ceil(Math.log2(leafCount)) + 1;
+}
+
+function stateBmt(N) {
+  let nodes = 1;
+  for (let level = N; level > 1; level = Math.ceil(level / 2)) nodes += level;
+  return LEAF * N + DIGEST * nodes;
 }
 
 // Siblings of the inclusive leaf range [start, end] in a BMT of leafCount leaves.
@@ -188,33 +193,24 @@ function spans(n, q, validator, slices) {
 
 // The operator encodes each distinct span once and sends it to every assigned validator.
 function assignment(n, q, slices) {
-  const unique = [];
   const bySpan = new Map();
-  const validators = Array.from({ length: n }, (_, v) => spans(n, q, v, slices).map(([lo, hi]) => {
-    const key = `${lo}:${hi}`;
-    if (!bySpan.has(key)) {
-      bySpan.set(key, unique.length);
-      unique.push({ lo, hi, count: 0 });
+  for (let v = 0; v < n; v += 1) {
+    for (const [lo, hi] of spans(n, q, v, slices)) {
+      const key = `${lo}:${hi}`;
+      if (!bySpan.has(key)) bySpan.set(key, { lo, hi, count: 0 });
+      bySpan.get(key).count += 1;
     }
-    const id = bySpan.get(key);
-    unique[id].count += 1;
-    return id;
-  }));
-  return { unique, validators };
+  }
+  return [...bySpan.values()];
 }
 
 function committee(sc, plan) {
   const parts = {};
-  const sizes = plan.unique.map(({ lo, hi, count }) => {
+  for (const { lo, hi, count } of plan) {
     const span = dealtSpan(sc, lo, hi);
     for (const [name, bytes] of Object.entries(span)) parts[name] = (parts[name] ?? 0) + count * bytes;
-    return byteSize(span);
-  });
-  let busiest = 0;
-  for (const ids of plan.validators) {
-    busiest = Math.max(busiest, ids.reduce((total, id) => total + sizes[id], 0));
   }
-  return { parts, busiest };
+  return parts;
 }
 
 function sig3(x) {
@@ -277,7 +273,22 @@ function injectStyles() {
       padding-bottom: 14px;
     }
     .clearing-calculator-activity b { color: ${INK}; }
-    .clearing-calculator-chart-label { color: ${BLUE}; font-size: 12px; }
+    .clearing-calculator-legend {
+      color: ${BLUE};
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 24px;
+      font-size: 12px;
+    }
+    .clearing-calculator-legend span { display: inline-flex; align-items: center; gap: 8px; }
+    .clearing-calculator-legend span::before {
+      content: '';
+      border-top: 2px solid currentColor;
+      flex-shrink: 0;
+      width: 22px;
+    }
+    .clearing-calculator-legend .state { color: ${GRAY}; }
+    .clearing-calculator-legend .state::before { border-top-style: dotted; }
     .clearing-calculator canvas {
       display: block;
       margin-top: 12px;
@@ -285,57 +296,41 @@ function injectStyles() {
     }
     .clearing-calculator-axis { color: ${GRAY}; font-size: 12px; text-align: center; }
     .clearing-calculator-out {
+      border-top: 1px solid ${GRID};
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
+      gap: 20px;
       margin-top: 22px;
+      padding-top: 18px;
     }
-    .clearing-calculator-out details {
-      align-self: start;
-      background: #fafafa;
-      border: 1px solid #d6d6d6;
-      border-radius: 3px;
-      min-width: 0;
-      padding: 12px 14px;
-    }
-    .clearing-calculator-out summary { color: ${INK}; cursor: pointer; font-size: 13px; list-style: revert; }
-    .clearing-calculator-out summary::-webkit-details-marker { display: revert; }
-    .clearing-calculator-out summary:focus-visible { outline: 2px solid ${BLUE}; outline-offset: 5px; }
-    .clearing-calculator-out summary b {
-      display: block;
+    .clearing-calculator-out .label { color: ${INK}; font-size: 13px; }
+    .clearing-calculator-out .value { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 6px 0; }
+    .clearing-calculator-out .value b {
+      color: ${BLUE};
       font-size: 22px;
       font-weight: 700;
-      margin: 5px 0;
     }
-    .clearing-calculator-out .dealing summary b { color: ${BLUE}; }
-    .clearing-calculator-out .egress summary b { color: ${GREEN}; }
+    .clearing-calculator-out .egress { color: ${GRAY}; font-size: 13px; }
     .clearing-calculator-out .scope {
       color: ${GRAY};
       display: block;
       font-size: 12px;
     }
-    .clearing-calculator-card {
-      border-top: 1px solid ${GRID};
+    .clearing-calculator-breakdown {
       color: ${GRAY};
       font-size: 12px;
-      margin-top: 12px;
-      padding-top: 10px;
+      margin-top: 6px;
     }
-    .clearing-calculator-card .row {
+    .clearing-calculator-breakdown .row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto auto;
       font-variant-numeric: tabular-nums;
       gap: 8px;
       padding: 4px 0;
     }
-    .clearing-calculator-card .row .term { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
-    .clearing-calculator-card .row .amount { color: ${INK}; font-weight: 700; white-space: nowrap; }
-    .clearing-calculator-card .row .share { text-align: right; }
-    .clearing-calculator-card .note {
-      display: block;
-      padding-top: 5px;
-      white-space: normal;
-    }
+    .clearing-calculator-breakdown .row .term { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+    .clearing-calculator-breakdown .row .amount { color: ${INK}; font-weight: 700; white-space: nowrap; }
+    .clearing-calculator-breakdown .row .share { text-align: right; }
     @media (max-width: 640px) {
       .clearing-calculator-controls { grid-template-columns: 1fr; gap: 16px; }
       .clearing-calculator-row { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
@@ -365,28 +360,16 @@ function slider(panel, id, label, hint, min, max, step, value) {
   return { input, out, help };
 }
 
-function readout(line, label, id, cls) {
-  const container = el('details', { class: cls });
-  const summary = el('summary', {}, label);
-  const value = el('b', { id });
-  const note = el('span', { class: 'scope' });
-  summary.append(value, note);
-  const card = el('div', { class: 'clearing-calculator-card' });
-  container.append(summary, card);
-  line.append(container);
-  return { value, card, note };
-}
-
-function fillCard(card, total, rows, note) {
-  card.replaceChildren();
+function fillBreakdown(breakdown, total, rows) {
+  breakdown.replaceChildren();
   for (const [label, amount] of rows) {
+    const share = Math.round((100 * amount) / total);
     const row = el('span', { class: 'row' });
     row.append(el('span', { class: 'term' }, label));
     row.append(el('span', { class: 'amount' }, bytesText(amount)));
-    row.append(el('span', { class: 'share' }, `${Math.round((100 * amount) / total)}%`));
-    card.append(row);
+    row.append(el('span', { class: 'share' }, amount > 0 && share === 0 ? '<1%' : `${share}%`));
+    breakdown.append(row);
   }
-  card.append(el('span', { class: 'note' }, note));
 }
 
 function mount(root) {
@@ -411,7 +394,10 @@ function mount(root) {
   activity.append(pairs, accounts);
   panel.append(activity);
 
-  panel.append(el('div', { class: 'clearing-calculator-chart-label' }, 'Average sent to one validator per close'));
+  const legend = el('div', { class: 'clearing-calculator-legend' });
+  const oState = el('span', { class: 'state' });
+  legend.append(el('span', {}, 'Validator dealing (average per close)'), oState);
+  panel.append(legend);
 
   const canvas = el('canvas', {
     height: '360',
@@ -421,8 +407,17 @@ function mount(root) {
 
   const results = el('div', { class: 'clearing-calculator-out' });
   panel.append(results);
-  const oDealing = readout(results, 'Validator dealing', 'clearing-calc-dealing', 'dealing');
-  const oEgress = readout(results, 'Operator egress', 'clearing-calc-egress', 'egress');
+  const dealing = el('div', { class: 'dealing' });
+  const value = el('div', { class: 'value' });
+  const oDealing = el('b', { id: 'clearing-calc-dealing' });
+  const oEgress = el('span', { id: 'clearing-calc-egress', class: 'egress' });
+  const scope = el('span', { class: 'scope' });
+  value.append(oDealing, oEgress);
+  dealing.append(el('div', { class: 'label' }, 'Validator dealing'), value, scope);
+  const composition = el('div', { class: 'composition' });
+  const breakdown = el('div', { class: 'clearing-calculator-breakdown' });
+  composition.append(el('div', { class: 'label' }, 'Dealing composition'), breakdown);
+  results.append(dealing, composition);
 
   // Committee sizes snap to n = 3f + 1.
   const curV = () => {
@@ -445,18 +440,18 @@ function mount(root) {
     sV.help.textContent = `${count(V.q)} holders per slice; ${count(V.slices)} slices.`;
     for (const s of [sN, sK, sV]) s.input.setAttribute('aria-valuetext', s.out.textContent);
 
-    const cm = committee(sc, plan);
-    const total = byteSize(cm.parts);
+    const parts = committee(sc, plan);
+    const total = byteSize(parts);
     const average = total / V.n;
-    oDealing.value.textContent = bytesText(average);
-    oDealing.note.textContent = `Average per validator. Largest: ${bytesText(cm.busiest)}.`;
+    const state = stateBmt(N);
+    oDealing.textContent = bytesText(average);
+    scope.textContent = `Average per validator per close; total across ${count(V.n)} validators.`;
     oE.textContent = count(sc.E);
     oRows.textContent = count(sc.A);
-    oEgress.value.textContent = bytesText(total);
-    oEgress.note.textContent = `${bytesText(average)} × ${count(V.n)} validators per close.`;
-    canvas.setAttribute('aria-label', `Average operator-to-validator dealing size as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))} recipients, the operator sends ${bytesText(average)} per validator, with a largest dealing of ${bytesText(cm.busiest)} and total egress of ${bytesText(total)} per close. Both axes use logarithmic scales.`);
+    oEgress.textContent = `(${bytesText(total)} total egress)`;
+    oState.textContent = `Full state: ${bytesText(state)}`;
+    canvas.setAttribute('aria-label', `Average operator-to-validator dealing size as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))} recipients, the operator sends ${bytesText(average)} per validator, with total egress of ${bytesText(total)} per close. A dotted reference line shows the full account state size of ${bytesText(state)}. Both axes use logarithmic scales.`);
 
-    const parts = cm.parts;
     const components = [
       ['Account updates', parts.rows],
       ['Payments by sender', parts.entries],
@@ -464,10 +459,7 @@ function mount(root) {
       ['Operator signatures', parts.aggregates],
       ['Span proofs', parts.fixed + parts.boundaries + parts.starts + parts.openings + parts.guards],
     ];
-    fillCard(oDealing.card, average, components.map(([label, bytes]) => [label, bytes / V.n]),
-      'Adjacent slices share a proof. Validators reuse their retained account state.');
-    fillCard(oEgress.card, total, components,
-      'Includes delivery of every assigned copy. Excludes transport overhead and other protocol messages.');
+    fillBreakdown(breakdown, average, components.map(([label, bytes]) => [label, bytes / V.n]));
 
     const w = canvas.clientWidth;
     const h = Math.max(240, Math.round(w * 0.42));
@@ -494,14 +486,14 @@ function mount(root) {
     for (let j = 0; j <= STEPS; j += 1) {
       const kj = kMin * Math.pow(kMax / kMin, j / STEPS);
       const sj = scenario(N, kj, V.slices);
-      const bytes = byteSize(committee(sj, plan).parts) / V.n;
+      const bytes = byteSize(committee(sj, plan)) / V.n;
       ks.push(sj.E / N);
       dealings.push(bytes);
       yMin = Math.min(yMin, bytes);
       yMax = Math.max(yMax, bytes);
     }
-    yMin = Math.min(yMin, average) * 0.55;
-    yMax = Math.max(yMax, average) * 1.5;
+    yMin = Math.min(yMin, average, state) * 0.55;
+    yMax = Math.max(yMax, average, state) * 1.5;
     const X = (k) => L + (pw * Math.log(k / ks[0])) / Math.log(kMax / ks[0]);
     const Y = (b) => T + ph * (1 - Math.log(b / yMin) / Math.log(yMax / yMin));
 
@@ -535,6 +527,15 @@ function mount(root) {
       g.textBaseline = 'top';
       g.fillText(String(kt), xx, T + ph + 8);
     }
+    g.strokeStyle = GRAY;
+    g.lineWidth = 1.6;
+    g.setLineDash([2, 4]);
+    g.beginPath();
+    g.moveTo(L, Y(state));
+    g.lineTo(w - R, Y(state));
+    g.stroke();
+    g.setLineDash([]);
+
     g.strokeStyle = BLUE;
     g.lineWidth = 2.2;
     g.beginPath();

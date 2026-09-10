@@ -174,6 +174,39 @@ O’Grady</a></div>
           .clearing-benchmark-table table {
             min-width: 760px;
           }
+          .clearing-compression {
+            align-items: stretch;
+            display: grid;
+            gap: 16px;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+            margin: 28px 0;
+            text-align: center;
+          }
+          .clearing-compression > div {
+            border: 1px solid #d6d6d6;
+            border-radius: 3px;
+            padding: 20px 12px;
+          }
+          .clearing-compression strong,
+          .clearing-compression span {
+            display: block;
+          }
+          .clearing-compression strong {
+            font-size: 20px;
+            margin-bottom: 6px;
+          }
+          .clearing-compression span {
+            font-size: 14px;
+          }
+          .clearing-compression > div:last-child {
+            border-color: #2424d4;
+          }
+          .clearing-compression > span {
+            align-self: center;
+            font-size: 24px;
+            justify-self: center;
+            line-height: 1;
+          }
           .clearing-calculator {
             border: 1px solid #d6d6d6;
             border-radius: 3px;
@@ -192,6 +225,8 @@ O’Grady</a></div>
           }
           .clearing-calculator-assumptions summary::-webkit-details-marker { display: revert; }
           @media (max-width: 640px) {
+            .clearing-compression { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+            .clearing-compression > span { transform: rotate(90deg); }
             .clearing-calculator { padding: 14px; }
           }
         </style>
@@ -1415,36 +1450,25 @@ O’Grady</a></div>
         </div>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
-        <p>The operator processes every one of the <span
-        class="math inline">T</span> payments it accepts, sharing
-        signature checks, durable recording, and countersigning across
-        each batch. The close has no per-payment term. Writing <span
-        class="math inline">U</span> for unchanged live leaves, <span
-        class="math inline">A</span> for changed rows, <span
-        class="math inline">E</span> for edge entries, <span
-        class="math inline">W</span> for withdrawal outputs, <span
-        class="math inline">S</span> for proof slices, and <span
-        class="math inline">M</span> for the largest committed vector
-        length, its authenticated corpus is</p>
-        <p><span class="math display">
-        \text{payments }T
-        \quad\longrightarrow\quad
-        U\text{ state leaves}+A\text{ rows}+E\text{ vector
-        entries}+E\text{ transpose entries}
-        +W\text{ withdrawal outputs}+(S+1)\text{ coverage
-        boundaries}+O(S\log M)\text{ openings},
-        </span></p>
-        <p>and the posted close omits <span
-        class="math inline">U</span>, the transpose, and every derivable
-        column. For the benchmark’s fixed live set, <span
-        class="math inline">U=N-A</span>, though account creation,
-        deletion, and external-payout rows break that identity in
-        general. Every unchanged account contributes a leaf to the
-        corpus and nothing to the posted close, every changed account a
-        row, and every edge one cumulative entry on each side. Repeated
-        payments update those entries without adding records; their wire
-        size follows the integer widths described above. Acceptance
-        reserves room per account and per edge, never per payment.</p>
+        <p>The operator still processes every accepted payment. The
+        close summarizes their effects in one row per changed account
+        and one cumulative vector entry per sender-recipient pair in the
+        epoch.</p>
+        <div class="clearing-compression" role="img" aria-label="One million payments from the same sender to the same recipient in one epoch become one cumulative vector entry recording their total amount and payment count.">
+          <div><strong>1,000,000 payments</strong><span>Same sender, recipient, and epoch</span></div>
+          <span aria-hidden="true">&rarr;</span>
+          <div><strong>1 cumulative entry</strong><span>Total amount + payment count</span></div>
+        </div>
+        <p>Repeated payments between those pairs update the existing
+        entries without adding rows or entries. Their encoded integers
+        can grow wider as amounts and counts increase, so a fixed record
+        count does not mean a fixed byte count. The <a
+        href="https://github.com/commonwarexyz/monorepo/pull/4664">implementation
+        in #4664</a> also distinguishes the full authenticated corpus
+        from the posted close: unchanged state and the transpose remain
+        part of the corpus, while readers of the posted close
+        reconstruct them from their prior state and the posted
+        vectors.</p>
         <p>Figure 6 estimates the operator’s data sent to validators for
         one close. A dealing contains the account changes, cumulative
         payment entries, and proofs a validator needs for its assigned
@@ -1456,15 +1480,15 @@ O’Grady</a></div>
         deposits, withdrawals, or external payouts. This workload
         differs from the measured fixture above, which credits 512
         recipients.</p>
-        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive operator-to-validator dealing calculator. Sliders set live accounts, average recipients per account, and validators. Results show the average and largest dealing per validator, and total operator egress per close.">
-          <noscript>At one million accounts each paying its next neighbor, the operator sends an average of 113 MB to each of 100 validators per close, totaling 11.3 GB. The largest individual dealing is 114 MB. Enable JavaScript to change the workload.</noscript>
+        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive operator-to-validator dealing calculator. Sliders set live accounts, average recipients per account, and validators. Results show the average dealing per validator with its composition, total operator egress per close, and a full-state size reference.">
+          <noscript>At one million accounts each paying its next neighbor, the operator sends an average of 113 MB to each of 100 validators per close, totaling 11.3 GB. The full account state is 129 MB. Enable JavaScript to change the workload.</noscript>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
-        <p>Figure 6: Average bytes sent to one validator per close.
-        Total operator egress is this average multiplied by the
-        validator count. Both axes use logarithmic scales. Open a result
-        for its byte breakdown.</p>
+        <p>Figure 6: Average dealing size per validator per close, with
+        total operator egress in parentheses. The dotted line shows the
+        full account state (leaves and Merkle tree levels) for
+        comparison. Both axes use logarithmic scales.</p>
         </div>
         <details class="clearing-calculator-assumptions">
         <summary>
@@ -1489,7 +1513,8 @@ O’Grady</a></div>
         n\rceil})</span> slices (128 for 100 validators). Each validator
         receives one or two spans, each with one proof. Dealing sizes
         count the actual spans assigned to each validator, including
-        repeated delivery of slices shared by several validators.</p>
+        repeated delivery of slices shared by several validators. They
+        exclude transport overhead and other protocol messages.</p>
         </details>
         <p>Both state roots are rebuilt from ordered streams, so an
         existing ordered database can supply their leaves. Root-only
