@@ -1181,12 +1181,7 @@ impl<V: Variant> Cluster<V> {
     /// This lets topology tests stop synthetic work before waiting for consensus, keeping their
     /// message volume bounded without relying on a wall-clock delay.
     /// Returns engine time excluding finality observation.
-    pub async fn wait_produced(
-        &mut self,
-        nodes: &[usize],
-        blocks: u64,
-        rounds: usize,
-    ) -> Duration {
+    pub async fn wait_produced(&mut self, nodes: &[usize], blocks: u64, rounds: usize) -> Duration {
         let mut elapsed = Duration::ZERO;
         for _ in 0..rounds {
             let started = Instant::now();

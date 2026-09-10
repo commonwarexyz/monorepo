@@ -425,7 +425,8 @@ impl LqcVerifier<Sha256, MinPk> for CommitteeVerifier {
         let mut context = self.2.child("verify");
         let proof = proof.clone();
         async move {
-            let valid = strategy.clone()
+            let valid = strategy
+                .clone()
                 .manual()
                 .spawn(1, move |_| {
                     scheme
@@ -603,7 +604,10 @@ fn main() {
                 (config.trace_sampling > 0.0).then(|| tokio::tracing::Config {
                     endpoint,
                     name: key.to_string(),
-                    rate: config.trace_sampling.try_into().expect("valid sampling probability"),
+                    rate: config
+                        .trace_sampling
+                        .try_into()
+                        .expect("valid sampling probability"),
                     run_id: config.run_id.clone(),
                 })
             });

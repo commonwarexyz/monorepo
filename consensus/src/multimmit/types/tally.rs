@@ -1230,7 +1230,11 @@ mod tests {
             tally.vote::<MinSig, Sha256>(&leader, Participant::new(0), config),
             Err(Error::Transcript)
         );
-        tally.signers = Signers::new((config.participants() + 1).try_into().unwrap(), [Participant::new(0)]).unwrap();
+        tally.signers = Signers::new(
+            (config.participants() + 1).try_into().unwrap(),
+            [Participant::new(0)],
+        )
+        .unwrap();
         assert_eq!(
             tally.vote::<MinSig, Sha256>(&leader, Participant::new(0), config),
             Err(Error::Context)

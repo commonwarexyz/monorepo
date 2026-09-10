@@ -544,7 +544,7 @@ type HeaderSegment<H> = Vec<TransactionBlockHeader<<H as Hasher>::Digest>>;
 type HeaderSegments<H> = Vec<HeaderSegment<H>>;
 type OutputRefs<H> = Vec<StoredRef<<H as Hasher>::Digest>>;
 type OutputReadResult<H> = Result<storage::FinalBlockReadOutcome<H>, Error>;
-type OutputReads<H> = Pool<(u64, OutputReadResult<H>)>;
+type OutputReads<H> = Pool<'static, (u64, OutputReadResult<H>)>;
 type CustodyWaiter<H> = (
     Vec<BlockRef<<H as Hasher>::Digest>>,
     Reply<CustodyValues<H>>,
@@ -7234,10 +7234,14 @@ mod tests {
                 assert_eq!(pending.len(), overlap_syncs);
                 pending.drain(1..).collect::<Vec<_>>()
             };
-            let second_archive_syncs = second_archives.len();
+            // Recovery markers can remain unpolled until the next archive request. Only
+            // syncs already waiting here participate in this cut's data durability.
+            let mut second_archive_syncs = 0;
             for sync in second_archives {
+                second_archive_syncs += usize::from(sync.blocked.now_or_never().is_some());
                 let _ = sync.release.send(Ok(()));
             }
+            assert!(second_archive_syncs > 0);
             let completed_through_second_archives = completed_before_pipeline
                 + first_archive_syncs
                 + second_archive_syncs;

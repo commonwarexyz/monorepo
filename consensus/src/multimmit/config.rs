@@ -189,6 +189,7 @@ pub(crate) struct EncodedBounds {
     max_certificate_frame_bytes: usize,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl EncodedBounds {
     pub(crate) const fn max_artifact_bytes(self) -> usize {
         self.max_artifact_bytes
@@ -874,7 +875,7 @@ mod tests {
                     Vqc::new(
                         leader.clone(),
                         tally(count),
-                        Signers::from(participants, []),
+                        Signers::new(u32::try_from(participants).unwrap(), []).unwrap(),
                         conflicting,
                         aggregate::Signature::zero(),
                         config,

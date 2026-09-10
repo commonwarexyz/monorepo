@@ -622,13 +622,17 @@ mod tests {
         // A LeaderFinalized for view 5 with a bare quorum of votes is retained first.
         <TestCommand as UnreliablePolicy>::handle(
             &mut overflow,
-            TestCommand::new(Request::Hint(Activity::LeaderFinalized { fact: fact(5, 41) })),
+            TestCommand::new(Request::Hint(Activity::LeaderFinalized {
+                fact: fact(5, 41),
+            })),
         );
         // A same-view advance carries more votes (extension settlement); it must supersede the
         // earlier finalized rather than be dropped, which the plain view comparison did.
         <TestCommand as UnreliablePolicy>::handle(
             &mut overflow,
-            TestCommand::new(Request::Hint(Activity::LeaderFinalityUpdated { fact: fact(5, 47) })),
+            TestCommand::new(Request::Hint(Activity::LeaderFinalityUpdated {
+                fact: fact(5, 47),
+            })),
         );
         assert_eq!(overflow.len(), 1);
         let Request::Hint(Activity::LeaderFinalityUpdated { fact: kept }) = &overflow[0].request
@@ -639,14 +643,20 @@ mod tests {
         // A late, stale finalized for the same view (fewer votes) must NOT evict the richer advance.
         <TestCommand as UnreliablePolicy>::handle(
             &mut overflow,
-            TestCommand::new(Request::Hint(Activity::LeaderFinalized { fact: fact(5, 41) })),
+            TestCommand::new(Request::Hint(Activity::LeaderFinalized {
+                fact: fact(5, 41),
+            })),
         );
         assert_eq!(overflow.len(), 1);
         let Request::Hint(Activity::LeaderFinalityUpdated { fact: kept }) = &overflow[0].request
         else {
             panic!("a stale same-view finalized must not evict the richer advance");
         };
-        assert_eq!(kept.votes(), 47, "content comparison is arrival-order independent");
+        assert_eq!(
+            kept.votes(),
+            47,
+            "content comparison is arrival-order independent"
+        );
     }
 
     #[test]

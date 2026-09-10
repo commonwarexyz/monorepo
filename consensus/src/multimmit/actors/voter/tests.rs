@@ -59,7 +59,7 @@ use commonware_runtime::{
     mocks::{DeferredSync, DelayedSyncContext, PendingSyncs, next_pending_sync},
     telemetry::{metrics::count_running_tasks, traces::collector::TraceStorage},
 };
-use commonware_utils::{NZU64, NZUsize, channel::oneshot, sync::Mutex};
+use commonware_utils::{NZU64, NZUsize, channel::oneshot, probability, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -759,7 +759,7 @@ impl Node {
         let link = Link {
             latency: Duration::from_millis(1),
             jitter: Duration::ZERO,
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         };
         let _ = self
             .oracle
@@ -4136,7 +4136,7 @@ fn mutable_journal_sync_failure_stops_production_engine() {
         let inspector = running.inspector();
 
         *context.storage_fault_config().write() = FaultConfig {
-            sync_rate: Some(1.0),
+            sync_rate: Some(probability!(1.0)),
             ..FaultConfig::default()
         };
         application.permit_builds(1);
@@ -5588,7 +5588,7 @@ fn skipped_view_nullification_resolves_from_a_peer_node() {
         let link = Link {
             latency: Duration::from_millis(1),
             jitter: Duration::ZERO,
-            success_rate: 1.0,
+            success_rate: probability!(1.0),
         };
         let _ = oracle
             .add_link(node_a.me.clone(), node_b.me.clone(), link.clone())

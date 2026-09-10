@@ -626,8 +626,8 @@ mod tests {
             Sha256::hash(&[b"parent"]),
         )
         .unwrap();
-        let encoded = Bytes::from_static(b"body").encode();
-        let body = Body::read_cfg(&mut encoded.as_ref(), &Body::codec_config(4)).unwrap();
+        let mut encoded = Bytes::from_static(b"body").encode();
+        let body = Body::read_cfg(&mut encoded, &Body::codec_config(4)).unwrap();
         let block = Arc::new(Block::from_context(context, body));
         let reference = block.reference();
         let (mut reporter, mut redraws) = OrderedReporter::channel();

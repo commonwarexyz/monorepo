@@ -143,7 +143,7 @@ where
         mut self,
         mut commands: mailbox::Receiver<ValidatorCommand<V, H::Digest>>,
     ) {
-        let mut verifies: Pool<Verified> = Pool::default();
+        let mut verifies: Pool<'static, Verified> = Pool::default();
         let mut cancels: BTreeMap<ValidationId, oneshot::Sender<()>> = BTreeMap::new();
         select_loop! {
             self.context,
@@ -170,7 +170,7 @@ where
     fn handle_command(
         &mut self,
         command: ValidatorCommand<V, H::Digest>,
-        verifies: &mut Pool<Verified>,
+        verifies: &mut Pool<'static, Verified>,
         cancels: &mut BTreeMap<ValidationId, oneshot::Sender<()>>,
     ) {
         match command {
@@ -200,7 +200,7 @@ where
     /// Dispatches every ready application validation this chain can start.
     fn dispatch(
         &mut self,
-        verifies: &mut Pool<Verified>,
+        verifies: &mut Pool<'static, Verified>,
         cancels: &mut BTreeMap<ValidationId, oneshot::Sender<()>>,
     ) {
         while let Some(job) = self.validator.ready_validation() {

@@ -2290,7 +2290,7 @@ fn symbolic_vqc(job: &VqcAggregateJob<MinPk, Digest>, config: CodecConfig) -> Vq
     });
     let tally = Tally::from_votes::<MinPk, Sha256, _>(&leader, votes, config).unwrap();
     let novoters = Signers::new(
-        config.participants(),
+        u32::try_from(config.participants()).unwrap(),
         messages.iter().filter_map(|message| match message {
             ViewMessage::NoVote(vote) => Some(vote.signer()),
             ViewMessage::Vote(_) => None,

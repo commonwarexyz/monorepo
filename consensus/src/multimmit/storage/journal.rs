@@ -24,7 +24,8 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
 use commonware_runtime::{
-    Error as RuntimeError, Handle, Metrics, ReadOptions, Storage, Supervisor, buffer::paged::CacheRef,
+    Error as RuntimeError, Handle, Metrics, ReadOptions, Storage, Supervisor,
+    buffer::paged::CacheRef,
 };
 use commonware_storage::journal::{
     Error as StorageError,
@@ -889,6 +890,14 @@ mod tests {
                 Journal::init(context.child("inject"), TestJournal::storage_config(&cfg))
                     .await
                     .unwrap();
+            let mut replay = raw
+                .replay(0, 0, cfg.write_buffer, ReadOptions::default())
+                .await
+                .unwrap();
+            while let Some(record) = replay.next().await {
+                record.unwrap();
+            }
+            let raw = replay.finish().unwrap();
             let (raw, _, _) = raw.append(0, &invalid).await.unwrap();
             let (raw, sync) = raw.start_sync(0).await.unwrap();
             sync.await.unwrap();

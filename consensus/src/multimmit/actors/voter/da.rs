@@ -226,7 +226,7 @@ where
             certified_through: self.certified_through,
             generation: self.generation,
         };
-        let mut recoveries: Pool<Recovered<V, H::Digest>> = Pool::default();
+        let mut recoveries: Pool<'static, Recovered<V, H::Digest>> = Pool::default();
         select_loop! {
             self.context,
             on_stopped => {
@@ -247,7 +247,7 @@ where
     fn handle_command(
         &self,
         plane: &mut Plane<V, H::Digest>,
-        recoveries: &mut Pool<Recovered<V, H::Digest>>,
+        recoveries: &mut Pool<'static, Recovered<V, H::Digest>>,
         command: ChainCommand<V, H::Digest>,
     ) {
         match command {
@@ -272,7 +272,7 @@ where
     fn observe(
         &self,
         plane: &mut Plane<V, H::Digest>,
-        recoveries: &mut Pool<Recovered<V, H::Digest>>,
+        recoveries: &mut Pool<'static, Recovered<V, H::Digest>>,
         share: &Arc<DaVote<V, H::Digest>>,
     ) {
         let header = share.header();
@@ -301,7 +301,7 @@ where
     fn advance_anchor(
         &self,
         plane: &mut Plane<V, H::Digest>,
-        recoveries: &mut Pool<Recovered<V, H::Digest>>,
+        recoveries: &mut Pool<'static, Recovered<V, H::Digest>>,
         height: Height,
     ) {
         if height <= plane.certified_through {
@@ -340,7 +340,7 @@ where
     fn drive(
         &self,
         plane: &mut Plane<V, H::Digest>,
-        recoveries: &mut Pool<Recovered<V, H::Digest>>,
+        recoveries: &mut Pool<'static, Recovered<V, H::Digest>>,
     ) {
         while recoveries.len() < self.recovery_slots {
             let Some(digest) = plane.ready.iter().next().copied() else {
@@ -368,7 +368,8 @@ where
                 // The group check runs on the shared pool, and a worker panic is reconciled into
                 // an unattributed failure rather than escaping the task.
                 let outcome = strategy
-                    .spawn(move |strategy| {
+                    .manual()
+                    .spawn(votes.len(), move |_| {
                         std::panic::catch_unwind(AssertUnwindSafe(move || {
                             scheme.assemble_da_certificate_optimistic(&votes, &strategy)
                         }))

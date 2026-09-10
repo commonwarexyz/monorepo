@@ -827,6 +827,7 @@ impl Reporter for NoopReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Buf as _;
     use commonware_codec::{Decode, Encode};
     use commonware_consensus::types::{Epoch, Height};
     use commonware_runtime::{
@@ -848,8 +849,8 @@ mod tests {
     fn body_codec_and_block_identities_are_canonical() {
         let context = context();
         let body = Body::junk(9, context, 4_097);
-        let encoded = body.encode();
-        let decoded = Body::read_cfg(&mut encoded.as_ref(), &Body::codec_config(4_097)).unwrap();
+        let mut encoded = body.encode();
+        let decoded = Body::read_cfg(&mut encoded, &Body::codec_config(4_097)).unwrap();
         assert_eq!(decoded, body);
 
         let block = TransactionBlock::<Sha256, _>::from_context(context, body);

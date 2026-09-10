@@ -3232,12 +3232,12 @@ mod tests {
         let bad_vqc = {
             let mut encoded = vqc.encode().to_vec();
             *encoded.last_mut().unwrap() ^= 0x01;
-            Vqc::<V, Digest>::decode_cfg(encoded.as_slice(), &fixture.codec).unwrap()
+            Vqc::<V, Digest>::decode_cfg(encoded, &fixture.codec).unwrap()
         };
         let bad_lqc = {
             let mut encoded = lqc.encode().to_vec();
             *encoded.last_mut().unwrap() ^= 0x01;
-            Lqc::<V, Digest>::decode_cfg(encoded.as_slice(), &fixture.codec).unwrap()
+            Lqc::<V, Digest>::decode_cfg(encoded, &fixture.codec).unwrap()
         };
         let all_known = votes
             .iter()

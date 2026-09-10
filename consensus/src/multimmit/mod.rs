@@ -230,11 +230,13 @@ mod actors;
 pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod engine;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
 pub(crate) mod machine;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod marshal;
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub mod scheme;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod storage;
@@ -243,6 +245,7 @@ pub mod telemetry;
 mod tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod twins;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub mod types;
 
 #[cfg(not(target_arch = "wasm32"))]

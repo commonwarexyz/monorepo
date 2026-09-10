@@ -4017,7 +4017,10 @@ mod tests {
     impl Read for ByteView {
         type Cfg = RangeCfg<usize>;
 
-        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        fn read_cfg(
+            buf: &mut impl commonware_codec::Buf,
+            cfg: &Self::Cfg,
+        ) -> Result<Self, commonware_codec::Error> {
             let start = buf.chunk().as_ptr() as usize;
             let source = start..start + buf.chunk().len();
             Ok(Self {
@@ -4033,6 +4036,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "read-consecutive-byte-views".into(),
+                replay_buffer: NZUsize!(1024),
                 items_per_section: NZU64!(20),
                 compression: None,
                 codec_config: (..).into(),

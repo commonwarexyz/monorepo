@@ -347,6 +347,7 @@ mod tests {
                 .write_at(0, malformed, WriteOptions::SYNC)
                 .await
                 .unwrap();
+            current.sync().await.unwrap();
             drop(current);
 
             let error = CheckpointStore::<_, MinPk, Sha256Digest>::open(

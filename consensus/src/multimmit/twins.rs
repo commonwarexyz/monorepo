@@ -37,7 +37,7 @@ use crate::{
     twins::{RoundScenario, Scenario},
     types::{Attributable as _, Epoch, Participant, Round, TermLength, View},
 };
-use commonware_codec::{Decode as _, Encode as _};
+use commonware_codec::{Copying, Decode as _, Encode as _};
 use commonware_cryptography::{
     Hasher as _, Sha256, bls12381::primitives::variant::MinPk, ed25519,
     sha256::Digest as Sha256Digest,
@@ -148,7 +148,7 @@ impl InclusionTrace {
             return false;
         };
         let Ok(envelope) = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
-            bytes,
+            Copying(bytes),
             &EnvelopeConfig {
                 max_frame_bytes: bounds.max_data_frame_bytes(),
                 epoch: self.epoch,
@@ -178,7 +178,7 @@ impl InclusionTrace {
             return;
         };
         let Ok(envelope) = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
-            bytes,
+            Copying(bytes),
             &EnvelopeConfig {
                 max_frame_bytes: bounds.max_consensus_frame_bytes(),
                 epoch: self.epoch,
@@ -570,7 +570,7 @@ fn identify_consensus(
 ) -> Option<DeliveryArtifact> {
     let bounds = codec.encoded_bounds::<MinPk, Sha256Digest>().ok()?;
     let payload = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
-        bytes,
+        Copying(bytes),
         &EnvelopeConfig {
             max_frame_bytes: bounds.max_consensus_frame_bytes(),
             epoch,
@@ -616,7 +616,7 @@ fn identify_producer(
 ) -> Option<ProducerArtifact> {
     let bounds = codec.encoded_bounds::<MinPk, Sha256Digest>().ok()?;
     let payload = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
-        bytes,
+        Copying(bytes),
         &EnvelopeConfig {
             max_frame_bytes: bounds.max_data_frame_bytes(),
             epoch,
@@ -651,7 +651,7 @@ fn identify_producer_consequence(
 ) -> Option<TransactionBlockHeader<Sha256Digest>> {
     let bounds = codec.encoded_bounds::<MinPk, Sha256Digest>().ok()?;
     let payload = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
-        bytes,
+        Copying(bytes),
         &EnvelopeConfig {
             max_frame_bytes: bounds.max_data_frame_bytes(),
             epoch,
@@ -870,7 +870,7 @@ fn message_view(plane: u64, bytes: &[u8], epoch: Epoch, codec: CodecConfig) -> O
     match plane {
         1 => {
             let envelope = Envelope::<ConsensusMessage<MinPk, Sha256Digest>>::decode_cfg(
-                bytes,
+                Copying(bytes),
                 &EnvelopeConfig {
                     max_frame_bytes: bounds.max_consensus_frame_bytes(),
                     epoch,
@@ -887,7 +887,7 @@ fn message_view(plane: u64, bytes: &[u8], epoch: Epoch, codec: CodecConfig) -> O
         }
         2 => {
             let envelope = Envelope::<CertificateMessage<MinPk, Sha256Digest>>::decode_cfg(
-                bytes,
+                Copying(bytes),
                 &EnvelopeConfig {
                     max_frame_bytes: bounds.max_certificate_frame_bytes(),
                     epoch,
@@ -905,7 +905,7 @@ fn message_view(plane: u64, bytes: &[u8], epoch: Epoch, codec: CodecConfig) -> O
             // Reject malformed data-plane bytes the same way the batcher would, without
             // attributing them to a view.
             let _ = Envelope::<DataMessage<MinPk, Sha256Digest>>::decode_cfg(
-                bytes,
+                Copying(bytes),
                 &EnvelopeConfig {
                     max_frame_bytes: bounds.max_data_frame_bytes(),
                     epoch,

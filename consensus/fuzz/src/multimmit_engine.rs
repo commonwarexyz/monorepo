@@ -22,7 +22,7 @@ use commonware_runtime::{
     buffer::paged::{self, CacheRef},
     deterministic,
 };
-use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
+use commonware_utils::{FuzzRng, NZUsize, probability, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -46,7 +46,7 @@ pub fn fuzz<V: Variant>(input: &[u8]) {
     let input = input.to_vec();
     let runner = deterministic::Runner::new(
         deterministic::Config::new()
-            .with_rng(Box::new(FuzzRng::new(input.clone())))
+            .with_rng(FuzzRng::new(input.clone()))
             .with_timeout(Some(RUNNER_TIMEOUT)),
     );
 
@@ -118,17 +118,17 @@ impl NetworkState {
             Self::Healthy => Link {
                 latency: Duration::from_millis(2),
                 jitter: Duration::from_millis(5),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             },
             Self::Degraded => Link {
                 latency: Duration::from_millis(25),
                 jitter: Duration::from_millis(5),
-                success_rate: 0.5,
+                success_rate: probability!(0.5),
             },
             Self::Disconnected => Link {
                 latency: Duration::from_millis(2),
                 jitter: Duration::from_millis(5),
-                success_rate: 0.0,
+                success_rate: probability!(0.0),
             },
         }
     }
@@ -832,7 +832,6 @@ impl Invariants {
         if let Some(producer) = inspection.producer() {
             assert_eq!(producer.chain(), ChainId::new(node as u32));
             assert_eq!(producer.da_quorum(), self.da_quorum);
-            assert!(producer.vote_shares() <= NODES);
             assert!(producer.certified() <= producer.produced());
             assert!(
                 producer

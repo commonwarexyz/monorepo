@@ -15,7 +15,7 @@ use commonware_actor::{
     Feedback, Unreliable,
     mailbox::{self, Overflow as _, Policy as _},
 };
-use commonware_codec::{Decode as _, Encode as _, ReadExt as _, Write as _};
+use commonware_codec::{Copying, Decode as _, Encode as _, ReadExt as _, Write as _};
 use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk, sha256::Digest};
 use commonware_macros::select;
 use commonware_p2p::{CheckedSender, LimitedSender, Receiver as _, Recipients, Sender as _};
@@ -145,14 +145,14 @@ fn resolver_response(
     requested: View,
     proof: Served<MinPk, Digest>,
 ) -> Bytes {
-    let mut request = request.as_ref();
+    let mut request = Copying(request.as_ref());
     let id = u64::read(&mut request).expect("resolver request id");
     assert_eq!(u8::read(&mut request).expect("resolver request tag"), 0);
     assert_eq!(
         u64::from(U64::read(&mut request).expect("resolver request view")),
         requested.get()
     );
-    assert!(request.is_empty());
+    assert!(request.0.is_empty());
 
     let mut response = BytesMut::new();
     id.write(&mut response);
@@ -316,10 +316,7 @@ fn proof_codec_round_trip() {
 #[test]
 fn proof_codec_rejects_unknown_tag() {
     let committee = committee();
-    assert!(
-        Served::<MinPk, Digest>::decode_cfg(commonware_codec::Copying(&[3]), &committee.codec())
-            .is_err()
-    );
+    assert!(Served::<MinPk, Digest>::decode_cfg(Copying(&[3]), &committee.codec()).is_err());
 }
 
 #[test]

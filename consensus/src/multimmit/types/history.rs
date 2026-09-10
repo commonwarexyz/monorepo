@@ -157,7 +157,9 @@ mod tests {
         let record = TipRecord::new(parent, tips.clone(), proposed).unwrap();
         assert_ne!(
             record.commitment::<Sha256>(),
-            TipRecord::at_tips(parent, tips).unwrap().commitment::<Sha256>()
+            TipRecord::at_tips(parent, tips)
+                .unwrap()
+                .commitment::<Sha256>()
         );
 
         assert_eq!(record.commitment::<Sha256>(), expected);

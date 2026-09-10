@@ -667,7 +667,12 @@ async fn wait_served(
     accepts: impl Fn(&Served<MinPk, Sha256Digest>) -> bool,
 ) -> bool {
     for _ in 0..rounds {
-        if cluster.serve(node, view).await.as_ref().is_some_and(&accepts) {
+        if cluster
+            .serve(node, view)
+            .await
+            .as_ref()
+            .is_some_and(&accepts)
+        {
             return true;
         }
         context.sleep(Duration::from_millis(25)).await;
@@ -788,11 +793,18 @@ fn duplicated_reordered_certificates_converge_after_healing() {
 
         let requested = View::new(target_view + 1);
         assert!(
-            wait_served(&context, &cluster, TARGET, requested, 400, |proof| match proof {
-                Served::Vqc(proof) => proof.as_ref() == &earlier,
-                Served::Lqc(proof) => proof.view() >= requested,
-                _ => false,
-            })
+            wait_served(
+                &context,
+                &cluster,
+                TARGET,
+                requested,
+                400,
+                |proof| match proof {
+                    Served::Vqc(proof) => proof.as_ref() == &earlier,
+                    Served::Lqc(proof) => proof.view() >= requested,
+                    _ => false,
+                }
+            )
             .await,
             "recovery serves the earlier future V-QC or a covering L-QC"
         );

@@ -300,7 +300,10 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, mocks};
-    use commonware_runtime::{BufMut as _, BufferPooler as _, Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        BufMut as _, BufferPooler as _, Clock as _, IoBuf, Quota, Runner, Supervisor as _,
+        deterministic,
+    };
     use commonware_utils::{
         NZUsize,
         channel::{mpsc, ring},

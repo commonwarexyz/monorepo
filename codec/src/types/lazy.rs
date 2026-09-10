@@ -298,7 +298,8 @@ impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
 mod test {
     use super::Lazy;
     use crate::{
-        Copying, Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
+        Buf, Copying, Decode, DecodeExt, Encode, FixedSize, Read, Write,
+        types::tests::TrackingWriteBuf,
     };
     use proptest::prelude::*;
 
@@ -356,7 +357,7 @@ mod test {
     impl Read for Counted {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl bytes::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
             DECODES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Self(u8::read_cfg(buf, &())?))
         }

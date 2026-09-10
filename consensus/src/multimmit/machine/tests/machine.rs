@@ -639,9 +639,11 @@ fn view_messages(
             .iter()
             .map(|&signer| ViewMessage::Vote(view_vote(machine, leader, signer))),
     );
-    messages.extend(nonvoters.iter().map(|&signer| {
-        ViewMessage::NoVote(no_vote(machine, leader.round().view(), signer))
-    }));
+    messages.extend(
+        nonvoters
+            .iter()
+            .map(|&signer| ViewMessage::NoVote(no_vote(machine, leader.round().view(), signer))),
+    );
     messages
 }
 
@@ -773,7 +775,7 @@ fn vqc(
     )
     .unwrap();
     let novoters = Signers::new(
-        machine.profile().protocol().codec_config().participants(),
+        u32::try_from(machine.profile().protocol().codec_config().participants()).unwrap(),
         messages.iter().filter_map(|message| match message {
             ViewMessage::NoVote(vote) => Some(vote.signer()),
             _ => None,
@@ -1939,7 +1941,7 @@ fn vqc_constituents_preserve_finality_observation_order() {
         let certificate = Vqc::new(
             designated.clone(),
             tally,
-            Signers::new(config.participants(), []).unwrap(),
+            Signers::new(u32::try_from(config.participants()).unwrap(), []).unwrap(),
             conflicting,
             aggregate::Signature::<MinPk>::zero(),
             config,
@@ -2178,7 +2180,7 @@ fn finality_owner_reservation_waits_for_the_earliest_claim() {
         Vqc::new(
             earlier,
             tally,
-            Signers::new(config.participants(), []).unwrap(),
+            Signers::new(u32::try_from(config.participants()).unwrap(), []).unwrap(),
             conflicting,
             aggregate::Signature::<MinPk>::zero(),
             config,
@@ -5128,7 +5130,7 @@ fn proposal_anchor_prefers_more_accounted_messages() {
         proposed.clone(),
         tally,
         Signers::new(
-            config.participants(),
+            u32::try_from(config.participants()).unwrap(),
             [Participant::new(4), Participant::new(5)],
         )
         .unwrap(),
@@ -5173,7 +5175,7 @@ fn proposal_anchor_prefers_more_accounted_messages() {
     let smaller = Vqc::new(
         proposed,
         tally,
-        Signers::new(config.participants(), []).unwrap(),
+        Signers::new(u32::try_from(config.participants()).unwrap(), []).unwrap(),
         conflicting,
         aggregate::Signature::<MinPk>::zero(),
         config,
@@ -11203,7 +11205,6 @@ fn signed_valid_proposal_durably_selects_direct_vote() {
     assert_eq!(body.positions(), &[Position::new(0)]);
     assert!(body.extensions()[0].is_empty());
 }
-
 
 #[test]
 fn vote_body_pass_ignores_later_da_choices() {

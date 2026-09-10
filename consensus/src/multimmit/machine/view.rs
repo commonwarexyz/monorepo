@@ -1,9 +1,9 @@
 //! Proposal selection, view-message collection, and deterministic view exits.
 
 use super::{
-    Artifact, ArtifactId, ChainState, Observation,
-    Profile, ProposalRequest, Role, SignRequest, ViewNullification, ViewSnapshot, ViewStance,
-    ViewTransition, VoteBodyPass, VoteBodyProgress, VoteRequest,
+    Artifact, ArtifactId, ChainState, Observation, Profile, ProposalRequest, Role, SignRequest,
+    ViewNullification, ViewSnapshot, ViewStance, ViewTransition, VoteBodyPass, VoteBodyProgress,
+    VoteRequest,
     algebra::{Tips, ValidatedVqc, validate_vqc, validate_vqc_votes},
 };
 use crate::{
@@ -779,7 +779,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 parent.tips.blocks().to_vec(),
                 parent.proposed.clone(),
             )
-                .map_err(|_| ViewError::Proposal)?,
+            .map_err(|_| ViewError::Proposal)?,
         );
         (history.commitment::<H>() == leader.history())
             .then_some(history)
@@ -1429,8 +1429,8 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 parent.tips.blocks().to_vec(),
                 parent.proposed.clone(),
             )
-                .map_err(|_| ViewError::Proposal)?
-                .commitment::<H>(),
+            .map_err(|_| ViewError::Proposal)?
+            .commitment::<H>(),
             proposals.to_vec(),
             profile.protocol().codec_config(),
         )
@@ -2847,11 +2847,11 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             return Ok(false);
         }
         let history = TipRecord::new(
-                parent.history,
-                parent.tips.blocks().to_vec(),
-                parent.proposed.clone(),
-            )
-            .map_err(|_| ViewError::Proposal)?;
+            parent.history,
+            parent.tips.blocks().to_vec(),
+            parent.proposed.clone(),
+        )
+        .map_err(|_| ViewError::Proposal)?;
         if history.commitment::<H>() != block.history() {
             return Ok(false);
         }

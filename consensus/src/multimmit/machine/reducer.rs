@@ -1805,12 +1805,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Ok((true, capabilities));
         }
 
-        let (da_status, da_capabilities) =
-            if self.views.regular_vote_in_progress(self.durable.view) {
-                (WorkStatus::Complete, Capabilities::None)
-            } else {
-                self.reserve_ready_da_votes(cycle)?
-            };
+        let (da_status, da_capabilities) = if self.views.regular_vote_in_progress(self.durable.view)
+        {
+            (WorkStatus::Complete, Capabilities::None)
+        } else {
+            self.reserve_ready_da_votes(cycle)?
+        };
         capabilities.extend(da_capabilities);
         Ok((da_status == WorkStatus::Requeue, capabilities))
     }
@@ -3529,10 +3529,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     continue;
                 };
                 for waiter in waiters {
-                    let Some(ArtifactState::Waiting(missing)) = self
-                        .artifacts
-                        .get(&waiter)
-                        .map(|entry| &entry.state)
+                    let Some(ArtifactState::Waiting(missing)) =
+                        self.artifacts.get(&waiter).map(|entry| &entry.state)
                     else {
                         continue;
                     };

@@ -243,7 +243,6 @@ async fn start_attached_marshal(
             producer: bridge,
             mailbox_size: NZUsize!(64),
             me: Some(identity),
-            initial: Duration::from_millis(20),
             timeout: Duration::from_millis(100),
             fetch_retry_timeout: Duration::from_millis(20),
             priority_requests: false,
@@ -576,7 +575,6 @@ impl Harness {
                 producer: bridge,
                 mailbox_size: NZUsize!(64),
                 me: Some(identity),
-                initial: Duration::from_millis(20),
                 timeout: Duration::from_millis(100),
                 fetch_retry_timeout: Duration::from_millis(20),
                 priority_requests: false,
@@ -1471,8 +1469,9 @@ fn remote_resolver_backfills_exact_lqc_history_and_blocks() {
             harness.committee.config.genesis().tips(),
             vec![vec![body(20), body(21)], vec![body(22), body(23)]],
         );
-        let second_history =
-            Arc::new(TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap());
+        let second_history = Arc::new(
+            TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap(),
+        );
         let second = certify(
             &harness.committee,
             2,
@@ -2527,8 +2526,9 @@ fn floor_installation_retires_the_pending_delivery_window() {
             })
             .await;
 
-        let floor_history =
-            Arc::new(TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap());
+        let floor_history = Arc::new(
+            TipRecord::at_tips(first.history.commitment::<Sha256>(), first.tips()).unwrap(),
+        );
         let floor = certify(
             &harness.committee,
             2,
@@ -2554,8 +2554,9 @@ fn floor_installation_retires_the_pending_delivery_window() {
             .await;
         harness.reporter(0).discard_pending();
 
-        let continuation_history =
-            Arc::new(TipRecord::at_tips(floor.history.commitment::<Sha256>(), floor.tips()).unwrap());
+        let continuation_history = Arc::new(
+            TipRecord::at_tips(floor.history.commitment::<Sha256>(), floor.tips()).unwrap(),
+        );
         let continuation = certify(
             &harness.committee,
             3,

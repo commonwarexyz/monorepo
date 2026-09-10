@@ -68,6 +68,7 @@ pub fn export(cfg: Config) -> Result<Tracer, ExporterBuildError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::probability;
     use opentelemetry::{Key, Value};
 
     #[test]
@@ -76,7 +77,7 @@ mod tests {
             let cfg = Config {
                 endpoint: "http://localhost:4318/v1/traces".to_owned(),
                 name: "node-7".to_owned(),
-                rate: 1.0,
+                rate: probability!(1.0),
                 run_id: run_id.clone(),
             };
             let resource = cfg.resource();
