@@ -152,7 +152,7 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Writer},
 };
 use commonware_utils::Cached;
-use futures::{FutureExt as _, Stream, future::try_join_all};
+use futures::{FutureExt as _, Stream, TryStreamExt as _, future, stream::FuturesUnordered};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -1440,7 +1440,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 
         // The buffer is pre-sized for every position, so each group can own a disjoint slice and
         // all groups can read concurrently.
-        let mut reads = Vec::new();
+        let reads = FuturesUnordered::new();
         let mut remaining_buf = buf.as_mut_slice();
         for group in positions.chunk_by(|a, b| {
             super::position_to_blob(*a, items_per_blob)
@@ -1458,11 +1458,11 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
                     .await
             });
         }
-        let hits: u64 = try_join_all(reads)
-            .await?
-            .into_iter()
-            .map(|group_hits| group_hits as u64)
-            .sum();
+        let hits = reads
+            .try_fold(0u64, |hits, group_hits| {
+                future::ready(Ok(hits + group_hits as u64))
+            })
+            .await?;
 
         let mut bytes = Bytes::from(buf);
         for _ in positions {

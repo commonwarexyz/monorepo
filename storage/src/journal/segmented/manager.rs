@@ -13,7 +13,7 @@ use commonware_runtime::{
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use futures::future::{join_all, try_join_all};
+use futures::{TryStreamExt as _, future::join_all, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -209,9 +209,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     where
         F::Buffer: 'a,
     {
-        try_join_all(blobs.into_iter().map(|blob| blob.wait_for_sync()))
+        blobs
+            .into_iter()
+            .map(|blob| blob.wait_for_sync())
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<()>()
             .await
-            .map(|_| ())
             .map_err(Error::Runtime)
     }
 
@@ -293,14 +296,14 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         for &section in &sections {
             self.prune_guard(section)?;
         }
-        let futures: Vec<_> = self
+        let futures: FuturesUnordered<_> = self
             .blobs
             .iter_mut()
             .filter(|(section, _)| sections.contains(section))
             .map(|(_, blob)| blob.sync())
             .collect();
         let count = futures.len() as u64;
-        try_join_all(futures).await.map_err(Error::Runtime)?;
+        futures.try_collect::<()>().await.map_err(Error::Runtime)?;
         self.synced.inc_by(count);
         Ok(())
     }
@@ -335,14 +338,22 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.synced.inc_by(futures.len() as u64);
         let handles = join_all(futures).await;
         Ok(Handle::from_future(async move {
-            try_join_all(handles).await.map(|_| ())
+            handles
+                .into_iter()
+                .collect::<FuturesUnordered<_>>()
+                .try_collect::<()>()
+                .await
         }))
     }
 
     /// Sync all sections to storage.
     pub async fn sync_all(&mut self) -> Result<(), Error> {
         let count = self.blobs.len() as u64;
-        try_join_all(self.blobs.values_mut().map(|b| b.sync()))
+        self.blobs
+            .values_mut()
+            .map(|b| b.sync())
+            .collect::<FuturesUnordered<_>>()
+            .try_collect::<()>()
             .await
             .map_err(Error::Runtime)?;
         self.synced.inc_by(count);
@@ -548,7 +559,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
@@ -650,6 +663,50 @@ mod tests {
             pending.remove(0)
         };
         let _ = sender.send(result);
+    }
+
+    #[rstest::rstest]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn test_concurrent_sync_reports_later_error(
+        #[case] count: u64,
+        #[values(false, true)] clear: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let cfg = test_config(pending.clone(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+            for section in 0..count {
+                manager.get_or_create(section).await.unwrap();
+            }
+            let handle = manager
+                .start_sync((0..count).collect::<Vec<_>>())
+                .await
+                .unwrap();
+
+            // Leave the first sync pending while completing the last one with an error.
+            pending
+                .lock()
+                .pop()
+                .unwrap()
+                .send(Err(RError::Closed))
+                .unwrap();
+            let result = commonware_macros::select! {
+                result = async {
+                    if clear {
+                        drop(handle);
+                        manager.clear().await
+                    } else {
+                        handle.await.map_err(Error::Runtime)
+                    }
+                } => Some(result),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => None,
+            };
+            assert!(matches!(result, Some(Err(Error::Runtime(RError::Closed)))));
+            // A mutable storage error is fatal; do not reuse the manager.
+            drop(manager);
+        });
     }
 
     #[test]

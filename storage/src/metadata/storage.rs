@@ -7,7 +7,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Span;
-use futures::{FutureExt as _, future::try_join_all};
+use futures::{FutureExt as _, TryStreamExt as _, stream::FuturesUnordered};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
@@ -465,7 +465,10 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
                         WriteOptions::DONT_CACHE,
                     ),
                 ]);
-            try_join_all(writes).await?;
+            writes
+                .collect::<FuturesUnordered<_>>()
+                .try_collect::<()>()
+                .await?;
             let sync = if pipelined {
                 Some(target.blob.start_sync().await)
             } else {

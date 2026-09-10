@@ -9,7 +9,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::bitmap::BitMap;
-use futures::future::try_join_all;
+use futures::{TryStreamExt as _, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
@@ -427,13 +427,13 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             return Ok(());
         }
 
-        let futures: Vec<_> = self
+        let futures: FuturesUnordered<_> = self
             .blobs
             .iter_mut()
             .filter(|(section, _)| self.pending.contains(section))
             .map(|(_, blob)| blob.sync())
             .collect();
-        try_join_all(futures).await?;
+        futures.try_collect::<()>().await?;
 
         // Clear pending sections.
         self.pending.clear();

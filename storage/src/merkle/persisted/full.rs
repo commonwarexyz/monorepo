@@ -34,6 +34,7 @@ use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
+use futures::{TryStreamExt as _, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
@@ -695,10 +696,19 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
-        let futs = F::nodes_to_pin(loc)
-            .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
-            .collect::<Vec<_>>();
-        futures::future::try_join_all(futs).await
+        // Observe errors in completion order while keeping the family's pinned-node order.
+        let mut reads = F::nodes_to_pin(loc)
+            .enumerate()
+            .map(|(index, p)| async move {
+                let node = self.get_node(p).await?.ok_or(Error::ElementPruned(p))?;
+                Ok::<_, Error<F>>((index, node))
+            })
+            .collect::<FuturesUnordered<_>>();
+        let mut nodes: Vec<_> = (0..reads.len()).map(|_| None).collect();
+        while let Some((index, node)) = reads.try_next().await? {
+            nodes[index] = Some(node);
+        }
+        Ok(nodes.into_iter().map(Option::unwrap).collect())
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to

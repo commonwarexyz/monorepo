@@ -12,12 +12,15 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use futures::{
-    future::try_join_all,
-    stream::{self, Stream},
+    TryStreamExt as _,
+    stream::{self, FuturesUnordered, Stream},
 };
 
 pub mod fixed;
 pub mod variable;
+
+#[cfg(test)]
+mod concurrency_tests;
 
 pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as Update};
 
@@ -197,7 +200,10 @@ where
         let futures = locs
             .into_iter()
             .map(|loc| Self::get_update_op(&self.log, *loc));
-        let mut updates = try_join_all(futures).await?;
+        let mut updates: Vec<_> = futures
+            .collect::<FuturesUnordered<_>>()
+            .try_collect()
+            .await?;
         updates.sort_by(|a, b| b.key.cmp(&a.key));
 
         Ok(updates)
