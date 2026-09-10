@@ -770,6 +770,10 @@ mod tests {
 
             for (signer, expected) in &votes {
                 prop_assert_eq!(
+                    tally.vote_with_leader_digest(&leader, leader.digest::<Sha256>(), *signer, config).unwrap(),
+                    expected.clone(),
+                );
+                prop_assert_eq!(
                     tally.vote::<MinSig, Sha256>(&leader, *signer, config).unwrap(),
                     expected.clone(),
                 );

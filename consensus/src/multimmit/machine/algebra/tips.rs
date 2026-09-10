@@ -469,10 +469,11 @@ impl<D: Digest> FinalTips<D> {
     {
         let leader = certificate.leader();
         let mut votes = Vec::with_capacity(certificate.tally().signers().count());
+        let leader_digest = leader.digest::<H>();
         for signer in certificate.tally().signers().iter() {
             let body = certificate
                 .tally()
-                .vote::<V, H>(leader, signer, config)
+                .vote_with_leader_digest(leader, leader_digest, signer, config)
                 .map_err(|_| Error::Vote)?;
             votes.push((signer, body));
         }

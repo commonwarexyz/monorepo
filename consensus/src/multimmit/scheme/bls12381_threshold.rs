@@ -1683,7 +1683,7 @@ where
     for signer in certificate.tally().signers().iter() {
         let body = certificate
             .tally()
-            .vote::<V, H>(leader, signer, config)
+            .vote_with_leader_digest(leader, leader_digest, signer, config)
             .map_err(|_| Error::Transcript)?;
         let subject = Subject::vote(&body);
         transcript.push((signer, subject.namespace(namespace), subject.message()));

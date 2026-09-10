@@ -1835,11 +1835,12 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
     ) -> Result<Vec<VerifiedVote<D>>, FinalityError> {
         let leader = certificate.leader();
         let tally = certificate.tally();
+        let leader_digest = leader.digest::<H>();
         let mut votes =
             Vec::with_capacity(tally.signers().count() + certificate.conflicting_votes().len());
         for signer in tally.signers().iter() {
             let body = tally
-                .vote::<V, H>(leader, signer, config)
+                .vote_with_leader_digest(leader, leader_digest, signer, config)
                 .map_err(|_| FinalityError::Algebra)?;
             votes.push(VerifiedVote::new::<H>(signer, body));
         }
@@ -1896,10 +1897,11 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             _ => {
                 // Recovery path: no compute-pool derivation accompanies the certificate.
                 let tally = certificate.tally();
+                let leader_digest = leader.digest::<H>();
                 let mut expanded = Vec::with_capacity(tally.signers().count());
                 for signer in tally.signers().iter() {
                     let body = tally
-                        .vote::<V, H>(leader, signer, self.config)
+                        .vote_with_leader_digest(leader, leader_digest, signer, self.config)
                         .map_err(|_| FinalityError::Algebra)?;
                     expanded.push((signer, body));
                 }
@@ -1913,7 +1915,7 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                     .into_iter()
                     .map(|(signer, body)| VerifiedVote::new::<H>(signer, body))
                     .collect();
-                (leader.digest::<H>(), tips, votes)
+                (leader_digest, tips, votes)
             }
         };
         let key = (leader.round(), leader_digest);
@@ -2335,10 +2337,12 @@ where
     if certificate.tally().signers().iter().collect::<Vec<_>>() != signers {
         return false;
     }
+    let leader = certificate.leader();
+    let leader_digest = leader.digest::<H>();
     votes.into_iter().all(|vote| {
         certificate
             .tally()
-            .vote::<V, H>(certificate.leader(), vote.signer(), config)
+            .vote_with_leader_digest(leader, leader_digest, vote.signer(), config)
             .is_ok_and(|body| body == *vote.body())
     })
 }

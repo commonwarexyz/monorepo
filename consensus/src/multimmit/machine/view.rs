@@ -3306,8 +3306,13 @@ where
         NoVote,
     }
     let mut actual = BTreeMap::<Participant, MessageBody<D>>::new();
+    let leader_digest = leader.digest::<H>();
     for signer in certificate.tally().signers().iter() {
-        let Ok(body) = certificate.tally().vote::<V, H>(leader, signer, config) else {
+        let Ok(body) =
+            certificate
+                .tally()
+                .vote_with_leader_digest(leader, leader_digest, signer, config)
+        else {
             return false;
         };
         actual.insert(signer, MessageBody::Vote(body));
