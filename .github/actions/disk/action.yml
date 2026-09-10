@@ -11,7 +11,12 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup || true
+        # Depth three separates Android NDK versions into independent tasks.
+        dirs=(/usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup)
+        sudo find "${dirs[@]}" -mindepth 3 -maxdepth 3 -print0 |
+          sudo xargs -0 -r -n 1 -P "$(nproc)" rm -rf -- || true
+        sudo rm -rf -- "${dirs[@]}" || true
+
         sudo docker image prune --all --force || true
 
     # macOS Cleanup

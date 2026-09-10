@@ -127,13 +127,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Configure swap
       uses: ./.github/actions/swap
-    - name: Clear disk space (macOS)
-      if: runner.os == 'macOS'
+    - name: Clear disk space
       uses: ./.github/actions/disk
-    - name: Clear disk space (Linux)
-      if: runner.os == 'Linux'
-      uses: ./.github/actions/disk
-      background: true
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -147,8 +142,6 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
-    - name: Wait for disk cleanup
-      wait-all:
     - name: Run tests
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
 
@@ -201,7 +194,6 @@ jobs:
       uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
-      background: true
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -214,8 +206,6 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0
-    - name: Wait for disk cleanup
-      wait-all:
     - name: Check stability (${{ matrix.level }})
       run: just check-stability ${{ matrix.level }}
 
@@ -230,7 +220,6 @@ jobs:
       uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
-      background: true
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -243,8 +232,6 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0
-    - name: Wait for disk cleanup
-      wait-all:
     - name: Check for unmarked public items
       run: just unstable-public
 
@@ -338,7 +325,6 @@ jobs:
       uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
-      background: true
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -346,8 +332,6 @@ jobs:
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
         sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-    - name: Wait for disk cleanup
-      wait-all:
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -520,7 +504,6 @@ jobs:
         uses: ./.github/actions/swap
       - name: Clear disk space
         uses: ./.github/actions/disk
-        background: true
       - name: Determine toolchain version
         id: toolchain
         run: |
@@ -544,8 +527,6 @@ jobs:
           tool: just@1.43.0,cargo-hack@0.6.43
       - name: Print Rust version
         run: rustc --version
-      - name: Wait for disk cleanup
-        wait-all:
       - name: Check feature powerset
         run: RUSTFLAGS="-D warnings" just hack ${{ matrix.partition.args }} check
 
