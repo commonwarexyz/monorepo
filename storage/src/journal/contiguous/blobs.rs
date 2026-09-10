@@ -4,7 +4,7 @@ use crate::{
     Context, SyncCompletion,
     journal::{Error, frame::FrameReader},
 };
-use bytes::Bytes;
+use bytes::{Bytes, TryGetError};
 use commonware_codec::Buf;
 use commonware_formatting::hex;
 use commonware_runtime::{
@@ -698,6 +698,13 @@ impl<B: RBlob> bytes::Buf for Replay<'_, B> {
         }
     }
 
+    fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.try_copy_to_slice(dst),
+            ReplayInner::View(replay) => replay.try_copy_to_slice(dst),
+        }
+    }
+
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             ReplayInner::Paged(replay) => replay.chunk(),
@@ -793,6 +800,10 @@ impl<B: RBlob> bytes::Buf for ViewReplay<'_, B> {
 
     fn remaining(&self) -> usize {
         self.buf.remaining()
+    }
+
+    fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+        self.buf.try_copy_to_slice(dst)
     }
 
     fn chunk(&self) -> &[u8] {
