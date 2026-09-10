@@ -20,6 +20,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    vec::IntoIter,
 };
 use tracing::error;
 
@@ -51,20 +52,26 @@ where
     },
 }
 
-/// Signals all aborts before dropping any handle, whose result or completion future may wake
-/// other tasks in the group during destruction.
-struct HandleGroup<T>(Vec<Handle<T>>)
+/// Signals all aborts before dropping any handle, whose result or completion future may depend
+/// on another task in the group during destruction.
+struct HandleGroup<T>(IntoIter<AbortOnDrop<T>>)
 where
     T: Send + 'static;
+
+impl<T: Send + 'static> HandleGroup<T> {
+    fn abort(&self) {
+        for guard in self.0.as_slice() {
+            guard.0.abort();
+        }
+    }
+}
 
 impl<T> Drop for HandleGroup<T>
 where
     T: Send + 'static,
 {
     fn drop(&mut self) {
-        for handle in &self.0 {
-            handle.abort();
-        }
+        self.abort();
     }
 }
 
@@ -218,16 +225,22 @@ where
     ) -> impl Future<Output = Result<T, Error>> + Send + 'static {
         // Construct the guard before returning so dropping the future without polling still aborts
         // every handle.
-        let mut handles = HandleGroup(handles.into_iter().collect::<Vec<_>>());
+        let mut handles = HandleGroup(
+            handles
+                .into_iter()
+                .map(Self::abort_on_drop)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
 
         async move {
-            if handles.0.is_empty() {
+            if handles.0.as_slice().is_empty() {
                 return Err(Error::Closed);
             }
 
             poll_fn(move |cx| {
-                for handle in &mut handles.0 {
-                    if let Poll::Ready(result) = Pin::new(handle).poll(cx) {
+                for guard in handles.0.as_mut_slice() {
+                    if let Poll::Ready(result) = Pin::new(&mut guard.0).poll(cx) {
                         return Poll::Ready(result);
                     }
                 }
@@ -324,31 +337,41 @@ where
     ///
     /// Spawned tasks are cancelled and joined. Completion handles only stop waiting for their
     /// underlying work.
-    pub async fn join_all<E2>(guards: Vec<Self>) -> Result<Vec<T>, E2>
+    ///
+    /// Dropping the returned future signals every cancellation before destroying any owned
+    /// outputs or completion futures.
+    pub fn join_all<E2>(guards: Vec<Self>) -> impl Future<Output = Result<Vec<T>, E2>>
     where
         E2: From<E1> + From<Error>,
     {
-        let mut joined = Vec::with_capacity(guards.len());
-        let mut guards = guards.into_iter();
-        while let Some(guard) = guards.next() {
-            let error = match guard.join().await {
-                Ok(Ok(output)) => {
-                    joined.push(output);
-                    continue;
+        let guards = HandleGroup(guards.into_iter());
+        async move {
+            // Cancellation must drop the group before destroying collected outputs.
+            let mut joined = Vec::with_capacity(guards.0.len());
+            let mut guards = guards;
+            while let Some(guard) = guards.0.as_mut_slice().first_mut() {
+                // Error conversion may destroy resources, so signal all cancellations first.
+                let result = (&mut guard.0).await;
+                if !matches!(result, Ok(Ok(_))) {
+                    guards.abort();
                 }
-                Ok(Err(err)) => err.into(),
-                Err(err) => err.into(),
-            };
-
-            // Signal every cancellation before destroying outputs that may depend on other tasks.
-            for guard in guards.as_slice() {
-                guard.0.abort();
+                match result
+                    .map_err(E2::from)
+                    .and_then(|result| result.map_err(E2::from))
+                {
+                    Ok(output) => joined.push(output),
+                    Err(error) => {
+                        // Release collected outputs before waiting on dependent tasks.
+                        drop(joined);
+                        drop(guards.0.next());
+                        futures::future::join_all(guards.0.by_ref().map(Self::abort)).await;
+                        return Err(error);
+                    }
+                }
+                drop(guards.0.next());
             }
-            drop(joined);
-            futures::future::join_all(guards.map(Self::abort)).await;
-            return Err(error);
+            Ok(joined)
         }
-        Ok(joined)
     }
 }
 
@@ -516,8 +539,10 @@ impl Aborter {
 mod tests {
     use super::{AbortOnDrop, Handle};
     use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
-    use commonware_utils::channel::oneshot;
-    use futures::{FutureExt as _, future, poll};
+    use commonware_utils::{channel::oneshot, sync::Mutex};
+    use futures::{FutureExt as _, future, poll, stream::AbortHandle};
+    use rstest::rstest;
+    use std::sync::Arc;
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
@@ -720,6 +745,78 @@ mod tests {
                     .expect("task still owns sender")
                     .is_err()
             );
+        });
+    }
+
+    struct AbortObservation {
+        abort_handle: AbortHandle,
+        observed: Arc<Mutex<Option<bool>>>,
+    }
+
+    impl Drop for AbortObservation {
+        fn drop(&mut self) {
+            *self.observed.lock() = Some(self.abort_handle.is_aborted());
+        }
+    }
+
+    impl From<AbortObservation> for Error {
+        fn from(_error: AbortObservation) -> Self {
+            Self::Closed
+        }
+    }
+
+    #[derive(Debug)]
+    enum JoinCleanup {
+        Unpolled,
+        CollectedOutput,
+        RemainingOutput,
+        PendingCompletion,
+        ErrorConversion,
+    }
+
+    #[rstest]
+    #[case::unpolled(JoinCleanup::Unpolled)]
+    #[case::collected_output(JoinCleanup::CollectedOutput)]
+    #[case::remaining_output(JoinCleanup::RemainingOutput)]
+    #[case::pending_completion(JoinCleanup::PendingCompletion)]
+    #[case::error_conversion(JoinCleanup::ErrorConversion)]
+    fn join_all_aborts_before_destruction(#[case] cleanup: JoinCleanup) {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = context
+                .child("pending")
+                .spawn(|_| future::pending::<Result<Option<AbortObservation>, AbortObservation>>());
+            let abort_handle = pending.aborter().unwrap().inner;
+            assert!(!abort_handle.is_aborted());
+            let observed = Arc::new(Mutex::new(None));
+            let resource = AbortObservation {
+                abort_handle,
+                observed: observed.clone(),
+            };
+            let first = match cleanup {
+                JoinCleanup::PendingCompletion => Handle::from_future(async move {
+                    let _resource = resource;
+                    future::pending().await
+                }),
+                JoinCleanup::ErrorConversion => Handle::ready(Ok(Err(resource))),
+                _ => Handle::ready(Ok(Ok(Some(resource)))),
+            };
+            let mut handles = vec![first, pending];
+            if matches!(cleanup, JoinCleanup::RemainingOutput) {
+                handles.insert(0, Handle::from_future(future::pending()));
+                handles.insert(0, Handle::ready(Ok(Ok(None))));
+            }
+            let mut joining = Box::pin(AbortOnDrop::join_all::<Error>(
+                handles.into_iter().map(Handle::abort_on_drop).collect(),
+            ));
+            if matches!(cleanup, JoinCleanup::ErrorConversion) {
+                assert!(matches!(joining.await, Err(Error::Closed)));
+            } else {
+                if !matches!(cleanup, JoinCleanup::Unpolled) {
+                    assert!(poll!(&mut joining).is_pending());
+                }
+                drop(joining);
+            }
+            assert_eq!(*observed.lock(), Some(true));
         });
     }
 
