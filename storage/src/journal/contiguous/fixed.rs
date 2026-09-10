@@ -1447,18 +1447,21 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// Shared body of [`super::Contiguous::read_many`] and the variable journal's offsets
     /// reads; the callers record the batch-read metrics, so routing them through `read_many`
     /// would count every batch twice.
-    pub(super) async fn read_many_inner(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
-        self.read_many_admission(positions, Admission::Admit).await
+    pub(super) fn read_many_inner(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = Result<Vec<A>, Error>> + Send {
+        self.read_many_admission(positions, Admission::Admit)
     }
 
     /// Like [`Self::read_many_inner`], but cache misses do not admit pages into the page cache.
     /// Suited to bulk scans of items that will not be read again soon.
     #[commonware_macros::stability(ALPHA)]
-    pub(super) async fn read_many_uncached_inner(
+    pub(super) fn read_many_uncached_inner(
         &self,
         positions: &[u64],
-    ) -> Result<Vec<A>, Error> {
-        self.read_many_admission(positions, Admission::Bypass).await
+    ) -> impl Future<Output = Result<Vec<A>, Error>> + Send {
+        self.read_many_admission(positions, Admission::Bypass)
     }
 
     async fn read_many_admission(

@@ -328,7 +328,7 @@ impl CacheRef {
         Ok(())
     }
 
-    /// Read many sorted ranges directly from `blob` without admitting their pages into the
+    /// Read many sorted, non-overlapping ranges from `blob` without admitting their pages into the
     /// page cache. Suited to bulk scans of pages that will not be read again soon:
     /// admission would churn the cache and serialize concurrent scanning tasks on its lock.
     ///
@@ -339,46 +339,34 @@ impl CacheRef {
         blob: &B,
         ranges: &mut [(&mut [u8], u64)],
     ) -> Result<(), Error> {
-        // Plan one fetch per distinct page covered by any range. Sorted ranges cover a
-        // non-decreasing page sequence, so deduplication only needs the last entry.
-        let mut pages = Vec::new();
-        for (buf, offset) in ranges.iter() {
-            let first = Cache::offset_to_page(self.page_size, *offset).0;
-            let last = Cache::offset_to_page(self.page_size, offset + buf.len() as u64 - 1).0;
-            for page_num in first..=last {
-                if pages.last() != Some(&page_num) {
-                    pages.push(page_num);
-                }
-            }
-        }
-        let fetched = futures::future::try_join_all(
-            pages
-                .iter()
-                .map(|&page_num| fetch_full_page(blob, page_num, self.page_size)),
-        )
-        .await?;
-
-        // Scatter each range out of the fetched pages, which are all full. The flattened
-        // (range, page) access sequence is non-decreasing in page number, so a single cursor
-        // suffices.
-        let page_size: usize = self.page_size.widen();
-        let mut cursor = 0;
+        // Split destinations at page boundaries. Sorted, non-overlapping ranges keep all
+        // segments for the same page adjacent, so each group needs only one fetch.
+        let mut segments = Vec::with_capacity(ranges.len());
         for (buf, offset) in ranges.iter_mut() {
             let mut buf: &mut [u8] = buf;
             let mut offset = *offset;
             while !buf.is_empty() {
-                let (page_num, offset_in_page) = Cache::offset_to_page(self.page_size, offset);
-                while pages[cursor] != page_num {
-                    cursor += 1;
-                }
-                let page = fetched[cursor].as_ref();
-                let offset_in_page = offset_in_page as usize;
-                let count = (page_size - offset_in_page).min(buf.len());
-                buf[..count].copy_from_slice(&page[offset_in_page..offset_in_page + count]);
+                let (page_num, offset_in_page, remaining) = Cache::locate(self.page_size, offset);
+                let count = remaining.min(buf.len());
+                let (dest, rest) = buf.split_at_mut(count);
+                segments.push((page_num, offset_in_page, dest));
                 offset += count as u64;
-                buf = &mut buf[count..];
+                buf = rest;
             }
         }
+
+        // Copy and release each completed page before waiting for other reads, which may
+        // need its buffer to return to a bounded pool before they can proceed.
+        futures::future::try_join_all(segments.chunk_by_mut(|a, b| a.0 == b.0).map(
+            |group| async move {
+                let page = fetch_full_page(blob, group[0].0, self.page_size).await?;
+                for (_, offset, dest) in group {
+                    dest.copy_from_slice(&page.as_ref()[*offset..*offset + dest.len()]);
+                }
+                Ok::<(), Error>(())
+            },
+        ))
+        .await?;
         Ok(())
     }
 
@@ -671,13 +659,13 @@ async fn fetch_cacheable_page(
 mod tests {
     use super::{super::Checksum, *};
     use crate::{
-        BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufs, IoBufsMut, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _, WriteOptions, buffer::paged::CHECKSUM_SIZE,
-        deterministic, telemetry::metrics::Registry,
+        BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufs, IoBufsMut, PoolError,
+        Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
+        buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
+    use commonware_utils::{NZU16, NZU32, NZUsize, channel::oneshot, sync::Mutex};
     use futures::future::pending;
     use rstest::rstest;
     use std::{
@@ -815,12 +803,138 @@ mod tests {
         }
     }
 
+    /// Reads wait for earlier results to release their pooled buffers.
+    #[derive(Clone)]
+    struct PooledBlob<B: Blob> {
+        inner: B,
+        pool: BufferPool,
+        context: Arc<deterministic::Context>,
+    }
+
+    impl<B: Blob> Blob for PooledBlob<B> {
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            let buf = loop {
+                match self.pool.try_alloc(len) {
+                    Ok(buf) => break buf,
+                    Err(PoolError::Exhausted) => {
+                        self.context.sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            };
+            self.inner.read_at_buf(offset, len, buf, options).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs, options).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs, options).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
+    }
+
+    #[rstest]
+    #[case::cached_small(false, 8)]
+    #[case::uncached_small(true, 8)]
+    #[case::cached_large(false, 64)]
+    #[case::uncached_large(true, 64)]
+    fn test_read_many_releases_io_buffers(#[case] uncached: bool, #[case] pages: u8) {
+        deterministic::Runner::default().start(|context: deterministic::Context| async move {
+            let mut image = Vec::new();
+            for page in 0..pages {
+                let logical = vec![page + 1; PAGE_SIZE.get() as usize];
+                image.extend_from_slice(&logical);
+                image.extend_from_slice(
+                    &Checksum::new(PAGE_SIZE.get(), Crc32::checksum(&logical)).to_bytes(),
+                );
+            }
+
+            // More pages than read buffers require completed reads to release their buffers
+            // before the rest can finish. The page cache uses a separate pool.
+            let mut registry = Registry::default();
+            let pool = BufferPool::new(
+                BufferPoolConfig::for_network()
+                    .with_size_class_range(NZUsize!(2048), NZUsize!(2048), NZU32!(2))
+                    .with_thread_cache_disabled(),
+                &mut registry,
+            );
+            let (inner, _) = context.open("buffer_dependencies", b"pages").await.unwrap();
+            inner
+                .write_at(0, image, WriteOptions::default())
+                .await
+                .unwrap();
+            let blob = PooledBlob {
+                inner,
+                pool: pool.clone(),
+                context: Arc::new(context.child("reads")),
+            };
+            let cache = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(1));
+            let id = cache.next_id();
+            let sealed =
+                super::super::Sealed::new(blob, PAGE_SIZE_U64 * u64::from(pages), None, cache, id);
+            let offsets: Vec<_> = (0..pages).map(|i| u64::from(i) * PAGE_SIZE_U64).collect();
+            let mut out = vec![0; offsets.len() * 4];
+            let read = async {
+                if uncached {
+                    sealed
+                        .read_many_into_uncached(&mut out, &offsets, NZUsize!(4))
+                        .await
+                } else {
+                    sealed.read_many_into(&mut out, &offsets, NZUsize!(4)).await
+                }
+            };
+            commonware_macros::select! {
+                result = read => { result.unwrap(); },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("read stalled while completed pages retained the available I/O buffers");
+                },
+            }
+            let expected: Vec<u8> = (1..=pages).flat_map(|v| [v; 4]).collect();
+            assert_eq!(out, expected);
+
+            let _first = pool.try_alloc(2048).expect("first read buffer released");
+            let _second = pool.try_alloc(2048).expect("second read buffer released");
+        });
+    }
+
     /// `read_uncached_many` fetches each distinct covered page exactly once, including for
     /// ranges that cross page boundaries.
+    #[rstest]
+    #[case::scattered(false)]
+    #[case::spanning(true)]
     #[test_traced("DEBUG")]
-    fn test_read_uncached_many_fetches_each_page_once() {
+    fn test_read_uncached_many_fetches_each_page_once(#[case] spanning: bool) {
         let executor = deterministic::Runner::default();
-        executor.start(|_context: deterministic::Context| async move {
+        executor.start(move |_context: deterministic::Context| async move {
             // Three full physical pages with distinct logical bytes per page.
             let page_size = PAGE_SIZE.get() as usize;
             let mut image = Vec::new();
@@ -839,10 +953,14 @@ mod tests {
             };
             let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(8));
 
-            // Sorted ranges: two on page 0, one crossing pages 0-1, one on page 1, and one
-            // crossing pages 1-2.
+            // Cover all three pages with either scattered ranges or one range spanning
+            // multiple page boundaries.
             let p = PAGE_SIZE_U64;
-            let specs = [(0, 8), (100, 16), (p - 4, 8), (p + 50, 8), (2 * p - 4, 8)];
+            let specs = if spanning {
+                vec![(p - 4, page_size + 8)]
+            } else {
+                vec![(0, 8), (100, 16), (p - 4, 8), (p + 50, 8), (2 * p - 4, 8)]
+            };
             let mut bufs: Vec<Vec<u8>> = specs.iter().map(|&(_, len)| vec![0; len]).collect();
             let mut ranges: Vec<(&mut [u8], u64)> = bufs
                 .iter_mut()
