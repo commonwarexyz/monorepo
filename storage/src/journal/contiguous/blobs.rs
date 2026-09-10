@@ -648,7 +648,11 @@ enum ReplayInner<'a, B: RBlob> {
 }
 
 impl<'a, B: RBlob> Replay<'a, B> {
-    /// Decode an item through the concrete buffer so field reads avoid repeated dispatch.
+    /// Decode an item through its concrete backing buffer.
+    ///
+    /// The whole `A::read` call stays inside the match so the compiler can specialize
+    /// its length checks and field-copy loops for each backing type. Fixed replay
+    /// relies on this specialization for throughput.
     pub(super) fn read<A: ReadExt>(&mut self) -> Result<A, CodecError> {
         match &mut self.inner {
             ReplayInner::Paged(replay) => A::read(replay),
