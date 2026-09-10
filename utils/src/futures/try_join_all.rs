@@ -1,7 +1,29 @@
 //! Concurrent collection with ordered results and prompt error propagation.
 
-use futures::{StreamExt as _, stream::FuturesUnordered};
+use futures::{StreamExt as _, future::Either, stream::FuturesUnordered};
 use std::future::Future;
+
+/// Preserves the selected size bound across upstream's repeated size-hint queries.
+struct Bounded<I> {
+    inner: I,
+    lower: usize,
+    upper: usize,
+}
+
+impl<I: Iterator> Iterator for Bounded<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.inner.next();
+        self.lower = self.lower.saturating_sub(1);
+        self.upper = self.upper.saturating_sub(1);
+        next
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.lower, Some(self.upper))
+    }
+}
 
 /// Runs futures concurrently, returning successful values in input order.
 ///
@@ -32,14 +54,23 @@ pub fn try_join_all<F, T, E>(
 where
     F: Future<Output = Result<T, E>>,
 {
+    let futures = futures.into_iter();
+    let (lower, upper) = futures.size_hint();
+    // Upstream's small collector handles errors promptly without per-future allocations.
+    if let Some(upper) = upper.filter(|&upper| upper <= 30) {
+        return Either::Left(futures::future::try_join_all(Bounded {
+            inner: futures,
+            lower,
+            upper,
+        }));
+    }
     // The upstream ordered collector delays errors behind earlier pending futures:
     // https://github.com/rust-lang/futures-rs/issues/2866
     let futures = futures
-        .into_iter()
         .enumerate()
         .map(|(index, future)| async move { future.await.map(|value| (index, value)) })
         .collect::<FuturesUnordered<_>>();
-    async move {
+    Either::Right(async move {
         let mut futures = futures;
         let mut values: Vec<_> = (0..futures.len()).map(|_| None).collect();
         while let Some(result) = futures.next().await {
@@ -47,7 +78,7 @@ where
             values[index] = Some(value);
         }
         Ok(values.into_iter().map(Option::unwrap).collect())
-    }
+    })
 }
 
 #[cfg(test)]
@@ -61,6 +92,7 @@ mod tests {
     };
     use pin_project::pin_project;
     use std::{
+        cell::Cell,
         pin::Pin,
         rc::Rc,
         sync::{
@@ -96,7 +128,8 @@ mod tests {
 
     struct WithHint<I> {
         inner: I,
-        known: bool,
+        known: Cell<bool>,
+        forget: bool,
     }
 
     impl<I: Iterator> Iterator for WithHint<I> {
@@ -107,7 +140,11 @@ mod tests {
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
-            if self.known {
+            let known = self.known.get();
+            if self.forget {
+                self.known.set(false);
+            }
+            if known {
                 self.inner.size_hint()
             } else {
                 (0, None)
@@ -165,7 +202,8 @@ mod tests {
         });
         let mut joined = Box::pin(try_join_all(WithHint {
             inner: futures,
-            known,
+            known: Cell::new(known),
+            forget: false,
         }));
         assert!(matches!(
             joined.as_mut().now_or_never(),
@@ -302,5 +340,19 @@ mod tests {
         let values = [Rc::new(1), Rc::new(2)];
         let joined = try_join_all(values.iter().map(|value| ready(Ok::<_, ()>(value))));
         assert_eq!(joined.now_or_never(), Some(Ok(values.iter().collect())));
+    }
+
+    #[test]
+    fn size_hint_can_change() {
+        let futures = [
+            Either::Left(futures::future::pending::<Result<(), &str>>()),
+            Either::Right(ready(Err("failed"))),
+        ];
+        let joined = try_join_all(WithHint {
+            inner: futures.into_iter(),
+            known: Cell::new(true),
+            forget: true,
+        });
+        assert_eq!(joined.now_or_never(), Some(Err("failed")));
     }
 }
