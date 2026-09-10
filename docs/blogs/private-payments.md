@@ -1,5 +1,5 @@
 ---
-title: "Scalable Private Payments"
+title: "Out of Sight, Out of State"
 description: "Every private payment system has an ever growing global nullifier set. We design a payment system where state only grows with the number of accounts."
 date: "September 3rd, 2026"
 published-time: "2026-09-03T00:00:00Z"
@@ -26,8 +26,9 @@ Surely cryptography was not the bottleneck? We can verify ~1000 Groth16 per seco
 I never got a satisfactory answer and always left feeling like the problems could be overcome with better engineering. But at least cryptography was not the bottleneck. Right?
 
 ::: {data-align="center"}
-> ***At commonware, the situation flipped. The chain is [really fast](https://x.com/_patrickogrady/status/2077449338230640739?s=20). [Scarily fast](https://commonware.xyz/blogs/pipelining-simplex).***<br>
-> ***It very quickly turned into: how will the cryptography keep up with the chain?!***
+> ***At commonware, the situation flipped. The chain is [really fast](https://x.com/_patrickogrady/status/2077449338230640739?s=20). [Scarily fast](https://commonware.xyz/blogs/pipelining-simplex).***
+
+> ***My concern was now: how will the cryptography keep up with the chain?!***
 :::
 
 Our goal is to build extremely high throughput private payments (1M+ TPS) with low latency.
@@ -38,7 +39,9 @@ Assuming every payment is $\approx 200$ bytes and takes $0.5-1$ ms to verify (us
 - **compute:** equivalent of <u>500-1000 dedicated CPU cores</u>/validator
 
 Sure you can always throw more threads at the problem and use bigger machines but that’s just not how commonware operates. We want the BEST solution at the LOWEST price point.
-Below we present our design for a private payment scheme where:
+
+<!-- TODO: Add link to Bonsai paper -->
+Below we present [Bonsai]() our design for a private payment scheme where:
 
 - **a million transactions** can be verified on an M5 Macbook Pro (18 cores)
 - every transaction is **256 bytes** and validators store a **single 32-byte commitment per account**

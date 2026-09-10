@@ -28,7 +28,7 @@
     const HANDOFF_MS = 720;
     const RECV_MIN = 3000;     // receivers claim after a random delay
     const RECV_MAX = 12000;
-    const EPOCH_MS = 15000;    // epoch length, for the last step
+    const HOT_W = 4;           // most recent nullifiers a user keeps hot, for the last step
 
     const START_BALANCE = 1000;
     const AMOUNT_MIN = 10, AMOUNT_MAX = 200;
@@ -71,10 +71,9 @@
     //  0 traditional bank      4 hide the operation
     //  1 ecash                 5 receipts off validators
     //  2 decentralize          6 nullifiers off validators
-    //  3 commitments + proofs  7 users prune by epoch
+    //  3 commitments + proofs  7 users prune by position
 
     const DIRECT = step => step === 0;   // one instruction through the bank, no handoff
-    const EPOCHS = step => step >= 7;
     const BALANCES_PUBLIC = step => step <= 2;
     const OP_VISIBLE = step => step <= 3;   // the ledger can tell a send from a receive
 
@@ -127,17 +126,17 @@
             learn: { v: 'who acted', n: 'send/receive are indistinguishable', hl: true },
         },
         {
-            store: { v: 'validators: commitments + MMR peaks + a nullifier per send/receive', hl: true },
+            store: { v: 'validators: commitments + MMR frontier + recent roots + a nullifier per send/receive', hl: true },
             work: { v: 'verify a proof per transaction, sign one root per block', hl: true },
             learn: { v: 'who acted' },
         },
         {
-            store: { v: 'validators: commitments + MMR peaks\nusers: every nullifier received', hl: true },
+            store: { v: 'validators: commitments + MMR frontier\nusers: every nullifier received', hl: true },
             work: { v: 'verify a proof per transaction, sign one root per block' },
             learn: { v: 'who acted' },
         },
         {
-            store: { v: "validators: commitments + MMR peaks\nusers: this epoch's nullifiers + MMR peaks", hl: true },
+            store: { v: `validators: commitments + MMR\nusers: nullifier tree frontier + ${HOT_W} most recent nullifiers`, n: 'older nullifiers in cold storage', hl: true },
             work: { v: 'verify a proof per transaction, sign one root per block' },
             learn: { v: 'who acted' },
         },
@@ -152,26 +151,18 @@
     const state = {
         time: 0,
         nextPay: 900,
-        payments: [],      // {k, from, to, v, tSend, tRecv, epoch, rho, nf}
+        payments: [],      // {k, from, to, v, tSend, tRecv, pid}
         events: [],        // {t, type, actor, pay, balance}
         balances: Object.fromEntries(ACCOUNTS.map(a => [a, START_BALANCE])),
-        counts: {
-            sends: 0, recvs: 0, unclaimed: zero(), recvBy: zero(),
-            recvByClaimEpoch: Object.fromEntries(ACCOUNTS.map(a => [a, {}])),   // by the epoch of the claim
-        },
-        // Nullifier values, in insertion order, for each set that some design keeps.
-        nf: {
-            recv: [],                                                        // global set, one per receive
-            tx: [],                                                          // global set, one per transaction (dummies for sends)
-            by: Object.fromEntries(ACCOUNTS.map(a => [a, []])),              // per user, lifetime
-            byEpoch: Object.fromEntries(ACCOUNTS.map(a => [a, {}])),         // per user, per claim epoch
-        },
+        counts: { sends: 0, recvs: 0, unclaimed: zero(), recvBy: zero() },
+        // Nullifiers each user holds, in claim order. A nullifier is the position of the
+        // claimed receipt in the receipt log, so per user these are increasing.
+        nf: Object.fromEntries(ACCOUNTS.map(a => [a, []])),
         com: {},           // current account commitment per account (random-looking)
         hit: {},           // last balance change per account: {t, type}, for the flash on its bar
         fwd: {},           // credit forwarded by the bank, used instead of the claim in step 0
         k: 0,
     };
-    const epochOf = t => Math.floor(t / EPOCH_MS);
     const hex4 = () => Math.floor(rand() * 0xffff).toString(16).padStart(4, '0');
     for (const a of ACCOUNTS) state.com[a] = hex4();
 
@@ -185,11 +176,11 @@
             const t0 = state.nextPay;
             if (state.balances[from] >= v) {
                 state.k += 1;
-                state.payments.push({
-                    k: state.k, from, to, v, tSend: t0, epoch: epochOf(t0),
-                    rho: hex4(), nf: hex4(), dnf: hex4(),
-                    tRecv: t0 + RECV_MIN + rand() * (RECV_MAX - RECV_MIN), sent: false, recvd: false,
-                });
+                // A receiver works through its inbox in position order, so this claim
+                // waits for any earlier receipt addressed to the same account.
+                let tRecv = t0 + RECV_MIN + rand() * (RECV_MAX - RECV_MIN);
+                for (const q of state.payments) if (q.to === to && !q.recvd) tRecv = Math.max(tRecv, q.tRecv + 400);
+                state.payments.push({ k: state.k, from, to, v, tSend: t0, tRecv, pid: -1, sent: false, recvd: false });
             }
             state.nextPay += PAY_EVERY * (0.6 + 0.8 * rand());
         }
@@ -200,12 +191,14 @@
         for (const p of state.payments) {
             if (!p.sent && state.time >= p.tSend + TOKEN_MS) {
                 p.sent = true;
+                // The receipt lands at the next position of the receipt log, which every
+                // send and receive extends once the operation is hidden.
+                p.pid = c.sends + c.recvs;
                 state.balances[p.from] -= p.v;
                 state.com[p.from] = hex4();
                 state.hit[p.from] = { t: state.time, type: 'send' };
                 // With a bank in the middle the credit lands one hop later (step 0 only).
                 state.fwd[p.to] = { t: state.time + TOKEN_MS, type: 'recv' };
-                state.nf.tx.push(p.dnf);
                 c.sends += 1;
                 c.unclaimed[p.to] += 1;
                 state.events.push({ t: state.time, type: 'send', actor: p.from, pay: p, balance: state.balances[p.from] });
@@ -216,12 +209,7 @@
                 c.recvs += 1;
                 c.unclaimed[p.to] -= 1;
                 c.recvBy[p.to] += 1;
-                const ce = epochOf(state.time);
-                c.recvByClaimEpoch[p.to][ce] = (c.recvByClaimEpoch[p.to][ce] || 0) + 1;
-                state.nf.recv.push(p.nf);
-                state.nf.tx.push(p.nf);
-                state.nf.by[p.to].push(p.nf);
-                (state.nf.byEpoch[p.to][ce] = state.nf.byEpoch[p.to][ce] || []).push(p.nf);
+                state.nf[p.to].push(p.pid);
                 state.com[p.to] = hex4();
                 state.hit[p.to] = { t: state.time, type: 'recv' };
                 state.events.push({ t: state.time, type: 'recv', actor: p.to, pay: p, balance: state.balances[p.to] });
@@ -301,7 +289,6 @@
         // Panel headers and dividers.
         text(svg, NET.cx, HEAD_Y, 'network', { class: 'sim-h' });
         const ledgerTitle = text(svg, LEDGER.x, HEAD_Y, 'public ledger', { class: 'sim-h left' });
-        const epochLabel = text(svg, LEDGER.x + LEDGER.w, HEAD_Y, '', { class: 'sim-h right sim-muted' });
         for (const x of V_DIVIDERS) el('line', { x1: x, y1: 12, x2: x, y2: ROW_SPLIT - 8, class: 'sim-divider' }, svg);
         el('line', { x1: 8, y1: ROW_SPLIT, x2: W - 8, y2: ROW_SPLIT, class: 'sim-divider' }, svg);
 
@@ -357,8 +344,8 @@
         const storeG = el('g', {}, svg);
         const cache = () => ({ g: el('g', {}, storeG), key: null, count: 0 });
         const S = {
-            headings: cache(), array: cache(), grid: cache(), mmr: cache(), tree: cache(),
-            users: ACCOUNTS.map(() => ({ mmr: cache(), tree: cache() })),
+            headings: cache(), array: cache(), grid: cache(), mmr: cache(),
+            users: ACCOUNTS.map(() => cache()),
         };
 
         // Help: a [?] in the corner of each panel explains what is drawn there. The text is
@@ -399,9 +386,9 @@
                 case 1: case 2: return `Each square is one nullifier the ${step === 1 ? 'bank' : 'committee'} has seen. The set is append-only: a coin issued long ago is still valid, so no entry can ever be removed.`;
                 case 3: return 'Balances are replaced by commitments (the hex tags), each rewritten when its account acts. The nullifier set is unchanged: one entry per receive.';
                 case 4: return 'One nullifier per send or receive now, real for receives and a dummy for sends, so the set grows twice as fast.';
-                case 5: return `Left: the receipt MMR. Receipts accumulate in perfect binary trees and validators only need to store the peaks (dots) to extend the tree. Right: the nullifier set as an indexed Merkle tree.`;
-                case 6: return `Validators only store the MMR frontier and delegate nullifier storage to users. Each user maintains an indexed merkle tree of nullifiers of every receipt it has claimed.`;
-                default: return `Users periodically prune nullifiers by appending the closed epoch's nullifier-tree root to an MMR (left, only the peaks are kept) and keep only the nullifiers claimed in the current epoch (right).`;
+                case 5: return `Left: the receipt MMR. Receipts accumulate in perfect binary trees and validators only need to store the peaks (dots) to extend the tree. Right: the nullifier set, still held by validators and still growing with every transaction.`;
+                case 6: return `Validators only store the MMR frontier and delegate nullifier storage to users. Each user keeps a sparse Merkle tree keyed by receipt position (leaf labels): a leaf is set once the receipt at that position is claimed. Positions only grow, so every insertion lands to the right of the last one.`;
+                default: return `Each user freezes its tree below a threshold: the frozen prefix is summarized by its frontier (blue), only the ${HOT_W} most recently claimed positions stay hot (red), and everything else moves to cold storage (faded). Nothing changes for the ledger.`;
             }
         });
 
@@ -519,7 +506,6 @@
                 r.rule.setAttribute('y2', y + LEDGER.rowH - 7);
                 r.rec.textContent = recordText(step, ev);
             });
-            epochLabel.textContent = EPOCHS(step) ? `epoch ${epochOf(state.time)}` : '';
         }
 
         function drawBalances(dt) {
@@ -586,7 +572,7 @@
             c.g.innerHTML = '';
             fn(c.g);
         }
-        function clearAll(list) { for (const c of list) rebuild(c, 'empty', () => {}); }
+        function clearAll(list) { for (const c of list) rebuild(c, 'empty', () => { }); }
         function flash(g, attrs, delayMs) {
             // A highlight that fades out; marks something just written. An optional delay
             // lets a sequence of flashes ripple.
@@ -670,58 +656,59 @@
             c.n = n;
         }
 
-        // An indexed Merkle tree over the nullifiers a party has inserted. Leaves are appended
-        // in insertion order, left to right, and threaded into a linked list sorted by value:
-        // each leaf also stores the next larger value. Inserting x therefore rewrites two
-        // leaves, the appended one and the "low leaf" holding the largest value below x, whose
-        // pointer now names x. That second path can land anywhere in the tree, which is why the
-        // whole tree is kept (every node solid), unlike the receipt MMR that keeps only its
-        // peaks. When the tree is full its depth grows by one.
+        // A user's nullifier tree: a sparse Merkle tree keyed by receipt position. The leaf of
+        // position p is set once the user has claimed the receipt at p. The tree spans every
+        // position the log has issued so far (`space`), so its depth grows with the log, not
+        // with the user's activity. Positions only grow, so each insertion lands to the right
+        // of every earlier one and touches a single root-to-leaf path, which ripples upward.
+        // Nodes are solid when the user stores them and hollow when their subtree is empty
+        // (a default hash anyone can recompute).
+        //
+        // With `opts.hot` set to a threshold L, the prefix [0, L) is frozen: the maximal
+        // subtrees covering it are summarized by their roots (the frontier, in blue), their
+        // bodies move to cold storage (faded), and only the paths of positions >= L stay hot.
         //
         // `d` is the minimum depth. The drawn depth D is capped by the width; beyond it each
-        // drawn leaf stands for 2^(d-D) consecutive leaves and the frontier leaf is shaded by
-        // how far it is filled. The depth and group size are recorded on the cache entry for
-        // the panel's help text.
-        function drawTree(c, x, y, w, h, values, d, opts) {
+        // drawn leaf stands for 2^(d-D) consecutive positions.
+        function drawSMT(c, x, y, w, h, positions, space, d, opts) {
             opts = opts || {};
-            const maxD = Math.max(d, Math.floor(Math.log2(w / (opts.pitch || 1.7))));
-            while (d < 16 && (1 << d) < values.length) d++;
-            const D = Math.min(d, maxD), LD = 1 << D, group = 1 << (d - D);
-            c.depth = d; c.group = group;
+            const maxD = Math.max(d, Math.floor(Math.log2(w / 1.7)));
+            while (d < 30 && (1 << d) < space) d++;
+            const D = Math.min(d, maxD), LD = 1 << D;
+            const L = opts.hot || 0;
             // Switching to another set (a different user) is not an insertion.
-            if (c.who !== opts.who) { c.who = opts.who; c.n = values.length; }
-            const n = values.length;
-            const key = `tree|${opts.who || ''}|${d}|${D}|${n}|${values[n - 1] || ''}|${x}|${y}|${w}|${h}`;
+            if (c.who !== opts.who) { c.who = opts.who; c.n = positions.length; }
+            const n = positions.length;
+            const key = `smt|${opts.who || ''}|${d}|${D}|${n}|${L}|${x}|${y}|${w}|${h}`;
             const prevN = c.n || 0;
             rebuild(c, key, g => {
                 const inserted = n > prevN && n > 0;
-                // The low leaf: the position of the largest earlier value below the new one.
-                let low = -1;
-                if (inserted) {
-                    for (let i = 0; i < n - 1; i++) {
-                        if (values[i] < values[n - 1] && (low < 0 || values[i] > values[low])) low = i;
-                    }
-                }
                 const r = Math.min(4.5, Math.max(1.1, w / LD / 2.6));
-                const labelRoom = opts.labels && group === 1 && w / LD >= 20;
-                // The bottom strip holds the sorted list; the tree proper sits above it.
-                const LIST = 38;
-                const th = (labelRoom ? h - 26 : h) - LIST;
+                const labelRoom = D === d && w / LD >= 6;
+                const th = labelRoom ? h - 22 : h;
                 const pos = (lvl, i) => ({ x: x + (i + 0.5) * w / (1 << lvl), y: y + r + lvl * (th - 2 * r) / D });
+                // The range of positions under the i-th drawn node at level lvl.
+                const lo = (lvl, i) => i << (d - lvl), hi = (lvl, i) => (i + 1) << (d - lvl);
+                const frozen = (lvl, i) => L > 0 && hi(lvl, i) <= L;
+                const leafOf = p => p >> (d - D);
+                const held = new Set(positions.map(leafOf));
+                const holds = (lvl, i) => {
+                    const a = i << (D - lvl), b = (i + 1) << (D - lvl);
+                    for (const leaf of held) if (leaf >= a && leaf < b) return true;
+                    return false;
+                };
                 for (let lvl = 0; lvl < D; lvl++) {
                     for (let i = 0; i < (1 << lvl); i++) {
                         const p = pos(lvl, i), a = pos(lvl + 1, 2 * i), b = pos(lvl + 1, 2 * i + 1);
-                        el('path', { d: `M ${a.x} ${a.y} L ${p.x} ${p.y} L ${b.x} ${b.y}`, class: 'sim-edge' }, g);
+                        el('path', { d: `M ${a.x} ${a.y} L ${p.x} ${p.y} L ${b.x} ${b.y}`, class: frozen(lvl, i) ? 'sim-edge cold' : 'sim-edge' }, g);
                     }
                 }
-                const leafOf = i => i >> (d - D);                       // drawn leaf of the i-th value
-                const newLeaf = inserted ? leafOf(n - 1) : -1, lowLeaf = low >= 0 ? leafOf(low) : -1;
-                // Both rewritten leaves ripple to the root; the two paths merge on the way up.
-                const ripple = (leaf, p, lvl) => {
+                const newLeaf = inserted ? leafOf(positions[n - 1]) : -1;
+                const ripple = (p, lvl) => {
                     const delay = (D - lvl) * STEP_MS;
                     flash(g, { cx: p.x, cy: p.y, r: r + 6 }, delay);
                     if (lvl > 0) {
-                        const q = pos(lvl - 1, leaf >> (D - lvl + 1));
+                        const q = pos(lvl - 1, newLeaf >> (D - lvl + 1));
                         const hot = el('path', { d: `M ${p.x} ${p.y} L ${q.x} ${q.y}`, class: 'sim-edge-hot' }, g);
                         hot.style.animationDelay = `${delay + STEP_MS / 2}ms`;
                     }
@@ -729,69 +716,38 @@
                 for (let lvl = 0; lvl <= D; lvl++) {
                     for (let i = 0; i < (1 << lvl); i++) {
                         const p = pos(lvl, i);
-                        const span = 1 << (D - lvl), first = i * span;
-                        // Values occupy a prefix of the leaves, so a node is live iff its
-                        // leftmost leaf holds something.
-                        const occ = Math.max(0, Math.min(span * group, n - first * group));
-                        const live = occ > 0;
-                        let cls = lvl === D ? (live ? 'sim-leaf' : 'sim-leaf empty') : (live ? 'sim-inner' : 'sim-inner empty');
+                        const base = lvl === D ? 'sim-leaf' : 'sim-inner';
+                        let cls;
+                        if (frozen(lvl, i)) {
+                            // The frontier is the frozen nodes whose parent is not frozen.
+                            cls = lvl === 0 || !frozen(lvl - 1, i >> 1) ? 'sim-frontier' : base + ' cold';
+                        } else {
+                            cls = holds(lvl, i) ? base : base + ' empty';
+                        }
                         const onNew = inserted && i === (newLeaf >> (D - lvl));
-                        const onLow = lowLeaf >= 0 && i === (lowLeaf >> (D - lvl));
-                        if (onNew) ripple(newLeaf, p, lvl);
-                        if (onLow && !onNew) ripple(lowLeaf, p, lvl);
-                        if (onNew && lvl === D && occ === 1) cls += ' pop';
-                        const node = el('circle', { cx: p.x, cy: p.y, r, class: cls }, g);
-                        // The frontier leaf of an aggregated tree is shaded by how full it is.
-                        if (lvl === D && live && group > 1 && occ < group) node.style.fillOpacity = (0.15 + 0.85 * occ / group).toFixed(2);
-                        if (lvl === D && labelRoom && i < n) {
-                            label(g, p.x, y + h - LIST - (i % 2 ? 2 : 14), values[i], 'sim-tiny center' + (i === newLeaf ? ' hot' : ''));
+                        if (onNew) ripple(p, lvl);
+                        if (onNew && lvl === D) cls += ' pop';
+                        el('circle', { cx: p.x, cy: p.y, r: cls === 'sim-frontier' ? r + 1 : r, class: cls }, g);
+                        if (lvl === D && labelRoom && held.has(i)) {
+                            label(g, p.x, y + h - (i % 2 ? 0 : 11), String(i), 'sim-tiny center' + (i === newLeaf ? ' hot' : lo(D, i) < L ? ' cold' : ''));
                         }
                     }
-                }
-                // The sorted linked list, as a row of dots beneath the tree. The new value takes
-                // its place in sorted order: the dots to its right slide over to make room, then
-                // it pops in. Thin lines tie the new dot to the appended leaf and the dot to its
-                // left, the low leaf, to the leaf it lives in.
-                const sorted = values.map((v, i) => i).sort((i, j) => values[i] < values[j] ? -1 : values[i] > values[j] ? 1 : 0);
-                const ly = y + h - 20;
-                const pitch = w / Math.max(n, LD), lr = Math.min(r, Math.max(1, pitch / 2.6));
-                const lx = k => x + (k + 0.5) * pitch;
-                const newAt = inserted ? sorted.indexOf(n - 1) : -1, lowAt = newAt - 1;
-                if (n > 0) label(g, x + w / 2, ly + 15, 'sorted nullifiers', 'sim-tiny center');
-                const SLIDE = 350;
-                sorted.forEach((i, k) => {
-                    const cls = 'sim-leaf' + (i === n - 1 && inserted ? ' pop' : '');
-                    const dot = el('circle', { cx: lx(k), cy: ly, r: lr, class: cls }, g);
-                    if (!inserted) return;
-                    if (i === n - 1) {
-                        dot.style.animationDelay = `${SLIDE}ms`;
-                    } else if (k > newAt) {
-                        // Start one slot to the left (its old place) and slide right.
-                        dot.style.transform = `translateX(${-pitch}px)`;
-                        dot.style.transition = `transform ${SLIDE}ms ease-in-out`;
-                        requestAnimationFrame(() => requestAnimationFrame(() => { dot.style.transform = 'translateX(0)'; }));
-                    }
-                });
-                if (inserted) {
-                    // The gap opening in the list.
-                    flash(g, { cx: lx(newAt), cy: ly, r: lr + 5 });
-                    const tie = (k, leaf, delay) => {
-                        const p = pos(D, leaf);
-                        const line = el('path', { d: `M ${lx(k)} ${ly - lr} L ${p.x} ${p.y + r}`, class: 'sim-link' }, g);
-                        line.style.animationDelay = `${delay}ms`;
-                    };
-                    tie(newAt, newLeaf, SLIDE);
-                    if (lowAt >= 0 && lowLeaf >= 0) tie(lowAt, lowLeaf, SLIDE);
                 }
             });
             c.n = n;
         }
 
+        // The threshold below which a user freezes its tree: keep the HOT_W most recent
+        // claims hot, so the frontier summarizes everything before the oldest of them.
+        function hotThreshold(positions) {
+            return positions.length > HOT_W ? positions[positions.length - HOT_W] : 0;
+        }
+        const popcount = n => n.toString(2).split('1').length - 1;
+
         function drawStorage() {
             const c = state.counts;
             const nTx = c.sends + c.recvs;
-            const epoch = epochOf(state.time);
-            const peaks = nTx.toString(2).split('1').length - 1;
+            const peaks = popcount(nTx);
             const X0 = STORE.x, XR = STORE.right, Y0 = STORE.y;
             const arrayMode = step <= 2 ? 'bal' : 'com';
             const arrayW = 300;
@@ -810,13 +766,14 @@
             // Left column: the owner's storage, always starting with the account array.
             drawArray(S.array, X0, Y0 + 14, arrayW, arrayMode);
 
+            // Through step 5 the nullifier set sits with the owner, one square per entry.
+            const nfCount = step === 0 ? 0 : step <= 3 ? c.recvs : nTx;
+            const gx = X0 + arrayW + 36;
             if (step <= 4) {
-                const nfCount = step === 0 ? 0 : step <= 3 ? c.recvs : nTx;
                 rebuild(S.headings, `h|${step}|${nfCount}`, g => {
                     label(g, X0, Y0, ownerHead, 'sim-h left');
                     headRule(g, X0, XR);
                     label(g, X0, Y0 + 62, step <= 2 ? 'balances: one per account' : 'commitments: one per account', 'sim-seg-label');
-                    const gx = X0 + arrayW + 36;
                     if (step === 0) {
                         label(g, gx, Y0 + 14 + 21, 'nothing per payment', 'sim-seg-label sim-muted');
                     } else {
@@ -824,23 +781,23 @@
                         label(g, gx, Y0 + 50, step <= 3 ? 'one per receive, never pruned' : 'one per send/receive, never pruned', 'sim-seg-label sim-muted');
                     }
                 });
-                drawGrid(S.grid, X0 + arrayW + 36, XR, Y0 + 62, bottom, nfCount);
-                clearAll([S.mmr, S.tree, ...S.users.flatMap(u => [u.mmr, u.tree])]);
+                drawGrid(S.grid, gx, XR, Y0 + 62, bottom, nfCount);
+                clearAll([S.mmr, ...S.users]);
                 return;
             }
-            drawGrid(S.grid, 0, 0, 0, 0, 0);
 
             // Steps 5 to 7: the validators' column is the account array with the receipt MMR
             // beneath it; the right-hand column holds the nullifiers, wherever this step keeps them.
-            rebuild(S.headings, `h|${step}|${nTx}|${peaks}|${epoch}|${perUser ? ACCOUNTS.map(a => c.recvBy[a] + ':' + (c.recvByClaimEpoch[a][epoch] || 0)).join(',') : ''}`, g => {
+            const perUserKey = perUser ? ACCOUNTS.map(a => `${c.recvBy[a]}:${step === 7 ? hotThreshold(state.nf[a]) : ''}`).join(',') : '';
+            rebuild(S.headings, `h|${step}|${nTx}|${peaks}|${perUserKey}`, g => {
                 label(g, X0, Y0, 'validator storage', 'sim-h left');
                 label(g, X0, Y0 + 62, 'commitments: one per account', 'sim-seg-label');
                 label(g, X0, Y0 + 112, `receipt MMR: ${nTx}`, 'sim-h left blue');
-                label(g, X0, Y0 + 130, `only store ${peaks} peaks`, 'sim-seg-label sim-muted');
+                label(g, X0, Y0 + 130, `only store ${peaks} peaks + recent roots`, 'sim-seg-label sim-muted');
                 if (!perUser) {
                     headRule(g, X0, XR);
-                    label(g, ux, Y0 + 32, `${ownerPoss} nullifier tree: ${nTx}`, 'sim-h left red');
-                    label(g, ux, Y0 + 50, 'committed via an indexed Merkle tree, never pruned', 'sim-seg-label sim-muted');
+                    label(g, gx, Y0 + 32, `${ownerPoss} nullifier set: ${nTx}`, 'sim-h left red');
+                    label(g, gx, Y0 + 50, 'one per send/receive, never pruned', 'sim-seg-label sim-muted');
                     return;
                 }
                 headRule(g, X0, ux - 40);
@@ -856,45 +813,30 @@
                     if (step === 6) {
                         label(g, cell.x + cell.w, cell.y + 11, `nullifier tree: ${c.recvBy[a]}`, 'sim-seg-label right red');
                     } else {
-                        // The MMR of closed-epoch roots is captioned beneath itself; the header
-                        // carries only the count for the open epoch, so the two never collide.
-                        const epochPeaks = epoch.toString(2).split('1').length - 1;
-                        label(g, cell.x + cell.w, cell.y + 11, `this epoch: ${c.recvByClaimEpoch[a][epoch] || 0}`, 'sim-seg-label right red');
-                        if (epoch > 0) {
-                            label(g, cell.x + MMR_PAD + (epochStrip(cell) - MMR_PAD) / 2, cell.y + cell.h - 4, `${epochPeaks} peak${epochPeaks === 1 ? '' : 's'}`, 'sim-tiny center blue');
-                        }
+                        // Hot state: the frontier of the frozen prefix plus the recent claims.
+                        const L = hotThreshold(state.nf[a]), hot = Math.min(c.recvBy[a], HOT_W);
+                        const t = label(g, cell.x + cell.w, cell.y + 11, '', 'sim-seg-label right');
+                        const f = el('tspan', { fill: BLUE }, t); f.textContent = `frontier: ${popcount(L)}`;
+                        const s = el('tspan', { fill: '#555' }, t); s.textContent = ' + ';
+                        const r = el('tspan', { fill: RED }, t); r.textContent = `hot: ${hot}`;
+                        if (c.recvBy[a] > HOT_W) label(g, cell.x + cell.w, cell.y + 24, `${c.recvBy[a] - HOT_W} in cold storage`, 'sim-tiny right');
                     }
                 });
             });
             drawMMR(S.mmr, X0, Y0 + 140, arrayW, bottom - Y0 - 150, nTx, { sizes: true });
 
             if (!perUser) {
-                drawTree(S.tree, ux + 4, Y0 + 66, uw - 8, bottom - Y0 - 74, state.nf.tx, 5, { pitch: 3.4 });
-                clearAll(S.users.flatMap(u => [u.mmr, u.tree]));
+                drawGrid(S.grid, gx, XR, Y0 + 62, bottom, nTx);
+                clearAll(S.users);
                 return;
             }
-            clearAll([S.tree]);
+            drawGrid(S.grid, 0, 0, 0, 0, 0);
             ACCOUNTS.forEach((a, i) => {
-                const cell = userCell(ux, uw, Y0, bottom, i), U = S.users[i];
-                const ty = cell.y + 22, th = cell.h - 26;
-                if (step === 6) {
-                    clearAll([U.mmr]);
-                    drawTree(U.tree, cell.x, ty, cell.w, th, state.nf.by[a], 4, { who: a });
-                } else {
-                    // The cell splits in half: the epoch-root MMR on the left, this epoch's
-                    // nullifier tree on the right.
-                    const strip = epochStrip(cell), tx = cell.x + strip + 16, tw = cell.w - strip - 16;
-                    drawMMR(U.mmr, cell.x + MMR_PAD, ty + 10, strip - MMR_PAD, th - 20, epoch, { empty: '' });
-                    drawTree(U.tree, tx, ty, tw, th, state.nf.byEpoch[a][epoch] || [], 3, { who: `${a}|${epoch}` });
-                }
+                const cell = userCell(ux, uw, Y0, bottom, i);
+                const ty = cell.y + 30, th = cell.h - 34;
+                const hot = step === 7 ? hotThreshold(state.nf[a]) : 0;
+                drawSMT(S.users[i], cell.x, ty, cell.w, th, state.nf[a], nTx, 4, { who: a, hot });
             });
-        }
-
-        // Width of the epoch-root strip at the left of a step-7 user cell, and the gap that keeps
-        // its MMR off the cell's left edge (the divider, for the right-hand column).
-        const MMR_PAD = 10;
-        function epochStrip(cell) {
-            return Math.round((cell.w - 16) / 2);
         }
 
         // Geometry of the i-th cell of the 2x2 grid of per-user panels.

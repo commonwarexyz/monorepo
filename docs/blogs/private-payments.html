@@ -8,7 +8,7 @@
     <link rel="preload" href="/shared.js" as="script">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
-    <title>commonware > Scalable Private Payments</title>
+    <title>commonware > Out of Sight, Out of State</title>
     <meta name="description" content="Every private payment system has
 an ever growing global nullifier set. We design a payment system where
 state only grows with the number of accounts.">
@@ -19,21 +19,21 @@ state only grows with the number of accounts.">
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/private-payments.png" />
-    <meta property="og:title" content="Scalable Private Payments" />
+    <meta property="og:title" content="Out of Sight, Out of State" />
     <meta property="og:description" content="Every private payment
 system has an ever growing global nullifier set. We design a payment
 system where state only grows with the number of accounts." />
     <meta property="article:author" content="Guru Vamsi Policharla" />
     <meta property="article:published_time" content="2026-09-03T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-09-03T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-10T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/private-payments" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/private-payments" />
-    <meta property="twitter:title" content="Scalable Private
-Payments" />
+    <meta property="twitter:title" content="Out of Sight, Out of
+State" />
     <meta property="twitter:description" content="Every private payment
 system has an ever growing global nullifier set. We design a payment
 system where state only grows with the number of accounts." />
@@ -94,7 +94,7 @@ system where state only grows with the number of accounts." />
         </div>
     </div>
     <div class="content">
-        <h1>Scalable Private Payments</h1>
+        <h1>Out of Sight, Out of State</h1>
         <div class="meta">
 
                         <div class="author">By <a href="https://x.com/guruvamsip">Guru
@@ -125,9 +125,11 @@ Vamsi Policharla</a></div>
         href="https://x.com/_patrickogrady/status/2077449338230640739?s=20">really
         fast</a>. <a
         href="https://commonware.xyz/blogs/pipelining-simplex">Scarily
-        fast</a>.</em></strong><br> <strong><em>It very quickly turned
-        into: how will the cryptography keep up with the
-        chain?!</em></strong></p>
+        fast</a>.</em></strong></p>
+        </blockquote>
+        <blockquote>
+        <p><strong><em>My concern was now: how will the cryptography
+        keep up with the chain?!</em></strong></p>
         </blockquote>
         </div>
         <p>Our goal is to build extremely high throughput private
@@ -146,11 +148,16 @@ Vamsi Policharla</a></div>
         </ul>
         <p>Sure you can always throw more threads at the problem and use
         bigger machines but that’s just not how commonware operates. We
-        want the BEST solution at the LOWEST price point. Below we
-        present our design for a private payment scheme where:</p>
+        want the BEST solution at the LOWEST price point.</p>
+        <!-- TODO: Add link to Bonsai paper -->
+        <p>Below we present <a href="">Bonsai</a> our design for a
+        private payment scheme where:</p>
         <ul>
         <li><strong>a million transactions</strong> can be verified on
         an M5 Macbook Pro (18 cores)</li>
+        <li>every transaction is <strong>256 bytes</strong> and
+        validators store a <strong>single 32-byte commitment per
+        account</strong></li>
         <li>validator storage grows <strong>logarithmically in
         #(transactions)</strong> and linearly in #(accounts)</li>
         <li>work done by users <strong>only depends on the transactions
@@ -261,15 +268,17 @@ Vamsi Policharla</a></div>
         indefinitely and return knowing only its secrets and the current
         state, without reading any past transactions</li>
         </ol>
-        <p>First, instead of signing every single transaction, the
-        committee can accumulate receipts in a Merkle Mountain Range and
-        just sign the root (see Peter’s <a
+        <p>First, instead of signing every single receipt, the ledger
+        appends receipts to a Merkle Mountain Range (see Peter’s <a
         href="https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md">doc</a>
-        or Roberto’s <a href="https://commonware.xyz/blogs/mmr">blog</a>
-        for an explainer). The receive proof can be modified to
-        additionally prove knowledge of a merkle tree opening.</p>
-        <p>Thus, validators only need to maintain the peaks of the
-        receipt MMR, which grow logarithmically in the number of
+        or Roberto’s <a
+        href="https://commonware.xyz/blogs/mmr">blogpost</a> for an
+        explainer). The receive proof is modified to prove knowledge of
+        an MMR opening under a root <span
+        class="math inline">\mathsf{root}_\rho</span> which the receiver
+        reveals in the clear.</p>
+        <p>Thus, validators only need to maintain the frontier of the
+        receipt MMR, which grows logarithmically in the number of
         transactions.</p>
         <h3 id="scaling-delegate-nullifiers">Scaling: delegate
         nullifiers</h3>
@@ -293,44 +302,61 @@ Vamsi Policharla</a></div>
         albeit providing less <em>on-chain</em> privacy than Zcash, it
         allows us to <strong>efficiently delegate</strong> nullifier
         storage. Each user remembers the nullifiers for any transactions
-        they received, accumulates them into an <a
-        href="https://eprint.iacr.org/2021/1263">indexed merkle tree</a>
+        they received, accumulates them into a <a
+        href="https://eprint.iacr.org/2016/683">sparse Merkle tree</a>
         and stores the root inside their account commitment. Using
         zero-knowledge proofs they show that it was correctly updated
         whenever they receive funds.</p>
+        <p>Since nullifiers are never published on chain, they no longer
+        need to look random. The nullifier of a receipt can simply be
+        its <strong>position</strong> <span
+        class="math inline">\mathsf{pid}</span> in the receipt MMR.</p>
         <p>Validator storage now grows with accounts, not transactions.
         Great.</p>
         <p>But eventually… the nullifier set will grow too big for users
         to manage as well.</p>
         <h3 id="scaling-prune-nullifiers">Scaling: prune nullifiers</h3>
-        <p>Now for the final optimization. Users can actually prune
-        their nullifier sets as well! We divide the ledger into epochs
-        and introduce a second MMR which stores the roots of nullifier
-        trees from previous epochs. Storage only grows logarithmically
-        in the number of epochs plus the number of nullifiers in the
-        current epoch.</p>
-        <p>Note that this means claiming a receipt from an old epoch is
-        more expensive as they would need to update the MMR which
-        requires retrieving the old roots and nullifiers.</p>
-        <p>In practice, we expect that this rarely happens as in typical
-        transactions the seller will only hand over the goods when they
-        have a receipt in-hand in which case they know all the receipts
-        they need to claim before closing out the epoch.</p>
+        <p>Now for the final optimization. Users can actually
+        <strong>prune nullifier sets</strong> as well!</p>
+        <p>Since nullifiers are positions in the MMR, they arrive in
+        <strong>increasing order</strong>, unlike nullifiers derived
+        from PRFs. In other words, a receipt created later has a larger
+        position. For any threshold <span class="math inline">L</span>
+        chosen by the user, the nullifier tree splits into a prefix
+        <span class="math inline">[0, L)</span> whose contents are
+        frozen as long as we never insert below <span
+        class="math inline">L</span> again, and a suffix <span
+        class="math inline">[L, \infty)</span>. The prefix is summarized
+        by its <em>frontier</em> (logarithmic number of hashes) and a
+        user who holds the frontier together with the positions it has
+        claimed at or above <span class="math inline">L</span> can
+        produce an insertion proof for any new position <span
+        class="math inline">\mathsf{pid} \geq L</span>.</p>
+        <p>Keeping the <span class="math inline">w</span> most recently
+        claimed positions costs <span class="math inline">\ell +
+        w</span> hashes for a tree of depth <span
+        class="math inline">\ell</span>, no matter how many receipts the
+        user has claimed in its lifetime or how long it has been
+        offline. Claiming a receipt with a position below <span
+        class="math inline">L</span> is still possible – it just
+        requires fetching the relevant path from the user’s cold storage
+        to update the tree.</p>
         </div>
         <h2 id="the-full-construction">The full construction</h2>
-        <p><strong>Accounts.</strong> Every account is represented by a
+        <p><strong>Accounts.</strong> An account name <span
+        class="math inline">A</span> is a signature verification key,
+        and registering it involves proving knowledge of the
+        corresponding signing key. Every account is represented by a
         single commitment</p>
         <p><span class="math display">
         \mathsf{com}_A = \mathsf{Com}_{\mathsf{acct}}\big(b_A,\
-        \kappa_A,\ \mathsf{root}_{\mathsf{null}}(A);\ r_A\big)
+        \mathsf{root}_{\mathsf{null}}(A);\ r_A\big)
         </span></p>
-        <p>to its balance <span class="math inline">b_A</span>, a secret
-        PRF key <span class="math inline">\kappa_A</span>, and the root
-        <span
+        <p>to its balance <span class="math inline">b_A</span> and the
+        root <span
         class="math inline">\mathsf{root}_{\mathsf{null}}(A)</span> of
-        the account’s nullifier tree. With epoch based pruning, we store
-        another root for the MMR of nullifier tree roots.</p>
-        <p><strong>Validators maintain:</strong></p>
+        the account’s nullifier tree – a sparse Merkle tree keyed by
+        receipt position. <strong>Validators maintain:</strong></p>
         <ul>
         <li>the account commitments <span
         class="math inline">\mathsf{Acct}[A] =
@@ -351,32 +377,40 @@ Vamsi Policharla</a></div>
         the receive branch). The position <span
         class="math inline">\mathsf{pid}</span> at which the ledger
         inserts <span class="math inline">\rho</span> into the MMR is
-        the payment’s identifier and determines its nullifier,</p>
-        <p><span class="math display">
-        \mathsf{null} =
-        \mathsf{CRPRF}_{\kappa_{\mathsf{Rec}}}(\mathsf{recv},
-        \mathsf{pid}),
-        </span></p>
-        <p>derived under the <em>receiver’s</em> committed key.
-        Positions are unique, so distinct receipts collide with
-        negligible probability thereby preventing <a
-        href="cite%20here">Faerie Gold attacks</a>. Note that the
-        nullifier is never actually published on chain, it will be
-        inserted into the tree maintained inside the account commitment.
-        This means that a sender does not learn when a payment was
-        claimed.</p>
-        <p>A send/receive is a strict disjunctive proof of the following
-        relations, where only one branch is every proved at a time:</p>
+        the payment’s identifier <em>and</em> its nullifier.</p>
+        <p>Positions are unique, so distinct receipts always carry
+        distinct nullifiers and no send can block another pending
+        payment (see <a
+        href="https://zips.z.cash/protocol/protocol.pdf">Faerie Gold
+        attack</a>). Note that the nullifier is never actually published
+        on chain, it will be inserted into the tree maintained inside
+        the account commitment. This means that a sender does not learn
+        if or when a payment was claimed.</p>
+        <p>Every transaction publishes the same record <span
+        class="math inline">(A, \mathsf{com}&#39;, \rho,
+        \mathsf{root}_\rho, \pi)</span>: a 32-byte account identifier,
+        the new account commitment, a receipt, an MMR root and a
+        128-byte proof, for a total of 256 bytes. The ledger checks
+        <span class="math inline">\mathsf{root}_\rho \in
+        \mathcal{T}</span>, verifies <span
+        class="math inline">\pi</span>, updates <span
+        class="math inline">\mathsf{Acct}[A] \gets
+        \mathsf{com}&#39;</span> and appends <span
+        class="math inline">\rho</span> to the receipt MMR. The proof
+        <span class="math inline">\pi</span> is a strict disjunction of
+        the following relations, where only one branch is ever proved at
+        a time:</p>
         <p><strong>If it is a send</strong>, the proof shows that:</p>
         <ul>
         <li>the balance was updated correctly: <span
         class="math inline">\mathsf{com} =
-        \mathsf{Com}_{\mathsf{acct}}(b,\kappa,\mathsf{root}_{\mathsf{null}};r)
+        \mathsf{Com}_{\mathsf{acct}}(b,\mathsf{root}_{\mathsf{null}};r)
         \wedge \mathsf{com}&#39; =
-        \mathsf{Com}_{\mathsf{acct}}(b-v,\kappa,\mathsf{root}_{\mathsf{null}};r&#39;)</span></li>
+        \mathsf{Com}_{\mathsf{acct}}(b-v,\mathsf{root}_{\mathsf{null}};r&#39;)</span></li>
         <li>receipt was created correctly: <span
         class="math inline">\rho =
-        \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r&#39;&#39;)</span></li>
+        \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r&#39;&#39;)</span>
+        with <span class="math inline">\mathsf{Sen} = A</span></li>
         <li>no overflows: <span class="math inline">0 \le v \le b</span>
         and <span class="math inline">b,\,v,\,b-v \in
         \mathcal{B}</span></li>
@@ -385,31 +419,40 @@ Vamsi Policharla</a></div>
         position <span class="math inline">\mathsf{pid}</span> and
         forwards the opening of <span class="math inline">\rho</span>
         together with <span class="math inline">\mathsf{pid}</span> to
-        the receiver over a private channel.</p>
+        the receiver over a private channel. The receiver need not have
+        registered when the receipt is created.</p>
         <p><strong>If it is a receive</strong>, the proof shows
         that:</p>
         <ul>
         <li>the balance was updated correctly: <span
         class="math inline">\mathsf{com} =
-        \mathsf{Com}_{\mathsf{acct}}(b,\kappa,\mathsf{root}_{\mathsf{null}};r)
+        \mathsf{Com}_{\mathsf{acct}}(b,\mathsf{root}_{\mathsf{null}};r)
         \wedge \mathsf{com}&#39; =
-        \mathsf{Com}_{\mathsf{acct}}(b+v,\kappa,\mathsf{root}_{\mathsf{null}}&#39;;r&#39;)</span></li>
+        \mathsf{Com}_{\mathsf{acct}}(b+v,\mathsf{root}_{\mathsf{null}}&#39;;r&#39;)</span></li>
         <li>claiming a receipt addressed to me: <span
-        class="math inline">\mathsf{MMR.Verify}(\mathsf{root}_\rho,\rho^\star,\mathsf{pid},\pi_{\mathsf{mmr}})=1
-        \wedge \rho^\star =
-        \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r&#39;&#39;)</span></li>
-        <li>nullifer did not appear: <span
-        class="math inline">\mathsf{null} =
-        \mathsf{CRPRF}_\kappa(\mathsf{recv},\mathsf{pid}) \wedge
-        \mathsf{MT.AccVerifyInsert}(\mathsf{root}_{\mathsf{null}},\mathsf{null},\pi_{\mathsf{mt}})=\mathsf{root}_{\mathsf{null}}&#39;</span></li>
+        class="math inline">\mathsf{MMR.Verify}(\mathsf{root}_\rho,\rho_{\mathsf{in}},\mathsf{pid},\pi_{\mathsf{mmr}})=1
+        \wedge \rho_{\mathsf{in}} =
+        \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r&#39;&#39;)</span>
+        with <span class="math inline">\mathsf{Rec} = A</span></li>
+        <li>nullifier did not appear: <span
+        class="math inline">\mathsf{SMT.VerifyInsert}(\mathsf{root}_{\mathsf{null}},\mathsf{pid},\pi_{\mathsf{smt}})=\mathsf{root}_{\mathsf{null}}&#39;</span></li>
         <li>published a dummy receipt <span class="math inline">\rho =
-        \mathsf{Com}_{\mathsf{rec}}(\cdot,\cdot,\cdot,0;\cdot)</span></li>
+        \mathsf{Com}_{\mathsf{rec}}(0,\bot,\bot,0;r&#39;&#39;&#39;)</span></li>
+        <li>no overflows: <span class="math inline">b,\,v,\,b+v \in
+        \mathcal{B}</span></li>
         </ul>
+        <p>The dummy receipt is appended to the MMR like any other, but
+        since a receive may only consume receipts of type <span
+        class="math inline">1</span>, it can never be claimed. Fees can
+        be supported by revealing <span
+        class="math inline">v_{\mathsf{fee}}</span> in the statement and
+        proving the new commitment carries <span
+        class="math inline">v_{\mathsf{fee}}</span> less balance.</p>
         <p><strong>Wallets maintain.</strong> The opening of its account
-        commitment (balance, PRF key, randomness), the nullifiers of the
-        current epoch together with their indexed Merkle tree, one root
-        per past epoch, and the openings of any receipts it has been
-        handed but not yet claimed.</p>
+        commitment (balance and randomness), the frontier of its
+        nullifier tree together with the recently claimed positions,
+        older nullifiers in cold storage, and the openings of any
+        receipts it has been handed but not yet claimed.</p>
         <p>When the sender and receiver are both online which is
         typically the case in e-commerce, the buyer can provide the
         seller with confirmation that a receipt has landed on chain and
@@ -526,30 +569,33 @@ Vamsi Policharla</a></div>
         instantiated with <a
         href="https://commonware.xyz/blogs/batch-pari">Pari + batch
         verification</a> can be found <a
-        href="https://github.com/guruvamsi-policharla/zk-pari/tree/vanishing-poly-zk">here</a>.
+        href="https://github.com/guruvamsi-policharla/zk-pari/pull/2">here</a>.
         Pari is not zero-knowledge as described in the <a
-        href="https://eprint.iacr.org/2024/1245">original paper</a>. We
-        use masking polynomials to add zk while ensuring the the proof
-        size remains unchanged <span class="math inline">2 \mathbb{G}_1
-        + \mathbb{F}</span> and there is minimal overhead on the
-        proving/verification time. All numbers below are on an M5
-        MacBook Pro (6 performance + 12 efficiency cores, 48 GB RAM)
-        over BLS12-381, single-threaded unless stated, and exclude
+        href="https://eprint.iacr.org/2024/1245">original paper</a> or
+        its <a href="https://eprint.iacr.org/2025/1485">improvement</a>.
+        We use vanishing-polynomial masks to add zk while ensuring the
+        proof size remains unchanged at <span class="math inline">2
+        \mathbb{G}_1 + \mathbb{F}</span> (128 bytes), there is
+        negligible overhead on the prover, and the batch-verification
+        strategy carries over. All numbers below are on an M5 MacBook
+        Pro (6 performance + 12 efficiency cores, 48 GB RAM) over
+        BLS12-381, single-threaded unless stated, and exclude
         deserialization and subgroup checks.</p>
         <p><strong>Batch Verification.</strong> Verifying a proof takes
         about <span class="math inline">0.7</span> ms regardless of
         circuit size. But with batch verification, this can be brought
         down significantly. At <span class="math inline">N =
-        65{,}536</span> the three MSMs account for over 90% of the 729
-        ms total time. Computing the Fiat-Shamir challenges take 34 ms,
-        the statement evaluations 24 ms (with inversions batched across
-        proofs), and the final pairing under a millisecond.</p>
+        65{,}536</span> the three MSMs account for over 90% of the 771
+        ms total time. Computing the Fiat-Shamir challenges takes 36 ms,
+        the statement evaluations 25 ms (with inversions batched across
+        proofs), and the final pairings under a millisecond.</p>
         <p><strong>Throughput.</strong> Batches are independent, so we
         shard them across threads with nothing shared, each thread
         verifying its own 80,000-proof chunk. Scaling is sub-linear
         because the efficiency cores are slower, but it crosses a
         million transactions per second on the laptop, where a
-        transaction is a single send or receive.</p>
+        transaction is a single send or receive (so roughly 525,000
+        payments per second, each being one send and one receive).</p>
         <div class="table-row">
         <div class="table-col">
         <table>
@@ -564,27 +610,27 @@ Vamsi Policharla</a></div>
         <tbody>
         <tr>
         <td style="text-align: center;">1</td>
-        <td style="text-align: center;">696 <span
+        <td style="text-align: center;">723 <span
         class="math inline">\mu</span>s</td>
         <td style="text-align: center;">–</td>
         </tr>
         <tr>
         <td style="text-align: center;">256</td>
-        <td style="text-align: center;">29.4 <span
+        <td style="text-align: center;">29.8 <span
         class="math inline">\mu</span>s</td>
         <td style="text-align: center;"><span
-        class="math inline">24\times</span></td>
+        class="math inline">25\times</span></td>
         </tr>
         <tr>
         <td style="text-align: center;">4,096</td>
-        <td style="text-align: center;">15.6 <span
+        <td style="text-align: center;">16.1 <span
         class="math inline">\mu</span>s</td>
         <td style="text-align: center;"><span
         class="math inline">46\times</span></td>
         </tr>
         <tr>
         <td style="text-align: center;">65,536</td>
-        <td style="text-align: center;">11.2 <span
+        <td style="text-align: center;">11.7 <span
         class="math inline">\mu</span>s</td>
         <td style="text-align: center;"><span
         class="math inline">64\times</span></td>
@@ -603,53 +649,57 @@ Vamsi Policharla</a></div>
         <tbody>
         <tr>
         <td style="text-align: center;">1</td>
-        <td style="text-align: center;">86,532</td>
+        <td style="text-align: center;">86,929</td>
         </tr>
         <tr>
         <td style="text-align: center;">4</td>
-        <td style="text-align: center;">314,710</td>
+        <td style="text-align: center;">324,857</td>
         </tr>
         <tr>
         <td style="text-align: center;">8</td>
-        <td style="text-align: center;">537,862</td>
+        <td style="text-align: center;">559,399</td>
         </tr>
         <tr>
         <td style="text-align: center;">16</td>
-        <td style="text-align: center;">970,676</td>
+        <td style="text-align: center;">992,728</td>
         </tr>
         <tr>
         <td style="text-align: center;">18</td>
-        <td style="text-align: center;">1,017,948</td>
+        <td style="text-align: center;">1,051,487</td>
         </tr>
         </tbody>
         </table>
         </div>
         </div>
-        <p><strong>Proving.</strong> The circuits use Pedersen hashes
-        over Jubjub for Merkle nodes, and account/receipt commitments,
-        and SHA-256 for the collision resistant PRF. As expected a send
-        is cheaper than a receive as it does not have to prove merkle
-        openings. In receive is where the cost sits, since it also
-        verifies a depth-40 MMR opening and an insertion into the
-        nullifier tree. The operation-hiding relation <span
-        class="math inline">\mathcal R_{\mathsf{op}}</span> is
-        <em>not</em> the sum of the two: send is structurally a
-        sub-relation of receive, so the circuit instantiates each shared
-        gadget once and lets the branch bit multiplex only the inputs,
-        adding about 8K constraints on top of receive. <span
-        class="math inline">d</span> is the depth of the user’s
-        nullifier tree.</p>
+        <p><strong>Proving.</strong> The circuits only use a
+        collision-resistant hash function and we benchmark two
+        instantiations: Pedersen hashes over Jubjub, whose security
+        rests only on discrete log, and Poseidon over the BLS12-381
+        scalar field. Both the receipt MMR opening and the nullifier
+        tree have depth 40. As expected a send is cheaper than a receive
+        as it is just three commitment openings and range checks.
+        Receive is where the cost sits: the depth-40 MMR opening (40
+        hashes) and the sparse Merkle tree insertion (80 hashes) account
+        for 120 of its 123 hash evaluations. The operation-hiding
+        relation <span class="math inline">\mathcal
+        R_{\mathsf{op}}</span> is <em>not</em> the sum of the two: send
+        is structurally a sub-relation of receive, so the circuit
+        instantiates each shared gadget once and lets the branch bit
+        multiplex only the inputs, adding about 8.3K (Pedersen) or 1K
+        (Poseidon) constraints on top of receive.</p>
         <table>
         <colgroup>
-        <col style="width: 15%" />
-        <col style="width: 21%" />
-        <col style="width: 21%" />
-        <col style="width: 21%" />
-        <col style="width: 21%" />
+        <col style="width: 13%" />
+        <col style="width: 13%" />
+        <col style="width: 18%" />
+        <col style="width: 18%" />
+        <col style="width: 18%" />
+        <col style="width: 18%" />
         </colgroup>
         <thead>
         <tr>
         <th style="text-align: left;">Circuit</th>
+        <th style="text-align: left;">Hash</th>
         <th style="text-align: right;">R1CS</th>
         <th style="text-align: right;">SR1CS</th>
         <th style="text-align: right;">Prove</th>
@@ -660,57 +710,69 @@ Vamsi Policharla</a></div>
         <tr>
         <td style="text-align: left;"><span class="math inline">\mathcal
         R_{\mathsf{send}}</span></td>
-        <td style="text-align: right;">19,293</td>
-        <td style="text-align: right;">38,595</td>
-        <td style="text-align: right;">1.6 s</td>
-        <td style="text-align: right;">748 <span
+        <td style="text-align: left;">Pedersen</td>
+        <td style="text-align: right;">16,109</td>
+        <td style="text-align: right;">32,227</td>
+        <td style="text-align: right;">0.93 s</td>
+        <td style="text-align: right;">794 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
         <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{recv}}</span>, <span class="math inline">d =
-        10</span></td>
-        <td style="text-align: right;">370,020</td>
-        <td style="text-align: right;">740,049</td>
-        <td style="text-align: right;">20.9 s</td>
-        <td style="text-align: right;">760 <span
+        R_{\mathsf{recv}}</span></td>
+        <td style="text-align: left;">Pedersen</td>
+        <td style="text-align: right;">398,111</td>
+        <td style="text-align: right;">796,231</td>
+        <td style="text-align: right;">23.2 s</td>
+        <td style="text-align: right;">785 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
         <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{recv}}</span>, <span class="math inline">d =
-        20</span></td>
-        <td style="text-align: right;">497,360</td>
-        <td style="text-align: right;">994,729</td>
-        <td style="text-align: right;">21.9 s</td>
-        <td style="text-align: right;">750 <span
+        R_{\mathsf{op}}</span></td>
+        <td style="text-align: left;">Pedersen</td>
+        <td style="text-align: right;">406,460</td>
+        <td style="text-align: right;">812,931</td>
+        <td style="text-align: right;">23.2 s</td>
+        <td style="text-align: right;">785 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
         <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{op}}</span>, <span class="math inline">d =
-        10</span></td>
-        <td style="text-align: right;">378,369</td>
-        <td style="text-align: right;">756,749</td>
-        <td style="text-align: right;">21.0 s</td>
-        <td style="text-align: right;">743 <span
+        R_{\mathsf{send}}</span></td>
+        <td style="text-align: left;">Poseidon</td>
+        <td style="text-align: right;">1,647</td>
+        <td style="text-align: right;">3,303</td>
+        <td style="text-align: right;">0.14 s</td>
+        <td style="text-align: right;">780 <span
         class="math inline">\mu</span>s</td>
         </tr>
         <tr>
         <td style="text-align: left;"><span class="math inline">\mathcal
-        R_{\mathsf{op}}</span>, <span class="math inline">d =
-        20</span></td>
-        <td style="text-align: right;">505,709</td>
-        <td style="text-align: right;">1,011,429</td>
-        <td style="text-align: right;">21.6 s</td>
-        <td style="text-align: right;">756 <span
+        R_{\mathsf{recv}}</span></td>
+        <td style="text-align: left;">Poseidon</td>
+        <td style="text-align: right;">30,729</td>
+        <td style="text-align: right;">61,467</td>
+        <td style="text-align: right;">1.9 s</td>
+        <td style="text-align: right;">772 <span
+        class="math inline">\mu</span>s</td>
+        </tr>
+        <tr>
+        <td style="text-align: left;"><span class="math inline">\mathcal
+        R_{\mathsf{op}}</span></td>
+        <td style="text-align: left;">Poseidon</td>
+        <td style="text-align: right;">31,706</td>
+        <td style="text-align: right;">63,423</td>
+        <td style="text-align: right;">1.9 s</td>
+        <td style="text-align: right;">779 <span
         class="math inline">\mu</span>s</td>
         </tr>
         </tbody>
         </table>
         <p>We note that the prover time can be halved by increasing the
-        proof size by 1 field element (32 bytes), and we expect the
-        number of constraints to come down as we optimize circuits.</p>
+        proof size by 1 field element (32 bytes) to natively support
+        R1CS constraints in Pari. We also expect the number of
+        constraints to come down as we optimize our circuits.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
 </body>

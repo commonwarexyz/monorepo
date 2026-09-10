@@ -455,6 +455,12 @@
 .sim-inner { fill: #555; }
 .sim-inner.empty { fill: white; stroke: #ccc; stroke-width: 1; }
 
+/* A frozen prefix of a nullifier tree: its frontier is kept, the rest is in cold storage. */
+.sim-frontier { fill: #1f1fd1; }
+.sim-leaf.cold, .sim-inner.cold { fill: #eee; }
+.sim-edge.cold { stroke: #eee; }
+.sim-tiny.cold { fill: #ccc; }
+
 .sim-pane {
     fill: white;
     stroke: #e0e0e0;
@@ -479,16 +485,6 @@
     stroke: #e0a800;
     stroke-width: 2.5;
     animation: sim-flash 0.6s ease-out both;
-    pointer-events: none;
-}
-
-/* The sorted-list pointer from the low leaf to the newly appended leaf. */
-.sim-link {
-    fill: none;
-    stroke: #e0a800;
-    stroke-width: 1.5;
-    stroke-dasharray: 3 2;
-    animation: sim-flash 1.8s ease-out both;
     pointer-events: none;
 }
 
