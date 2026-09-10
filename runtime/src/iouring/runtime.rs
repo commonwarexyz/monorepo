@@ -103,7 +103,7 @@
 //! destruction on one-off threads can follow registration release.
 
 use super::{
-    driver::Driver,
+    driver::{Driver, ServiceOutcome},
     mailbox::{Mailbox, Message},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, TimerId, Timers},
@@ -503,16 +503,19 @@ impl TaskMetrics {
     }
 }
 
-/// Finish task metrics if factory construction unwinds.
-struct FactoryGuard {
+/// Close supervision and finish task metrics if factory construction unwinds.
+struct FactoryGuard<'a> {
+    /// Supervision subtree closed if construction fails.
+    tree: &'a Arc<Tree>,
     /// Metric transferred to the execution wrapper after construction succeeds.
     metric: Option<MetricHandle>,
 }
 
-impl Drop for FactoryGuard {
+impl Drop for FactoryGuard<'_> {
     fn drop(&mut self) {
         if let Some(metric) = &self.metric {
             metric.finish();
+            self.tree.abort();
         }
     }
 }
@@ -633,7 +636,9 @@ impl Shared {
         #[cfg(test)]
         let payload = tests::before_launch(payload);
 
-        utils::thread::spawn(self.cfg.thread_stack_size, move || Worker::run_task(payload));
+        utils::thread::spawn(self.cfg.thread_stack_size, move || {
+            Worker::run_task(payload)
+        });
     }
 }
 
@@ -710,6 +715,7 @@ impl crate::Spawner for Context {
         };
 
         let mut guard = FactoryGuard {
+            tree: &parent,
             metric: Some(metric),
         };
 
@@ -718,7 +724,7 @@ impl crate::Spawner for Context {
         // including when the factory unwinds or shutdown closes the registry.
         let future = f(self);
 
-        // The execution wrapper takes over metric cleanup once the factory returns.
+        // The execution wrapper takes over cleanup once the factory returns.
         let (future, handle) = Handle::init(
             future,
             guard.metric.take().unwrap(),
@@ -1036,6 +1042,7 @@ impl Local {
         if mailbox.upgrade().is_none_or(|mailbox| !mailbox.is_open()) {
             return Err(Error::Closed);
         }
+
         panic!("registered io_uring handle polled outside its owning worker");
     }
 
@@ -1075,7 +1082,12 @@ impl Local {
 
     /// Update aggregate pending-operation metrics using only this worker's delta.
     fn update_pending(&mut self) {
+        // Count active requests, including queued ones. Completed results waiting
+        // for their callers no longer contribute to the pending count.
         let pending = self.driver.as_ref().unwrap().len();
+
+        // Other workers update the same gauge. Apply only our change so their
+        // contributions remain intact.
         if pending > self.reported_pending {
             self.shared
                 .pending_operations
@@ -1354,8 +1366,8 @@ impl Worker {
             }
         }));
         let output = match result {
-            Ok(Ok(value)) => Some(value),
-            Ok(Err(panic)) | Err(panic) => {
+            Ok(output) => output,
+            Err(panic) => {
                 worker.panics.retain(panic);
                 None
             }
@@ -1389,6 +1401,7 @@ impl Worker {
             worker.cleanup();
             worker.result(output)
         }));
+
         if let Err(panic) = result.unwrap_or_else(Err) {
             shared.panicker.notify(panic);
         }
@@ -1415,6 +1428,7 @@ impl Worker {
             local.mailbox.clone()
         };
         let messages = mailbox.close();
+
         if !messages.is_empty() {
             self.processed_seq = self.processed_seq.wrapping_add(1) & SUBMISSION_SEQ_MASK;
         }
@@ -1452,6 +1466,8 @@ impl Worker {
             drop(waker);
         }
 
+        // Escaped handles can outlive task disposal. Detach their ordinary I/O
+        // observers and clear sleep registrations before draining retained work.
         {
             let mut local = self.local.borrow_mut();
             let Local {
@@ -1469,6 +1485,8 @@ impl Worker {
         // Retained writes and syncs still need to finish. Cancelled operations
         // and their cancellation acknowledgements must also retire before exit.
         loop {
+            // A retained write may still be queued without an SQE in flight.
+            // Service must stage that work before we consider waiting for a CQE.
             {
                 let mut local = self.local.borrow_mut();
                 local.now = Instant::now();
@@ -1488,16 +1506,21 @@ impl Worker {
             self.callbacks();
 
             let mut local = self.local.borrow_mut();
+
             // Callbacks can enqueue another batch. Keep TLS installed until
             // all deferred work and kernel completions have been handled.
             if !local.deferred.is_empty() || !self.deferred.is_empty() {
                 continue;
             }
+
+            // An operation can finish before its cancellation acknowledgement.
+            // The driver's empty check includes both kinds of outstanding work.
             if local.driver.as_ref().unwrap().is_empty() {
                 break;
             }
 
             let deadline = local.next_deadline();
+
             // Parking only enters the kernel and invokes no user callbacks.
             // Keeping the driver in Local preserves the cleanup owner on unwind.
             let parked = local
@@ -1568,9 +1591,8 @@ impl Worker {
     }
 
     /// Service the ring and timers using one time sample, collecting callbacks.
-    /// Returns whether a wake CQE requests an inbox check. `defer_kernel_service`
-    /// allows the next ring wait to run deferred kernel work during an idle turn.
-    fn service(&mut self, defer_kernel_service: bool) -> bool {
+    /// Reports wake CQEs and whether kernel service was deferred to an idle wait.
+    fn service(&mut self, defer_kernel_service: bool) -> ServiceOutcome {
         let mut local = self.local.borrow_mut();
         local.now = Instant::now();
         let Local {
@@ -1584,21 +1606,23 @@ impl Worker {
             .as_mut()
             .unwrap()
             .service(*now, defer_kernel_service, deferred);
-        let woke = result.expect("io_uring driver service failed");
+        let outcome = result.expect("io_uring driver service failed");
+
         // Timer expiry only queues wakers. Callbacks run after this borrow ends.
         timers.expire(*now, &mut deferred.wakes);
         local.update_pending();
-        woke
+        outcome
     }
 
     /// Drive tasks and one separately pinned root through bounded service turns.
-    /// Returns on root completion or worker failure. The caller destroys the root
-    /// before closing registration and cleaning up the worker.
+    /// Returns the root output, or `None` with the first failure retained in the
+    /// worker through root destruction. The caller then closes registration and
+    /// cleans up the worker.
     fn drive<Fut: Future>(
         &mut self,
         mut root: Pin<&mut Fut>,
         root_waker: &Waker,
-    ) -> Result<Fut::Output, Panic> {
+    ) -> Option<Fut::Output> {
         let (mailbox, spinner_cfg) = {
             let local = self.local.borrow();
             (local.mailbox.clone(), local.shared.cfg.idle_spinner.clone())
@@ -1608,8 +1632,8 @@ impl Worker {
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
 
         loop {
-            if let Some(panic) = self.panics.take() {
-                return Err(panic);
+            if self.panics.first.is_some() {
+                return None;
             }
 
             // Bound task polling so a self-waking task cannot starve the root,
@@ -1627,6 +1651,7 @@ impl Worker {
                         .as_mut()
                         .poll(&mut TaskContext::from_waker(&running.waker))
                 });
+
                 if matches!(poll, Some(Poll::Pending)) {
                     // Restore the task, retaining any notification received during its poll.
                     self.local.borrow_mut().tasks.pending(running);
@@ -1639,16 +1664,20 @@ impl Worker {
                 }
             }
 
+            // The root has no Tasks entry. Its flag also records notifications
+            // forwarded from other workers through the mailbox.
             let poll_root = {
                 let mut local = self.local.borrow_mut();
                 mem::take(&mut local.root_ready)
             };
+
             if poll_root {
                 let mut cx = TaskContext::from_waker(root_waker);
+
                 // A wake during this poll sets root_ready again. Pending must
                 // not clear it, including a wake caused by the root itself.
                 if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
-                    return Ok(output);
+                    return Some(output);
                 }
             }
 
@@ -1657,21 +1686,24 @@ impl Worker {
             // work remains visible to the complete readiness checks below.
             if !self.local.borrow().deferred.is_empty() {
                 self.callbacks();
-                if let Some(panic) = self.panics.take() {
-                    return Err(panic);
+                if self.panics.first.is_some() {
+                    return None;
                 }
             }
 
             // An apparently idle turn can combine kernel service with the wait.
-            // Work discovered below must service the kernel before polling again.
+            // The result records whether that enter was actually deferred.
             let defer = !self.local.borrow().is_ready()
                 && self.inbox.is_empty()
                 && !mailbox.waker.pending(self.processed_seq);
-            let woke = self.service(defer);
-            self.messages(&mailbox, woke);
+            let service = self.service(defer);
+
+            // Apply foreign messages and completion callbacks before considering
+            // a wait. Any tasks they make ready will be polled on the next turn.
+            self.messages(&mailbox, service.woke);
             self.callbacks();
-            if let Some(panic) = self.panics.take() {
-                return Err(panic);
+            if self.panics.first.is_some() {
+                return None;
             }
 
             // Callbacks and messages can submit I/O or make tasks runnable, so
@@ -1685,14 +1717,17 @@ impl Worker {
                     local.next_deadline(),
                 )
             };
+
+            // Queued submissions need another service turn even when no task
+            // has a notification that would cause it to be polled.
             if ready
                 || pending_submissions
                 || !self.inbox.is_empty()
                 || mailbox.waker.pending(self.processed_seq)
             {
-                if defer && needs_kernel {
-                    // Callbacks and incoming work can invalidate the idle
-                    // decision. Satisfy deferred GETEVENTS before polling again.
+                if (service.kernel_deferred && needs_kernel) || (defer && pending_submissions) {
+                    // An idle turn must stage work introduced by its callbacks.
+                    // A wake alone needs catch-up only if GETEVENTS was deferred.
                     self.service(false);
                     self.callbacks();
                 }
@@ -1703,7 +1738,7 @@ impl Worker {
             // at this actual idle boundary after any elapsed callback time.
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
-                if defer && needs_kernel {
+                if service.kernel_deferred && needs_kernel {
                     self.service(false);
                     self.callbacks();
                 }
@@ -1712,6 +1747,9 @@ impl Worker {
 
             #[cfg(test)]
             tests::before_park();
+
+            // Outstanding operations and cancellations need the ring wait to run
+            // deferred kernel work. A futex wake alone cannot advance their I/O.
             if needs_kernel {
                 let result = self
                     .local
@@ -1720,6 +1758,7 @@ impl Worker {
                     .as_mut()
                     .unwrap()
                     .park(self.processed_seq, deadline);
+
                 if !result.expect("io_uring kernel wait failed") {
                     // A rejected wait may not have entered the kernel. Complete
                     // its deferred service obligation before another polling turn.
@@ -1731,9 +1770,11 @@ impl Worker {
                 // is skipped when it could consume the remaining deadline.
                 let near_deadline = deadline
                     .is_some_and(|deadline| deadline.saturating_duration_since(now) <= max_spin);
+
                 if !near_deadline && spinner.spin(|| mailbox.waker.pending(self.processed_seq)) {
                     continue;
                 }
+
                 if let Some(duration) = mailbox.waker.park_idle(self.processed_seq, deadline) {
                     spinner.on_wake(duration);
                 }
@@ -1833,6 +1874,7 @@ impl crate::Runner for Runner {
             },
             storage_buffer_pool.clone(),
         );
+
         // Storage construction acquires the directory hold first. This sync
         // therefore includes any straggling writes from a preceding runner.
         crate::storage::sync(&self.cfg.storage_directory).unwrap_or_else(|error| {
@@ -1841,6 +1883,7 @@ impl crate::Runner for Runner {
                 self.cfg.storage_directory.display()
             );
         });
+
         let storage = MeteredStorage::new(storage, &mut runtime_registry);
         let network = MeteredNetwork::new(
             Network::new(
@@ -1873,6 +1916,7 @@ impl crate::Runner for Runner {
 
         let label = Label::root();
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
+
         let metric = MetricHandle::new(shared.metrics.tasks_running.get_or_create(&label).clone());
         let tree = Tree::root();
         let context_shared = shared.clone();
@@ -1907,6 +1951,7 @@ impl crate::Runner for Runner {
             worker.result(output)
         });
         metric.finish();
+
         match output {
             Ok(output) => output,
             Err(panic) => resume_unwind(panic),

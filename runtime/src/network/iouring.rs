@@ -924,7 +924,7 @@ mod tests {
 
             let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
             let addr = listener.local_addr().unwrap();
-            let expected = *b"abcdefgh";
+            let expected = b"abcdefgh";
 
             // Accept one connection and issue a recv that exactly matches the
             // internal buffer size, forcing the direct-recv branch.
@@ -936,7 +936,7 @@ mod tests {
             });
 
             let (mut sink, _stream) = network.dial(addr).await.unwrap();
-            sink.send(expected.as_slice()).await.unwrap();
+            sink.send(expected).await.unwrap();
 
             assert_eq!(reader.await.unwrap().coalesce(), expected);
         });

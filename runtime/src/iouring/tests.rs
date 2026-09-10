@@ -121,7 +121,11 @@ fn take_worker_fault(
 
 /// Model a rejected thread destroying its payload before reporting launch failure.
 pub(super) fn before_launch(payload: Launch) -> Launch {
-    if take_worker_fault(&payload.active.0, |fault| matches!(fault, WorkerFault::Launch)).is_some() {
+    if take_worker_fault(&payload.active.0, |fault| {
+        matches!(fault, WorkerFault::Launch)
+    })
+    .is_some()
+    {
         // Dispose before raising the injected panic so a destructor can itself
         // panic without causing a second panic during unwinding.
         drop(payload);
@@ -142,9 +146,9 @@ pub(super) fn before_startup(registry: &Arc<Workers>) -> std::io::Result<()> {
 
 /// Run a one-shot callback after the worker count and its lock have been released.
 pub(super) fn after_release(registry: &Arc<Workers>) {
-    if let Some(WorkerFault::AfterRelease(callback)) =
-        take_worker_fault(registry, |fault| matches!(fault, WorkerFault::AfterRelease(_)))
-    {
+    if let Some(WorkerFault::AfterRelease(callback)) = take_worker_fault(registry, |fault| {
+        matches!(fault, WorkerFault::AfterRelease(_))
+    }) {
         callback();
     }
 }

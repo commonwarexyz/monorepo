@@ -71,6 +71,14 @@ use tracing::warn;
 /// Like the wake token, this uses the slot index reserved by [`Waiters::insert`].
 const CANCEL_USER_DATA: UserData = u32::MAX as UserData;
 
+/// Wake notification and kernel-service status from one driver turn.
+pub struct ServiceOutcome {
+    /// Whether a wake CQE requested an inbox check.
+    pub woke: bool,
+    /// Whether pending kernel work received no GETEVENTS service point this turn.
+    pub kernel_deferred: bool,
+}
+
 /// Ring and request state accessed exclusively by the owning worker.
 pub struct Driver {
     /// Declared first so ring destruction precedes descriptor and buffer release.
@@ -221,15 +229,16 @@ impl Driver {
 
     /// Process completions, deadlines, and queued submissions without callbacks.
     ///
-    /// Returns whether a wake CQE requested an inbox recheck. `defer_kernel_service`
-    /// permits the following idle ring wait to supply GETEVENTS. It is ignored
-    /// when callbacks or unfinished staging already require another busy turn.
+    /// Reports wake CQEs and whether kernel service was deferred. The
+    /// `defer_kernel_service` argument permits the following idle ring wait to
+    /// supply GETEVENTS. It is ignored when callbacks or unfinished staging
+    /// already require another busy turn.
     pub fn service(
         &mut self,
         now: Instant,
         defer_kernel_service: bool,
         deferred: &mut Deferred,
-    ) -> io::Result<bool> {
+    ) -> io::Result<ServiceOutcome> {
         // Finish posted work before expiring requests, then register deadlines
         // against the refreshed wheel so an idle interval cannot shorten them.
         let mut woke = self.state.reap(&mut self.ring, deferred);
@@ -251,9 +260,10 @@ impl Driver {
 
         // Busy turns must run deferred kernel work. An idle turn can leave this
         // enter to park, unless callbacks or more submissions need attention.
-        if self.needs_kernel_service()
-            && (!defer_kernel_service || !deferred.is_empty() || self.has_pending_submissions())
-        {
+        let service_kernel = self.needs_kernel_service()
+            && (!defer_kernel_service || !deferred.is_empty() || self.has_pending_submissions());
+
+        if service_kernel {
             Self::submit_and_wait(&mut self.ring, 1, Some(Duration::ZERO))?;
             self.state.submit_retry = !self.ring.submission().is_empty();
         }
@@ -265,7 +275,10 @@ impl Driver {
         #[cfg(test)]
         tests::after_service(&self.ring, deferred)?;
 
-        Ok(woke)
+        Ok(ServiceOutcome {
+            woke,
+            kernel_deferred: !service_kernel && self.needs_kernel_service(),
+        })
     }
 
     /// Wait for ring activity or the deadline while retaining worker ownership.
@@ -840,9 +853,9 @@ pub mod tests {
 
         /// Service at a chosen time, collect results, and report mailbox wake CQEs.
         fn service_at(&mut self, now: Instant, defer: bool) -> bool {
-            let woke = self.driver.service(now, defer, &mut self.deferred).unwrap();
+            let outcome = self.driver.service(now, defer, &mut self.deferred).unwrap();
             self.collect();
-            woke
+            outcome.woke
         }
 
         /// Service using wall-clock time and run deferred kernel work immediately.

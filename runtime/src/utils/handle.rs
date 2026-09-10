@@ -67,7 +67,7 @@ where
     }
 }
 
-/// Closes supervision and finishes metrics when task execution exits or unwinds.
+/// Closes supervision and finishes metrics when a task exits or is discarded.
 struct TaskGuard {
     /// Supervision subtree owned by the task.
     tree: Arc<Tree>,
@@ -127,19 +127,22 @@ where
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
+        // Install cleanup before the first poll so rejected tasks also close
+        // supervision and finish their metrics when the future is dropped.
+        let guard = TaskGuard {
+            tree,
+            metric: metric.clone(),
+        };
+
         // Wrap the future with panic catching, abort support, and cleanup.
         //
         // Everything is done in a single async block (and the function is marked
         // #[inline(always)]) so that stack usage is `size_of(F) + constant` rather than
         // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
-        let metric_handle = metric.clone();
         let task = async move {
             // Cancellation can destroy the user future during this poll. Close
             // its supervision subtree even if that destruction unwinds.
-            let _guard = TaskGuard {
-                tree,
-                metric: metric_handle,
-            };
+            let _guard = guard;
 
             // Run future with panic catching and abort support
             let result =
