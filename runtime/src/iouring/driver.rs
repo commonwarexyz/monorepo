@@ -1760,7 +1760,7 @@ pub mod tests {
         let waker = harness.driver.state.waker.clone();
         let producer = thread::spawn(move || {
             wait_until_eventfd_armed(&waker, deadline);
-            if waker.publish_deferred() {
+            if waker.publish() {
                 waker.wake();
             }
         });
@@ -1814,7 +1814,7 @@ pub mod tests {
             let waker = harness.driver.state.waker.clone();
             let producer = thread::spawn(move || {
                 wait_until_eventfd_armed(&waker, deadline);
-                if waker.publish_deferred() {
+                if waker.publish() {
                     waker.wake();
                 }
             });

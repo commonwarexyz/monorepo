@@ -71,7 +71,7 @@ impl Mailbox {
             inbox.messages.push(message);
 
             // Publish once per batch to match the worker's transfer count.
-            first && self.waker.publish_deferred()
+            first && self.waker.publish()
         };
 
         if signal {

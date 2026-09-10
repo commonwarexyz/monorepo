@@ -1511,8 +1511,7 @@ impl Worker {
                 if !near_deadline && spinner.spin(|| mailbox.waker.pending(self.processed_seq)) {
                     continue;
                 }
-                if let Some(duration) = mailbox.waker.park_idle_until(self.processed_seq, deadline)
-                {
+                if let Some(duration) = mailbox.waker.park_idle(self.processed_seq, deadline) {
                     spinner.on_wake(duration);
                 }
             }
