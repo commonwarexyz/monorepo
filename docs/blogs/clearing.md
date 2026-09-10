@@ -680,17 +680,17 @@ $$
 
 and the posted close omits $U$, the transpose, and every derivable column. For the benchmark's fixed live set, $U=N-A$, though account creation, deletion, and external-payout rows break that identity in general. Every unchanged account contributes a leaf to the corpus and nothing to the posted close, every changed account a row, and every edge one cumulative entry on each side. Repeated payments update those entries without adding records; their wire size follows the integer widths described above. Acceptance reserves room per account and per edge, never per payment.
 
-Figure 6 compares what a reader downloads with the evidence delivered to validators for one close. Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
+Figure 6 compares the state update (the posted close) with the data used to validate a close. Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
 
 ```{=html}
-<div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive data-size calculator. Sliders set live accounts, average recipients per account, and validators. Results show the reader download, evidence for all slices, the largest validator download, and total sent to validators per close.">
-  <noscript>At one million accounts each paying its next neighbor, one reader downloads 73 MB. Evidence for all slices, counted once with a separate proof per slice, is 170 MB. The largest validator download is 114 MB, and the total sent to 100 validators is 11.3 GB. Enable JavaScript to change the workload.</noscript>
+<div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive data-size calculator. Sliders set live accounts, average recipients per account, and validators. Results show the state update, one set of validation data, the largest validator download, and total sent to validators per close.">
+  <noscript>At one million accounts each paying its next neighbor, the state update is 73 MB. Validation data, counted once with a separate proof per slice, is 170 MB. The largest validator download is 114 MB, and the total sent to 100 validators is 11.3 GB. Enable JavaScript to change the workload.</noscript>
 </div>
 <script type="module" src="clearing.calculator.js"></script>
 ```
 
 ::: {.image-caption}
-Figure 6: The colored curves compare the reader download with one copy of every evidence slice. The gray line shows the account tree already stored by a reader. Both axes use logarithmic scales. Open a result for details.
+Figure 6: The colored curves compare the state update with one complete set of validation data. The gray line shows the account tree already stored by a reader. Both axes use logarithmic scales. Open a result for details.
 :::
 
 <details class="clearing-calculator-assumptions">
@@ -698,7 +698,7 @@ Figure 6: The colored curves compare the reader download with one copy of every 
 
 Recipients per account is an average over all $N$ live accounts, including those that send nothing. Accounts follow key order across evenly populated slices. Below an average of one, the first $E$ accounts each pay one of the last $E$, giving $E$ sender-recipient pairs and $\min(N,2E)$ accounts with activity. At integer average $k\ge1$, every account pays its next $k$ neighbors cyclically.
 
-Accounts and pairs are limited to $2^{24}$; recipients per sender are capped at $\min(1024,N-1)$. Validator counts follow $n=3f+1$, with $S=\min(256,2^{\lceil\log_2 n\rceil})$ slices (128 for 100 validators). Each validator receives one or two spans, each with one proof. The all-slice evidence size counts a separate proof for each slice; actual validator downloads combine adjacent slices into spans.
+Accounts and pairs are limited to $2^{24}$; recipients per sender are capped at $\min(1024,N-1)$. Validator counts follow $n=3f+1$, with $S=\min(256,2^{\lceil\log_2 n\rceil})$ slices (128 for 100 validators). Each validator receives one or two spans, each with one proof. The validation data includes a separate proof for each slice; actual validator downloads combine adjacent slices into spans.
 
 </details>
 

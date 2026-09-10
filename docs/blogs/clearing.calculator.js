@@ -457,7 +457,7 @@ function mount(root) {
 
   const legend = el('div', { class: 'clearing-calculator-legend' });
   const stateReference = el('span', { class: 'state' });
-  legend.append(el('span', {}, 'Reader download'), el('span', { class: 'evidence' }, 'Evidence for all slices'), stateReference);
+  legend.append(el('span', {}, 'State update'), el('span', { class: 'evidence' }, 'Validation data'), stateReference);
   panel.append(legend);
 
   const canvas = el('canvas', {
@@ -468,8 +468,8 @@ function mount(root) {
 
   const results = el('div', { class: 'clearing-calculator-out' });
   panel.append(results);
-  const oPosted = readout(results, 'Reader download', 'One reader holding the previous state.', 'clearing-calc-certified', 'reader');
-  const oDealt = readout(results, 'Evidence for all slices', 'Each slice once, with its own proof.', 'clearing-calc-dealt', 'evidence');
+  const oPosted = readout(results, 'State update', 'Apply one close to the previous state.', 'clearing-calc-certified', 'reader');
+  const oDealt = readout(results, 'Validation data', 'One complete set, before replication.', 'clearing-calc-dealt', 'evidence');
   const oBusiest = readout(results, 'Largest validator download', 'Maximum received by one validator.', 'clearing-calc-busiest');
   const oEgress = readout(results, 'Total sent to validators', '', 'clearing-calc-egress');
 
@@ -507,7 +507,7 @@ function mount(root) {
     oBusiest.value.textContent = bytesText(cm.busiest);
     oEgress.value.textContent = bytesText(cm.egress);
     oEgress.note.textContent = `Across ${count(V.n)} validators, including replicas.`;
-    canvas.setAttribute('aria-label', `Logarithmic size comparison as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))}, the reader download is ${bytesText(posted)} and evidence for all slices is ${bytesText(dt)}. The stored account tree is ${bytesText(st)}.`);
+    canvas.setAttribute('aria-label', `Logarithmic size comparison as recipients per live account increase. At the selected average of ${Number(K.toPrecision(3))}, the state update is ${bytesText(posted)} and one set of validation data is ${bytesText(dt)}. The stored account tree is ${bytesText(st)}.`);
 
     fillCard(oPosted.card, posted, [
       ['Header and roots', postedParts.fixed],

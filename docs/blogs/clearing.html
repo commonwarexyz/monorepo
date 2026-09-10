@@ -1423,19 +1423,19 @@ O’Grady</a></div>
         payments update those entries without adding records; their wire
         size follows the integer widths described above. Acceptance
         reserves room per account and per edge, never per payment.</p>
-        <p>Figure 6 compares what a reader downloads with the evidence
-        delivered to validators for one close. Each sender signs one
-        batch, and each sender-recipient pair carries one unit payment.
-        All accounts remain live, with no deposits, withdrawals, or
-        external payouts. This workload differs from the measured
-        fixture above, which credits 512 recipients.</p>
-        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive data-size calculator. Sliders set live accounts, average recipients per account, and validators. Results show the reader download, evidence for all slices, the largest validator download, and total sent to validators per close.">
-          <noscript>At one million accounts each paying its next neighbor, one reader downloads 73 MB. Evidence for all slices, counted once with a separate proof per slice, is 170 MB. The largest validator download is 114 MB, and the total sent to 100 validators is 11.3 GB. Enable JavaScript to change the workload.</noscript>
+        <p>Figure 6 compares the state update (the posted close) with
+        the data used to validate a close. Each sender signs one batch,
+        and each sender-recipient pair carries one unit payment. All
+        accounts remain live, with no deposits, withdrawals, or external
+        payouts. This workload differs from the measured fixture above,
+        which credits 512 recipients.</p>
+        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive data-size calculator. Sliders set live accounts, average recipients per account, and validators. Results show the state update, one set of validation data, the largest validator download, and total sent to validators per close.">
+          <noscript>At one million accounts each paying its next neighbor, the state update is 73 MB. Validation data, counted once with a separate proof per slice, is 170 MB. The largest validator download is 114 MB, and the total sent to 100 validators is 11.3 GB. Enable JavaScript to change the workload.</noscript>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
-        <p>Figure 6: The colored curves compare the reader download with
-        one copy of every evidence slice. The gray line shows the
+        <p>Figure 6: The colored curves compare the state update with
+        one complete set of validation data. The gray line shows the
         account tree already stored by a reader. Both axes use
         logarithmic scales. Open a result for details.</p>
         </div>
@@ -1460,9 +1460,9 @@ O’Grady</a></div>
         Validator counts follow <span class="math inline">n=3f+1</span>,
         with <span class="math inline">S=\min(256,2^{\lceil\log_2
         n\rceil})</span> slices (128 for 100 validators). Each validator
-        receives one or two spans, each with one proof. The all-slice
-        evidence size counts a separate proof for each slice; actual
-        validator downloads combine adjacent slices into spans.</p>
+        receives one or two spans, each with one proof. The validation
+        data includes a separate proof for each slice; actual validator
+        downloads combine adjacent slices into spans.</p>
         </details>
         <p>Both state roots are rebuilt from ordered streams, so an
         existing ordered database can supply their leaves. Root-only
