@@ -71,6 +71,9 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// whole number of elements. This is 1 for GF(2^8) and 2 for GF(2^16).
     const ALIGN: usize = Self::BITS / 8;
 
+    /// Globally unique transcript namespace for this field and code variant.
+    const NAMESPACE: &'static [u8];
+
     /// A Cantor basis for the field over GF(2), with [`Self::BITS`] elements.
     ///
     /// Writing `v_i` for the `i`th element, we require `v_0 = 1` and
@@ -89,6 +92,15 @@ pub trait Impl: Copy + Send + Sync + 'static {
 
     /// `dst -= c * src`, elementwise.
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element);
+
+    /// Compute independent inner products of `shard` with `coefficients`.
+    ///
+    /// `shard` and `out` must be aligned to [`Self::ALIGN`]. `coefficients`
+    /// must have length `shard.len() * out.len() / Self::ALIGN` and contains
+    /// one shard-sized vector of uniformly represented field elements for each
+    /// output element. Binary extension fields must map every byte string to
+    /// exactly one field element. `out` uses the same canonical representation.
+    fn checksum(self, shard: &[u8], coefficients: &[u8], out: &mut [u8]);
 
     /// The forward butterfly: `x += c * y`, then `y += x`.
     ///
