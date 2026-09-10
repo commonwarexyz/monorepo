@@ -293,6 +293,8 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
         };
         batch.reserve(count);
 
+        // Decode directly from the buffered bytes, keeping each item's journal position.
+        // Stop this blob on error because decoding may have consumed only part of an item.
         let base = self.pos;
         for i in 0..count {
             match A::read(&mut self.replay) {

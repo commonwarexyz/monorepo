@@ -300,8 +300,8 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             };
             let item_len = next_offset - self.offset;
 
-            // `take(item_size)` advances past exactly the payload bytes after the header was
-            // consumed by `decode_length_prefix`.
+            // `decode_length_prefix` already consumed the header. Bound decoding to this payload
+            // so it cannot consume bytes from the next frame.
             match decode_item::<V>(
                 (&mut self.replay).take(item_size),
                 &self.codec_config,
