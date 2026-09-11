@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/10/26): Operators can now process payments to the same recipient in parallel across payers. Each batch needs one payer signature. Validators retain state between closes and receive only account changes, cumulative payment entries, and proofs.*
+*Update (9/10/26): Operators can now process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain state between closes and receive only account changes, cumulative payment entries, and proofs.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
