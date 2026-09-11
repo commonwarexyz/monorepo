@@ -294,6 +294,7 @@ mod tests {
                 Start::Floor(ref floor) if floor == &stored
             ));
 
+            drop(plan);
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             let plan = plan.with_floor(finalization(&fixture.schemes, 6, 6));
@@ -304,6 +305,7 @@ mod tests {
             );
 
             let newer = finalization(&fixture.schemes, 9, 9);
+            drop(plan);
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             let plan = plan.with_floor(newer.clone());

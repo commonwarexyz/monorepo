@@ -2246,12 +2246,18 @@ mod tests {
         }
 
         async fn reopen_view_at_height(
-            &self,
+            self,
             context: deterministic::Context,
             height: Height,
         ) -> Option<u64> {
+            let Self {
+                processor,
+                db_config,
+                ..
+            } = self;
+            drop(processor);
             let reopened: Qmdb<deterministic::Context> =
-                Qmdb::init(context.child("reopen_db"), self.db_config.clone(), None)
+                Qmdb::init(context.child("reopen_db"), db_config, None)
                     .await
                     .expect("database reopen should succeed");
             reopened

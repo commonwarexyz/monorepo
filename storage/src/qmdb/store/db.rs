@@ -1003,6 +1003,7 @@ mod test {
             let db = db.prune(floor).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
+            drop(db);
             let db = create_test_store(context.child("store").with_attribute("index", 2)).await;
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
@@ -1081,6 +1082,7 @@ mod test {
             assert_eq!(*db.inactivity_floor_loc, 2);
 
             // Re-open the store
+            drop(db);
             let db = create_test_store(ctx.child("store").with_attribute("index", 2)).await;
 
             // Ensure the re-opened store retained the committed operations

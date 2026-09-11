@@ -614,6 +614,16 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let sync_root = SyncDatabase::root(&db);
 
         assert!(local_start > crate::merkle::Location::new(0));
+        drop(db);
+        let journal = <<Db as SyncDatabase>::Journal as crate::qmdb::sync::Journal<
+            crate::merkle::mmr::Family,
+        >>::new(
+            || context.child("journal"),
+            crate::qmdb::sync::DatabaseConfig::journal_config(&config),
+            non_empty_range!(local_start, local_end),
+        )
+        .await
+        .unwrap();
 
         let stale_target = crate::qmdb::sync::Target {
             root: sync_root,
@@ -624,7 +634,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
-                &db.any.log.journal,
+                &journal,
             )
             .await
             .unwrap()
@@ -640,14 +650,13 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
-                &db.any.log.journal,
+                &journal,
             )
             .await
             .unwrap()
             .is_some()
         );
-
-        db.destroy().await.unwrap();
+        drop(journal);
     });
 }
 
