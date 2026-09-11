@@ -1011,6 +1011,7 @@ mod tests {
     };
     use rstest::rstest;
     use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
         pin::Pin,
         sync::{
             Arc,
@@ -2710,6 +2711,37 @@ mod tests {
         // Dropping the guard after the runtime has torn down will trigger a wake on
         // a task whose executor has been dropped.
         drop(holder);
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_factory_panic_finishes_running_metric<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Metrics,
+    {
+        // A task factory that unwinds must finish the running gauge and close its
+        // supervision node, even though the execution wrapper never received them.
+        runner.start(|context| async move {
+            let child = context.child("panicking_factory");
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                child.spawn(|_| -> std::future::Ready<()> { panic!("factory failed") })
+            }))
+            .err()
+            .expect("factory panic must reach its caller");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"factory failed"));
+
+            // The attempted spawn stays counted, but nothing is left running.
+            assert_eq!(count_running_tasks(&context, "panicking_factory"), 0);
+            let buffer = context.encode();
+            assert!(buffer.contains(
+                "runtime_tasks_spawned_total{name=\"panicking_factory\",kind=\"Task\",execution=\"Shared\"} 1"
+            ));
+        });
     }
 
     #[rstest]

@@ -18,7 +18,7 @@ use crate::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
         task::Label, validate_label,
     },
-    utils::{self, Panicker, signal::Stopper, supervision::Tree},
+    utils::{self, FactoryGuard, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -599,10 +599,14 @@ impl crate::Spawner for Context {
         let Some(task_guard) = executor.tasks.admit() else {
             return Handle::closed(metric);
         };
+
+        // The factory runs user code. If it unwinds, the guard finishes the
+        // running gauge and closes the supervision node the wrapper never received.
+        let guard = FactoryGuard::new(&parent, metric);
         let future = f(self);
         let (f, handle) = Handle::init(
             future,
-            metric,
+            guard.disarm(),
             executor.panicker.clone(),
             Arc::clone(&parent),
         );

@@ -133,7 +133,9 @@ use crate::{
         CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
         raw, task::Label, validate_label,
     },
-    utils::{self, MetricHandle, Panicked, Panicker, signal::Stopper, supervision::Tree},
+    utils::{
+        self, FactoryGuard, MetricHandle, Panicked, Panicker, signal::Stopper, supervision::Tree,
+    },
 };
 use commonware_macros::select;
 use commonware_parallel::Rayon;
@@ -509,23 +511,6 @@ impl TaskMetrics {
     }
 }
 
-/// Close supervision and finish task metrics if factory construction unwinds.
-struct FactoryGuard<'a> {
-    /// Supervision subtree closed if construction fails.
-    tree: &'a Arc<Tree>,
-    /// Metric transferred to the execution wrapper after construction succeeds.
-    metric: Option<MetricHandle>,
-}
-
-impl Drop for FactoryGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(metric) = &self.metric {
-            metric.finish();
-            self.tree.abort();
-        }
-    }
-}
-
 /// Registration and cleanup barrier for one-off workers.
 #[derive(Default)]
 struct Workers {
@@ -720,20 +705,16 @@ impl crate::Spawner for Context {
             None
         };
 
-        let mut guard = FactoryGuard {
-            tree: &parent,
-            metric: Some(metric),
-        };
-
         // User construction runs on the caller with no runtime borrow or lock.
         // A reserved one-off remains counted through construction and launch,
         // including when the factory unwinds or shutdown closes the registry.
+        let guard = FactoryGuard::new(&parent, metric);
         let future = f(self);
 
         // The execution wrapper takes over cleanup once the factory returns.
         let (future, handle) = Handle::init(
             future,
-            guard.metric.take().unwrap(),
+            guard.disarm(),
             shared.panicker.clone(),
             parent.clone(),
         );

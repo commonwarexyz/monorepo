@@ -90,6 +90,41 @@ impl Drop for TaskGuard {
     }
 }
 
+/// Closes supervision and finishes metrics if task construction unwinds.
+///
+/// A spawn holds this guard while running the user's task factory, then
+/// disarms it by transferring the metric to the execution wrapper.
+pub(crate) struct FactoryGuard<'a> {
+    /// Supervision node closed if construction fails.
+    tree: &'a Arc<Tree>,
+    /// Metric transferred to the execution wrapper after construction succeeds.
+    metric: Option<MetricHandle>,
+}
+
+impl<'a> FactoryGuard<'a> {
+    /// Arm the guard around a task factory call.
+    pub(crate) const fn new(tree: &'a Arc<Tree>, metric: MetricHandle) -> Self {
+        Self {
+            tree,
+            metric: Some(metric),
+        }
+    }
+
+    /// Hand the metric to the execution wrapper once construction has succeeded.
+    pub(crate) fn disarm(mut self) -> MetricHandle {
+        self.metric.take().expect("factory guard disarmed twice")
+    }
+}
+
+impl Drop for FactoryGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(metric) = &self.metric {
+            metric.finish();
+            self.tree.abort();
+        }
+    }
+}
+
 /// Normalizes receiver-backed and future-backed completions behind one abortable future.
 enum Completion<T>
 where

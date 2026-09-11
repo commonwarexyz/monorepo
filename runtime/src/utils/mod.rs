@@ -19,7 +19,7 @@ mod handle;
 #[commonware_macros::stability(ALPHA)]
 pub(crate) use handle::Panicked;
 pub use handle::{AbortOnDrop, Handle};
-pub(crate) use handle::{Aborter, MetricHandle, Panicker};
+pub(crate) use handle::{Aborter, FactoryGuard, MetricHandle, Panicker};
 
 mod cell;
 pub use cell::Cell as ContextCell;
