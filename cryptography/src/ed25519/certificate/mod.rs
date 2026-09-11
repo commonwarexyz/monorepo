@@ -1089,7 +1089,7 @@ mod tests {
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()]
             .into_iter()
-            .map(Bytes::copy_from_slice)
+            .map(Bytes::from_static)
             .collect();
         let mut certificates = Vec::new();
 
@@ -1135,7 +1135,7 @@ mod tests {
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice()]
             .into_iter()
-            .map(Bytes::copy_from_slice)
+            .map(Bytes::from_static)
             .collect();
         let mut certificates = Vec::new();
 

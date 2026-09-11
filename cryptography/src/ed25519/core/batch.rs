@@ -45,7 +45,6 @@ use alloc::{vec, vec::Vec};
 use bytes::Bytes;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::union_unique;
 use core::iter::once;
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as B,
@@ -69,11 +68,9 @@ fn gen_u128<R: Rng + CryptoRng>(mut rng: R) -> u128 {
 /// A batch verification context.
 #[derive(Default)]
 pub struct Verifier {
-    /// Signature data queued for verification, in insertion order. Payloads
-    /// are copied (instead of hashed at queue time) so the SHA-512 challenge
-    /// computation for every signature is deferred to [`Verifier::verify`],
-    /// where it runs under the caller's [`Strategy`] instead of serially at
-    /// queue time.
+    /// Signature data queued in insertion order. Payloads remain available for
+    /// SHA-512 challenge computation under the caller's [`Strategy`] during
+    /// [`Verifier::verify`].
     signatures: Vec<(VerificationKey, Bytes, Signature)>,
 }
 
@@ -85,26 +82,8 @@ impl Verifier {
         }
     }
 
-    /// Queue a `(key, signature)` pair for verification of `message` under
-    /// `namespace`.
-    pub fn queue(
-        &mut self,
-        vk: VerificationKey,
-        sig: Signature,
-        namespace: Option<&[u8]>,
-        message: &[u8],
-    ) {
-        let payload = namespace.map_or_else(
-            || message.to_vec(),
-            |namespace| union_unique(namespace, message),
-        );
-        self.queue_payload(vk, sig, payload.into());
-    }
-
-    /// Queue a `(key, signature)` pair for verification of an already framed
-    /// `payload`, as produced by [`union_unique`]. Lets callers share one
-    /// payload across many signatures instead of copying it per signature.
-    pub fn queue_payload(&mut self, vk: VerificationKey, sig: Signature, payload: Bytes) {
+    /// Queues a signature over the supplied payload without copying it.
+    pub fn queue(&mut self, vk: VerificationKey, sig: Signature, payload: Bytes) {
         self.signatures.push((vk, payload, sig));
     }
 
@@ -313,7 +292,7 @@ mod tests {
     ) -> bool {
         let mut verifier = Verifier::default();
         for (vk, sig, msg) in items {
-            verifier.queue(*vk, *sig, None, msg);
+            verifier.queue(*vk, *sig, Bytes::copy_from_slice(msg));
         }
         verifier.verify(test_rng(), strategy).is_ok()
     }
@@ -352,24 +331,5 @@ mod tests {
 
         items[5].2[0] ^= 1;
         assert!(!verify(&items));
-    }
-
-    #[test]
-    fn test_deferred_framing_matches_union_unique() {
-        // A signature over union_unique(ns, msg) must verify when queued as
-        // (ns, msg), pinning the deferred framing to union_unique's format.
-        let mut rng = test_rng();
-        let sk = SigningKey::new(&mut rng);
-        let namespace = b"namespace";
-        let msg = b"message";
-        let sig = sk.sign(&union_unique(namespace, msg));
-        let mut verifier = Verifier::default();
-        verifier.queue(sk.verification_key(), sig, Some(namespace), msg);
-        assert!(verifier.verify(test_rng(), &Sequential).is_ok());
-
-        // A different namespace must fail.
-        let mut verifier = Verifier::default();
-        verifier.queue(sk.verification_key(), sig, Some(b"other"), msg);
-        assert!(verifier.verify(test_rng(), &Sequential).is_err());
     }
 }

@@ -30,7 +30,7 @@ use ::core::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -421,7 +421,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 /// The encoded key is the batch pipeline's authoritative identity. Its optional decoded point is
 /// an individual-verification cache and is not part of the queued state.
 struct BatchItem {
-    message: Vec<u8>,
+    message: Bytes,
     public_key: core::VerifyingKeyBytes,
     signature: core::Signature,
 }
@@ -455,22 +455,46 @@ impl BatchVerifier {
         signature: &Signature,
     ) {
         self.items.push(BatchItem {
-            message: union_unique(namespace, message),
+            message: union_unique(namespace, message).into(),
             public_key: public_key.bytes,
             signature: core::Signature::from_bytes(signature.bytes),
         });
     }
 
-    /// Queues an unframed message for raw Ed25519 test-vector checks.
+    /// Queues signatures over the same namespaced message.
+    ///
+    /// The message is framed once and its storage is shared by all queued signatures.
+    /// The input message, keys, and signatures do not need to outlive this call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` is longer than `u32::MAX` bytes.
+    pub fn add_same_message<'a>(
+        &mut self,
+        namespace: &[u8],
+        message: &[u8],
+        signatures: impl IntoIterator<Item = (&'a VerifyingKey, &'a Signature)>,
+    ) {
+        let payload: Bytes = union_unique(namespace, message).into();
+        for (public_key, signature) in signatures {
+            self.items.push(BatchItem {
+                message: payload.clone(),
+                public_key: public_key.bytes,
+                signature: core::Signature::from_bytes(signature.bytes),
+            });
+        }
+    }
+
+    /// Queues a static unframed message for raw Ed25519 test-vector checks.
     #[cfg(test)]
     pub(crate) fn add_raw(
         &mut self,
-        message: &[u8],
+        message: &'static [u8],
         public_key: &VerifyingKey,
         signature: &Signature,
     ) {
         self.items.push(BatchItem {
-            message: message.to_vec(),
+            message: Bytes::from_static(message),
             public_key: public_key.bytes,
             signature: core::Signature::from_bytes(signature.bytes),
         });
@@ -491,7 +515,7 @@ impl BatchVerifier {
         let items = self
             .items
             .iter()
-            .map(|item| (&item.public_key, &item.signature, item.message.as_slice()));
+            .map(|item| (&item.public_key, &item.signature, item.message.as_ref()));
         core::verify_batch_bytes(rng, items, strategy)
     }
 }
@@ -499,20 +523,63 @@ impl BatchVerifier {
 #[cfg(test)]
 mod tests {
     use super::{BatchItem, BatchVerifier, SigningKey};
+    use bytes::Bytes;
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_utils::{test_rng, union_unique};
 
     #[test]
     fn batch_items_do_not_retain_decoded_key_cache() {
         assert_eq!(
             core::mem::size_of::<BatchItem>(),
-            core::mem::size_of::<(Vec<u8>, [u8; 32], super::core::Signature)>(),
+            core::mem::size_of::<(Bytes, [u8; 32], super::core::Signature)>(),
         );
     }
 
     #[test]
     fn empty_batch_is_invalid() {
         assert!(!BatchVerifier::new(0).verify(&mut test_rng(), &Sequential));
+
+        let mut batch = BatchVerifier::new(0);
+        batch.add_same_message(b"", b"", core::iter::empty());
+        assert!(batch.items.is_empty());
+    }
+
+    #[test]
+    fn batch_same_message_shares_owned_payload() {
+        const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SHARED_MESSAGE_TEST";
+
+        // Adding a shared group preserves earlier entries with a different payload.
+        let keys = [
+            SigningKey::from_seed([1; 32]),
+            SigningKey::from_seed([2; 32]),
+        ];
+        let mut message = b"shared message".to_vec();
+        let entries: Vec<_> = keys
+            .iter()
+            .map(|key| (key.verifying_key(), key.sign(NAMESPACE, &message)))
+            .collect();
+        let mut batch = BatchVerifier::new(3);
+        batch.add(
+            NAMESPACE,
+            b"other",
+            &entries[0].0,
+            &keys[0].sign(NAMESPACE, b"other"),
+        );
+        batch.add_same_message(
+            NAMESPACE,
+            &message,
+            entries.iter().map(|(key, signature)| (key, signature)),
+        );
+
+        // Shared entries retain the complete framed allocation independently of their inputs.
+        assert_eq!(batch.items.len(), 3);
+        let shared = &batch.items[1].message;
+        assert_eq!(shared.as_ref(), union_unique(NAMESPACE, &message));
+        assert_eq!(batch.items[2].message.as_ptr(), shared.as_ptr());
+        assert_eq!(batch.items[2].message.len(), shared.len());
+        message.fill(0);
+        drop(entries);
+        assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]
