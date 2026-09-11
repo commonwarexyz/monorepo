@@ -315,14 +315,20 @@ fn manual_compaction_rejects_changed_database() {
             .await
             .unwrap();
         let (db, _) = db.apply_batch(other).await.unwrap();
+        let root = db.root();
+        let floor = db.inactivity_floor_loc();
         assert!(matches!(
             first.compact(&db, ONE).await,
             Err(Error::StaleBatch)
         ));
+        assert_eq!(db.root(), root);
+        assert_eq!(db.inactivity_floor_loc(), floor);
         assert!(matches!(
             second.merkleize(&db, None).await,
             Err(Error::StaleBatch)
         ));
+        assert_eq!(db.root(), root);
+        assert_eq!(db.inactivity_floor_loc(), floor);
     });
 }
 
@@ -356,13 +362,19 @@ fn manual_compaction_rejects_applied_parent() {
             .unwrap();
         let (second, _) = second.compact(&db, ONE).await.unwrap();
         let (db, _) = db.apply_batch(parent).await.unwrap();
+        let root = db.root();
+        let floor = db.inactivity_floor_loc();
         assert!(matches!(
             first.compact(&db, ONE).await,
             Err(Error::StaleBatch)
         ));
+        assert_eq!(db.root(), root);
+        assert_eq!(db.inactivity_floor_loc(), floor);
         assert!(matches!(
             second.merkleize(&db, None).await,
             Err(Error::StaleBatch)
         ));
+        assert_eq!(db.root(), root);
+        assert_eq!(db.inactivity_floor_loc(), floor);
     });
 }

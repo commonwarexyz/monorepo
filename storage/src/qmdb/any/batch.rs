@@ -1092,7 +1092,7 @@ where
         let reserve = total_steps
             .min(total_active_keys as u64)
             .min(round_tip - scan_start) as usize;
-        // Committed candidates are active keys and the last commit. Every uncommitted
+        // Applied candidates are active keys and the last commit. Every pending batch
         // operation may be a candidate, even when the batch deletes most keys.
         let candidate_bound = (db.active_keys as u64)
             .saturating_add(1)
