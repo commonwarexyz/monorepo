@@ -196,7 +196,7 @@ mod tests {
         },
     };
     use commonware_macros::test_group;
-    use commonware_utils::sync::Mutex;
+    use commonware_utils::{iter::zip_eq, sync::Mutex};
     use rstest::rstest;
     use std::{net::SocketAddr, sync::Arc};
 
@@ -306,7 +306,7 @@ mod tests {
 
         // Step 2: Run the same ordered exchange on each network so audit equality does
         // not depend on how the runtime schedules separate client and server tasks.
-        for (network, mut listener) in networks.iter().zip(listeners) {
+        for (network, mut listener) in zip_eq(&networks, listeners) {
             let (mut client_sink, mut client_stream) = network.dial(listener_addr).await.unwrap();
             let (_, mut server_sink, mut server_stream) = listener.accept().await.unwrap();
 

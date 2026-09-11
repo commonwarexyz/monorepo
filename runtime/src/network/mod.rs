@@ -59,7 +59,7 @@ mod tests {
 
         // Spawn server. Returning the socket halves keeps them alive until both
         // join handles are awaited below.
-        let server = context.child("task").spawn(move |_| async move {
+        let server = context.child("server").spawn(move |_| async move {
             // Server accepts a client, verifies the payload, and sends a reply.
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
             let received = stream
@@ -76,7 +76,7 @@ mod tests {
         // Spawn client, connect to server, send and receive data over connection.
         // Returning the socket halves keeps them alive until both join handles
         // are awaited below.
-        let client = context.child("task").spawn(move |_| async move {
+        let client = context.child("client").spawn(move |_| async move {
             // Client connects to the server, sends a payload, and reads the reply.
             // Connect to the server
             let (mut sink, mut stream) = network
@@ -126,7 +126,7 @@ mod tests {
 
         // Spawn a server and read exactly the logical message size. The receive
         // side should observe the same byte stream regardless of send chunking.
-        let server = context.child("task").spawn(move |_| async move {
+        let server = context.child("server").spawn(move |_| async move {
             // Server receives the vectored payload as one logical byte stream.
             let (_, sink, mut stream) = listener.accept().await.expect("Failed to accept");
             let received = stream
@@ -138,7 +138,7 @@ mod tests {
         });
 
         // Spawn client
-        let client = context.child("task").spawn(move |_| async move {
+        let client = context.child("client").spawn(move |_| async move {
             // Client connects and sends the pre-built vectored message.
             // Connect to the server
             let (mut sink, stream) = network
@@ -177,25 +177,30 @@ mod tests {
 
         // Server task
         let server_barrier = barrier.clone();
-        let server = context.child("task").spawn(move |context| async move {
+        let server = context.child("server").spawn(move |context| async move {
             // Handle multiple clients
             let mut set = FuturesUnordered::new();
-            for _ in 0..NUM_CLIENTS {
+            for client in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
                 let barrier = server_barrier.clone();
-                set.push(context.child("connection").spawn(move |_| async move {
-                    let received = stream
-                        .recv(CLIENT_SEND_DATA.len())
-                        .await
-                        .expect("Failed to receive");
-                    assert_eq!(received.coalesce(), CLIENT_SEND_DATA);
-                    sink.send(IoBuf::from(SERVER_SEND_DATA))
-                        .await
-                        .expect("Failed to send");
+                set.push(
+                    context
+                        .child("connection")
+                        .with_attribute("client", client)
+                        .spawn(move |_| async move {
+                            let received = stream
+                                .recv(CLIENT_SEND_DATA.len())
+                                .await
+                                .expect("Failed to receive");
+                            assert_eq!(received.coalesce(), CLIENT_SEND_DATA);
+                            sink.send(IoBuf::from(SERVER_SEND_DATA))
+                                .await
+                                .expect("Failed to send");
 
-                    // Hold the connection open until every peer has finished.
-                    barrier.wait().await;
-                }));
+                            // Hold the connection open until every peer has finished.
+                            barrier.wait().await;
+                        }),
+                );
             }
             while let Some(result) = set.next().await {
                 result.expect("Server connection task failed");
@@ -204,33 +209,38 @@ mod tests {
 
         // Start multiple clients
         let mut set = FuturesUnordered::new();
-        for _ in 0..NUM_CLIENTS {
+        for client in 0..NUM_CLIENTS {
             let network = network.clone();
             let barrier = barrier.clone();
-            set.push(context.child("connection").spawn(move |_| async move {
-                // Connect to the server
-                let (mut sink, mut stream) = network
-                    .dial(listener_addr)
-                    .await
-                    .expect("Failed to dial server");
+            set.push(
+                context
+                    .child("client")
+                    .with_attribute("client", client)
+                    .spawn(move |_| async move {
+                        // Connect to the server
+                        let (mut sink, mut stream) = network
+                            .dial(listener_addr)
+                            .await
+                            .expect("Failed to dial server");
 
-                // Send a message to the server
-                sink.send(IoBuf::from(CLIENT_SEND_DATA))
-                    .await
-                    .expect("Failed to send data");
+                        // Send a message to the server
+                        sink.send(IoBuf::from(CLIENT_SEND_DATA))
+                            .await
+                            .expect("Failed to send data");
 
-                // Receive a message from the server
-                let received = stream
-                    .recv(SERVER_SEND_DATA.len())
-                    .await
-                    .expect("Failed to receive data");
+                        // Receive a message from the server
+                        let received = stream
+                            .recv(SERVER_SEND_DATA.len())
+                            .await
+                            .expect("Failed to receive data");
 
-                // Verify the received data
-                assert_eq!(received.coalesce(), SERVER_SEND_DATA);
+                        // Verify the received data
+                        assert_eq!(received.coalesce(), SERVER_SEND_DATA);
 
-                // Hold the connection open until every peer has finished.
-                barrier.wait().await;
-            }));
+                        // Hold the connection open until every peer has finished.
+                        barrier.wait().await;
+                    }),
+            );
         }
 
         // Wait for all servers and clients to complete.
@@ -257,7 +267,7 @@ mod tests {
 
         // Spawn server. Returning the socket halves keeps them alive until both
         // join handles are awaited below.
-        let server = context.child("task").spawn(move |_| async move {
+        let server = context.child("server").spawn(move |_| async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             // Receive and echo large data in chunks
@@ -273,7 +283,7 @@ mod tests {
 
         // Client task. Returning the socket halves keeps them alive until both
         // join handles are awaited below.
-        let client = context.child("task").spawn(move |_| async move {
+        let client = context.child("client").spawn(move |_| async move {
             // Connect to the server
             let (mut sink, mut stream) = network
                 .dial(listener_addr)
@@ -336,14 +346,14 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Server sends data
-        let server = context.child("task").spawn(move |_| async move {
+        let server = context.child("server").spawn(move |_| async move {
             let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
             sink.send(IoBuf::from(DATA)).await.expect("Failed to send");
             (sink, stream)
         });
 
         // Client receives and tests peek
-        let client = context.child("task").spawn(move |_| async move {
+        let client = context.child("client").spawn(move |_| async move {
             // Connect to the server
             let (sink, mut stream) = network
                 .dial(listener_addr)
@@ -396,7 +406,7 @@ mod tests {
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
-        let server = context.child("task").spawn(move |context| async move {
+        let server = context.child("server").spawn(move |context| async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             // Cancel a recv mid-flight
@@ -418,7 +428,7 @@ mod tests {
             (sink, stream)
         });
 
-        let client = context.child("task").spawn(move |_| async move {
+        let client = context.child("client").spawn(move |_| async move {
             let (sink, mut stream) = network
                 .dial(listener_addr)
                 .await
@@ -447,7 +457,7 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
         let (canceled_sender, canceled_receiver) = oneshot::channel();
 
-        let server = context.child("task").spawn(move |_| async move {
+        let server = context.child("server").spawn(move |_| async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             // Poll multiple sends until backpressure makes one pending, then
@@ -481,7 +491,7 @@ mod tests {
             (sink, stream)
         });
 
-        let client = context.child("task").spawn(move |_| async move {
+        let client = context.child("client").spawn(move |_| async move {
             let (mut sink, stream) = network
                 .dial(listener_addr)
                 .await
@@ -514,7 +524,7 @@ mod tests {
 
         // Server triggers a recv error after a partial read, then verifies the
         // stream is poisoned while the sink remains usable.
-        let server = context.child("task").spawn(move |_| async move {
+        let server = context.child("server").spawn(move |_| async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
             let err = stream
@@ -533,7 +543,7 @@ mod tests {
 
         // Client sends a partial payload, half-closes its write direction, and
         // still receives the server's response on the read half.
-        let client = context.child("task").spawn(move |_| async move {
+        let client = context.child("client").spawn(move |_| async move {
             let (mut sink, mut stream) = network
                 .dial(listener_addr)
                 .await
@@ -572,7 +582,7 @@ mod tests {
 
         // Server sends a response, waits for the client to buffer it, then
         // closes the connection so the client's next send eventually fails.
-        let server = context.child("task").spawn(move |_| async move {
+        let server = context.child("server").spawn(move |_| async move {
             let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
 
             sink.send(IoBuf::from(DATA))
@@ -593,7 +603,7 @@ mod tests {
 
         // Client confirms the read half remains usable after the server closes,
         // then verifies the sink is poisoned after the first send error.
-        let client = context.child("task").spawn(move |context| async move {
+        let client = context.child("client").spawn(move |context| async move {
             let (mut sink, mut stream) = network
                 .dial(listener_addr)
                 .await
@@ -720,21 +730,26 @@ mod tests {
 
         // Spawn a server task that echoes messages from many clients.
         let server_barrier = barrier.clone();
-        let server = context.child("task").spawn(move |context| async move {
+        let server = context.child("server").spawn(move |context| async move {
             let mut set = FuturesUnordered::new();
-            for _ in 0..NUM_CLIENTS {
+            for client in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                 let barrier = server_barrier.clone();
-                set.push(context.child("connection").spawn(move |_| async move {
-                    // Echo every message back to the connected client.
-                    for _ in 0..NUM_MESSAGES {
-                        let received = stream.recv(MESSAGE_SIZE).await.unwrap();
-                        sink.send(received).await.unwrap();
-                    }
+                set.push(
+                    context
+                        .child("connection")
+                        .with_attribute("client", client)
+                        .spawn(move |_| async move {
+                            // Echo every message back to the connected client.
+                            for _ in 0..NUM_MESSAGES {
+                                let received = stream.recv(MESSAGE_SIZE).await.unwrap();
+                                sink.send(received).await.unwrap();
+                            }
 
-                    // Hold the connection open until every peer has finished.
-                    barrier.wait().await;
-                }));
+                            // Hold the connection open until every peer has finished.
+                            barrier.wait().await;
+                        }),
+                );
             }
             while let Some(result) = set.next().await {
                 result.unwrap();
@@ -743,22 +758,27 @@ mod tests {
 
         // Spawn all clients.
         let mut set = FuturesUnordered::new();
-        for _ in 0..NUM_CLIENTS {
+        for client in 0..NUM_CLIENTS {
             let network = network.clone();
             let barrier = barrier.clone();
-            set.push(context.child("connection").spawn(move |_| async move {
-                // Dial the server and repeatedly verify the echoed payload.
-                let (mut sink, mut stream) = network.dial(addr).await.unwrap();
-                let payload = vec![42u8; MESSAGE_SIZE];
-                for _ in 0..NUM_MESSAGES {
-                    sink.send(payload.clone()).await.unwrap();
-                    let received = stream.recv(MESSAGE_SIZE).await.unwrap();
-                    assert_eq!(received.coalesce(), &payload[..]);
-                }
+            set.push(
+                context
+                    .child("client")
+                    .with_attribute("client", client)
+                    .spawn(move |_| async move {
+                        // Dial the server and repeatedly verify the echoed payload.
+                        let (mut sink, mut stream) = network.dial(addr).await.unwrap();
+                        let payload = vec![42u8; MESSAGE_SIZE];
+                        for _ in 0..NUM_MESSAGES {
+                            sink.send(payload.clone()).await.unwrap();
+                            let received = stream.recv(MESSAGE_SIZE).await.unwrap();
+                            assert_eq!(received.coalesce(), &payload[..]);
+                        }
 
-                // Hold the connection open until every peer has finished.
-                barrier.wait().await;
-            }));
+                        // Hold the connection open until every peer has finished.
+                        barrier.wait().await;
+                    }),
+            );
         }
 
         // Wait for all servers and clients to complete.
