@@ -552,12 +552,14 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         (journal, _) = journal.prune(*prune_pos).await?;
         let journal = (*journal).finish(*journal_size).await?;
 
+        // The journal was recovered without a bound, so its recovery watermark may still lag
+        // its size. Leave it dirty so the first sync persists the watermark.
         Ok(Self {
             mem: Arc::new(mem),
             pruned_to_pos: prune_pos,
             journal,
             metadata,
-            journal_dirty: false,
+            journal_dirty: true,
             strategy: cfg.config.strategy,
         })
     }
@@ -1274,6 +1276,85 @@ mod tests {
                 error,
                 Error::Journal(JError::Metadata(crate::metadata::Error::Runtime(_)))
             ));
+        });
+    }
+
+    /// Build a tree whose nodes are all durable while the journal's recovery watermark still
+    /// lags. `start_sync` advances the watermark with the durable size sampled before its data
+    /// sync completes, so a delayed first sync leaves the watermark at 0. Returns the node count.
+    async fn seed_lagging_watermark(context: &deterministic::Context) -> u64 {
+        let pending = PendingSyncs::default();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let delayed = DelayedSyncContext {
+            inner: context.child("delayed"),
+            pending: pending.clone(),
+        };
+        let merkle = drive_pending_syncs(
+            &pending,
+            Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                delayed.child("seed"),
+                &hasher,
+                test_config(context),
+            ),
+        )
+        .await
+        .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let merkle = merkle.apply_batch(&batch).unwrap();
+        let size = *merkle.size();
+
+        // Flush first so the appends' own blob syncs complete, then start a sync whose data
+        // fsync is still in flight when the watermark samples the durable size.
+        let merkle = drive_pending_syncs(&pending, merkle.flush()).await.unwrap();
+        let (merkle, handle) = merkle.start_sync().await.unwrap();
+        drive_pending_syncs(&pending, handle).await.unwrap();
+        drop(merkle);
+
+        let lagging = persisted_watermark(context).await.unwrap();
+        assert!(
+            lagging < size,
+            "watermark {lagging} covers all {size} nodes"
+        );
+        size
+    }
+
+    /// Read the recovery watermark persisted for the test journal partition.
+    async fn persisted_watermark(context: &deterministic::Context) -> Option<u64> {
+        Journal::<_, Digest>::persisted_watermark(
+            context.child("probe"),
+            &test_config(context).journal_partition,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test_traced]
+    fn test_full_sync_after_init_sync_persists_watermark() {
+        deterministic::Runner::default().start(|context| async move {
+            let size = seed_lagging_watermark(&context).await;
+
+            // A sync target the journal already covers reuses every node, so a sync with
+            // nothing new to flush must still persist the watermark.
+            let leaves = Location::<mmr::Family>::try_from(Position::new(size)).unwrap();
+            let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init_sync(
+                context.child("sync"),
+                SyncConfig {
+                    config: test_config(&context),
+                    range: non_empty_range!(Location::new(0), leaves),
+                    pinned_nodes: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(*merkle.size(), size);
+            let merkle = merkle.sync().await.unwrap();
+            drop(merkle);
+
+            assert_eq!(persisted_watermark(&context).await, Some(size));
         });
     }
 

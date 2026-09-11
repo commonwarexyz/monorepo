@@ -2046,6 +2046,16 @@ mod tests {
         }
     }
 
+    impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
+        /// Read the recovery watermark persisted for `partition` without opening the journal.
+        pub(crate) async fn persisted_watermark(
+            context: E,
+            partition: &str,
+        ) -> Result<Option<u64>, Error> {
+            Ok(Checkpoint::open(context, partition).await?.watermark())
+        }
+    }
+
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
 

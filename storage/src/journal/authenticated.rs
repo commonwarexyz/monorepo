@@ -2390,6 +2390,51 @@ mod tests {
         }
     }
 
+    /// Reopening recovers the Merkle journal bounded, so publication persists its recovery
+    /// watermark even when no node is flushed.
+    #[test_traced]
+    fn test_reopen_persists_merkle_watermark() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_journal(&context, "first", "watermark", &pending);
+            let mut journal = drive_pending_syncs(&pending, open).await.unwrap();
+            for i in 0..5u8 {
+                (journal, _) = journal
+                    .append(&create_operation::<mmr::Family>(i))
+                    .await
+                    .unwrap();
+            }
+            (journal, _) = journal
+                .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
+                .await
+                .unwrap();
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            let size = *journal.merkle.size();
+            drop(journal);
+            let before = ContiguousJournal::<_, Digest>::persisted_watermark(
+                context.child("p0"),
+                "mmr-journal-watermark",
+            )
+            .await
+            .unwrap();
+            assert_eq!(before, Some(0));
+
+            let journal =
+                create_empty_journal::<mmr::Family>(context.child("second"), "watermark").await;
+            assert_eq!(*journal.merkle.size(), size);
+            drop(journal);
+            let after = ContiguousJournal::<_, Digest>::persisted_watermark(
+                context.child("p1"),
+                "mmr-journal-watermark",
+            )
+            .await
+            .unwrap();
+            assert_eq!(after, Some(size));
+        });
+    }
+
     #[test_traced("INFO")]
     fn test_start_sync_durability_mmr() {
         let executor = deterministic::Runner::default();
