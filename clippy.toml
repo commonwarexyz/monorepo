@@ -33,4 +33,6 @@ disallowed-macros = [
 
 disallowed-methods = [
     { path = "commonware_p2p::Blocker::block", reason = "use commonware_p2p::block! instead" },
+    { path = "futures::future::try_join_all", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures" },
+    { path = "futures_util::future::try_join_all", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures" },
 ]

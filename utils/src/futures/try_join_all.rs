@@ -85,6 +85,7 @@ where
     let (lower, upper) = futures.size_hint();
     // Upstream's small collector handles errors promptly without per-future allocations.
     if let Some(upper) = upper.filter(|&upper| upper <= 30) {
+        #[allow(clippy::disallowed_methods)]
         return Either::Left(futures::future::try_join_all(Bounded {
             inner: futures,
             lower,
