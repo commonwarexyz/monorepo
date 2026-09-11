@@ -287,6 +287,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             return false;
         }
 
+        // Malformed signatures can skip per-signer group operations.
+        let Some(signature) = certificate.signature.get() else {
+            return false;
+        };
+
         // Aggregate the public keys.
         let mut agg_public = aggregate::PublicKey::<V>::zero();
         for signer in certificate.signers.iter() {
@@ -298,9 +303,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         // Verify the aggregate signature.
-        let Some(signature) = certificate.signature.get() else {
-            return false;
-        };
         aggregate::verify_same_message::<V>(
             &agg_public,
             subject.namespace(&self.namespace),
