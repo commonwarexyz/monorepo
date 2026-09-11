@@ -23,7 +23,7 @@ aws = [
 	"clap",
 	"commonware-cryptography",
 	"commonware-macros/std",
-	"commonware-utils",
+	"commonware-utils/std",
 	"futures",
 	"reqwest",
 	"serde_yaml",
