@@ -36,7 +36,7 @@
 //!         init_buffer: NZUsize!(1 << 21),
 //!     };
 //!     let db =
-//!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config)
+//!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config, None)
 //!             .await
 //!             .unwrap();
 //!
@@ -82,9 +82,12 @@
 use crate::{
     Context,
     index::{Unordered as _, unordered::Index},
-    journal::contiguous::{
-        Contiguous, Mutable as _,
-        variable::{Config as JournalConfig, Journal},
+    journal::{
+        authenticated::{Backing as _, BackingRecovery as _},
+        contiguous::{
+            Contiguous,
+            variable::{Config as JournalConfig, Journal},
+        },
     },
     merkle::mmr::Location,
     qmdb::{
@@ -367,16 +370,38 @@ where
     }
 
     /// Initializes a new [Db] with the given configuration.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    #[boxed]
     pub async fn init(
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
+        max_size: Option<Location>,
     ) -> Result<Self, Error> {
-        let log =
-            Journal::<E, Operation<crate::mmr::Family, K, V>>::init(context.child("log"), cfg.log)
-                .await?;
-
-        // Rewind log to remove uncommitted operations.
-        let (mut log, size) = log.rewind_to(|op| op.is_commit()).await?;
+        crate::qmdb::validate_initialization_bound(max_size)?;
+        let pending = Journal::<E, Operation<crate::mmr::Family, K, V>>::recover(
+            context.child("log"),
+            cfg.log,
+            max_size.map(|size| *size),
+        )
+        .await?;
+        let size = pending
+            .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
+            .await?;
+        let bounds = pending.bounds();
+        let commit = if size == 0 {
+            None
+        } else {
+            Some(pending.read(size - 1).await?)
+        };
+        crate::qmdb::validate_initialization_commit(
+            bounds.start,
+            size,
+            bounds == (0..0),
+            commit.as_ref(),
+            true,
+        )?;
+        let mut log = pending.finish(size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
             (log, _) = log
@@ -571,8 +596,10 @@ mod test {
     /// The type of the store used in tests.
     type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
 
-    async fn create_test_store(context: deterministic::Context) -> TestStore {
-        let cfg = Config {
+    fn test_config(
+        context: &deterministic::Context,
+    ) -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg> {
+        Config {
             log: JournalConfig {
                 partition: "journal".into(),
                 write_buffer: NZUsize!(64 * 1024),
@@ -580,13 +607,17 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-        };
-        TestStore::init(context, cfg).await.unwrap()
+        }
+    }
+
+    async fn create_test_store(context: deterministic::Context) -> TestStore {
+        let cfg = test_config(&context);
+        TestStore::init(context, cfg, None).await.unwrap()
     }
 
     async fn apply_entries(
@@ -594,6 +625,150 @@ mod test {
         iter: impl IntoIterator<Item = (Digest, Option<Vec<u8>>)> + Send,
     ) -> (TestStore, Range<Location>) {
         db.apply_batch(iter.into_iter().collect()).await.unwrap()
+    }
+
+    #[test_traced]
+    fn test_store_bounded_initialization_commit_selection() {
+        for cap_case in 0..4 {
+            deterministic::Runner::default().start(move |context| async move {
+                let cfg = test_config(&context);
+                let db = TestStore::init(context.child("seed"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+                let a = Blake3::hash(&[b"a"]);
+                let b = Blake3::hash(&[b"b"]);
+                let c = Blake3::hash(&[b"c"]);
+                let batch = db
+                    .new_batch()
+                    .update(a, vec![1])
+                    .update(b, vec![2])
+                    .finalize(Some(vec![10]));
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let first_size = db.size();
+                let batch = db
+                    .new_batch()
+                    .update(a, vec![3])
+                    .delete(b)
+                    .update(c, vec![4])
+                    .finalize(Some(vec![20]));
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let latest_size = db.size();
+                _ = db.sync().await.unwrap();
+                let cap = match cap_case {
+                    0 => first_size,
+                    1 => first_size + 1,
+                    2 => latest_size,
+                    _ => Location::new(u64::MAX),
+                };
+                assert!(first_size + 1 < latest_size);
+                let old = cap_case < 2;
+                let expected_size = if old { first_size } else { latest_size };
+                let db = TestStore::init(context.child("cap"), cfg.clone(), Some(cap))
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), expected_size);
+                assert_eq!(
+                    db.get_metadata().await.unwrap(),
+                    Some(vec![if old { 10 } else { 20 }])
+                );
+                assert_eq!(
+                    db.get(&a).await.unwrap(),
+                    Some(vec![if old { 1 } else { 3 }])
+                );
+                assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
+                assert_eq!(db.get(&c).await.unwrap(), (!old).then(|| vec![4]));
+                drop(db);
+                let db = TestStore::init(context.child("reopen"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), expected_size);
+                assert_eq!(
+                    db.get(&a).await.unwrap(),
+                    Some(vec![if old { 1 } else { 3 }])
+                );
+                assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
+                assert_eq!(db.get(&c).await.unwrap(), (!old).then(|| vec![4]));
+                let batch = db
+                    .new_batch()
+                    .update(a, vec![5])
+                    .update(c, vec![6])
+                    .finalize(None);
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let appended_size = db.size();
+                assert!(appended_size > expected_size);
+                drop(db.commit().await.unwrap());
+                let db = TestStore::init(context.child("after_append"), cfg, None)
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), appended_size);
+                assert_eq!(db.get(&a).await.unwrap(), Some(vec![5]));
+                assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
+                assert_eq!(db.get(&c).await.unwrap(), Some(vec![6]));
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_store_bounded_initialization_rejects_zero() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config(&context);
+            let db = TestStore::init(context.child("seed"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let key = Blake3::hash(&[b"key"]);
+            let (db, _) = apply_entries(db, [(key, Some(vec![1]))]).await;
+            let size = db.size();
+            _ = db.sync().await.unwrap();
+            assert!(matches!(
+                TestStore::init(context.child("zero"), cfg.clone(), Some(Location::new(0))).await,
+                Err(Error::InvalidInitializationBound)
+            ));
+            let db = TestStore::init(context.child("unchanged"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!(db.size(), size);
+            assert_eq!(db.get(&key).await.unwrap(), Some(vec![1]));
+        });
+    }
+
+    #[test_traced]
+    fn test_store_bounded_initialization_rejects_pruned_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            const KEYS: u64 = 64;
+            let cfg = test_config(&context);
+            let mut db = TestStore::init(context.child("seed"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
+            for value in [1, 2] {
+                (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
+            }
+            let target = db.size();
+            let target_floor = db.inactivity_floor_loc();
+            let prune_loc = target_floor + KEYS / 2;
+            assert!(prune_loc < target);
+            let mut value = 2;
+            while db.inactivity_floor_loc() < prune_loc {
+                value += 1;
+                assert!(value <= 10);
+                (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
+            }
+            let db = db.prune(prune_loc).await.unwrap();
+            let bounds = db.bounds();
+            assert!(bounds.start > *target_floor && bounds.start < *target);
+            _ = db.sync().await.unwrap();
+            assert!(matches!(
+                TestStore::init(context.child("cap"), cfg.clone(), Some(target)).await,
+                Err(Error::HistoricalFloorPruned(size)) if size == target
+            ));
+            let db = TestStore::init(context.child("unchanged"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!(db.bounds(), bounds);
+            for i in 0..KEYS {
+                assert_eq!(db.get(&key(i)).await.unwrap(), Some(vec![value]));
+            }
+        });
     }
 
     /// A store over a delayed-sync storage backend.
@@ -631,6 +806,7 @@ mod test {
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -1379,6 +1555,7 @@ mod test {
             let db = VecKeyStore::init(
                 context.child("store").with_attribute("index", 0),
                 cfg.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -1396,9 +1573,10 @@ mod test {
             drop(db);
 
             // Reopen the store and verify both committed values.
-            let db = VecKeyStore::init(context.child("store").with_attribute("index", 1), cfg)
-                .await
-                .unwrap();
+            let db =
+                VecKeyStore::init(context.child("store").with_attribute("index", 1), cfg, None)
+                    .await
+                    .unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
             db.destroy().await.unwrap();

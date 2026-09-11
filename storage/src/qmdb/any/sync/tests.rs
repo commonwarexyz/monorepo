@@ -2231,7 +2231,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2293,7 +2293,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::ordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2355,7 +2355,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2417,7 +2417,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::unordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2486,14 +2486,14 @@ mod harnesses {
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
             let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2571,14 +2571,14 @@ mod harnesses {
             let seed = ctx.next_u64();
             let config =
                 crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx, ());
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::ordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2655,14 +2655,14 @@ mod harnesses {
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
             let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2739,14 +2739,14 @@ mod harnesses {
             let seed = ctx.next_u64();
             let config =
                 crate::qmdb::any::unordered::variable::test::create_test_config(seed, &ctx);
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::unordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(

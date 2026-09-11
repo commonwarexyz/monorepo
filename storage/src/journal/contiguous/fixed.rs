@@ -102,9 +102,8 @@
 //!
 //! - The watermark only takes values the barrier has held (never an in-flight size).
 //! - The barrier advances only on an observed sync success.
-//! - Operations that move blob state backward (truncate, clear) durably lower the watermark
-//!   before touching blob state (draining any in-flight watermark write that could exceed
-//!   the surviving data), then lower the barrier.
+//! - Initialization recovery persists a lower watermark before discarding a suffix. Live
+//!   handles never move their retained end backward.
 //!
 //! # Consistency
 //!
@@ -1295,44 +1294,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok(self.bounds.end - 1)
     }
 
-    /// See [Journal::rewind].
-    pub(crate) async fn rewind(mut self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
-        match size.cmp(&self.bounds.end) {
-            std::cmp::Ordering::Greater => return Err(Error::InvalidRewind(size)),
-            std::cmp::Ordering::Equal => return Ok(self),
-            std::cmp::Ordering::Less => {}
-        }
-
-        if size < self.bounds.start {
-            return Err(Error::ItemPruned(size));
-        }
-
-        let blob = super::position_to_blob(size, self.items_per_blob.get());
-        let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
-        let byte_offset = Self::items_to_bytes(pos_in_blob)?;
-
-        // Persist a lowered recovery watermark before blob state moves backward.
-        if self.checkpoint.lower_watermark(size) {
-            self.checkpoint = self.checkpoint.sync().await?;
-        }
-
-        if blob == self.blobs.tail_blob_index() {
-            self.blobs.rewind_tail(byte_offset).await?;
-        } else {
-            self.blobs.rewind_into_sealed(blob, byte_offset).await?;
-        }
-
-        self.bounds.end = size;
-        self.barrier.truncate(size);
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
-
-        Ok(self)
-    }
-
     /// Return the location before which all items have been pruned.
     pub const fn pruning_boundary(&self) -> u64 {
         self.bounds.start
@@ -1398,6 +1359,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         new_size: u64,
     ) -> Result<Box<Self>, Error> {
+        if new_size < self.bounds.end {
+            return Err(Error::ItemOutOfRange(new_size));
+        }
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
@@ -1441,6 +1405,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
+        }
+        if new_size < self.bounds.end {
+            return Err(Error::ItemOutOfRange(new_size));
         }
         self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
         Ok(self)
@@ -1554,8 +1521,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// If the journal later rewinds or truncates into the returned reader's range, subsequent reads
-    /// from that range may observe unspecified contents.
+    /// Close storage-backed snapshots before reopening these partitions for bounded initialization.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
@@ -1603,25 +1569,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ) -> Result<(Self, u64), Error> {
         let position = self.0.append_prepared(prepared).await?;
         Ok((self, position))
-    }
-
-    /// Rewind the journal to `size` items, discarding items from the end.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidRewind] if `size` is larger than current size.
-    /// Returns [Error::ItemPruned] if `size` is smaller than the pruning boundary.
-    ///
-    /// # Warnings
-    ///
-    /// * This operation is not guaranteed to survive restarts until `commit` or `sync` is called.
-    /// * This operation is not atomic. Its on-disk updates are ordered (blobs removed
-    ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
-    /// * Readers returned by [`snapshot`](Self::snapshot) may observe unspecified contents if this
-    ///   rewind truncates into their range.
-    pub async fn rewind(mut self, size: u64) -> Result<Self, Error> {
-        self.0 = self.0.rewind(size).await?;
-        Ok(self)
     }
 
     /// Return the location before which all items have been pruned.
@@ -1994,10 +1941,6 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
-    }
-
-    async fn rewind(self, size: u64) -> Result<Self, Error> {
-        Self::rewind(self, size).await
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
@@ -2578,50 +2521,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_rewind_drains_parked_watermark_advance() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            let cfg = test_cfg(&context, NZU64!(100));
-            let make = |pending: PendingSyncs| {
-                Inner::<_, u64>::init(
-                    DelayedSyncContext {
-                        inner: context.child("journal"),
-                        pending,
-                    },
-                    cfg.clone(),
-                )
-            };
-            let mut journal = Box::new(make(pending.clone()).await.unwrap());
-
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (mut journal, h1) = journal.start_sync().await.unwrap();
-            release_pending_syncs(&pending);
-            h1.await.unwrap();
-
-            // This parks the metadata sync advancing the watermark to 3.
-            journal.append(&4).await.unwrap();
-            let (journal, h2) = journal.start_sync().await.unwrap();
-            assert_eq!(journal.recovery_watermark(), 3);
-
-            // Rewind below the in-flight advance: the lowered value must win on reopen.
-            let journal = drive_pending_syncs(&pending, journal.rewind(2))
-                .await
-                .unwrap();
-            assert_eq!(journal.recovery_watermark(), 2);
-            drop(h2);
-
-            // Reopen: the lowered watermark held, and no corruption is reported.
-            pending.unblock();
-            drop(journal);
-            let journal = make(pending.clone()).await.unwrap();
-            assert_eq!(journal.recovery_watermark(), 2);
-            assert_eq!(journal.bounds(), 0..2);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_start_sync_watermark_advance_inline_failure() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2767,79 +2666,6 @@ mod tests {
             // Truncate discards the proof for position 2. While re-appended data is still syncing,
             // the next call's advance must not raise the watermark past the truncate point.
             let mut journal = drive_pending_syncs(&pending, journal.test_truncate(2))
-                .await
-                .unwrap();
-            journal.append(&9).await.unwrap();
-            let (journal, handle) = journal.start_sync().await.unwrap();
-            assert_eq!(journal.recovery_watermark(), 2);
-
-            pending.unblock();
-            handle.await.unwrap();
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_rewind_watermark_lowering_failure_keeps_blobs() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let faults = WriteFaults::default();
-            let cfg = test_cfg(&context, NZU64!(100));
-            let make = |faults: WriteFaults| {
-                Inner::<_, u64>::init(
-                    WriteFaultContext {
-                        inner: context.child("journal"),
-                        faults,
-                    },
-                    cfg.clone(),
-                )
-            };
-            let mut journal = Box::new(make(faults.clone()).await.unwrap());
-            journal
-                .append_many(Many::Flat(&[1, 2, 3, 4]))
-                .await
-                .unwrap();
-            let journal = journal.sync().await.unwrap();
-            assert_eq!(journal.recovery_watermark(), 4);
-
-            // Rewind must durably lower the watermark before touching blob state: when the
-            // lowering fails, the rewind fails with the blobs intact.
-            faults.arm();
-            assert!(journal.rewind(2).await.is_err());
-            faults.disarm();
-
-            let journal = make(faults).await.unwrap();
-            assert_eq!(journal.recovery_watermark(), 4);
-            assert_eq!(journal.bounds(), 0..4);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_rewind_truncates_durable_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            let cfg = test_cfg(&context, NZU64!(100));
-            let mut journal = Box::new(
-                Inner::<_, u64>::init(
-                    DelayedSyncContext {
-                        inner: context.child("journal"),
-                        pending: pending.clone(),
-                    },
-                    cfg,
-                )
-                .await
-                .unwrap(),
-            );
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
-            assert_eq!(journal.recovery_watermark(), 3);
-
-            // Rewind discards the proof for position 2: while re-appended data is still
-            // syncing, the next call's advance must not raise the watermark past the rewind
-            // point.
-            let mut journal = drive_pending_syncs(&pending, journal.rewind(2))
                 .await
                 .unwrap();
             journal.append(&9).await.unwrap();
@@ -4708,232 +4534,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewinding() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(&context, NZU64!(2));
-            let journal: Journal<_, Digest> = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-            let journal = journal.rewind(0).await.unwrap();
-            assert!(matches!(
-                journal.rewind(1).await,
-                Err(Error::InvalidRewind(1))
-            ));
-            let mut journal: Journal<_, Digest> =
-                Journal::init(context.child("reopen"), cfg.clone())
-                    .await
-                    .expect("failed to re-initialize journal");
-
-            // Append an item to the journal
-            (journal, _) = journal
-                .append(&test_digest(0))
-                .await
-                .expect("failed to append data 0");
-            assert_eq!(journal.size(), 1);
-            journal = journal.rewind(1).await.unwrap(); // should be no-op
-            journal = journal.rewind(0).await.unwrap();
-            assert_eq!(journal.size(), 0);
-
-            // append 7 items
-            for i in 0..7 {
-                let pos;
-                (journal, pos) = journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-                assert_eq!(pos, i);
-            }
-            assert_eq!(journal.size(), 7);
-
-            // rewind back to item #4, which should prune 2 blobs
-            journal = journal.rewind(4).await.unwrap();
-            assert_eq!(journal.size(), 4);
-
-            // rewind back to empty and ensure all blobs are rewound over
-            journal = journal.rewind(0).await.unwrap();
-            assert_eq!(journal.size(), 0);
-
-            // stress test: add 100 items, rewind 49, repeat x10.
-            for _ in 0..10 {
-                for i in 0..100 {
-                    (journal, _) = journal
-                        .append(&test_digest(i))
-                        .await
-                        .expect("failed to append data");
-                }
-                let size = journal.size();
-                journal = journal.rewind(size - 49).await.unwrap();
-            }
-            const ITEMS_REMAINING: u64 = 10 * (100 - 49);
-            assert_eq!(journal.size(), ITEMS_REMAINING);
-
-            let journal = journal.sync().await.expect("Failed to sync journal");
-            drop(journal);
-
-            // Repeat with a different blob size (3 items per blob)
-            let mut cfg = test_cfg(&context, NZU64!(3));
-            cfg.partition = "test-partition-2".into();
-            let mut journal = Journal::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-            for _ in 0..10 {
-                for i in 0..100 {
-                    (journal, _) = journal
-                        .append(&test_digest(i))
-                        .await
-                        .expect("failed to append data");
-                }
-                let size = journal.size();
-                journal = journal.rewind(size - 49).await.unwrap();
-            }
-            assert_eq!(journal.size(), ITEMS_REMAINING);
-
-            journal.sync().await.expect("Failed to sync journal");
-
-            // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, Digest> =
-                Journal::init(context.child("third"), cfg.clone())
-                    .await
-                    .expect("failed to re-initialize journal");
-            assert_eq!(journal.size(), 10 * (100 - 49));
-
-            // Make sure rewinding works after pruning
-            (journal, _) = journal.prune(300).await.expect("pruning failed");
-            assert_eq!(journal.size(), ITEMS_REMAINING);
-            // Rewinding to the prune point should work.
-            // always remain in the journal.
-            journal = journal.rewind(300).await.unwrap();
-            let bounds = journal.bounds();
-            assert_eq!(bounds.end, 300);
-            assert!(bounds.is_empty());
-
-            // Rewinding prior to our prune point should fail.
-            assert!(matches!(
-                journal.rewind(299).await,
-                Err(Error::ItemPruned(299))
-            ));
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_rewind_commit_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-
-            for i in 0..12u64 {
-                (journal, _) = journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            let journal = journal.sync().await.expect("failed to sync journal");
-
-            let journal = journal.rewind(7).await.expect("failed to rewind journal");
-            journal.commit().await.expect("failed to commit journal");
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
-            assert_eq!(journal.bounds(), 0..7);
-            for i in 0..7u64 {
-                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
-            }
-            assert!(matches!(
-                journal.read(7).await,
-                Err(Error::ItemOutOfRange(7))
-            ));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_rewind_persists_lower_watermark() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-
-            for i in 0..12u64 {
-                (journal, _) = journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            let journal = journal.sync().await.expect("failed to sync journal");
-            journal.rewind(7).await.expect("failed to rewind journal");
-
-            let checkpoint = Checkpoint::open(context.child("metadata"), &cfg.partition)
-                .await
-                .expect("failed to reopen checkpoint");
-            let persisted_watermark = checkpoint
-                .watermark()
-                .expect("missing recovery watermark after rewind");
-            assert_eq!(persisted_watermark, 7);
-            drop(checkpoint);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_rewind_append_commit_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-
-            for i in 0..12u64 {
-                (journal, _) = journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            let journal = journal.sync().await.expect("failed to sync journal");
-
-            let mut journal = journal.rewind(7).await.expect("failed to rewind journal");
-            for i in 0..3u64 {
-                (journal, _) = journal
-                    .append(&test_digest(100 + i))
-                    .await
-                    .expect("failed to append data");
-            }
-            journal.commit().await.expect("failed to commit journal");
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
-            assert_eq!(journal.bounds(), 0..10);
-            assert_eq!(journal.0.recovery_watermark(), 7);
-            for i in 0..7u64 {
-                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
-            }
-            for i in 0..3u64 {
-                assert_eq!(journal.read(7 + i).await.unwrap(), test_digest(100 + i));
-            }
-            assert!(matches!(
-                journal.read(10).await,
-                Err(Error::ItemOutOfRange(10))
-            ));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_recovery_preserves_rolled_predecessors_without_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -6758,38 +6358,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewind_error_before_bounds_start() {
-        // Test that rewind returns error when trying to rewind before bounds.start
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-
-            let mut journal =
-                Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 10)
-                    .await
-                    .unwrap();
-
-            // Append a few items (positions 10, 11, 12)
-            for i in 0..3u64 {
-                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
-            }
-            assert_eq!(journal.size(), 13);
-
-            // Rewind to position 11 should work
-            journal = journal.rewind(11).await.unwrap();
-            assert_eq!(journal.size(), 11);
-
-            // Rewind to position 10 (pruning_boundary) should work
-            journal = journal.rewind(10).await.unwrap();
-            assert_eq!(journal.size(), 10);
-
-            // Rewind to before pruning_boundary should fail
-            let result = journal.rewind(9).await;
-            assert!(matches!(result, Err(Error::ItemPruned(9))));
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_journal_init_at_size_crash_scenarios() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -7267,7 +6835,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(4));
-            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+            let mut journal = Journal::init(context.child("j"), cfg.clone())
+                .await
+                .unwrap();
 
             for i in 0..20u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
@@ -7312,10 +6882,14 @@ mod tests {
             drop(served);
             drop(reader);
 
-            // After a rewind the journal's end is not blob-aligned, so an out-of-range
+            // After a truncate the journal's end is not blob-aligned, so an out-of-range
             // position can share a blob with a valid one. Validation trims the batch
             // instead of poisoning the shared group.
-            journal = journal.rewind(18).await.unwrap();
+            journal = {
+                _ = journal.sync().await.unwrap();
+                Journal::<_, Digest>::init_at_most(context.child("cap"), cfg.clone(), 18).await
+            }
+            .unwrap();
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
             reader.read_many(&[17]).await.unwrap();
@@ -7405,13 +6979,12 @@ mod tests {
             let (journal, reader) = journal.snapshot().await.unwrap();
             reader.read_many(&[1, 2, 4]).await.unwrap();
             let (journal, _) = journal.prune(2).await.unwrap();
-            let journal = journal.rewind(4).await.unwrap();
 
             let buffer = context.encode();
             for expected in [
-                "fixed_metrics_size 4",
+                "fixed_metrics_size 6",
                 "fixed_metrics_pruning_boundary 2",
-                "fixed_metrics_retained 2",
+                "fixed_metrics_retained 4",
                 "fixed_metrics_tail_items 2",
                 "fixed_metrics_append_calls_total 1",
                 "fixed_metrics_append_many_calls_total 1",

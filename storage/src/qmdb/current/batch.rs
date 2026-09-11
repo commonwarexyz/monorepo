@@ -299,8 +299,8 @@ where
 /// is not an immutable snapshot.
 ///
 /// Internally, the batch chain terminates in the DB's committed bitmap via `BitmapBatch::Base`.
-/// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch),
-/// [`Db::prune`](super::db::Db::prune), and [`Db::rewind`](super::db::Db::rewind) update the DB.
+/// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch) and
+/// [`Db::prune`](super::db::Db::prune) update the DB.
 ///
 /// Reads through this batch's chain, constructing child batches from it, and applying it later are
 /// only semantically correct while its ancestor chain is still the committed prefix of the DB. In

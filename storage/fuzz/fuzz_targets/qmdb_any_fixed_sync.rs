@@ -173,7 +173,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let cfg = test_config(&test_name, &context);
-        let mut db: FixedDb<F> = Db::init(context.child("storage"), cfg)
+        let mut db: FixedDb<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init source db");
         let mut restarts = 0usize;
@@ -277,6 +277,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     let db = Db::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init source db");
