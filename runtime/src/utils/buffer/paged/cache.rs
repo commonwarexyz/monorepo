@@ -32,7 +32,7 @@ const MAX_FAULT_RUN_PAGES: usize = 64;
 
 /// Maximum concurrent runs in a bulk read. Bounds scratch memory (about 2MiB at 4KiB
 /// pages). A completed run frees a slot immediately, without waiting for its peers.
-const MAX_FAULT_WAVE_RUNS: usize = 8;
+const MAX_CONCURRENT_FAULT_RUNS: usize = 8;
 
 /// The part of one output range that falls within a missing page.
 struct ReadTarget<'a> {
@@ -553,7 +553,7 @@ impl CacheRef {
                     Ok(())
                 }
             })
-            .buffer_unordered(MAX_FAULT_WAVE_RUNS);
+            .buffer_unordered(MAX_CONCURRENT_FAULT_RUNS);
         while let Some(result) = reads.next().await {
             result?;
         }

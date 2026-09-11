@@ -862,6 +862,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 struct Miss {
     position: u64,
     offset: Option<u64>,
+    // For a valid position, None means the successor's offset is unresolved. The probe
+    // always supplies the blob's logical size for the final frame in a blob or journal.
     end: Option<u64>,
 }
 
@@ -917,11 +919,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                 unresolved.push(miss.position);
             }
             if miss.end.is_none() {
-                let next = miss.position + 1;
-                // The final frame in a blob gets its end from that blob's logical size.
-                if next < self.bounds.end && !next.is_multiple_of(items_per_blob) {
-                    unresolved.push(next);
-                }
+                unresolved.push(miss.position + 1);
             }
         }
 
@@ -953,14 +951,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             .map(|miss| {
                 let blob = position_to_blob(miss.position, items_per_blob);
                 let start = miss.offset.unwrap_or_else(|| resolve(miss.position));
-                let end = miss.end.unwrap_or_else(|| {
-                    let next = miss.position + 1;
-                    if next < self.bounds.end && !next.is_multiple_of(items_per_blob) {
-                        resolve(next)
-                    } else {
-                        self.data.get(blob).expect("position is in bounds").size()
-                    }
-                });
+                let end = miss.end.unwrap_or_else(|| resolve(miss.position + 1));
                 read_range(blob, start, end)
             })
             .collect::<Result<_, _>>()?;
@@ -2694,6 +2685,16 @@ mod tests {
             assert_eq!(
                 counter(&context.encode(), "offsets_items_read_total") - before,
                 3
+            );
+
+            // Final frames use the blob's size, including a partially filled final blob.
+            cache.clear();
+            let (_, misses) = reader.probe_parts(&[127, 139]);
+            assert_eq!(misses.len(), 2);
+            assert!(misses.iter().all(|m| m.end.is_some()));
+            assert_eq!(
+                reader.fetch_misses(&misses).await.unwrap(),
+                vec![items[127].clone(), items[139].clone()]
             );
             drop(reader);
             journal.destroy().await.unwrap();
