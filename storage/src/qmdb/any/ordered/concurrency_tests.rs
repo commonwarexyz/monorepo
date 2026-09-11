@@ -100,14 +100,14 @@ impl<C: Contiguous> Contiguous for Controlled<C> {
         self.inner.try_read_many_sync(positions)
     }
 
-    async fn replay(
+    async fn replay_range(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send, JournalError>
     {
-        self.inner.replay(start_pos, buffer, read_options).await
+        self.inner.replay_range(range, buffer, read_options).await
     }
 }
 
