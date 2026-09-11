@@ -5486,6 +5486,9 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             .expect("block should be cached after broadcast");
 
         // Restart marshal, removing any in-memory cache
+        drop(handle);
+        setup.actor_handle.abort();
+        let _ = setup.actor_handle.await;
         let setup2 = H::setup_validator(
             context
                 .child("validator_restart")

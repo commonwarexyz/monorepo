@@ -401,6 +401,7 @@ mod test {
             let _batch = db.new_batch().write(d1, Some(d2));
             // Don't merkleize/apply -- simulates uncommitted write
         }
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.root(), root);
 
@@ -555,6 +556,7 @@ mod test {
         let db = db.commit().await.unwrap();
         let op_count = db.bounds().end;
         let root = db.root();
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);
@@ -613,6 +615,7 @@ mod test {
         // Confirm close/reopen gets us back to the same state.
         let op_count = db.bounds().end;
         let root = db.root();
+        drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
 
         assert_eq!(db.root(), root);
