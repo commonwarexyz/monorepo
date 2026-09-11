@@ -28,7 +28,7 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::{
-    Header, Layout,
+    Generation, Header, Layout, Pending, Sender, Tracker, defer_sync,
     hold::{Held, Hold},
     resolve_header, sync_dir,
 };
@@ -48,7 +48,7 @@ use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Seek, SeekFrom, Write},
-    ops::RangeInclusive,
+    ops::{Deref, RangeInclusive},
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -75,6 +75,8 @@ pub struct Storage {
     hold: Arc<Hold>,
     /// Shared pool used to allocate read buffers.
     pool: BufferPool,
+    /// Deferred syncs and the live open of each blob.
+    pending: Arc<Pending>,
 }
 
 impl Storage {
@@ -96,6 +98,7 @@ impl Storage {
             blob_layouts,
             hold,
             pool,
+            pending: Arc::new(Pending::default()),
         }
     }
 }
@@ -111,73 +114,100 @@ impl crate::Storage for Storage {
     ) -> Result<(Blob, u64, BlobVersion), Error> {
         super::validate_partition_name(partition)?;
 
-        // Acquire the filesystem lock
-        let _guard = self.lock.lock();
+        let (blob, logical_len, blob_version, wait) = {
+            // Acquire the filesystem lock
+            let _guard = self.lock.lock();
 
-        // Construct the full path
-        let path = self.storage_directory.join(partition).join(hex(name));
-        let parent = path
-            .parent()
-            .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
+            // Construct the full path
+            let path = self.storage_directory.join(partition).join(hex(name));
+            let parent = path
+                .parent()
+                .ok_or_else(|| Error::PartitionMissing(partition.into()))?;
 
-        // Create the partition directory if it does not exist
-        fs::create_dir_all(parent).map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
+            // Create the partition directory if it does not exist
+            fs::create_dir_all(parent)
+                .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
-        // Open the file, creating it if it doesn't exist
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
+            // Open the file, creating it if it doesn't exist
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|e| Error::BlobOpenFailed(partition.into(), hex(name), e.into()))?;
 
-        let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
+            let raw_len = file.metadata().map_err(|_| Error::ReadFailed)?.len();
 
-        // Handle the header. Existing blobs have their header read. New blobs and blobs left
-        // torn by an interrupted creation get a fresh header written.
-        let existing = resolve_header(
-            &mut file,
-            raw_len,
-            &self.blob_layouts,
-            &versions,
-            partition,
-            name,
-        )?;
-        let (logical_len, blob_version, data_offset) = match existing {
-            Some(resolved) => resolved,
-            None => {
-                // Sync the directories before writing the header so a parseable header
-                // always implies durable directory entries (an open that parses a header
-                // never re-runs these). The storage directory is synced unconditionally:
-                // the partition directory existing in the namespace does not imply its
-                // entry is durable.
-                sync_dir(parent)?;
-                sync_dir(&self.storage_directory)?;
+            // Handle the header. Existing blobs have their header read. New blobs and blobs left
+            // torn by an interrupted creation get a fresh header written.
+            let existing = resolve_header(
+                &mut file,
+                raw_len,
+                &self.blob_layouts,
+                &versions,
+                partition,
+                name,
+            )?;
 
-                // Truncate to zero before writing, per the [Header::create] contract.
-                let (region, blob_version) = Header::create(&self.blob_layouts, &versions);
-                let data_offset = region.len() as u64;
-                file.set_len(0)
-                    .map_err(|e| Error::BlobResizeFailed(partition.into(), hex(name), e.into()))?;
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|_| Error::WriteFailed)?;
-                file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-                file.sync_all()
-                    .map_err(|e| Error::BlobSyncFailed(partition.into(), hex(name), e.into()))?;
-
-                (0, blob_version, data_offset)
+            if existing.is_none() {
+                self.pending.forget(partition, Some(name));
             }
-        };
+            let (generation, wait) = self.pending.attach(partition, name);
 
-        let blob = Blob::new(
-            partition.into(),
-            name,
-            file,
-            self.hold.clone(),
-            self.pool.clone(),
-            data_offset,
-        );
+            let (logical_len, blob_version, data_offset) = match existing {
+                Some(resolved) => resolved,
+                None => (|| {
+                    // Sync the directories before writing the header so a parseable header
+                    // always implies durable directory entries (an open that parses a header
+                    // never re-runs these). The storage directory is synced unconditionally:
+                    // the partition directory existing in the namespace does not imply its
+                    // entry is durable.
+                    sync_dir(parent)?;
+                    sync_dir(&self.storage_directory)?;
+
+                    // Truncate to zero before writing, per the [Header::create] contract.
+                    let (region, blob_version) = Header::create(&self.blob_layouts, &versions);
+                    let data_offset = region.len() as u64;
+                    file.set_len(0).map_err(|e| {
+                        Error::BlobResizeFailed(partition.into(), hex(name), e.into())
+                    })?;
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(|_| Error::WriteFailed)?;
+                    #[cfg(test)]
+                    if let Some(len) = self.pending.fail_creation_after.lock().take() {
+                        file.write_all(&region[..len.min(region.len())])
+                            .map_err(|_| Error::WriteFailed)?;
+                        return Err(Error::Closed);
+                    }
+                    file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+                    file.sync_all().map_err(|e| {
+                        Error::BlobSyncFailed(partition.into(), hex(name), e.into())
+                    })?;
+
+                    Ok((0, blob_version, data_offset))
+                })()
+                .inspect_err(|error: &Error| {
+                    // Retain creation failures until the namespace entry is removed or replaced.
+                    let sender = self
+                        .pending
+                        .start(&generation)
+                        .expect("creation owns its namespace entry");
+                    self.pending
+                        .finish(&generation.key, sender, Err(error.clone()));
+                })?,
+            };
+
+            let blob = Blob::new(
+                file,
+                self.hold.clone(),
+                self.pool.clone(),
+                data_offset,
+                generation,
+            );
+            (blob, logical_len, blob_version, wait)
+        };
+        Pending::wait(wait).await?;
         Ok((blob, logical_len, blob_version))
     }
 
@@ -188,20 +218,21 @@ impl crate::Storage for Storage {
         let _guard = self.lock.lock();
 
         let path = self.storage_directory.join(partition);
-        if let Some(name) = name {
+        let sync_path = if let Some(name) = name {
             let blob_path = path.join(hex(name));
             fs::remove_file(blob_path)
                 .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
 
-            // Sync the partition directory to ensure the removal is durable.
-            sync_dir(&path)?;
+            &path
         } else {
             fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
 
-            // Sync the storage directory to ensure the removal is durable.
-            sync_dir(&self.storage_directory)?;
-        }
-        Ok(())
+            &self.storage_directory
+        };
+
+        // Retire the removed names before the directory sync makes the removal durable.
+        self.pending.forget(partition, name);
+        sync_dir(sync_path)
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -244,12 +275,8 @@ impl crate::Storage for Storage {
 /// An open blob whose file retains the storage directory hold.
 #[derive(Clone)]
 pub struct Blob {
-    /// The partition this blob lives in
-    partition: String,
-    /// The name of the blob
-    name: Vec<u8>,
-    /// The underlying file
-    file: Arc<Held>,
+    /// The open shared by every clone of this handle.
+    open: Arc<Open>,
     /// Buffer pool for read allocations
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
@@ -259,20 +286,82 @@ pub struct Blob {
     dont_cache_supported: Arc<AtomicBool>,
 }
 
+/// A blob's file with the writes no completed sync covers.
+///
+/// Dropping the last reference resolves the obligation its open registered: at once when a
+/// completed sync covers every mutation, and otherwise through a sync of the file that the next
+/// open of the blob waits for. Registered requests retain the file and the directory hold on
+/// their own, so the sync runs once the handles and detached syncs of the open are gone.
+struct Shared {
+    file: Arc<Held>,
+    tracker: Tracker,
+    pending: Arc<Pending>,
+    key: (String, Vec<u8>),
+    /// Resolves the obligation the open registered when its last handle dropped.
+    promise: Mutex<Option<Sender>>,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        let Some(sender) = self.promise.lock().take() else {
+            return;
+        };
+        if !self.tracker.is_dirty() {
+            self.pending.resolve(&self.key, sender, Ok(()));
+            return;
+        }
+        let file = self.file.clone();
+        let key = self.key.clone();
+        defer_sync(self.pending.clone(), self.key.clone(), sender, move || {
+            file.sync_data()
+                .map_err(|e| Error::BlobSyncFailed(key.0.clone(), hex(&key.1), e.into()))
+        });
+    }
+}
+
+/// One open of a blob, shared by its clones.
+///
+/// Dropping the last clone releases the name and registers the obligation a later open waits
+/// for, which [Shared] resolves once every reference to it is gone.
+struct Open {
+    shared: Arc<Shared>,
+    generation: Arc<Generation>,
+}
+
+impl Deref for Open {
+    type Target = Shared;
+
+    fn deref(&self) -> &Shared {
+        &self.shared
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        if let Some(sender) = self.generation.release() {
+            *self.shared.promise.lock() = Some(sender);
+        }
+    }
+}
+
 impl Blob {
     /// Construct a blob handle that retains its file and storage directory hold.
     fn new(
-        partition: String,
-        name: &[u8],
         file: File,
         hold: Arc<Hold>,
         pool: BufferPool,
         data_offset: u64,
+        generation: Arc<Generation>,
     ) -> Self {
-        Self {
-            partition,
-            name: name.to_vec(),
+        let shared = Arc::new(Shared {
             file: Held::new(file, hold),
+            tracker: Tracker::default(),
+            pending: generation.pending.clone(),
+            key: generation.key.clone(),
+            promise: Mutex::new(None),
+        });
+        Self {
+            open: Arc::new(Open { shared, generation }),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
@@ -340,7 +429,7 @@ impl crate::Blob for Blob {
             Cache::Enabled
         };
         let output = Operation::register(Request::ReadAt(ReadAtRequest {
-            file: self.file.clone(),
+            file: self.open.file.clone(),
             offset,
             read: 0,
             buf: io_buf,
@@ -398,18 +487,37 @@ impl crate::Blob for Blob {
         } else {
             WriteAtState::WritingBeforeSync
         };
-        let output = Operation::register(Request::WriteAt(WriteAtRequest {
-            file: self.file.clone(),
+        // A multi-batch durable write ends in a whole-file sync that covers every mutation
+        // completed before it was issued. A single-batch durable write covers only itself.
+        let sync = options.contains(WriteOptions::SYNC);
+        let covers_file = matches!(state, WriteAtState::WritingBeforeSync);
+        let seen = if covers_file {
+            self.open.tracker.begin_sync()
+        } else {
+            0
+        };
+        if !sync {
+            self.open.tracker.write();
+        }
+        let result = match Operation::register(Request::WriteAt(WriteAtRequest {
+            file: self.open.file.clone(),
             offset,
             write: bufs.into(),
             state,
             cache,
         }))
         .await
-        .map_err(|_| Error::WriteFailed)?;
-        let RequestOutput::WriteAt(result) = output else {
-            unreachable!("write request returned another output kind");
+        {
+            Ok(RequestOutput::WriteAt(result)) => result,
+            Ok(_) => unreachable!("write request returned another output kind"),
+            Err(_) => Err(Error::WriteFailed),
         };
+        match (&result, sync) {
+            (Ok(()), false) => self.open.tracker.complete(),
+            (Ok(()), true) if covers_file => self.open.tracker.end_sync(seen),
+            (Err(_), true) => self.open.tracker.write(),
+            _ => {}
+        }
         result
     }
 
@@ -418,48 +526,62 @@ impl crate::Blob for Blob {
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        self.file.set_len(len).map_err(|e| {
-            Error::BlobResizeFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::other(e).into(),
-            )
-        })
+        self.open.tracker.write();
+        self.open.file.set_len(len).map_err(|e| {
+            let (partition, name) = &self.open.key;
+            Error::BlobResizeFailed(partition.clone(), hex(name), IoError::other(e).into())
+        })?;
+        self.open.tracker.complete();
+        Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        if !self.open.tracker.is_dirty() {
+            #[cfg(test)]
+            self.open.tracker.skip_sync();
+            return Ok(());
+        }
+        let (partition, name) = &self.open.key;
+        let seen = self.open.tracker.begin_sync();
         let output = Operation::register(Request::Sync(SyncRequest {
-            file: self.file.clone(),
+            file: self.open.file.clone(),
         }))
         .await
         .map_err(|error| {
-            Error::BlobSyncFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::other(error).into(),
-            )
+            Error::BlobSyncFailed(partition.clone(), hex(name), IoError::other(error).into())
         })?;
         let RequestOutput::Sync(result) = output else {
             unreachable!("sync request returned another output kind");
         };
         result.map_err(|error| match error {
-            Error::Io(error) => {
-                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), error)
-            }
+            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error),
             error => error,
-        })
+        })?;
+        self.open.tracker.end_sync(seen);
+        Ok(())
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        let partition = self.partition.clone();
-        let name = self.name.clone();
+        if !self.open.tracker.is_dirty() {
+            #[cfg(test)]
+            self.open.tracker.skip_sync();
+            return Handle::ready(Ok(()));
+        }
+        let shared = self.open.shared.clone();
+        let seen = shared.tracker.begin_sync();
         let receiver = operation::start_sync(SyncRequest {
-            file: self.file.clone(),
+            file: shared.file.clone(),
         });
         Handle::from_future(async move {
             match receiver.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
+                Ok(Ok(())) => {
+                    shared.tracker.end_sync(seen);
+                    Ok(())
+                }
+                Ok(Err(Error::Io(e))) => {
+                    let (partition, name) = &shared.key;
+                    Err(Error::BlobSyncFailed(partition.clone(), hex(name), e))
+                }
                 Ok(Err(err)) => Err(err),
                 Err(_) => Err(Error::Closed),
             }
@@ -531,12 +653,11 @@ mod tests {
         let hold = Hold::acquire(&directory).unwrap();
         let mut registry = Registry::default();
         let blob = Blob::new(
-            "partition".into(),
-            b"large",
             File::options().write(true).open("/dev/full").unwrap(),
             hold,
             test_pool(&mut registry),
             0,
+            Arc::new(Pending::default()).attach("partition", b"large").0,
         );
 
         // Zeroed allocation stays demand-paged on Linux. The erroring device
@@ -1282,12 +1403,11 @@ mod tests {
             let pool = test_pool(&mut registry.sub_registry("pool"));
 
             let blob = Blob::new(
-                "partition".into(),
-                b"blob",
                 file,
                 Hold::acquire(&storage_directory).unwrap(),
                 pool,
                 Layout::V0.data_offset(),
+                Arc::new(Pending::default()).attach("partition", b"blob").0,
             );
             let err = blob
                 .resize(0)
@@ -1313,6 +1433,8 @@ mod tests {
                 Box::pin(async move { reader.read_at(0, 1, ReadOptions::default()).await });
             let mut write =
                 Box::pin(async move { writer.write_at(0, b"x", WriteOptions::default()).await });
+            // A clean open skips the sync, so record an uncovered mutation first.
+            blob.open.tracker.write();
             let mut sync = Box::pin(async move { blob.sync().await });
 
             // Register each operation before allowing worker shutdown. Keeping
@@ -1385,15 +1507,16 @@ mod tests {
                 let mut registry = Registry::default();
                 let pool = test_pool(&mut registry.sub_registry("pool"));
                 let blob = Blob::new(
-                    "partition".into(),
-                    b"blob",
                     file,
                     Hold::acquire(&storage_directory).unwrap(),
                     pool,
                     Layout::V0.data_offset(),
+                    Arc::new(Pending::default()).attach("partition", b"blob").0,
                 );
 
-                // Syncing a socket reaches the kernel and fails through the adapter.
+                // A clean open skips the sync, so record an uncovered mutation first. Syncing
+                // a socket then reaches the kernel and fails through the adapter.
+                blob.open.tracker.write();
                 let result = if detached {
                     blob.start_sync().await.await
                 } else {
@@ -1508,6 +1631,254 @@ mod tests {
             assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
 
             let _ = std::fs::remove_dir_all(&storage_directory);
+        });
+    }
+
+    /// Wait until no deferred sync is registered.
+    async fn settle(pending: &Pending) {
+        while pending.len() > 0 {
+            crate::utils::reschedule().await;
+        }
+    }
+
+    #[test]
+    fn test_failed_creation_does_not_publish_unsynced_header() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            super::super::check_failed_creation(&storage, &storage.pending).await;
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    #[test]
+    fn test_durable_writes_need_no_reopen_sync() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            super::super::check_sync_writes(&storage, &storage.pending).await;
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    /// A dirty handle of a removed blob defers nothing when it drops, and a dirty drop before
+    /// the unlink still syncs.
+    #[test]
+    fn test_remove_live_dirty_owner_defers_nothing() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            for by_name in [true, false] {
+                for unlink_first in [false, true] {
+                    let partition = "remove_live_dirty";
+                    let name = b"blob";
+                    let (blob, _) = storage.open(partition, name).await.unwrap();
+                    blob.write_at(0, b"dirty", WriteOptions::default())
+                        .await
+                        .unwrap();
+                    let finished = storage.pending.finished();
+                    let target = by_name.then_some(name.as_slice());
+                    if unlink_first {
+                        storage.remove(partition, target).await.unwrap();
+                        let read = blob
+                            .read_at(0, 5, ReadOptions::default())
+                            .await
+                            .unwrap()
+                            .coalesce();
+                        assert_eq!(read.as_ref(), b"dirty");
+                        drop(blob);
+                    } else {
+                        drop(blob);
+                        storage.remove(partition, target).await.unwrap();
+                    }
+                    settle(&storage.pending).await;
+                    assert_eq!(
+                        storage.pending.finished() - finished,
+                        u64::from(!unlink_first)
+                    );
+                    if by_name {
+                        storage.remove(partition, None).await.unwrap();
+                    }
+                }
+            }
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    /// A handle to a removed blob cannot register a sync against the recreated name, while the
+    /// recreated blob's own dirty drop syncs before the next open.
+    #[test]
+    fn test_recreate_reopen_ignores_removed_handle() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            for remove_name in [true, false] {
+                let partition = "recreate_pending";
+                let name = b"blob";
+                let (old, _) = storage.open(partition, name).await.unwrap();
+                old.write_at(0, b"old", WriteOptions::default())
+                    .await
+                    .unwrap();
+                storage
+                    .remove(partition, remove_name.then_some(name.as_slice()))
+                    .await
+                    .unwrap();
+
+                let (current, len) = storage.open(partition, name).await.unwrap();
+                assert_eq!(len, 0);
+                let reader = current.clone();
+                current
+                    .write_at(0, b"new", WriteOptions::default())
+                    .await
+                    .unwrap();
+                let finished = storage.pending.finished();
+                drop(current);
+                drop(old);
+                drop(reader);
+                settle(&storage.pending).await;
+                assert_eq!(storage.pending.finished() - finished, 1);
+
+                let (reopened, len) = storage.open(partition, name).await.unwrap();
+                assert_eq!(len, 3);
+                let bytes = reopened
+                    .read_at(0, 3, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert_eq!(bytes.as_ref(), b"new");
+                drop(reopened);
+                storage.remove(partition, None).await.unwrap();
+            }
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    /// Only a multi-batch durable write covers the plain writes before it.
+    #[test]
+    fn test_multibatch_durable_write_covers_prior_mutations() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            for (case, (chunks, options, later_plain, expected)) in [
+                (1025, WriteOptions::SYNC, false, 0),
+                (
+                    1025,
+                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+                    false,
+                    0,
+                ),
+                (1024, WriteOptions::SYNC, false, 1),
+                (0, WriteOptions::SYNC, false, 1),
+                (1025, WriteOptions::default(), false, 1),
+                (1025, WriteOptions::SYNC, true, 1),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let before = storage.pending.finished();
+                let (blob, _) = storage.open("large_durable", &[case as u8]).await.unwrap();
+                blob.write_at(0, b"prefix", WriteOptions::default())
+                    .await
+                    .unwrap();
+                let mut bufs = IoBufs::default();
+                for _ in 0..chunks {
+                    bufs.append(IoBuf::from(vec![7u8]));
+                }
+                blob.write_at(6, bufs, options).await.unwrap();
+                if later_plain {
+                    blob.write_at(0, b"suffix", WriteOptions::default())
+                        .await
+                        .unwrap();
+                }
+                drop(blob);
+                let (blob, size) = storage.open("large_durable", &[case as u8]).await.unwrap();
+                assert_eq!(size, 6 + chunks);
+                let actual = blob
+                    .read_at(0, size as usize, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert_eq!(
+                    &actual.as_ref()[..6],
+                    if later_plain { b"suffix" } else { b"prefix" }
+                );
+                assert!(actual.as_ref()[6..].iter().all(|byte| *byte == 7));
+                drop(blob);
+                settle(&storage.pending).await;
+                assert_eq!(storage.pending.finished() - before, expected, "case={case}");
+            }
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    /// Dropping the last handle with unsynced writes syncs the blob before the next open reads
+    /// it, and durable writes, synced handles and removed blobs defer nothing.
+    #[test]
+    fn test_reopen_waits_for_deferred_sync() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"hello", WriteOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(storage.pending.finished(), 0);
+            drop(blob);
+
+            let (blob, len) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(storage.pending.len(), 0);
+            assert_eq!(storage.pending.finished(), 1);
+            assert_eq!(len, 5);
+            let read = blob
+                .read_at(0, 5, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+            drop(blob);
+
+            let (blob, _) = storage.open("partition", b"durable").await.unwrap();
+            blob.write_at(0, b"hello", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+            settle(&storage.pending).await;
+            assert_eq!(storage.pending.finished(), 1);
+
+            let (blob, _) = storage.open("partition", b"synced").await.unwrap();
+            blob.resize(16).await.unwrap();
+            blob.start_sync().await.await.unwrap();
+            drop(blob);
+            settle(&storage.pending).await;
+            assert_eq!(storage.pending.finished(), 1);
+
+            storage.remove("partition", None).await.unwrap();
+            assert_eq!(storage.pending.len(), 0);
+
+            drop(storage);
+            let _ = std::fs::remove_dir_all(&storage_directory);
+        });
+    }
+
+    /// A sync on an open with no uncovered mutation returns without a device flush.
+    #[test]
+    fn test_clean_sync_is_skipped() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            let (blob, _) = storage.open("partition", b"clean").await.unwrap();
+            blob.sync().await.unwrap();
+            blob.start_sync().await.await.unwrap();
+            assert_eq!(blob.open.tracker.skipped(), 2);
+            blob.write_at(0, b"hello", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+            assert_eq!(blob.open.tracker.skipped(), 2);
+            blob.sync().await.unwrap();
+            assert_eq!(blob.open.tracker.skipped(), 3);
+            drop(blob);
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
         });
     }
 }

@@ -876,7 +876,9 @@ mod tests {
             if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {
                 return Ok(());
             }
-            self.partition.open(blob).await?.sync().await?;
+            self.sealed[(blob - self.oldest_blob_index) as usize]
+                .sync()
+                .await?;
             Ok(())
         }
     }

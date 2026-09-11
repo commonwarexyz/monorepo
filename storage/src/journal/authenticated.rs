@@ -2843,11 +2843,13 @@ mod tests {
         assert_eq!(journal.bounds().start, 0);
 
         // Test no pruning
+        drop(journal);
         let journal =
             create_journal_with_ops::<F>(context.child("no_prune"), "boundary", 100).await;
         assert_eq!(journal.bounds().start, 0);
 
         // Test after pruning
+        drop(journal);
         let mut journal =
             create_journal_with_ops::<F>(context.child("pruned"), "boundary", 100).await;
         (journal, _) = journal
@@ -3200,13 +3202,15 @@ mod tests {
     /// Verify replay() with empty journal and multiple operations.
     async fn test_replay_operations_inner<F: Family + PartialEq>(context: Context) {
         // Test empty journal
-        let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
-        let stream = journal
-            .replay(0, NZUsize!(10), ReadOptions::default())
-            .await
-            .unwrap();
-        futures::pin_mut!(stream);
-        assert!(stream.next().await.is_none());
+        {
+            let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
+            let stream = journal
+                .replay(0, NZUsize!(10), ReadOptions::default())
+                .await
+                .unwrap();
+            futures::pin_mut!(stream);
+            assert!(stream.next().await.is_none());
+        }
 
         // Test replaying all operations
         let journal = create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;

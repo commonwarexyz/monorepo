@@ -46,8 +46,8 @@ pub use crate::storage::faulty::{
     Config as FaultConfig, PartialWriteMode, ResizeConfig, WriteConfig,
 };
 use crate::{
-    BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
-    METRICS_PREFIX, Name, Panicked, child_label,
+    BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, IoBufsMut,
+    ListenerOf, METRICS_PREFIX, Name, Panicked, ReadOptions, WriteOptions, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -923,6 +923,76 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
+/// The live open of each blob, keyed by partition and name.
+type Opens = Mutex<BTreeMap<(String, Vec<u8>), Weak<Live>>>;
+
+/// Marks a blob as open until the last clone of its handle drops.
+struct Live {
+    key: (String, Vec<u8>),
+    opens: Arc<Opens>,
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        let mut opens = self.opens.lock();
+        if opens
+            .get(&self.key)
+            .is_some_and(|live| std::ptr::eq(live.as_ptr(), self))
+        {
+            opens.remove(&self.key);
+        }
+    }
+}
+
+/// A blob handle whose open stays exclusive until every clone drops.
+#[derive(Clone)]
+pub struct Blob {
+    inner: <Storage as crate::Storage>::Blob,
+    _live: Arc<Live>,
+}
+
+impl crate::Blob for Blob {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs, options).await
+    }
+
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len, options).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
 fn build_storage(
     inner: MemStorage,
     rng: Arc<Mutex<BoxDynRng>>,
@@ -948,6 +1018,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    opens: Arc<Opens>,
     network_buffer_pool: BufferPool,
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
@@ -1018,6 +1089,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                opens: Arc::default(),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1095,6 +1167,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                opens: Arc::default(),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1123,6 +1196,17 @@ impl Context {
     /// Compute a [Sha256] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().audit()
+    }
+
+    /// Return a copy of a blob's durable logical contents without opening it, or `None` when
+    /// the blob is missing.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.storage
+            .inner()
+            .inner()
+            .inner()
+            .durable(partition, name)
     }
 
     /// Access the storage fault configuration.
@@ -1291,6 +1375,7 @@ impl crate::Supervisor for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            opens: self.opens.clone(),
             network_buffer_pool: self.network_buffer_pool.clone(),
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
@@ -1609,7 +1694,7 @@ impl TryRng for Context {
 impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <Storage as crate::Storage>::Blob;
+    type Blob = Blob;
 
     async fn open_versioned(
         &self,
@@ -1617,11 +1702,34 @@ impl crate::Storage for Context {
         name: &[u8],
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
-        self.storage.open_versioned(partition, name, versions).await
+        let (inner, len, version) = self
+            .storage
+            .open_versioned(partition, name, versions)
+            .await?;
+        let key = (partition.to_owned(), name.to_vec());
+        let live = Arc::new(Live {
+            key: key.clone(),
+            opens: self.opens.clone(),
+        });
+        let mut opens = self.opens.lock();
+        assert!(
+            opens.get(&key).and_then(Weak::upgrade).is_none(),
+            "blob {partition}/{} is already open",
+            hex(name)
+        );
+        opens.insert(key, Arc::downgrade(&live));
+        Ok((Blob { inner, _live: live }, len, version))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.storage.remove(partition, name).await
+        self.storage.remove(partition, name).await?;
+        // Removed names may be opened again while handles to the removed blobs remain alive.
+        self.opens
+            .lock()
+            .retain(|(stored_partition, stored_name), _| {
+                stored_partition != partition || name.is_some_and(|name| stored_name != name)
+            });
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {

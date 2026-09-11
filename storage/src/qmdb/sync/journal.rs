@@ -299,6 +299,7 @@ mod tests {
             context.remove(&blob_part, None).await.unwrap();
             let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap();
+            drop(blob);
 
             // Reopening must restore the requested start so locations 7-8 are not skipped.
             let range = non_empty_range!(

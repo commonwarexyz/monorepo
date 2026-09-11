@@ -701,6 +701,7 @@ pub(crate) mod tests {
         let root = db.root();
 
         // Commit op should remain after reopen even without clean shutdown.
+        drop(db);
         let db = reopen(context.child("db").with_attribute("index", 3)).await;
         assert_eq!(db.bounds().end, 2); // commit op should remain after re-open.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -1158,6 +1159,7 @@ pub(crate) mod tests {
         const ELEMENTS: u64 = 200;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
+        drop(db);
         let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().end, 1); // initial commit should exist
         assert_eq!(db.root(), root);
@@ -1574,6 +1576,7 @@ pub(crate) mod tests {
         let op_count = db.bounds().end;
 
         // Reopen DB without clean shutdown and make sure the state is the same.
+        drop(db);
         let db = reopen(context.child("db").with_attribute("index", 2)).await;
         assert_eq!(db.bounds().end, op_count);
         assert_eq!(db.root(), root);

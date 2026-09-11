@@ -202,7 +202,7 @@ pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> 
 pub mod tests {
     use super::*;
     use crate::{
-        Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _,
+        Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _, WriteOptions,
         iouring::{
             Config, RingConfig, Runner,
             request::{RecvRequest, SendRequest},
@@ -436,6 +436,11 @@ pub mod tests {
         let callbacks = Arc::new(Reentrant::default());
         runner().start(|context| async move {
             let (blob, _) = context.open("observer_closed", b"file").await.unwrap();
+
+            // A clean open skips the sync, so record an uncovered mutation first.
+            blob.write_at(0, b"x", WriteOptions::default())
+                .await
+                .unwrap();
             let (fd, _peer) = socket();
             let mut operation = recv(fd.clone(), None);
             let waker = callbacks.waker();

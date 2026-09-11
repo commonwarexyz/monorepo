@@ -1139,6 +1139,7 @@ pub(crate) mod test {
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
+            drop(db);
             let mut db = open_db(context.child("second")).await;
             assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -1176,6 +1177,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
+            drop(db);
             let mut db = open_db(context.child("fifth")).await;
             assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
@@ -1214,6 +1216,7 @@ pub(crate) mod test {
             let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
+            drop(db);
             let mut db = open_db(context.child("second")).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
@@ -1249,6 +1252,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
+            drop(db);
             let mut db = open_db(context.child("fifth")).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);

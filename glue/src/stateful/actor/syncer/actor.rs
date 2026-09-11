@@ -601,7 +601,7 @@ mod tests {
             }
             assert_eq!(marshal.get_processed_height().await, Some(Height::new(10)));
 
-            first.abort();
+            first.abort().await;
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
@@ -680,7 +680,7 @@ mod tests {
                     context.sleep(Duration::from_millis(1)).await;
                 }
             }
-            first.abort();
+            first.abort().await;
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
@@ -708,7 +708,7 @@ mod tests {
                 "stale selected block must be unavailable before restart",
             );
             assert!(marshal.get_block(Height::new(8)).await.is_some());
-            second.abort();
+            second.abort().await;
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 

@@ -4940,6 +4940,7 @@ mod tests {
                 if section == 1 {
                     blob.resize(0).await.expect("Failed to truncate index");
                     blob.sync().await.expect("Failed to sync index truncation");
+                    drop(blob);
                 } else {
                     drop(blob);
                     context
@@ -4972,10 +4973,10 @@ mod tests {
                     oversized.get(section, 0).await,
                     Err(Error::ItemOutOfRange(0))
                 ));
-                let (_, recovered_size) = context
-                    .open(&cfg.index_partition, &section.to_be_bytes())
-                    .await
-                    .expect("Failed to reopen index blob");
+                let recovered_size = context
+                    .durable(&cfg.index_partition, &section.to_be_bytes())
+                    .unwrap()
+                    .len();
                 assert_eq!(recovered_size, 0);
 
                 // The recovered sections accept new entries from position zero.

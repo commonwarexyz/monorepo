@@ -2720,7 +2720,7 @@ pub mod tests {
                 let root_before = db.root();
                 db_ctx = context.child("db").with_attribute("round", round);
 
-                let prev_db = db;
+                drop(db);
                 db = UnorderedVariableMmbDb::init(
                     db_ctx.child("db"),
                     variable_config::<OneCap>("test_repeated_prune", &db_ctx),
@@ -2731,7 +2731,6 @@ pub mod tests {
 
                 assert_eq!(db.root(), root_before);
                 assert_eq!(db.get(&k).await.unwrap(), expected);
-                drop(prev_db);
             }
 
             db.destroy().await.unwrap();
@@ -2873,7 +2872,7 @@ pub mod tests {
                 );
 
                 db_ctx = context.child("db_reopen").with_attribute("round", round);
-                let prev_db = db;
+                drop(db);
                 db = UnorderedVariableMmbDb::init(
                     db_ctx.child("db"),
                     variable_config::<OneCap>("test_large_prune", &db_ctx),
@@ -2903,8 +2902,6 @@ pub mod tests {
                     ),
                     "proof verification failed after reopen at round {round}"
                 );
-
-                drop(prev_db);
             }
 
             db.destroy().await.unwrap();

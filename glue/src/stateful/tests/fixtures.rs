@@ -192,14 +192,15 @@ pub(crate) struct MarshalFixture {
 }
 
 impl MarshalFixture {
-    /// Aborts a started fixture so its durable storage can be reopened.
-    pub(crate) fn abort(self) {
+    /// Aborts a started fixture and waits for it to release its durable storage.
+    pub(crate) async fn abort(self) {
         let guards = self
             .guards
             .downcast::<(handler::Handler<Sha256Digest>, Handle<()>)>()
             .unwrap_or_else(|_| panic!("marshal fixture was not started"));
         let (_, handle) = *guards;
         handle.abort();
+        let _ = handle.await;
     }
 }
 

@@ -1525,7 +1525,7 @@ mod tests {
 
             let verification_db = <OrderedFixedDb as ManagedDb<_>>::init(
                 context.child("verification_db"),
-                config,
+                fixed_config("ordered-matches-sync-target-verification", &context),
                 None,
             )
             .await
@@ -1672,9 +1672,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            let verification_db = FixedDb::init(context.child("verification_db"), config, None)
-                .await
-                .unwrap();
+            let verification_db = FixedDb::init(
+                context.child("verification_db"),
+                fixed_config("matches-sync-target-verification", &context),
+                None,
+            )
+            .await
+            .unwrap();
             let (verification_db, _) = verification_db
                 .apply_batch(merkleized.inner.clone())
                 .await
