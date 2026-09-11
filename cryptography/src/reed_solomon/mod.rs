@@ -16,6 +16,11 @@
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror
 
+#![allow(
+    clippy::multiple_inherent_impl,
+    reason = "Keep the vendored implementation aligned with its upstream layout."
+)]
+
 pub use self::{
     decoder_result::{DecoderResult, Originals, Recoveries, RecoveryDecoderResult},
     encoder_result::{EncoderResult, Recovery},

@@ -1,7 +1,6 @@
 //! Codec implementations for common types
 
-use crate::{Error, Read};
-use ::bytes::Buf;
+use crate::{Buf, Error, Read};
 use core::cmp::Ordering;
 
 pub mod btree_map;
@@ -107,8 +106,8 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{BufsMut, Error, Read, Write};
-    use bytes::{Buf, BufMut, Bytes, BytesMut, buf::UninitSlice};
+    use crate::{Buf, BufsMut, Error, Read, Write};
+    use bytes::{BufMut, Bytes, BytesMut, TryGetError, buf::UninitSlice};
 
     /// One-byte test type that uses the default aggregate hooks.
     ///
@@ -142,8 +141,8 @@ pub(crate) mod tests {
         pub put_slice_calls: usize,
         /// Number of single-byte writes.
         pub put_u8_calls: usize,
-        /// Number of externally pushed chunks.
-        pub push_calls: usize,
+        /// Externally pushed chunks, in order.
+        pub pushed: Vec<Bytes>,
     }
 
     impl TrackingWriteBuf {
@@ -152,7 +151,7 @@ pub(crate) mod tests {
                 inner: BytesMut::new(),
                 put_slice_calls: 0,
                 put_u8_calls: 0,
-                push_calls: 0,
+                pushed: Vec::new(),
             }
         }
 
@@ -194,35 +193,37 @@ pub(crate) mod tests {
     impl BufsMut for TrackingWriteBuf {
         fn push(&mut self, bytes: impl Into<Bytes>) {
             let bytes = bytes.into();
-            self.push_calls += 1;
             self.inner.extend_from_slice(&bytes);
+            self.pushed.push(bytes);
         }
     }
 
-    /// Test [`Buf`] implementation that records how values are read.
+    /// Test [`bytes::Buf`] implementation that records how values are read.
     ///
     /// Specialization-selection tests use this to assert whether a container
-    /// read its payload with one aggregate [`Buf::copy_to_slice`] call or with
-    /// per-element [`Buf::get_u8`] calls.
+    /// read its payload with bulk reads (a slice copy, or a chunk consumed via
+    /// [`bytes::Buf::advance`]) or with per-byte reads.
     pub struct TrackingReadBuf {
         inner: Bytes,
-        /// Number of aggregate slice reads.
-        pub copy_to_slice_calls: usize,
+        /// Number of bulk reads.
+        pub bulk_reads: usize,
         /// Number of single-byte reads.
-        pub get_u8_calls: usize,
+        pub byte_reads: usize,
     }
 
     impl TrackingReadBuf {
         pub fn new(bytes: &'static [u8]) -> Self {
             Self {
                 inner: Bytes::from_static(bytes),
-                copy_to_slice_calls: 0,
-                get_u8_calls: 0,
+                bulk_reads: 0,
+                byte_reads: 0,
             }
         }
     }
 
-    impl Buf for TrackingReadBuf {
+    impl Buf for TrackingReadBuf {}
+
+    impl bytes::Buf for TrackingReadBuf {
         fn remaining(&self) -> usize {
             self.inner.remaining()
         }
@@ -232,17 +233,22 @@ pub(crate) mod tests {
         }
 
         fn advance(&mut self, cnt: usize) {
+            self.bulk_reads += 1;
             self.inner.advance(cnt)
         }
 
-        fn copy_to_slice(&mut self, dst: &mut [u8]) {
-            self.copy_to_slice_calls += 1;
-            self.inner.copy_to_slice(dst);
+        fn get_u8(&mut self) -> u8 {
+            self.byte_reads += 1;
+            self.inner.get_u8()
         }
 
-        fn get_u8(&mut self) -> u8 {
-            self.get_u8_calls += 1;
-            self.inner.get_u8()
+        fn try_get_u8(&mut self) -> Result<u8, TryGetError> {
+            self.byte_reads += 1;
+            self.inner.try_get_u8()
+        }
+
+        fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+            self.inner.copy_to_bytes(len)
         }
     }
 }

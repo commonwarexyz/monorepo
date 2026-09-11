@@ -27,9 +27,7 @@ impl<S: Scheme> Provider<S> {
             schemes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-}
 
-impl<S: Scheme> Provider<S> {
     /// Registers a new signing scheme for the given epoch.
     ///
     /// Returns `false` if a scheme was already registered for the epoch.

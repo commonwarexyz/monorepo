@@ -866,7 +866,7 @@ mod tests {
             .expect("signer must produce an attestation");
         let mut invalid_signer = attestation;
         invalid_signer.signer = Participant::new(99);
-        let mut truncated = &[0u8, 1, 2][..];
+        let mut truncated = Bytes::from_static(&[0u8, 1, 2]);
         let missing_signature = Attestation::<Scheme<Ed25519PublicKey>> {
             signer: Participant::new(2),
             signature: Lazy::deferred(&mut truncated, ()),
@@ -945,7 +945,7 @@ mod tests {
         let valid_b = scheme_fixture.schemes[1]
             .sign::<Sha256Digest>(subject)
             .expect("signer must produce an attestation");
-        let mut truncated = &[9u8, 9, 9][..];
+        let mut truncated = Bytes::from_static(&[9u8, 9, 9]);
         let missing_signature = Attestation::<Scheme<Ed25519PublicKey>> {
             signer: Participant::new(2),
             signature: Lazy::deferred(&mut truncated, ()),

@@ -11,8 +11,8 @@
 use super::{array, bitmap};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use core::ops::Range;
 
 /// Maximum number of runs in a Run container.
@@ -339,6 +339,11 @@ impl Run {
     pub fn max(&self) -> Option<u16> {
         self.runs.last().map(|&(_, end)| end)
     }
+
+    pub(crate) fn from_runs_checked(runs: Vec<(u16, u16)>) -> Result<Self, CodecError> {
+        validate_runs(&runs)?;
+        Ok(Self { runs })
+    }
 }
 
 impl Write for Run {
@@ -363,13 +368,6 @@ impl Read for Run {
         // Read as Vec of (start, end) pairs with bounded count to prevent OOM.
         let runs = Vec::<(u16, u16)>::read_cfg(buf, &(RangeCfg::new(..=MAX_RUNS), ((), ())))?;
         Self::from_runs_checked(runs)
-    }
-}
-
-impl Run {
-    pub(crate) fn from_runs_checked(runs: Vec<(u16, u16)>) -> Result<Self, CodecError> {
-        validate_runs(&runs)?;
-        Ok(Self { runs })
     }
 }
 
