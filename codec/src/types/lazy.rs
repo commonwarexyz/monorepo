@@ -1,7 +1,7 @@
 //! This module exports the [`Lazy`] type.
 
-use crate::{BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
-use bytes::{Buf, Bytes};
+use crate::{Buf, BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
+use bytes::{Buf as _, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
 use std::sync::OnceLock;
@@ -102,8 +102,8 @@ impl<T: Read> Lazy<T> {
 
     /// Create a [`Lazy`] by deferring decoding of an underlying value.
     ///
-    /// The only cost incurred when this function is called is that of copying
-    /// some bytes.
+    /// Retains the remaining encoded bytes, sharing the input allocation when possible
+    /// and copying otherwise.
     ///
     /// Use [`Self::get`] to access the actual value, by decoding these bytes.
     pub fn deferred(buf: &mut impl Buf, cfg: T::Cfg) -> Self {
@@ -116,7 +116,7 @@ impl<T: Read> Lazy<T> {
                 }
             } else {
                 Self {
-                    value: T::decode_cfg(bytes.as_ref(), &cfg).ok(),
+                    value: T::decode_cfg(bytes.clone(), &cfg).ok(),
                     pending: Some(Pending { bytes, cfg }),
                 }
             }
@@ -139,7 +139,7 @@ impl<T: Read> Lazy<T> {
                     .pending
                     .as_ref()
                     .expect("Lazy should have pending if value is not initialized");
-                T::decode_cfg(bytes.as_ref(), cfg).ok()
+                T::decode_cfg(bytes.clone(), cfg).ok()
             })
             .as_ref()
     }
@@ -259,7 +259,9 @@ impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
 #[cfg(test)]
 mod test {
     use super::Lazy;
-    use crate::{DecodeExt, Encode, FixedSize, Read, Write};
+    use crate::{
+        Copying, Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
+    };
     use proptest::prelude::*;
 
     /// A byte that's always <= 100
@@ -279,7 +281,7 @@ mod test {
     impl Read for Small {
         type Cfg = ();
 
-        fn read_cfg(buf: &mut impl bytes::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+        fn read_cfg(buf: &mut impl crate::Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
             let byte = u8::read_cfg(buf, &())?;
             if byte > 100 {
                 return Err(crate::Error::Invalid("Small", "value > 100"));
@@ -337,5 +339,29 @@ mod test {
             prop_assert_eq!(a < b, la < lb);
             prop_assert_eq!(a >= b, la >= lb);
         }
+    }
+
+    #[test]
+    fn test_lazy_view() {
+        let value: Vec<Lazy<Small>> = (0..64u8).map(|i| Lazy::new(Small(i))).collect();
+        let source = value.encode();
+        let cfg = ((..).into(), ());
+        let range = source.as_ptr_range();
+
+        // Decoding from the owned buffer defers every element as a view of it
+        let decoded = Vec::<Lazy<Small>>::decode_cfg(source.clone(), &cfg).unwrap();
+        assert_eq!(decoded, value);
+        let mut buf = TrackingWriteBuf::new();
+        decoded.write_bufs(&mut buf);
+        assert_eq!(buf.pushed.len(), value.len());
+        assert!(buf.pushed.iter().all(|b| range.contains(&b.as_ptr())));
+
+        // Decoding from a slice of it copies every element
+        let copied = Vec::<Lazy<Small>>::decode_cfg(Copying(&source), &cfg).unwrap();
+        assert_eq!(copied, value);
+        let mut buf = TrackingWriteBuf::new();
+        copied.write_bufs(&mut buf);
+        assert_eq!(buf.pushed.len(), value.len());
+        assert!(buf.pushed.iter().all(|b| !range.contains(&b.as_ptr())));
     }
 }

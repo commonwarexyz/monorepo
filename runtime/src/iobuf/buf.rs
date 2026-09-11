@@ -11,8 +11,10 @@ use super::{
     panic_advance,
     pool::BufferPool,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
-use commonware_codec::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
+use bytes::{BufMut, Bytes, BytesMut, TryGetError};
+use commonware_codec::{
+    Buf, BufsMut, EncodeSize, Error, Input, RangeCfg, Read, Write, util::at_least,
+};
 use std::{
     mem::ManuallyDrop,
     num::NonZeroUsize,
@@ -332,7 +334,9 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBuf {
     }
 }
 
-impl Buf for IoBuf {
+impl Buf for IoBuf {}
+
+impl bytes::Buf for IoBuf {
     #[inline(always)]
     fn remaining(&self) -> usize {
         self.len
@@ -449,6 +453,13 @@ impl From<Bytes> for IoBuf {
 impl From<BytesMut> for IoBuf {
     fn from(bytes: BytesMut) -> Self {
         Self::from(bytes.freeze())
+    }
+}
+
+/// Convert [`IoBufMut`] into an [`IoBuf`] without copying (via [`IoBufMut::freeze`]).
+impl From<IoBufMut> for IoBuf {
+    fn from(buf: IoBufMut) -> Self {
+        buf.freeze()
     }
 }
 
@@ -854,7 +865,11 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBufMut {
     }
 }
 
-impl Buf for IoBufMut {
+impl Input for IoBufMut {
+    type Buf = IoBuf;
+}
+
+impl bytes::Buf for IoBufMut {
     #[inline(always)]
     fn remaining(&self) -> usize {
         self.len
@@ -985,7 +1000,7 @@ unsafe impl BufMut for IoBufMut {
     }
 
     #[inline]
-    fn put<T: Buf>(&mut self, mut src: T)
+    fn put<T: bytes::Buf>(&mut self, mut src: T)
     where
         Self: Sized,
     {
@@ -1119,7 +1134,7 @@ mod tests {
         super::{bufs::IoBufs, pool::BufferPoolConfig},
         *,
     };
-    use bytes::{Bytes, BytesMut};
+    use bytes::{Buf as _, Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, RangeCfg};
     use core::ops::Bound;
     use std::mem::size_of;
@@ -1708,6 +1723,16 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufmut_decode_preserves_byte_fields() {
+        let values = vec![Bytes::from_static(b"abc"), Bytes::from_static(b"def")];
+        let source = IoBufMut::from(values.encode());
+        let range = source.as_ref().as_ptr_range();
+        let decoded = Vec::<Bytes>::decode_cfg(source, &((..).into(), (..).into())).unwrap();
+        assert_eq!(decoded, values);
+        assert!(decoded.iter().all(|field| range.contains(&field.as_ptr())));
+    }
+
+    #[test]
     fn test_iobuf_read_cfg_zero_copy_from_iobuf_source() {
         // Decoding an IoBuf field from an IoBuf source must not copy the
         // payload: copy_to_bytes carves a zero-copy slice and From wraps it.
@@ -1728,7 +1753,7 @@ mod tests {
         // larger than its reported remaining(). `put` must bound each copy by
         // its own capacity and panic instead of overflowing the buffer.
         struct LyingBuf;
-        impl Buf for LyingBuf {
+        impl bytes::Buf for LyingBuf {
             fn remaining(&self) -> usize {
                 1
             }

@@ -7,7 +7,7 @@ use common::{
     arbitrary_ciphertext_minpk, arbitrary_ciphertext_minsig, arbitrary_minpk_signature,
     arbitrary_minsig_signature,
 };
-use commonware_codec::ReadExt;
+use commonware_codec::{Encode, ReadExt};
 use commonware_cryptography::bls12381::{
     primitives::{
         group::Private,
@@ -274,13 +274,12 @@ fn fuzz(op: FuzzOperation) {
             )
             .expect("encryption should succeed");
 
-            let mut encoded = Vec::new();
-            commonware_codec::Write::write(&ciphertext, &mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             if tamper_index < encoded.len() {
                 encoded[tamper_index] ^= tamper_value;
             }
 
-            if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded.as_slice()) {
+            if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded) {
                 let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinPk>(&signature, &tampered);
             }
@@ -307,13 +306,12 @@ fn fuzz(op: FuzzOperation) {
             )
             .expect("encryption should succeed");
 
-            let mut encoded = Vec::new();
-            commonware_codec::Write::write(&ciphertext, &mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             if tamper_index < encoded.len() {
                 encoded[tamper_index] ^= tamper_value;
             }
 
-            if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded.as_slice()) {
+            if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded) {
                 let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinSig>(&signature, &tampered);
             }

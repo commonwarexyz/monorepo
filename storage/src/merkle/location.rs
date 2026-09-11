@@ -1,6 +1,6 @@
 use super::{Family, position::Position};
-use bytes::{Buf, BufMut};
-use commonware_codec::{ReadExt, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Buf, ReadExt, varint::UInt};
 use core::{
     convert::TryFrom,
     fmt,

@@ -854,8 +854,8 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Storage as _,
-        Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
+        AbortOnDrop, Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _,
+        Storage as _, Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
         tokio::telemetry,
     };
     use bytes::Bytes;
@@ -885,6 +885,13 @@ mod tests {
         Return,
         FuturePanic,
         ConstructorPanic,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum JoinRelease {
+        Task,
+        Completion,
+        Output,
     }
 
     fn spawn_drop_gated_task(
@@ -1122,6 +1129,98 @@ mod tests {
                 assert_runner_drains_spawned_task(execution, root_exit);
             }
         }
+    }
+
+    fn assert_join_all_releases_pending_work(release_owner: JoinRelease) {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (started, started_rx) = commonware_utils::channel::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let (joining, joining_rx) = std::sync::mpsc::channel();
+        let (done, done_rx) = std::sync::mpsc::channel();
+        let (exited, exited_rx) = std::sync::mpsc::channel();
+        let (drop_release, drop_release_rx) = std::sync::mpsc::channel();
+        drop(drop_release);
+        let release_on_drop = TaskDropGate {
+            entered: release.clone(),
+            release: drop_release_rx,
+        };
+
+        let runner = std::thread::spawn(move || {
+            Runner::new(cfg).start(move |context| async move {
+                let blocked = context
+                    .child("blocked")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        started.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        exited.send(()).unwrap();
+                        Ok::<_, Error>(None::<TaskDropGate>)
+                    })
+                    .abort_on_drop();
+                let failed = Handle::ready(Ok(Err(Error::Closed))).abort_on_drop();
+                let mut guards = vec![failed, blocked];
+                if matches!(release_owner, JoinRelease::Output) {
+                    guards.insert(
+                        0,
+                        Handle::ready(Ok(Ok(Some(release_on_drop)))).abort_on_drop(),
+                    );
+                } else {
+                    let pending = async move {
+                        let _release_on_drop = release_on_drop;
+                        futures::future::pending::<Result<Option<TaskDropGate>, Error>>().await
+                    };
+                    let pending = if matches!(release_owner, JoinRelease::Task) {
+                        context.child("pending").spawn(move |_| pending)
+                    } else {
+                        Handle::from_future(async move { Ok(pending.await) })
+                    };
+                    guards.push(pending.abort_on_drop());
+                }
+
+                started_rx.await.unwrap();
+                joining.send(()).unwrap();
+                let result = AbortOnDrop::join_all::<Error>(guards).await;
+                assert!(done.send((result, exited_rx.try_recv().is_ok())).is_ok());
+            });
+        });
+
+        joining_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("blocking task did not start");
+        let early = done_rx.recv_timeout(Duration::from_secs(5));
+        let completed = early.is_ok();
+
+        // Release the blocking poll even when cancellation stalls, so the runner can shut down.
+        let _ = release.send(());
+        let (result, exited) = early.unwrap_or_else(|_| {
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("joining did not finish after releasing the blocking task")
+        });
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            completed,
+            "joining stalled with release owned by {release_owner:?}"
+        );
+        assert!(exited, "joining returned before the blocking task exited");
+        assert!(matches!(result, Err(Error::Closed)));
+    }
+
+    #[test]
+    fn test_join_all_aborts_all_tasks_before_waiting() {
+        assert_join_all_releases_pending_work(JoinRelease::Task);
+    }
+
+    #[test]
+    fn test_join_all_drains_completions_concurrently() {
+        assert_join_all_releases_pending_work(JoinRelease::Completion);
+    }
+
+    #[test]
+    fn test_join_all_drops_outputs_before_waiting() {
+        assert_join_all_releases_pending_work(JoinRelease::Output);
     }
 
     #[test]

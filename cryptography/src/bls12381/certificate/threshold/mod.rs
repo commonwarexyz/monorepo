@@ -23,8 +23,8 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Faults, Participant,
@@ -1204,7 +1204,7 @@ mod tests {
             })
             .collect();
         let malformed_signer = attestations[0].signer;
-        let mut malformed = &[0u8][..];
+        let mut malformed = Bytes::from_static(&[0u8]);
         attestations[0].signature = Lazy::deferred(&mut malformed, ());
 
         assert_eq!(

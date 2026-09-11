@@ -135,8 +135,8 @@ use crate::{
     },
     transcript::{Summary, Transcript, Version},
 };
-use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{Buf, Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Space},
     poly::{Interpolator, Poly},
@@ -1929,10 +1929,10 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        let encoded = signed.encode();
+        let mut encoded = signed.encode();
         let max_players = NonZeroU32::new(7).unwrap();
         let cfg = (max_players, ModeVersion::v0());
-        let decoded = SignedDealerLog::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        let decoded = SignedDealerLog::read_cfg(&mut encoded, &cfg).unwrap();
 
         // The decoded log should identify successfully and produce a valid DKG.
         let (pk, log) = decoded
@@ -1965,10 +1965,10 @@ mod tests {
             &Sequential,
         )
         .unwrap();
-        let encoded = output.encode();
+        let mut encoded = output.encode();
         let max_players = NonZeroU32::new(7).unwrap();
         let cfg = (max_players, ModeVersion::v0());
-        let decoded: Output<PublicKey> = Read::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+        let decoded: Output<PublicKey> = Read::read_cfg(&mut encoded, &cfg).unwrap();
 
         assert_eq!(output, decoded);
         assert_eq!(output.public(), decoded.public());

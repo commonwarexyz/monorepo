@@ -9,8 +9,8 @@ use super::{
     panic_advance,
     pool::BufferPool,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{BufsMut, EncodeSize, Write};
+use bytes::{Buf as _, BufMut, Bytes, BytesMut};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Input, Write};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize};
 
 /// Container for one or more immutable buffers.
@@ -469,7 +469,9 @@ impl IoBufs {
     }
 }
 
-impl Buf for IoBufs {
+impl Buf for IoBufs {}
+
+impl bytes::Buf for IoBufs {
     #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
@@ -656,7 +658,7 @@ impl From<&'static [u8]> for IoBufs {
 /// The intended usage is fill-then-read: write into the container (through
 /// [`BufMut`], [`Self::copy_from_slice`], or
 /// [`Blob::read_at_buf`](crate::Blob::read_at_buf)), then consume it through
-/// [`Buf`]. Caller-reserved write capacity generally survives read
+/// [`bytes::Buf`]. Caller-reserved write capacity generally survives read
 /// operations, with three exceptions:
 /// - The deque-backed read paths (four or more chunks) skip past a chunk
 ///   with no readable bytes by popping it, so a never-filled chunk ordered
@@ -1018,7 +1020,18 @@ impl IoBufsMut {
     }
 }
 
-impl Buf for IoBufsMut {
+impl Input for IoBufsMut {
+    type Buf = IoBufs;
+}
+
+/// Freezes every chunk (see [`IoBufsMut::freeze`]).
+impl From<IoBufsMut> for IoBufs {
+    fn from(bufs: IoBufsMut) -> Self {
+        bufs.freeze()
+    }
+}
+
+impl bytes::Buf for IoBufsMut {
     #[inline]
     fn remaining(&self) -> usize {
         match &self.inner {
@@ -1277,7 +1290,7 @@ impl<const N: usize> From<[u8; N]> for IoBufsMut {
 ///
 /// Returns drained bytes plus whether the caller should canonicalize afterward.
 #[inline]
-fn copy_to_bytes_small_chunks<B: Buf, const N: usize>(
+fn copy_to_bytes_small_chunks<B: bytes::Buf, const N: usize>(
     chunks: &mut [B; N],
     len: usize,
     not_enough_data_msg: &str,
@@ -1313,7 +1326,7 @@ fn copy_to_bytes_small_chunks<B: Buf, const N: usize>(
 ///
 /// Returns drained bytes plus whether the caller should canonicalize afterward.
 #[inline]
-fn copy_to_bytes_chunked<B: Buf>(
+fn copy_to_bytes_chunked<B: bytes::Buf>(
     bufs: &mut VecDeque<B>,
     len: usize,
     not_enough_data_msg: &str,
@@ -1364,7 +1377,7 @@ fn copy_to_bytes_chunked<B: Buf>(
 
 /// Advance across a [`VecDeque`] of chunks by consuming from the front.
 #[inline]
-fn advance_chunked_front<B: Buf>(bufs: &mut VecDeque<B>, mut cnt: usize) {
+fn advance_chunked_front<B: bytes::Buf>(bufs: &mut VecDeque<B>, mut cnt: usize) {
     while cnt > 0 {
         let front = bufs.front_mut().expect("cannot advance past end of buffer");
         let avail = front.remaining();
@@ -1387,7 +1400,7 @@ fn advance_chunked_front<B: Buf>(bufs: &mut VecDeque<B>, mut cnt: usize) {
 /// Returns `true` when one or more chunks became (or were) empty, so callers
 /// can canonicalize once after the operation.
 #[inline]
-fn advance_small_chunks<B: Buf>(chunks: &mut [B], mut cnt: usize) -> bool {
+fn advance_small_chunks<B: bytes::Buf>(chunks: &mut [B], mut cnt: usize) -> bool {
     let mut idx = 0;
     let mut needs_canonicalize = false;
 
@@ -1632,7 +1645,7 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 mod tests {
     use super::{super::pool::BufferPoolConfig, *};
     use bytes::{Bytes, BytesMut};
-    use commonware_codec::{Encode, types::lazy::Lazy};
+    use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
     use std::collections::{BTreeMap, HashMap};
 
@@ -2019,6 +2032,25 @@ mod tests {
         let coalesced = bufs.coalesce_with_pool(&pool);
         assert_eq!(coalesced, b"abcdefgh");
         assert!(coalesced.is_pooled());
+    }
+
+    #[test]
+    fn test_iobufsmut_decode_preserves_byte_fields() {
+        let first = IoBufMut::from(&b"\x02\x03abc"[..]);
+        let second = IoBufMut::from(&b"\x03def"[..]);
+        let ranges = [
+            first.as_ref().as_ptr_range(),
+            second.as_ref().as_ptr_range(),
+        ];
+        let source = IoBufsMut::from(vec![first, second]);
+        let decoded = Vec::<Bytes>::decode_cfg(source, &((..).into(), (..).into())).unwrap();
+        assert_eq!(
+            decoded,
+            [Bytes::from_static(b"abc"), Bytes::from_static(b"def")]
+        );
+        for (field, range) in decoded.iter().zip(ranges) {
+            assert!(range.contains(&field.as_ptr()));
+        }
     }
 
     #[test]

@@ -145,8 +145,8 @@ mod tests {
         marshal::coding::types::coding_config_for_participants,
         types::{Epoch, FixedEpocher, Height, Round, View},
     };
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use bytes::BufMut;
+    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         Committable, Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest,
