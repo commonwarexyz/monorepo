@@ -384,11 +384,17 @@ where
     base_active_keys: usize,
 }
 
-/// Resolved user operations awaiting optional compaction and finalization.
+/// Resolved user operations for caller-controlled compaction and finalization.
 ///
 /// Created by `UnmerkleizedBatch::prepare`. Call [`Self::compact`] zero
 /// or more times, then [`Self::merkleize`] to append one CommitFloor and compute the root.
-/// No automatic compaction occurs on this path. All rounds share the original scan tip.
+/// All rounds share the original scan tip.
+///
+/// Unlike [`UnmerkleizedBatch::merkleize`], which applies the default compaction budget and
+/// finalizes the batch in one call, this type lets callers bound compaction work across explicit
+/// rounds. Manual compaction is useful when execution cost is more sensitive than disk space cost:
+/// callers can limit work per batch or defer it, accepting slower reclamation of disk space.
+///
 /// The database must retain the same root between preparation and finalization. Any root change,
 /// including applying an ancestor, is rejected with [`crate::qmdb::Error::StaleBatch`].
 /// An error consumes the prepared batch.
@@ -1336,10 +1342,9 @@ where
         ))
     }
 
-    /// Append one CommitFloor and compute the root, without performing further compaction.
+    /// Finalize the prepared operations by appending one CommitFloor and computing the root.
     ///
-    /// An empty post-state always has its floor at the commit location, even when no
-    /// compaction was requested. This requires no bitmap scan or entry moves.
+    /// An empty post-state places its floor at the commit location directly.
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -2149,9 +2154,10 @@ where
         prepared.merkleize(db, metadata).await
     }
 
-    /// Resolve user mutations without automatically compacting or appending CommitFloor.
+    /// Resolve user mutations for caller-controlled compaction and finalization.
     ///
-    /// Use the returned batch to choose compaction budgets and the number of rounds.
+    /// Use the returned batch to choose compaction budgets and the number of rounds. To apply the
+    /// default compaction budget and finalize in one call, use [`Self::merkleize`].
     pub async fn prepare<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -2378,9 +2384,10 @@ where
         prepared.merkleize(db, metadata).await
     }
 
-    /// Resolve user mutations without automatically compacting or appending CommitFloor.
+    /// Resolve user mutations for caller-controlled compaction and finalization.
     ///
-    /// Use the returned batch to choose compaction budgets and the number of rounds.
+    /// Use the returned batch to choose compaction budgets and the number of rounds. To apply the
+    /// default compaction budget and finalize in one call, use [`Self::merkleize`].
     pub async fn prepare<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
