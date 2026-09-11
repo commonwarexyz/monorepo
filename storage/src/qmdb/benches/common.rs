@@ -125,6 +125,7 @@ fn merkle_cfg(
         write_buffer: WRITE_BUFFER_SIZE,
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
+        node_cache_size: None,
         page_cache,
     }
 }
