@@ -86,11 +86,11 @@ macro_rules! impl_from {
     };
 }
 
-impl_from!(NonZeroUsize => usize, |v| v.get());
-impl_from!(NonZeroU8 => u8, |v| v.get());
-impl_from!(NonZeroU16 => u16, |v| v.get());
-impl_from!(NonZeroU32 => u32, |v| v.get());
-impl_from!(NonZeroU64 => u64, |v| v.get());
+impl_from!(NonZeroUsize => usize, usize::from);
+impl_from!(NonZeroU8 => u8, u8::from);
+impl_from!(NonZeroU16 => u16, u16::from);
+impl_from!(NonZeroU32 => u32, u32::from);
+impl_from!(NonZeroU64 => u64, u64::from);
 
 impl_from!(NonZeroU8 => usize, |v| usize::from(v.get()));
 impl_from!(NonZeroU16 => usize, |v| usize::from(v.get()));
@@ -98,17 +98,9 @@ impl_from!(NonZeroU32 => usize, |v| usize::try_from(v.get()).expect("range bound
 
 impl_from!(NonZeroU8 => NonZeroUsize, NonZeroUsize::from);
 impl_from!(NonZeroU16 => NonZeroUsize, NonZeroUsize::from);
-impl_from!(NonZeroU32 => NonZeroUsize, |v| NonZeroUsize::try_from(v).expect("range bound exceeds usize"));
-
-impl<T: Copy + PartialOrd> RangeCfg<T> {
-    /// Applies `f` to both bounds.
-    fn map<U: Copy + PartialOrd>(self, f: impl Fn(T) -> U) -> RangeCfg<U> {
-        RangeCfg {
-            start: self.start.map(&f),
-            end: self.end.map(&f),
-        }
-    }
-}
+impl_from!(NonZeroU32 => NonZeroUsize, |v| {
+    NonZeroUsize::try_from(v).expect("range bound exceeds usize")
+});
 
 impl<T: Copy + PartialOrd> RangeCfg<T> {
     /// Creates a new `RangeCfg` from any type implementing `RangeBounds<T>`.
@@ -154,6 +146,14 @@ impl<T: Copy + PartialOrd> RangeCfg<T> {
 
         // If not excluded by either bound, the value is within the range
         true
+    }
+
+    /// Applies `f` to both bounds.
+    fn map<U: Copy + PartialOrd>(self, f: impl Fn(T) -> U) -> RangeCfg<U> {
+        RangeCfg {
+            start: self.start.map(&f),
+            end: self.end.map(&f),
+        }
     }
 }
 
