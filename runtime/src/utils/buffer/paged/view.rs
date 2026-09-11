@@ -178,9 +178,12 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        self.cache_ref
-            .read_many_after_faults(self.blob, self.id, cache_ranges)
-            .await?;
+        // Keep the bulk-read state out of cache-hit futures. Only misses allocate it.
+        Box::pin(
+            self.cache_ref
+                .read_many_after_faults(self.blob, self.id, cache_ranges),
+        )
+        .await?;
 
         Ok(offsets.len() - blob_reads)
     }
