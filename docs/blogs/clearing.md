@@ -3,7 +3,7 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-10T00:00:00Z"
+modified-time: "2026-09-11T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
@@ -11,7 +11,7 @@ image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
 
-*Update (9/10/26): Operators can now process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain state between closes and receive only account changes, cumulative payment entries, and proofs.*
+*Update (9/11/26): Operators can now process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators retain state between closes and receive only account changes, cumulative payment entries, and proofs.*
 
 *Update (8/20/26): Clearing now uses a 32-byte commitment and BLS12-381 multisignatures for the commitment certificate.*
 
@@ -162,6 +162,8 @@ These rows update the live account state, a sorted vector of accounts with posit
 
 ## Slice the Evidence
 
+We don't want every validator to store the entire account state.
+
 The evidence is divided into $S$ deterministic account-key slices (256 in the benchmarks). Each validator receives at most two contiguous spans of slices, each with its own range proof. It retains the state in those spans between closes, so its dealing carries only account changes, payment entries, and proofs.
 
 Shared boundaries make these local checks compose. The coverage commitment binds each boundary's position in the old state, new state, changed rows, and payment entries, together with running totals and two accumulator checksums. Each slice must begin where its predecessor ended.
@@ -206,7 +208,7 @@ A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Each
 Figure 2: With sixteen validators and sixteen slices, each slice has eleven holders. The holder window slides around the ring (left); each validator's assigned slices form one span, or two at the wrap (right).
 :::
 
-A validator authenticates every row, signature, state transition, and boundary check in its assigned spans. It retains the evidence through the challenge deadline before signing the commitment.
+A validator authenticates every row, signature, state transition, and boundary check in its assigned spans. It then signs the commitment and keeps the evidence available through the challenge deadline.
 
 The certificate needs $q$ signers, all signing the same commitment. Quorum intersection guarantees that an honest signer authenticated and retains each slice, though that signer may differ by slice. Every slice $j$'s holders share more than $f$ validators with the certificate's signers:
 
@@ -420,7 +422,7 @@ Every live account sends a single-entry batch to one of the same 512 recipients.
 ```
 
 ::: {.image-caption}
-Measured on an AWS c8a.4xlarge with 100 validators and 256 slices. Stages run independently. Prepare, deal, and seal use an adaptive 16-worker pool; prepare starts with a prebuilt predecessor-state proof cache. Certificate, challenge, and withdrawal-claim checks run on the calling thread.
+Figure 4: Measured on an AWS c8a.4xlarge with 100 validators and 256 slices. Stages run independently. Prepare, deal, and seal use an adaptive 16-worker pool; prepare starts with a prebuilt predecessor-state proof cache. Certificate, challenge, and withdrawal-claim checks run on the calling thread.
 :::
 
 ```{=html}
@@ -428,20 +430,22 @@ Measured on an AWS c8a.4xlarge with 100 validators and 256 slices. Stages run in
 ```
 
 ::: {.image-caption}
-Figure 4: Prepare, deal, and seal latencies for the four measured profiles above. Both axes are logarithmic.
+Figure 5: Prepare, deal, and seal latencies for the four measured profiles above. Both axes are logarithmic.
 :::
 
-At one million live accounts, the largest dealing is 103 MB when all send and 182 KB with 1,024 senders. Repeated payments between those pairs reuse the same records, while preparation and sealing still process live state.
+At one million live accounts, the largest dealing is 103 MB when all send and 182 KB with 1,024 senders. Preparation still rebuilds the full account tree, and validators check their assigned state, including accounts with no activity.
+
+Repeated payments between those pairs reuse the same records.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots divide fixed sizes by one million to one billion accepted payments. The left uses the table's rounded largest validator dealings for four account counts; the right uses the 101-byte commitment and certificate.">
 ```
 
 ::: {.image-caption}
-Figure 5: Amortizing the table's largest validator dealings and 101-byte commitment with certificate over more payments between the same pairs. Curves use rounded sizes and hold encoded integer widths fixed.
+Figure 6: Amortizing the table's largest validator dealings and 101-byte commitment with certificate over more payments between the same pairs. Curves use rounded sizes and hold encoded integer widths fixed.
 :::
 
-Challenge proofs grow with their Merkle lookup depths. Withdrawal claims grow with the number of withdrawal outputs $W$ in their close. The separate fixtures below use a 21-byte destination and range from one output to one million, with each claim opening just one leaf. The payment profiles above contain no withdrawals.
+Challenge proofs grow with their Merkle lookup depths. Withdrawal claims grow with the number of withdrawal outputs $W$ in their close.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -473,6 +477,10 @@ Challenge proofs grow with their Merkle lookup depths. Withdrawal claims grow wi
 </div>
 ```
 
+::: {.image-caption}
+Figure 7: Each claim opens one withdrawal output with a 21-byte destination. The payment profiles above contain no withdrawals.
+:::
+
 Adjust the workload and committee size below to see how much data the operator sends to validators.
 
 ```{=html}
@@ -483,23 +491,23 @@ Adjust the workload and committee size below to see how much data the operator s
 ```
 
 ::: {.image-caption}
-Figure 6: Average validator dealing per close, with total operator egress in parentheses. Sizes include every assigned span and proof, excluding transport and other protocol messages. The dotted line shows full account state, including Merkle tree levels. Both axes are logarithmic.
+Figure 8: Average validator dealing per close, with total operator egress in parentheses. Sizes include every assigned span and proof, excluding transport and other protocol messages. The dotted line shows full account state, including Merkle tree levels. Both axes are logarithmic.
 
 Each sender signs one batch containing one unit payment per recipient. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, each account pays its next neighbors cyclically. Accounts are evenly spread across slices, whose count varies with the committee (128 at 100 validators). This differs from the benchmarks' 256 slices and 512 recipients. All accounts stay live, with no deposits, withdrawals, or external payouts.
 :::
 
 ## A Bajillion Payments, One Settlement
 
-More payments between the same pairs add to their totals without adding settlement records. Each active account settles its net change across all counterparties.
+Repeated payments between the same pairs share settlement records. Each active account settles its net change across all counterparties.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account rows with their proofs.">
 ```
 
 ::: {.image-caption}
-Figure 7: The four-account network carrying 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
+Figure 9: The four-account network carrying 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
 :::
 
-The payer gets a receipt in one round trip to the operator, and that same receipt lets its holder prove a fault if the close contradicts it. Keeping the state available for recovery lets users leave even if the operator disappears.
+The payer's receipt arrives in one round trip and gives its holder evidence to challenge a dishonest close. Validators keep the state available so users can recover their funds if the operator disappears.
 
 The settlement chain only keeps the change.

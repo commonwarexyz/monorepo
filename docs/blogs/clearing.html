@@ -25,7 +25,7 @@ more to replicate, settle onchain, and index than they’re worth. Yet
 your agent will need to make millions of them over the coming years." />
     <meta property="article:author" content="Patrick O’Grady" />
     <meta property="article:published_time" content="2026-08-19T00:00:00Z" />
-    <meta property="article:modified_time" content="2026-09-10T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-11T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/clearing" />
 
@@ -101,7 +101,7 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
-        <p><em>Update (9/10/26): Operators can now process payments to
+        <p><em>Update (9/11/26): Operators can now process payments to
         the same recipient in parallel across payers, with one signature
         check covering each payer’s batch. Validators retain state
         between closes and receive only account changes, cumulative
@@ -370,6 +370,8 @@ O’Grady</a></div>
         tree (BMT). Deposits can add accounts, while withdrawals and
         payments can remove them when their balance reaches zero.</p>
         <h2 id="slice-the-evidence">Slice the Evidence</h2>
+        <p>We don’t want every validator to store the entire account
+        state.</p>
         <p>The evidence is divided into <span
         class="math inline">S</span> deterministic account-key slices
         (256 in the benchmarks). Each validator receives at most two
@@ -451,9 +453,9 @@ O’Grady</a></div>
         two at the wrap (right).</p>
         </div>
         <p>A validator authenticates every row, signature, state
-        transition, and boundary check in its assigned spans. It retains
-        the evidence through the challenge deadline before signing the
-        commitment.</p>
+        transition, and boundary check in its assigned spans. It then
+        signs the commitment and keeps the evidence available through
+        the challenge deadline.</p>
         <p>The certificate needs <span class="math inline">q</span>
         signers, all signing the same commitment. Quorum intersection
         guarantees that an honest signer authenticated and retains each
@@ -743,34 +745,33 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Measured on an AWS c8a.4xlarge with 100 validators and 256
-        slices. Stages run independently. Prepare, deal, and seal use an
-        adaptive 16-worker pool; prepare starts with a prebuilt
-        predecessor-state proof cache. Certificate, challenge, and
-        withdrawal-claim checks run on the calling thread.</p>
+        <p>Figure 4: Measured on an AWS c8a.4xlarge with 100 validators
+        and 256 slices. Stages run independently. Prepare, deal, and
+        seal use an adaptive 16-worker pool; prepare starts with a
+        prebuilt predecessor-state proof cache. Certificate, challenge,
+        and withdrawal-claim checks run on the calling thread.</p>
         </div>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three log-scale plots show measured latency for preparing roots, dealing all evidence slices, and sealing the busiest validator dealing as live accounts increase from 1,024 to one million.">
         <div class="image-caption">
-        <p>Figure 4: Prepare, deal, and seal latencies for the four
+        <p>Figure 5: Prepare, deal, and seal latencies for the four
         measured profiles above. Both axes are logarithmic.</p>
         </div>
         <p>At one million live accounts, the largest dealing is 103 MB
-        when all send and 182 KB with 1,024 senders. Repeated payments
-        between those pairs reuse the same records, while preparation
-        and sealing still process live state.</p>
+        when all send and 182 KB with 1,024 senders. Preparation still
+        rebuilds the full account tree, and validators check their
+        assigned state, including accounts with no activity.</p>
+        <p>Repeated payments between those pairs reuse the same
+        records.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots divide fixed sizes by one million to one billion accepted payments. The left uses the table's rounded largest validator dealings for four account counts; the right uses the 101-byte commitment and certificate.">
         <div class="image-caption">
-        <p>Figure 5: Amortizing the table’s largest validator dealings
+        <p>Figure 6: Amortizing the table’s largest validator dealings
         and 101-byte commitment with certificate over more payments
         between the same pairs. Curves use rounded sizes and hold
         encoded integer widths fixed.</p>
         </div>
         <p>Challenge proofs grow with their Merkle lookup depths.
         Withdrawal claims grow with the number of withdrawal outputs
-        <span class="math inline">W</span> in their close. The separate
-        fixtures below use a 21-byte destination and range from one
-        output to one million, with each claim opening just one leaf.
-        The payment profiles above contain no withdrawals.</p>
+        <span class="math inline">W</span> in their close.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -798,6 +799,11 @@ O’Grady</a></div>
           </tbody>
         </table>
         </div>
+        <div class="image-caption">
+        <p>Figure 7: Each claim opens one withdrawal output with a
+        21-byte destination. The payment profiles above contain no
+        withdrawals.</p>
+        </div>
         <p>Adjust the workload and committee size below to see how much
         data the operator sends to validators.</p>
         <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive operator-to-validator dealing calculator. Sliders set live accounts, average recipients per account, and validators. Results show the average dealing per validator with its composition, total operator egress per close, and a full-state size reference.">
@@ -805,7 +811,7 @@ O’Grady</a></div>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
-        <p>Figure 6: Average validator dealing per close, with total
+        <p>Figure 8: Average validator dealing per close, with total
         operator egress in parentheses. Sizes include every assigned
         span and proof, excluding transport and other protocol messages.
         The dotted line shows full account state, including Merkle tree
@@ -822,22 +828,22 @@ O’Grady</a></div>
         </div>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
-        <p>More payments between the same pairs add to their totals
-        without adding settlement records. Each active account settles
-        its net change across all counterparties.</p>
+        <p>Repeated payments between the same pairs share settlement
+        records. Each active account settles its net change across all
+        counterparties.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account rows with their proofs.">
         <div class="image-caption">
-        <p>Figure 7: The four-account network carrying 100 million
+        <p>Figure 9: The four-account network carrying 100 million
         payments of $0.000001, one atomic unit each. Every sender uses
         its own opening funds. The arrows group independent payments by
         sender and recipient, with both directions between <span
         class="math inline">b</span> and <span
         class="math inline">c</span> retained in the close.</p>
         </div>
-        <p>The payer gets a receipt in one round trip to the operator,
-        and that same receipt lets its holder prove a fault if the close
-        contradicts it. Keeping the state available for recovery lets
-        users leave even if the operator disappears.</p>
+        <p>The payer’s receipt arrives in one round trip and gives its
+        holder evidence to challenge a dishonest close. Validators keep
+        the state available so users can recover their funds if the
+        operator disappears.</p>
         <p>The settlement chain only keeps the change.</p>
         <div id="footer-placeholder"></div>
         <script src="/shared.js"></script>
