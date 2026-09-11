@@ -2290,11 +2290,11 @@ where
         //
         // Each diff is key-sorted, as are `updated`/`created`/`deleted`, so the handled check
         // advances three cursors in a sorted merge instead of three binary searches per key.
-        // Each diff records only its owning batch's changes, so active operations
-        // can be read directly from that batch's journal suffix.
-        // Existing-key updates preserve membership, so the classifier's successors suffice and
-        // no predecessor is rewritten. Its candidates passed the stale-ancestor guard, so the
-        // deleted-key filter below has nothing to remove either.
+        // Each diff records only its owning batch's changes, so active operations can be read
+        // directly from that batch's journal suffix.
+        //
+        // Existing-key updates preserve membership, so their resolved successors suffice and
+        // no predecessor is rewritten.
         let changes_membership = !created.is_empty() || !deleted.is_empty();
         let candidate_ancestors = if changes_membership {
             m.ancestors.as_slice()
@@ -2308,7 +2308,6 @@ where
             0
         };
         let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
-        let mut ancestor_deleted: Vec<&K> = Vec::new();
         for batch in candidate_ancestors.iter() {
             let (mut ui, mut ci, mut di) = (0, 0, 0);
             for (key, entry) in batch.diff.iter() {
@@ -2331,46 +2330,36 @@ where
                 {
                     continue;
                 }
-                match entry {
-                    DiffEntry::Active { loc, .. } => {
-                        let index = (**loc - *batch.bounds.base.size) as usize;
-                        let data = match &batch.journal_batch.items()[index] {
-                            Operation::Update(data) => data,
-                            _ => unreachable!("ancestor diff Active should reference Update op"),
-                        };
-                        next_candidates.push(data.key.clone());
-                        next_candidates.push(data.next_key.clone());
-                        prev_candidates
-                            .push((data.key.clone(), (Some(Cow::Borrowed(&data.value)), *loc)));
-                    }
-                    DiffEntry::Deleted { .. } => {
-                        ancestor_deleted.push(key);
-                    }
-                }
+                let DiffEntry::Active { loc, .. } = entry else {
+                    continue;
+                };
+                let index = (**loc - *batch.bounds.base.size) as usize;
+                let data = match &batch.journal_batch.items()[index] {
+                    Operation::Update(data) => data,
+                    _ => unreachable!("ancestor diff Active should reference Update op"),
+                };
+                next_candidates.push(data.key.clone());
+                next_candidates.push(data.next_key.clone());
+                prev_candidates.push((data.key.clone(), (Some(Cow::Borrowed(&data.value)), *loc)));
             }
         }
-        ancestor_deleted.sort();
 
-        // Sort + dedup candidate sets now so find_next_key/find_prev_key_mut can binary-search.
+        // Sort and deduplicate successor candidates for binary search.
         db.strategy().sort_by(&mut next_candidates, |a, b| a.cmp(b));
         next_candidates.dedup();
 
-        // Remove all known-deleted keys from possible_* sets. The prev_translated_key lookup
-        // already did this for this batch's deletes, but the ancestor diff incorporation may
-        // have re-added them via next_key references. Also remove parent-deleted keys that the
-        // base DB lookup may have added.
-        let is_deleted = |k: &K| -> bool {
-            deleted.binary_search_by(|(dk, _)| dk.cmp(k)).is_ok()
-                || ancestor_deleted.binary_search(&k).is_ok()
-        };
-        next_candidates.retain(|k| !is_deleted(k));
-
-        // `prev_candidates` is consulted only by the predecessor rewrites below. Duplicates can
-        // occur when the same key is pushed from multiple sources (main scan, prev_results,
-        // ancestor walk). Later pushes carry the freshest state (ancestor walk runs last), so
-        // dedup keeps the LAST push per key. `dedup_by` retains the first of each consecutive
-        // run; swap so the retained slot holds the later push.
+        // Only membership changes require filtering deleted successors and preparing
+        // predecessor candidates for rewrites.
         if changes_membership {
+            // Resolved operations can still reference keys deleted by this batch.
+            let is_deleted = |k: &K| deleted.binary_search_by(|(dk, _)| dk.cmp(k)).is_ok();
+            next_candidates.retain(|k| !is_deleted(k));
+
+            // `prev_candidates` is consulted only by the predecessor rewrites below. Duplicates
+            // can occur when the same key is pushed from multiple sources (main scan,
+            // prev_results, ancestor walk). Later pushes carry the freshest state (ancestor
+            // walk runs last), so dedup keeps the LAST push per key. `dedup_by` retains the
+            // first of each consecutive run; swap so the retained slot holds the later push.
             prev_candidates.sort_by(|a, b| a.0.cmp(&b.0));
             prev_candidates.dedup_by(|a, b| {
                 if a.0 == b.0 {
@@ -5697,9 +5686,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Child: overwrite only existing keys. Two resolve from the parent journal while
-            // their bucket scan reads the deleted key's stale committed op, one is the
-            // parent-created key, and one is untouched by the parent.
+            // Child: overwrite only existing keys. Its bucket scan encounters the deleted
+            // key's stale committed op alongside keys created or rewritten by the parent.
             let pending_child = parent
                 .new_batch::<Sha256>()
                 .write(colliding_digest(0, 0), Some(v(5)))
