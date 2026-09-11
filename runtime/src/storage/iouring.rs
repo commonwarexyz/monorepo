@@ -21,7 +21,8 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::{
-    Generation, Header, Layout, Pending, Tracker, defer_sync, hold::Hold, resolve_header, sync_dir,
+    Generation, Header, Layout, Pending, Sender, Tracker, defer_sync, hold::Hold, resolve_header,
+    sync_dir,
 };
 use crate::{
     BlobVersion, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
@@ -34,7 +35,7 @@ use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Seek, SeekFrom, Write},
-    ops::RangeInclusive,
+    ops::{Deref, RangeInclusive},
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -205,7 +206,8 @@ impl crate::Storage for Storage {
                         .pending
                         .start(&generation)
                         .expect("creation owns its namespace entry");
-                    self.pending.finish(&generation, sender, Err(error.clone()));
+                    self.pending
+                        .finish(&generation.key, sender, Err(error.clone()));
                 })?,
             };
 
@@ -284,8 +286,8 @@ impl crate::Storage for Storage {
 
 #[derive(Clone)]
 pub struct Blob {
-    /// The underlying file and its write tracking, shared by every clone of this open
-    shared: Arc<Shared>,
+    /// The open shared by every clone of this handle.
+    open: Arc<Open>,
     /// Buffer pool for read allocations
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
@@ -297,30 +299,62 @@ pub struct Blob {
 
 /// A blob's file with the writes no completed sync covers.
 ///
-/// Dropping the last handle while dirty starts a deferred sync that later opens of the blob
-/// wait for. The ring handle keeps the storage directory held through that sync.
+/// Every operation keeps the file alive, so the open's obligation stays pending until it has
+/// finished. Dropping the last reference resolves that obligation: at once when a completed sync
+/// covers every mutation, and otherwise through a deferred sync that the next open of the blob
+/// waits for. The ring handle keeps the storage directory held through that sync.
 struct Shared {
     file: Arc<File>,
     io_handle: iouring::Handle,
     tracker: Tracker,
-    generation: Arc<Generation>,
+    pending: Arc<Pending>,
+    key: (String, Vec<u8>),
+    /// Resolves the obligation the open registered when its last handle dropped.
+    promise: Mutex<Option<Sender>>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
+        let Some(sender) = self.promise.lock().take() else {
+            return;
+        };
         if !self.tracker.is_dirty() {
+            self.pending.resolve(&self.key, sender, Ok(()));
             return;
         }
         let file = self.file.clone();
         let io_handle = self.io_handle.clone();
-        let generation = self.generation.clone();
-        defer_sync(generation.clone(), move || {
+        let key = self.key.clone();
+        defer_sync(self.pending.clone(), self.key.clone(), sender, move || {
             let _io_handle = io_handle;
-            file.sync_data().map_err(|e| {
-                let (partition, name) = &generation.key;
-                Error::BlobSyncFailed(partition.clone(), hex(name), e.into())
-            })
+            file.sync_data()
+                .map_err(|e| Error::BlobSyncFailed(key.0.clone(), hex(&key.1), e.into()))
         });
+    }
+}
+
+/// One open of a blob, shared by its clones.
+///
+/// Dropping the last clone releases the name and registers the obligation a later open waits
+/// for, which [Shared] resolves once every reference to the file is gone.
+struct Open {
+    shared: Arc<Shared>,
+    generation: Arc<Generation>,
+}
+
+impl Deref for Open {
+    type Target = Shared;
+
+    fn deref(&self) -> &Shared {
+        &self.shared
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        if let Some(sender) = self.generation.release() {
+            *self.shared.promise.lock() = Some(sender);
+        }
     }
 }
 
@@ -333,14 +367,16 @@ impl Blob {
         data_offset: u64,
         generation: Arc<Generation>,
     ) -> Self {
-        let shared = Shared {
+        let shared = Arc::new(Shared {
             file: Arc::new(file),
             io_handle,
             tracker: Tracker::default(),
-            generation,
-        };
+            pending: generation.pending.clone(),
+            key: generation.key.clone(),
+            promise: Mutex::new(None),
+        });
         Self {
-            shared: Arc::new(shared),
+            open: Arc::new(Open { shared, generation }),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
@@ -395,9 +431,9 @@ impl crate::Blob for Blob {
             iouring::Cache::Enabled
         };
         let io_buf = self
-            .shared
+            .open
             .io_handle
-            .read_at(self.shared.file.clone(), offset, len, io_buf, cache)
+            .read_at(self.open.file.clone(), offset, len, io_buf, cache)
             .await
             .map_err(|(_, err)| err)?;
 
@@ -433,26 +469,26 @@ impl crate::Blob for Blob {
 
         let sync = options.contains(WriteOptions::SYNC);
         let seen = if sync {
-            self.shared.tracker.begin_sync()
+            self.open.tracker.begin_sync()
         } else {
             0
         };
         if !sync {
-            self.shared.tracker.write();
+            self.open.tracker.write();
         }
         let result = self
-            .shared
+            .open
             .io_handle
-            .write_at(self.shared.file.clone(), offset, bufs, options, cache)
+            .write_at(self.open.file.clone(), offset, bufs, options, cache)
             .await;
         if sync {
             match &result {
-                Ok(true) => self.shared.tracker.end_sync(seen),
-                Err(_) => self.shared.tracker.write(),
+                Ok(true) => self.open.tracker.end_sync(seen),
+                Err(_) => self.open.tracker.write(),
                 Ok(false) => {}
             }
         } else if result.is_ok() {
-            self.shared.tracker.complete();
+            self.open.tracker.complete();
         }
         result.map(|_| ())
     }
@@ -462,50 +498,46 @@ impl crate::Blob for Blob {
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        self.shared.tracker.write();
-        self.shared.file.set_len(len).map_err(|e| {
-            let (partition, name) = &self.shared.generation.key;
+        self.open.tracker.write();
+        self.open.file.set_len(len).map_err(|e| {
+            let (partition, name) = &self.open.key;
             Error::BlobResizeFailed(partition.clone(), hex(name), IoError::other(e).into())
         })?;
-        self.shared.tracker.complete();
+        self.open.tracker.complete();
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        if !self.shared.tracker.is_dirty() {
+        if !self.open.tracker.is_dirty() {
             #[cfg(test)]
-            self.shared.tracker.skip_sync();
+            self.open.tracker.skip_sync();
             return Ok(());
         }
-        let seen = self.shared.tracker.begin_sync();
-        self.shared
+        let seen = self.open.tracker.begin_sync();
+        self.open
             .io_handle
-            .sync(self.shared.file.clone())
+            .sync(self.open.file.clone())
             .await
             .map_err(|err| match err {
                 Error::Io(e) => {
-                    let (partition, name) = &self.shared.generation.key;
+                    let (partition, name) = &self.open.key;
                     Error::BlobSyncFailed(partition.clone(), hex(name), e)
                 }
                 err => err,
             })?;
-        self.shared.tracker.end_sync(seen);
+        self.open.tracker.end_sync(seen);
         Ok(())
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        if !self.shared.tracker.is_dirty() {
+        if !self.open.tracker.is_dirty() {
             #[cfg(test)]
-            self.shared.tracker.skip_sync();
+            self.open.tracker.skip_sync();
             return Handle::ready(Ok(()));
         }
-        let shared = self.shared.clone();
+        let shared = self.open.shared.clone();
         let seen = shared.tracker.begin_sync();
-        let receiver = self
-            .shared
-            .io_handle
-            .start_sync(self.shared.file.clone())
-            .await;
+        let receiver = self.open.io_handle.start_sync(self.open.file.clone()).await;
         Handle::from_future(async move {
             match receiver.await {
                 Ok(Ok(())) => {
@@ -513,7 +545,7 @@ impl crate::Blob for Blob {
                     Ok(())
                 }
                 Ok(Err(Error::Io(e))) => {
-                    let (partition, name) = &shared.generation.key;
+                    let (partition, name) = &shared.key;
                     Err(Error::BlobSyncFailed(partition.clone(), hex(name), e))
                 }
                 Ok(Err(err)) => Err(err),
@@ -1427,7 +1459,7 @@ mod tests {
         );
         // A clean open skips the sync, so record an uncovered mutation first. The sync should
         // then fail through the blob-specific wrapper before any kernel work is attempted.
-        blob.shared.tracker.write();
+        blob.open.tracker.write();
         let err = blob
             .sync()
             .await
@@ -1466,7 +1498,7 @@ mod tests {
             Arc::new(Pending::default()).attach("partition", b"blob").0,
         );
         // A clean open skips the sync, so record an uncovered mutation first.
-        blob.shared.tracker.write();
+        blob.open.tracker.write();
         let err = blob
             .start_sync()
             .await
@@ -1548,7 +1580,7 @@ mod tests {
         );
         // A clean open skips the sync, so record an uncovered mutation first. The request
         // should then reach the kernel and come back as a wrapped sync failure.
-        blob.shared.tracker.write();
+        blob.open.tracker.write();
         let err = blob
             .sync()
             .await
@@ -1727,14 +1759,14 @@ mod tests {
         let (blob, _) = storage.open("partition", b"clean").await.unwrap();
         blob.sync().await.unwrap();
         blob.start_sync().await.await.unwrap();
-        assert_eq!(blob.shared.tracker.skipped(), 2);
+        assert_eq!(blob.open.tracker.skipped(), 2);
         blob.write_at(0, b"hello", WriteOptions::default())
             .await
             .unwrap();
         blob.sync().await.unwrap();
-        assert_eq!(blob.shared.tracker.skipped(), 2);
+        assert_eq!(blob.open.tracker.skipped(), 2);
         blob.sync().await.unwrap();
-        assert_eq!(blob.shared.tracker.skipped(), 3);
+        assert_eq!(blob.open.tracker.skipped(), 3);
         drop(blob);
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);

@@ -667,15 +667,14 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
-    /// The same holds for a blob reopened within a run. Once every handle to a
-    /// blob has been dropped and every operation issued through those handles
-    /// has completed (its future was awaited, or its [`Blob::start_sync`]
-    /// handle resolved), a handle returned by a later
-    /// [`Storage::open_versioned`] reads only crash-durable bytes. Writes and
-    /// resizes that no completed sync covered are either made durable before
-    /// the open returns or are not visible through the new handle. While
-    /// another handle to the blob remains open, a new handle may read bytes
-    /// that no sync covers.
+    /// The same holds for a blob reopened within a run. A blob has one open at
+    /// a time, see [`Storage::open_versioned`]. Once every handle to a blob has
+    /// been dropped and every operation issued through those handles has
+    /// completed (its future was awaited, or its [`Blob::start_sync`] handle
+    /// resolved), a handle returned by a later open reads only crash-durable
+    /// bytes. Writes and resizes that no completed sync covered are either made
+    /// durable before the open returns or are not visible through the new
+    /// handle.
     ///
     /// # Cancellation
     ///
@@ -713,10 +712,14 @@ stability_scope!(BETA {
         /// Open an existing blob in a given partition or create a new one, returning
         /// the blob and its length.
         ///
-        /// Multiple instances of the same blob can be opened concurrently, however,
-        /// writing to the same blob concurrently may lead to undefined behavior.
+        /// A blob has one open at a time. Clone the returned blob to share it, and
+        /// drop every clone before opening the blob again.
         ///
         /// An Ok result indicates the blob is durably created (or already exists).
+        ///
+        /// # Panics
+        ///
+        /// Panics if a handle from an earlier open of the blob is still alive.
         ///
         /// # Versions
         ///
@@ -863,11 +866,10 @@ stability_scope!(BETA {
     /// To support blob implementations that enable concurrent reads and
     /// writes, blobs are responsible for maintaining synchronization.
     ///
-    /// Cloning a blob is similar to wrapping a single file descriptor in
-    /// a lock whereas opening a new blob (of the same name) is similar to
-    /// opening a new file descriptor. If multiple blobs are opened with the same
-    /// name, they are not expected to coordinate access to underlying storage
-    /// and writing to both is undefined behavior.
+    /// Cloning a blob shares one open, similar to wrapping a single file
+    /// descriptor in a lock. A blob has one open at a time: opening it again
+    /// while any clone is alive panics, so clones are the only way to share
+    /// access to a blob.
     ///
     /// Dropping the last clone of a blob whose writes or resizes are not covered
     /// by a completed [Blob::sync] does not make them durable at a known point.
@@ -1485,6 +1487,7 @@ mod tests {
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
+            drop(blob);
             let (blob, len) = context
                 .open(partition, name)
                 .await
@@ -1611,6 +1614,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after write");
 
             // Re-open and check length
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
@@ -1622,6 +1626,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after resize");
 
             // Re-open and check length again
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, new_len);
 
@@ -1644,6 +1649,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
+            drop(blob);
             let (blob, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, data.len() as u64);
 

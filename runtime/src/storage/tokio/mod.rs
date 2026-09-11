@@ -183,7 +183,7 @@ impl crate::Storage for Storage {
                         let sender = pending
                             .start(&generation)
                             .expect("creation owns its namespace entry");
-                        pending.finish(&generation, sender, Err(error.clone()));
+                        pending.finish(&generation.key, sender, Err(error.clone()));
                     })?,
                 };
 
@@ -1103,33 +1103,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Each open is tracked separately: dropping a dirty handle defers a sync even while another
-    /// handle to the blob is open, and the later open waits for it.
+    /// Removes a test storage directory when the test unwinds.
+    struct Cleanup(PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A blob has one open at a time: opening it again while a handle is alive panics.
     #[tokio::test]
-    async fn test_open_while_dirty_handle_alive() {
+    #[should_panic(expected = "is already open")]
+    async fn test_open_while_handle_alive_panics() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_alive_{}", random_suffix()));
-        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let _cleanup = Cleanup(storage_directory.clone());
+        let config = Config::new(storage_directory, Layout::ALL);
         let storage = Storage::new(config, test_pool());
-
         let (first, _) = storage.open("partition", b"blob").await.unwrap();
-        first
-            .write_at(0, b"hello", WriteOptions::default())
-            .await
-            .unwrap();
-        let (second, _) = storage.open("partition", b"blob").await.unwrap();
-        assert_eq!(storage.pending.finished(), 0);
+        let _second = storage.open("partition", b"blob").await;
         drop(first);
-        drop(second);
-
-        let (third, len) = storage.open("partition", b"blob").await.unwrap();
-        assert_eq!(storage.pending.len(), 0);
-        assert_eq!(storage.pending.finished(), 1);
-        assert_eq!(len, 5);
-        drop(third);
-        settle(&storage).await;
-        assert_eq!(storage.pending.finished(), 1);
-
-        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 }

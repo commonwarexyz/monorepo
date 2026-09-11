@@ -16,6 +16,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         },
     };
     use ::tokio::sync::watch;
+    use commonware_formatting::hex;
     #[cfg(test)]
     use crate::{Blob as _, BufferPool, ReadOptions, WriteOptions, buffer::Write};
     #[cfg(test)]
@@ -81,10 +82,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         })
     }
 
-    /// Deferred syncs and the live file identities that can still register them.
+    /// Deferred syncs and the live opens that can still register them.
     ///
-    /// Names can be removed and reused while old handles remain readable. A weak identity binds
-    /// registration to the current name, while its receiver retains outstanding work and errors.
+    /// A name has at most one live open. Its identity binds registration to that open, while
+    /// the receiver retains outstanding work and errors until the name is removed or recreated.
     #[derive(Default)]
     pub(crate) struct Pending {
         syncs: commonware_utils::sync::Mutex<HashMap<(String, Vec<u8>), Entry>>,
@@ -104,10 +105,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         sync: Option<Receiver>,
     }
 
-    /// Shared by overlapping opens of one namespace entry and its deferred work.
+    /// The live open of one namespace entry, dropped with the last handle of that open.
     pub(crate) struct Generation {
         pending: Arc<Pending>,
         key: (String, Vec<u8>),
+    }
+
+    impl Generation {
+        /// Release the name for a later open, returning the sender that resolves the obligation
+        /// every later open waits for. `None` once the name was removed or recreated, or while a
+        /// retained failure still blocks it.
+        pub(crate) fn release(&self) -> Option<Sender> {
+            self.pending.start(self)
+        }
     }
 
     impl Drop for Generation {
@@ -124,9 +134,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// The result of a pending sync, `None` while it runs.
     type Outcome = Option<Result<(), Error>>;
     type Receiver = watch::Receiver<Outcome>;
+    pub(crate) type Sender = watch::Sender<Outcome>;
 
     impl Pending {
-        /// Attach to the actual opened file while the backend holds its namespace lock.
+        /// Attach a fresh open to a name while the backend holds its namespace lock.
+        ///
+        /// # Panics
+        ///
+        /// Panics while a handle from an earlier open of the name is still alive.
         pub(crate) fn attach(
             self: &Arc<Self>,
             partition: &str,
@@ -135,19 +150,22 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             let key = (partition.to_owned(), name.to_vec());
             let mut syncs = self.syncs.lock();
             let entry = syncs.entry(key.clone()).or_default();
-            let generation = entry.identity.upgrade().unwrap_or_else(|| {
-                let generation = Arc::new(Generation { pending: self.clone(), key });
-                entry.identity = Arc::downgrade(&generation);
-                generation
-            });
+            assert!(
+                entry.identity.upgrade().is_none(),
+                "blob {partition}/{} is already open",
+                hex(name)
+            );
+            let generation = Arc::new(Generation { pending: self.clone(), key });
+            entry.identity = Arc::downgrade(&generation);
             (generation, entry.sync.clone())
         }
 
-        /// Register work only while this identity still owns its name.
-        fn start(&self, generation: &Generation) -> Option<watch::Sender<Outcome>> {
+        /// Register work only while this identity still owns its name and no earlier obligation
+        /// is outstanding.
+        fn start(&self, generation: &Generation) -> Option<Sender> {
             let mut syncs = self.syncs.lock();
             let entry = syncs.get_mut(&generation.key)?;
-            if !std::ptr::eq(entry.identity.as_ptr(), generation) {
+            if !std::ptr::eq(entry.identity.as_ptr(), generation) || entry.sync.is_some() {
                 return None;
             }
             let (sender, receiver) = watch::channel(None);
@@ -155,22 +173,32 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             Some(sender)
         }
 
-        /// Publish a sync's result. A success releases its debt and a failure retains it.
-        fn finish(
+        /// Publish a deferred sync's result, see [Self::resolve].
+        fn finish(&self, key: &(String, Vec<u8>), sender: Sender, result: Result<(), Error>) {
+            #[cfg(test)]
+            if result.is_ok() {
+                self.finished.fetch_add(1, Ordering::AcqRel);
+            }
+            self.resolve(key, sender, result);
+        }
+
+        /// Publish an obligation's result. A success releases its debt and a failure retains it.
+        pub(crate) fn resolve(
             &self,
-            generation: &Generation,
-            sender: watch::Sender<Outcome>,
+            key: &(String, Vec<u8>),
+            sender: Sender,
             result: Result<(), Error>,
         ) {
             if result.is_ok() {
                 let mut syncs = self.syncs.lock();
-                if let Some(entry) = syncs.get_mut(&generation.key)
+                if let Some(entry) = syncs.get_mut(key)
                     && entry.sync.as_ref().is_some_and(|receiver| receiver.same_channel(&sender.subscribe()))
                 {
                     entry.sync = None;
+                    if entry.identity.upgrade().is_none() {
+                        syncs.remove(key);
+                    }
                 }
-                #[cfg(test)]
-                self.finished.fetch_add(1, Ordering::AcqRel);
             }
             let _ = sender.send(Some(result));
         }
@@ -266,20 +294,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    /// Run a deferred sync for a blob whose last handle dropped dirty.
+    /// Run a deferred sync for a blob whose open ended dirty, resolving its obligation with
+    /// `sender`.
     ///
     /// The sync runs on the blocking pool when a runtime is available and inline otherwise. A
     /// pool that is shutting down may discard queued work, so a blob dropped dirty during runtime
     /// teardown relies on the next start's flush. `sync` must own everything the sync needs,
     /// including the directory hold.
     pub(crate) fn defer_sync(
-        generation: Arc<Generation>,
+        pending: Arc<Pending>,
+        key: (String, Vec<u8>),
+        sender: Sender,
         sync: impl FnOnce() -> Result<(), Error> + Send + 'static,
     ) {
-        let pending = generation.pending.clone();
-        let Some(sender) = pending.start(&generation) else {
-            return;
-        };
         #[cfg(test)]
         let gate = {
             pending.deferred.lock().push(sender.subscribe());
@@ -291,7 +318,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 let _ = gate.recv();
             }
             let result = sync();
-            pending.finish(&generation, sender, result);
+            pending.finish(&key, sender, result);
         };
         match ::tokio::runtime::Handle::try_current() {
             Ok(handle) => {
@@ -414,7 +441,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
             let (current, len) = storage.open(partition, name).await.unwrap();
             assert_eq!(len, 0);
-            let (reader, _) = storage.open(partition, name).await.unwrap();
+            let reader = current.clone();
             current.write_at(0, b"new", WriteOptions::default()).await.unwrap();
 
             // Dropping the sender also releases the worker if an assertion unwinds.
@@ -572,32 +599,41 @@ pub(crate) mod tests {
             assert!(!tracker.is_dirty());
         }
 
+        fn key() -> (String, Vec<u8>) {
+            ("a".to_owned(), b"1".to_vec())
+        }
+
         #[tokio::test]
         async fn test_wait_observes_pending_sync() {
             let pending = Arc::new(Pending::default());
             let (generation, wait) = pending.attach("a", b"1");
             Pending::wait(wait).await.unwrap();
-            let sender = pending.start(&generation).unwrap();
-            let wait = pending.attach("a", b"1").1;
+            let sender = generation.release().unwrap();
+            drop(generation);
+            let (generation, wait) = pending.attach("a", b"1");
             let waiter = tokio::spawn(Pending::wait(wait));
             tokio::task::yield_now().await;
             assert!(!waiter.is_finished());
-            pending.finish(&generation, sender, Ok(()));
+            pending.finish(&key(), sender, Ok(()));
             waiter.await.unwrap().unwrap();
             assert_eq!(pending.len(), 0);
             assert_eq!(pending.finished(), 1);
+            drop(generation);
+            assert!(pending.syncs.lock().is_empty());
         }
 
         #[tokio::test]
         async fn test_failed_sync_stays_until_forgotten() {
             let pending = Arc::new(Pending::default());
             let (generation, _) = pending.attach("a", b"1");
-            let sender = pending.start(&generation).unwrap();
-            pending.finish(&generation, sender, Err(Error::Closed));
+            let sender = generation.release().unwrap();
+            pending.finish(&key(), sender, Err(Error::Closed));
             drop(generation);
             for _ in 0..2 {
                 let (generation, wait) = pending.attach("a", b"1");
                 assert!(matches!(Pending::wait(wait).await, Err(Error::Closed)));
+                // A failed open cannot replace the retained failure with its own release.
+                assert!(generation.release().is_none());
                 drop(generation);
                 assert_eq!(pending.len(), 1);
             }
@@ -609,16 +645,25 @@ pub(crate) mod tests {
         }
 
         #[test]
+        fn test_live_open_refuses_a_second_attach() {
+            let pending = Arc::new(Pending::default());
+            let (first, _) = pending.attach("a", b"1");
+            let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pending.attach("a", b"1")
+            }));
+            assert!(second.is_err(), "a live open must refuse a second open");
+            drop(first);
+            drop(pending.attach("a", b"1"));
+        }
+
+        #[test]
         fn test_generations_retire_and_release_clean_entries() {
             let pending = Arc::new(Pending::default());
             let (first, _) = pending.attach("a", b"1");
-            let (reader, _) = pending.attach("a", b"1");
-            assert!(Arc::ptr_eq(&first, &reader));
-            let sender = pending.start(&first).unwrap();
-            pending.finish(&first, sender, Ok(()));
+            let sender = first.release().unwrap();
             drop(first);
             assert_eq!(pending.syncs.lock().len(), 1);
-            drop(reader);
+            pending.finish(&key(), sender, Ok(()));
             assert!(pending.syncs.lock().is_empty());
 
             for name in 0..128u64 {
@@ -627,23 +672,25 @@ pub(crate) mod tests {
             }
 
             let (old, _) = pending.attach("a", b"1");
-            let old_sync = pending.start(&old).unwrap();
             pending.forget("a", Some(b"1"));
             let (current, _) = pending.attach("a", b"1");
-            let current_sync = pending.start(&current).unwrap();
-            assert!(pending.start(&old).is_none());
-            pending.finish(&old, old_sync, Ok(()));
+            let current_sync = current.release().unwrap();
+            assert!(old.release().is_none());
             drop(old);
             assert_eq!(pending.len(), 1);
-            pending.finish(&current, current_sync, Ok(()));
             drop(current);
+            assert_eq!(pending.len(), 1);
+            pending.finish(&key(), current_sync, Ok(()));
             assert!(pending.syncs.lock().is_empty());
         }
 
         #[tokio::test]
         async fn test_defer_sync_runs_on_the_blocking_pool() {
             let pending = Arc::new(Pending::default());
-            defer_sync(pending.attach("a", b"1").0, || Ok(()));
+            let (generation, _) = pending.attach("a", b"1");
+            let sender = generation.release().unwrap();
+            drop(generation);
+            defer_sync(pending.clone(), key(), sender, || Ok(()));
             Pending::wait(pending.attach("a", b"1").1).await.unwrap();
             assert_eq!(pending.finished(), 1);
             assert_eq!(pending.len(), 0);
@@ -652,7 +699,10 @@ pub(crate) mod tests {
         #[test]
         fn test_defer_sync_runs_inline_without_a_runtime() {
             let pending = Arc::new(Pending::default());
-            defer_sync(pending.attach("a", b"1").0, || Ok(()));
+            let (generation, _) = pending.attach("a", b"1");
+            let sender = generation.release().unwrap();
+            drop(generation);
+            defer_sync(pending.clone(), key(), sender, || Ok(()));
             assert_eq!(pending.finished(), 1);
             assert!(pending.syncs.lock().is_empty());
         }
@@ -883,7 +933,7 @@ pub(crate) mod tests {
         assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
     }
 
-    /// Removal liveness is per-blob, not per-handle: clones taken before or after removal keep
+    /// Removal liveness is per-open, not per-handle: clones taken before or after removal keep
     /// reading regardless of other handles' lifetimes, and out-of-bounds reads still fail.
     async fn test_read_after_remove_handle_clones<S>(storage: &S)
     where
@@ -901,11 +951,6 @@ pub(crate) mod tests {
             .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
-        // Opened independently: a distinct handle to the same blob, not a clone.
-        let (independent, _) = storage
-            .open("read_after_remove_clones", b"name")
-            .await
-            .unwrap();
 
         storage
             .remove("read_after_remove_clones", Some(b"name"))
@@ -916,7 +961,7 @@ pub(crate) mod tests {
         let third = first.clone();
         drop(first);
 
-        for handle in [&second, &third, &independent] {
+        for handle in [&second, &third] {
             let read = handle
                 .read_at(0, data.len(), ReadOptions::default())
                 .await

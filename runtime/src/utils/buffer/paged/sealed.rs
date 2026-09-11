@@ -77,6 +77,12 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
+    /// Make the sealed blob durable.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn sync(&self) -> Result<(), crate::Error> {
+        self.inner.blob.sync().await
+    }
+
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no
     /// partial page.
     fn partial_offset(&self) -> u64 {

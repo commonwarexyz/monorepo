@@ -1,10 +1,10 @@
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
-    storage::{Generation, Tracker, defer_sync, hold::Hold},
+    storage::{Generation, Pending, Sender, Tracker, defer_sync, hold::Hold},
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     fs::File,
     io::IoSlice,
@@ -52,14 +52,19 @@ impl Cache {
 /// A blob's file bundled with the hold on its storage directory.
 ///
 /// An operation must capture the file to touch it, so it carries the hold
-/// into the blocking pool without having to remember to. Dropping the last
-/// handle while writes remain uncovered by a completed sync starts a deferred
-/// sync that later opens of the blob wait for.
+/// into the blocking pool without having to remember to, and keeps the open's
+/// obligation pending until it has finished. Dropping the last reference
+/// resolves that obligation: at once when a completed sync covers every
+/// mutation, and otherwise through a deferred sync that the next open of the
+/// blob waits for.
 struct Held {
     file: Arc<File>,
     tracker: Tracker,
-    generation: Arc<Generation>,
     hold: Arc<Hold>,
+    pending: Arc<Pending>,
+    key: (String, Vec<u8>),
+    /// Resolves the obligation the open registered when its last handle dropped.
+    promise: Mutex<Option<Sender>>,
 }
 
 impl Deref for Held {
@@ -72,23 +77,52 @@ impl Deref for Held {
 
 impl Drop for Held {
     fn drop(&mut self) {
+        let Some(sender) = self.promise.lock().take() else {
+            return;
+        };
         if !self.tracker.is_dirty() {
+            self.pending.resolve(&self.key, sender, Ok(()));
             return;
         }
         let file = self.file.clone();
         let hold = self.hold.clone();
-        let generation = self.generation.clone();
-        defer_sync(generation.clone(), move || {
+        let key = self.key.clone();
+        defer_sync(self.pending.clone(), self.key.clone(), sender, move || {
             let _hold = hold;
-            let (partition, name) = &generation.key;
-            Blob::sync_inner(&file, partition, name)
+            Blob::sync_inner(&file, &key.0, &key.1)
         });
+    }
+}
+
+/// One open of a blob, shared by its clones.
+///
+/// Dropping the last clone releases the name and registers the obligation a
+/// later open waits for, which [Held] resolves once every operation issued
+/// through this open has finished.
+struct Open {
+    held: Arc<Held>,
+    generation: Arc<Generation>,
+}
+
+impl Deref for Open {
+    type Target = Held;
+
+    fn deref(&self) -> &Held {
+        &self.held
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        if let Some(sender) = self.generation.release() {
+            *self.held.promise.lock() = Some(sender);
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct Blob {
-    file: Arc<Held>,
+    open: Arc<Open>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -107,14 +141,16 @@ impl Blob {
         hold: Arc<Hold>,
         generation: Arc<Generation>,
     ) -> Self {
-        let held = Held {
+        let held = Arc::new(Held {
             file: Arc::new(file),
             tracker: Tracker::default(),
-            generation,
             hold,
-        };
+            pending: generation.pending.clone(),
+            key: generation.key.clone(),
+            promise: Mutex::new(None),
+        });
         Self {
-            file: Arc::new(held),
+            open: Arc::new(Open { held, generation }),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
@@ -126,7 +162,7 @@ impl Blob {
     /// Number of syncs this open skipped because it had nothing to persist.
     #[cfg(test)]
     pub(super) fn skipped_syncs(&self) -> u64 {
-        self.file.tracker.skipped()
+        self.open.tracker.skipped()
     }
 
     pub(super) fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
@@ -321,7 +357,7 @@ impl crate::Blob for Blob {
         if len == 0 {
             return Ok(bufs);
         }
-        let file = self.file.clone();
+        let file = self.open.held.clone();
         let pool = self.pool.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled(self.dont_cache_supported.clone())
@@ -352,7 +388,7 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let file = self.file.clone();
+        let file = self.open.held.clone();
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
@@ -379,7 +415,7 @@ impl crate::Blob for Blob {
         }
         let fused = flags.is_some();
         if !fused {
-            self.file.tracker.write();
+            self.open.tracker.write();
         }
         task::spawn_blocking(move || {
             // Preserve the single-buffer fast path when no option requires per-write flags.
@@ -406,7 +442,7 @@ impl crate::Blob for Blob {
             }
             if sync && !fused {
                 let seen = file.tracker.begin_sync();
-                let (partition, name) = &file.generation.key;
+                let (partition, name) = &file.key;
                 Self::sync_inner(&file, partition, name)?;
                 file.tracker.end_sync(seen);
             }
@@ -417,11 +453,11 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let file = self.file.clone();
+        let file = self.open.held.clone();
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        self.file.tracker.write();
+        self.open.tracker.write();
         task::spawn_blocking(move || {
             file.set_len(len)?;
             file.tracker.complete();
@@ -431,22 +467,22 @@ impl crate::Blob for Blob {
         .map_err(|e| e.into())
         .and_then(|r: std::io::Result<()>| r)
         .map_err(|e| {
-            let (partition, name) = &self.file.generation.key;
+            let (partition, name) = &self.open.key;
             Error::BlobResizeFailed(partition.clone(), hex(name), e.into())
         })?;
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        if !self.file.tracker.is_dirty() {
+        if !self.open.tracker.is_dirty() {
             #[cfg(test)]
-            self.file.tracker.skip_sync();
+            self.open.tracker.skip_sync();
             return Ok(());
         }
-        let file = self.file.clone();
-        let seen = self.file.tracker.begin_sync();
+        let file = self.open.held.clone();
+        let seen = self.open.tracker.begin_sync();
         task::spawn_blocking(move || {
-            let (partition, name) = &file.generation.key;
+            let (partition, name) = &file.key;
             Self::sync_inner(&file, partition, name)?;
             file.tracker.end_sync(seen);
             Ok(())
@@ -454,25 +490,25 @@ impl crate::Blob for Blob {
         .await
         .map_err(|e| {
             let err: std::io::Error = e.into();
-            let (partition, name) = &self.file.generation.key;
+            let (partition, name) = &self.open.key;
             Error::BlobSyncFailed(partition.clone(), hex(name), err.into())
         })?
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        if !self.file.tracker.is_dirty() {
+        if !self.open.tracker.is_dirty() {
             #[cfg(test)]
-            self.file.tracker.skip_sync();
+            self.open.tracker.skip_sync();
             return Handle::ready(Ok(()));
         }
         let (tx, rx) = oneshot::channel();
-        let file = self.file.clone();
-        let seen = self.file.tracker.begin_sync();
+        let file = self.open.held.clone();
+        let seen = self.open.tracker.begin_sync();
         #[cfg(test)]
         let after_start_sync = self.after_start_sync.clone();
         task::spawn_blocking(move || {
             // Release this operation's blob ownership before publishing its completion.
-            let (partition, name) = &file.generation.key;
+            let (partition, name) = &file.key;
             let result = Self::sync_inner(&file, partition, name);
             if result.is_ok() {
                 file.tracker.end_sync(seen);
