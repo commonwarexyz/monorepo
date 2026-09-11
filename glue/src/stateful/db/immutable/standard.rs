@@ -233,7 +233,7 @@ where
                 self.metadata,
                 self.inactivity_floor.unwrap_or_default(),
             )
-            .await;
+            .await?;
         Ok(ImmutableMerkleized {
             inner: merkleized,
             db: self.db.clone(),

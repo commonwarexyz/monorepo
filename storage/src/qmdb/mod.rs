@@ -226,6 +226,12 @@ pub enum Error<F: Family> {
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
+    /// A batch read found that a non-ancestor batch was applied to the database (or that
+    /// it was rewound off the batch's chain). The caller should fork a new batch from the
+    /// current state.
+    #[error("stale read: a non-ancestor batch was applied")]
+    StaleRead,
+
     /// The batch's inactivity floor is lower than the database's current floor.
     #[error("floor regressed: batch floor {0} < current floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
