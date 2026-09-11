@@ -111,9 +111,16 @@ We observe that users can also **prune their nullifier state**. For a threshold 
 
 Recall that the nullifiers are temporally ordered based on the time the receipt was created. Choosing $L$ to retain the $w$ largest claimed positions bounds the wallet's storage to $\ell$ hashes plus $w$ positions, independent of the total number of receipts it has claimed. Older nullifiers can be pushed to cold storage, so a receipt below $L$ can still be claimed by retrieving the relevant path from cold storage and updating the frontier.
 
-### An Interactive Example
+## An Interactive Example
 
-In the example below, four accounts make a random sequence of payments to one another. Four panels show communication between parties, (potentially private) account balances, transactions posted to the ledger, and the storage held by each party. Use **prev** and **next** to step through the designs above.
+The simulation below follows four accounts making payments to one another. Use **prev** and **next** to move from a traditional bank through ecash to Bonsai, adding privacy and pruning state along the way. The same stream of payments continues across stages.
+
+The four panels show different views of the same activity:
+
+- **Network:** messages exchanged with the bank or validators, and private handoffs between senders and receivers.
+- **Balances:** funds held in each account and payments sent but not yet claimed.
+- **Ledger:** what the bank records or validators publish, showing which payment details remain visible at each stage.
+- **Storage:** the data retained by the bank, validators, and wallets. Observe the growing nullifier set move to wallets, then see how pruning reduces the active state.
 
 ```{=html}
 <div id="sim" role="region" aria-label="From a bank to our construction."></div>

@@ -210,10 +210,8 @@ Vamsi Policharla</a></div>
         a hiding commitment (receipt):</p>
         <p><span class="math display">
         \rho = \mathsf{Com}_{\mathsf{rec}}\big(v,\ \mathsf{Sen},\
-        \mathsf{Rec}\big).
-        </span></p>
-        <p>The receipt is stored in a Merkle Mountain Range (MMR; see
-        Peter’s <a
+        \mathsf{Rec}\big),
+        </span> in a Merkle Mountain Range (MMR; see Peter’s <a
         href="https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md">doc</a>
         or Roberto’s <a href="https://commonware.xyz/blogs/mmr">blog
         post</a>).</p>
@@ -237,7 +235,7 @@ Vamsi Policharla</a></div>
         <p>To prevent a receipt from being claimed twice, the proof
         requires the receiver to insert a nullifier into their nullifier
         tree. Typically, such nullifiers are computed as the output of a
-        pseudorandom function (PRF) on some unique input such as <span
+        pseudorandom function on some unique input such as <span
         class="math inline">\mathsf{pid}</span>. But in our case,
         nullifiers are never published, so we can choose the nullifier
         to be <span class="math inline">\mathsf{pid}</span> itself!</p>
@@ -292,11 +290,11 @@ Vamsi Policharla</a></div>
         need at most 40 frontier hashes, or 1.25 KiB with 32-byte
         hashes.</p>
         <p><strong>Pruning Nullifiers.</strong> The real challenge lies
-        in managing nullifier growth. For receipts, we prove
-        <em>membership</em>; for nullifiers, we need to prove
-        <em>non-membership</em> to prevent double spending. MMRs do not
-        support (efficient) non-membership proofs, so validators cannot
-        use the same strategy.</p>
+        in managing the nullifier growth. Unlike receipts where we prove
+        <em>membership</em>, we need to prove <em>non-membership</em> of
+        nullifiers to prevent double spending. MMRs do not support
+        (efficient) non-membership proofs so validators cannot use the
+        same strategy.</p>
         <p>One approach is to shift the burden of non-membership to the
         users. To spend a coin, the user must prove that it has not
         already been spent, using the ledger’s history since the coin
@@ -308,13 +306,14 @@ Vamsi Policharla</a></div>
         link them to their eventual transactions. Users can be offline,
         but resuming requires synchronization work by the user or a
         service that processes the ledger.</p>
-        <p>Bonsai benefits from the account-based model: although it
-        provides less <em>on-chain</em> privacy than Zcash, it offers an
-        elegant way to <strong>delegate</strong> nullifier storage. As
-        described above, each user maintains the nullifiers for payments
-        they have received, accumulates them into a <a
-        href="https://eprint.iacr.org/2016/683">sparse Merkle tree</a>,
-        and stores the root inside their account commitment.</p>
+        <p>Bonsai has the benefit of working in the account based model
+        and albeit providing less <em>on-chain</em> privacy than Zcash,
+        it offers a simpler approach to <strong>delegate</strong>
+        nullifier storage. As described above, each user maintains the
+        nullifiers for any payments they received, accumulates them into
+        a <a href="https://eprint.iacr.org/2016/683">sparse Merkle
+        tree</a> and stores the root inside their account
+        commitment.</p>
         <p>But won’t the nullifier set eventually grow too big for users
         to manage? We seem to have just delayed the problem.</p>
         <p>We observe that users can also <strong>prune their nullifier
@@ -338,13 +337,27 @@ Vamsi Policharla</a></div>
         below <span class="math inline">L</span> can still be claimed by
         retrieving the relevant path from cold storage and updating the
         frontier.</p>
-        <h3 id="an-interactive-example">An Interactive Example</h3>
-        <p>In the example below, four accounts make a random sequence of
-        payments to one another. Four panels show communication between
-        parties, (potentially private) account balances, transactions
-        posted to the ledger, and the storage held by each party. Use
-        <strong>prev</strong> and <strong>next</strong> to step through
-        the designs above.</p>
+        <h2 id="an-interactive-example">An Interactive Example</h2>
+        <p>The simulation below follows four accounts making payments to
+        one another. Use <strong>prev</strong> and <strong>next</strong>
+        to move from a traditional bank through ecash to Bonsai, adding
+        privacy and pruning state along the way. The same stream of
+        payments continues across stages.</p>
+        <p>The four panels show different views of the same
+        activity:</p>
+        <ul>
+        <li><strong>Network:</strong> messages exchanged with the bank
+        or validators, and private handoffs between senders and
+        receivers.</li>
+        <li><strong>Balances:</strong> funds held in each account and
+        payments sent but not yet claimed.</li>
+        <li><strong>Ledger:</strong> what the bank records or validators
+        publish, showing which payment details remain visible at each
+        stage.</li>
+        <li><strong>Storage:</strong> the data retained by the bank,
+        validators, and wallets. Observe the growing nullifier set move
+        to wallets, then see how pruning reduces the active state.</li>
+        </ul>
         <div id="sim" role="region" aria-label="From a bank to our construction."></div>
         <h2 id="privacy-beyond-the-ledger">Privacy Beyond the
         Ledger</h2>
