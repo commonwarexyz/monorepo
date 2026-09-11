@@ -793,7 +793,11 @@ impl<E: Clock + Spawner> Reporter for Application<E> {
         }
         let certified = match &activity {
             Activity::ProtocolAccepted { artifact, .. } => match artifact.as_ref() {
-                Artifact::DaCertificate(certificate) => Some(certificate.block_ref::<Sha256>()),
+                Artifact::DaCertificate(certificate)
+                    if Some(certificate.header().chain()) == self.producer_chain =>
+                {
+                    Some(certificate.block_ref::<Sha256>())
+                }
                 _ => None,
             },
             Activity::HistoryAccepted { .. }
