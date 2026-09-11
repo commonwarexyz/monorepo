@@ -1,4 +1,4 @@
-use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
+use super::{Header, Layout, Pending, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use std::{
@@ -33,6 +33,7 @@ pub struct Storage {
     cfg: Config,
     pool: BufferPool,
     hold: Arc<Hold>,
+    pending: Arc<Pending>,
 }
 
 impl Storage {
@@ -55,6 +56,7 @@ impl Storage {
             cfg,
             pool,
             hold,
+            pending: Arc::new(Pending::default()),
         }
     }
 
@@ -101,6 +103,11 @@ impl crate::Storage for Storage {
         let blob_layouts = self.cfg.blob_layouts.clone();
         let pool = self.pool.clone();
         let hold = self.hold.clone();
+        let pending = self.pending.clone();
+
+        // A sync started when the blob's last handle dropped dirty must land before
+        // this handle can read the bytes it covers.
+        pending.wait(&partition, &name).await?;
 
         // Run the open to completion: it mutates the partition directory and the
         // blob (create, truncate, header write, syncs), and dropping this future
@@ -137,6 +144,7 @@ impl crate::Storage for Storage {
                 &partition,
                 &name,
             )?;
+
             let (logical_size, blob_version, data_offset) = match existing {
                 Some(resolved) => resolved,
                 None => {
@@ -165,7 +173,7 @@ impl crate::Storage for Storage {
             };
 
             // Construct the blob while still holding the filesystem lock.
-            let blob = Self::Blob::new(partition, &name, file, pool, data_offset, hold);
+            let blob = Self::Blob::new(partition, &name, file, pool, data_offset, hold, pending);
             Ok((blob, logical_size, blob_version))
         })
         .await
@@ -178,25 +186,30 @@ impl crate::Storage for Storage {
         let storage_directory = self.cfg.storage_directory.clone();
         let partition = partition.to_string();
         let name = name.map(<[u8]>::to_vec);
+        let pending = self.pending.clone();
 
         // Run the removal to completion: dropping this future must not abandon
         // the sequence between an unlink and the directory sync that makes it
         // durable.
         self.dispatch(move || {
             // Remove all related files
-            if let Some(name) = name {
-                let blob_path = path.join(hex(&name));
+            if let Some(name) = &name {
+                let blob_path = path.join(hex(name));
                 fs::remove_file(blob_path)
-                    .map_err(|_| Error::BlobMissing(partition, hex(&name)))?;
+                    .map_err(|_| Error::BlobMissing(partition.clone(), hex(name)))?;
 
                 // Sync the partition directory to ensure the removal is durable.
                 sync_dir(&path)?;
             } else {
-                fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition))?;
+                fs::remove_dir_all(&path)
+                    .map_err(|_| Error::PartitionMissing(partition.clone()))?;
 
                 // Sync the storage directory to ensure the removal is durable.
                 sync_dir(&storage_directory)?;
             }
+
+            // Removed blobs need no sync on reopen.
+            pending.forget(&partition, name.as_deref());
             Ok(())
         })
         .await
@@ -859,5 +872,172 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&storage_directory);
         }
+    }
+
+    /// Wait for every deferred sync to land.
+    async fn settle(storage: &Storage) {
+        while storage.pending.len() > 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Dropping the last handle with unsynced writes starts a sync, and the next open waits
+    /// for it.
+    #[tokio::test]
+    async fn test_reopen_waits_for_deferred_sync() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_deferred_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(storage.pending.finished(), 0);
+        drop(blob);
+
+        let (blob, len) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(storage.pending.len(), 0);
+        assert_eq!(storage.pending.finished(), 1);
+        assert_eq!(len, 5);
+        let read = blob
+            .read_at(0, 5, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(read.as_ref(), b"hello");
+
+        // The untouched handle drops clean.
+        drop(blob);
+        settle(&storage).await;
+        assert_eq!(storage.pending.finished(), 1);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Handles that synced their writes, through either sync entry point, defer nothing. A
+    /// fused durable write covers only itself, earns no credit, and defers a sync.
+    #[tokio::test]
+    async fn test_synced_drop_defers_nothing() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_synced_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"sync").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+
+        let (blob, _) = storage.open("partition", b"start_sync").await.unwrap();
+        blob.resize(16).await.unwrap();
+        blob.start_sync().await.await.unwrap();
+        drop(blob);
+        settle(&storage).await;
+        assert_eq!(storage.pending.finished(), 0);
+
+        let (blob, _) = storage.open("partition", b"sync_write").await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::SYNC)
+            .await
+            .unwrap();
+        drop(blob);
+        settle(&storage).await;
+        cfg_if::cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                assert_eq!(storage.pending.finished(), 1);
+            } else {
+                assert_eq!(storage.pending.finished(), 0);
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Clones share one tracker: a sync is deferred only when the last clone drops dirty, and a
+    /// sync through any clone clears the state.
+    #[tokio::test]
+    async fn test_clones_share_dirty_state() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_clones_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let clone = blob.clone();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        drop(blob);
+        assert_eq!(storage.pending.len(), 0);
+        clone.sync().await.unwrap();
+        drop(clone);
+        settle(&storage).await;
+        assert_eq!(storage.pending.finished(), 0);
+
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let clone = blob.clone();
+        blob.resize(0).await.unwrap();
+        drop(blob);
+        assert_eq!(storage.pending.len(), 0);
+        drop(clone);
+        settle(&storage).await;
+        assert_eq!(storage.pending.finished(), 1);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Removing a blob or its partition forgets its pending syncs.
+    #[tokio::test]
+    async fn test_remove_forgets_pending() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_forget_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        for name in [b"a".as_slice(), b"b".as_slice()] {
+            let (blob, _) = storage.open("partition", name).await.unwrap();
+            blob.write_at(0, b"hello", WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob);
+        }
+        storage.remove("partition", Some(b"a")).await.unwrap();
+        storage.remove("partition", None).await.unwrap();
+        assert_eq!(storage.pending.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// Each open is tracked separately: dropping a dirty handle defers a sync even while another
+    /// handle to the blob is open, and the later open waits for it.
+    #[tokio::test]
+    async fn test_open_while_dirty_handle_alive() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_alive_{}", random_suffix()));
+        let config = Config::new(storage_directory.clone(), Layout::ALL);
+        let storage = Storage::new(config, test_pool());
+
+        let (first, _) = storage.open("partition", b"blob").await.unwrap();
+        first
+            .write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        let (second, _) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(storage.pending.finished(), 0);
+        drop(first);
+        drop(second);
+
+        let (third, len) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(storage.pending.len(), 0);
+        assert_eq!(storage.pending.finished(), 1);
+        assert_eq!(len, 5);
+        drop(third);
+        settle(&storage).await;
+        assert_eq!(storage.pending.finished(), 1);
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
     }
 }

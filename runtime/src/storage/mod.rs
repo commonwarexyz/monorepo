@@ -5,11 +5,17 @@ use commonware_macros::stability_scope;
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::{BlobVersion, Error};
     use std::{
+        collections::HashMap,
         fs::File,
         io::{Read as _, Seek as _, SeekFrom},
         ops::RangeInclusive,
         path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
     };
+    use ::tokio::sync::watch;
 
     /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
     /// but did not `fsync` are crash-durable before any storage structure reads.
@@ -65,6 +71,154 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 e.into(),
             )
         })
+    }
+
+    /// Syncs in flight for blobs whose last handle dropped with writes that no completed sync
+    /// covered.
+    ///
+    /// A backend starts the sync when the last handle drops and registers it here, and an open of
+    /// the same blob waits for it before returning a handle, so bytes readable through the new
+    /// handle are durable within a run just as [sync] makes them at start. An entry lives while
+    /// its sync runs, and stays with the error when the sync fails so later opens fail too.
+    #[derive(Default)]
+    pub(crate) struct Pending {
+        syncs: commonware_utils::sync::Mutex<HashMap<(String, Vec<u8>), Receiver>>,
+        #[cfg(test)]
+        finished: AtomicU64,
+    }
+
+    /// The result of a pending sync, `None` while it runs.
+    type Outcome = Option<Result<(), Error>>;
+    type Receiver = watch::Receiver<Outcome>;
+
+    impl Pending {
+        /// Register a sync about to start, returning the sender that completes it.
+        pub(crate) fn start(&self, partition: &str, name: &[u8]) -> watch::Sender<Outcome> {
+            let (sender, receiver) = watch::channel(None);
+            self.syncs
+                .lock()
+                .insert((partition.to_owned(), name.to_vec()), receiver);
+            sender
+        }
+
+        /// Publish a sync's result. A success releases the entry, a failure keeps it.
+        pub(crate) fn finish(
+            &self,
+            partition: &str,
+            name: &[u8],
+            sender: watch::Sender<Outcome>,
+            result: Result<(), Error>,
+        ) {
+            let key = (partition.to_owned(), name.to_vec());
+            if result.is_ok() {
+                #[cfg(test)]
+                self.finished.fetch_add(1, Ordering::AcqRel);
+                let mut syncs = self.syncs.lock();
+                if syncs.get(&key).is_some_and(|receiver| receiver.same_channel(&sender.subscribe())) {
+                    syncs.remove(&key);
+                }
+            }
+            let _ = sender.send(Some(result));
+        }
+
+        /// Wait for a pending sync of the blob, returning its result.
+        pub(crate) async fn wait(&self, partition: &str, name: &[u8]) -> Result<(), Error> {
+            let receiver = self
+                .syncs
+                .lock()
+                .get(&(partition.to_owned(), name.to_vec()))
+                .cloned();
+            let Some(mut receiver) = receiver else {
+                return Ok(());
+            };
+            receiver
+                .wait_for(Option::is_some)
+                .await
+                .map_or(Err(Error::Closed), |outcome| {
+                    outcome.clone().expect("outcome is published")
+                })
+        }
+
+        /// Forget the pending syncs of a blob or of every blob in a partition.
+        pub(crate) fn forget(&self, partition: &str, name: Option<&[u8]>) {
+            self.syncs.lock().retain(|(stored, stored_name), _| {
+                stored != partition || name.is_some_and(|name| stored_name != name)
+            });
+        }
+
+        /// Number of registered syncs.
+        #[cfg(test)]
+        pub(crate) fn len(&self) -> usize {
+            self.syncs.lock().len()
+        }
+
+        /// Number of syncs that finished successfully.
+        #[cfg(test)]
+        pub(crate) fn finished(&self) -> u64 {
+            self.finished.load(Ordering::Acquire)
+        }
+    }
+
+    /// Tracks the writes to one blob file that no completed sync covers.
+    ///
+    /// Shared by every handle of one open, it counts issued and completed writes and resizes
+    /// and remembers the completed count each sync observed before it was issued. Only writes
+    /// completed before a sync begins are credited to it, so a write racing a sync stays dirty.
+    #[derive(Default)]
+    pub(crate) struct Tracker {
+        written: AtomicU64,
+        completed: AtomicU64,
+        synced: AtomicU64,
+    }
+
+    impl Tracker {
+        /// Count a write or resize about to be issued.
+        pub(crate) fn write(&self) {
+            self.written.fetch_add(1, Ordering::AcqRel);
+        }
+
+        /// Count a write or resize whose bytes have reached the file.
+        pub(crate) fn complete(&self) {
+            self.completed.fetch_add(1, Ordering::AcqRel);
+        }
+
+        /// Observe the completed writes a sync about to be issued will cover.
+        pub(crate) fn begin_sync(&self) -> u64 {
+            self.completed.load(Ordering::Acquire)
+        }
+
+        /// Credit a completed sync with the writes observed when it began.
+        pub(crate) fn end_sync(&self, seen: u64) {
+            self.synced.fetch_max(seen, Ordering::AcqRel);
+        }
+
+        /// Whether writes were issued that no completed sync covers.
+        pub(crate) fn is_dirty(&self) -> bool {
+            self.written.load(Ordering::Acquire) != self.synced.load(Ordering::Acquire)
+        }
+    }
+
+    /// Run a deferred sync for a blob whose last handle dropped dirty.
+    ///
+    /// The sync runs on the blocking pool when a runtime is available and inline otherwise, as
+    /// during teardown. `sync` must own everything the sync needs, including the directory hold.
+    pub(crate) fn defer_sync(
+        pending: Arc<Pending>,
+        partition: String,
+        name: Vec<u8>,
+        sync: impl FnOnce() -> Result<(), Error> + Send + 'static,
+    ) {
+        let sender = pending.start(&partition, &name);
+        let work = move || {
+            let result = sync();
+            pending.finish(&partition, &name, sender, result);
+        };
+        match ::tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(work);
+            }
+            Err(_) => work(),
+        }
     }
 
     /// Reads a blob's leading bytes and resolves its header (see [header::resolve]).
@@ -128,6 +282,120 @@ pub(crate) mod tests {
         WriteOptions,
     };
     use futures::FutureExt;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod tracker {
+        use crate::{
+            Error,
+            storage::{Pending, Tracker, defer_sync},
+        };
+        use std::sync::Arc;
+
+        #[test]
+        fn test_synced_writes_are_clean() {
+            let tracker = Tracker::default();
+            assert!(!tracker.is_dirty());
+            tracker.write();
+            assert!(tracker.is_dirty());
+            tracker.complete();
+            let seen = tracker.begin_sync();
+            tracker.end_sync(seen);
+            assert!(!tracker.is_dirty());
+        }
+
+        #[test]
+        fn test_unlanded_write_is_not_credited() {
+            let tracker = Tracker::default();
+            tracker.write();
+
+            // The sync began before the write reached the file, so it cannot cover it.
+            let seen = tracker.begin_sync();
+            tracker.complete();
+            tracker.end_sync(seen);
+            assert!(tracker.is_dirty());
+            let later = tracker.begin_sync();
+            tracker.end_sync(later);
+            assert!(!tracker.is_dirty());
+        }
+
+        #[test]
+        fn test_write_racing_sync_stays_dirty() {
+            let tracker = Tracker::default();
+            tracker.write();
+            tracker.complete();
+            let seen = tracker.begin_sync();
+            tracker.write();
+            tracker.complete();
+            tracker.end_sync(seen);
+            assert!(tracker.is_dirty());
+
+            // A sync observing both writes clears the state, and a stale completion
+            // cannot regress it.
+            let later = tracker.begin_sync();
+            tracker.end_sync(later);
+            tracker.end_sync(seen);
+            assert!(!tracker.is_dirty());
+        }
+
+        #[tokio::test]
+        async fn test_wait_observes_pending_sync() {
+            let pending = Arc::new(Pending::default());
+            assert!(pending.wait("a", b"1").await.is_ok());
+
+            let sender = pending.start("a", b"1");
+            assert_eq!(pending.len(), 1);
+            let waiter = tokio::spawn({
+                let pending = pending.clone();
+                async move { pending.wait("a", b"1").await }
+            });
+            tokio::task::yield_now().await;
+            assert!(!waiter.is_finished());
+            pending.finish("a", b"1", sender, Ok(()));
+            waiter.await.unwrap().unwrap();
+            assert_eq!(pending.len(), 0);
+            assert_eq!(pending.finished(), 1);
+        }
+
+        #[tokio::test]
+        async fn test_failed_sync_stays_until_forgotten() {
+            let pending = Arc::new(Pending::default());
+            let sender = pending.start("a", b"1");
+            pending.finish("a", b"1", sender, Err(Error::Closed));
+            assert!(matches!(pending.wait("a", b"1").await, Err(Error::Closed)));
+            assert_eq!(pending.len(), 1);
+
+            // A newer sync of the same blob replaces the failure, and an older completion
+            // cannot release the newer entry.
+            let stale = pending.start("a", b"1");
+            let newer = pending.start("a", b"1");
+            pending.finish("a", b"1", stale, Ok(()));
+            assert_eq!(pending.len(), 1);
+            pending.finish("a", b"1", newer, Ok(()));
+            assert_eq!(pending.len(), 0);
+
+            let sender = pending.start("b", b"1");
+            pending.finish("b", b"1", sender, Err(Error::Closed));
+            pending.forget("b", Some(b"1"));
+            assert!(pending.wait("b", b"1").await.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_defer_sync_runs_on_the_blocking_pool() {
+            let pending = Arc::new(Pending::default());
+            defer_sync(pending.clone(), "a".into(), b"1".to_vec(), || Ok(()));
+            pending.wait("a", b"1").await.unwrap();
+            assert_eq!(pending.finished(), 1);
+            assert_eq!(pending.len(), 0);
+        }
+
+        #[test]
+        fn test_defer_sync_runs_inline_without_a_runtime() {
+            let pending = Arc::new(Pending::default());
+            defer_sync(pending.clone(), "a".into(), b"1".to_vec(), || Ok(()));
+            assert_eq!(pending.finished(), 1);
+            assert_eq!(pending.len(), 0);
+        }
+    }
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)

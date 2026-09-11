@@ -1,6 +1,6 @@
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
-    storage::hold::Hold,
+    storage::{Pending, Tracker, defer_sync, hold::Hold},
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
@@ -52,16 +52,16 @@ impl Cache {
 /// A blob's file bundled with the hold on its storage directory.
 ///
 /// An operation must capture the file to touch it, so it carries the hold
-/// into the blocking pool without having to remember to.
+/// into the blocking pool without having to remember to. Dropping the last
+/// handle while writes remain uncovered by a completed sync starts a deferred
+/// sync that later opens of the blob wait for.
 struct Held {
-    file: File,
-    _hold: Arc<Hold>,
-}
-
-impl Held {
-    fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
-        Arc::new(Self { file, _hold: hold })
-    }
+    file: Arc<File>,
+    tracker: Tracker,
+    pending: Arc<Pending>,
+    partition: String,
+    name: Vec<u8>,
+    hold: Arc<Hold>,
 }
 
 impl Deref for Held {
@@ -69,6 +69,26 @@ impl Deref for Held {
 
     fn deref(&self) -> &File {
         &self.file
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if !self.tracker.is_dirty() {
+            return;
+        }
+        let file = self.file.clone();
+        let hold = self.hold.clone();
+        let (partition, name) = (self.partition.clone(), self.name.clone());
+        defer_sync(
+            self.pending.clone(),
+            self.partition.clone(),
+            self.name.clone(),
+            move || {
+                let _hold = hold;
+                Blob::sync_inner(&file, &partition, &name)
+            },
+        );
     }
 }
 
@@ -93,18 +113,27 @@ impl Blob {
         pool: BufferPool,
         data_offset: u64,
         hold: Arc<Hold>,
+        pending: Arc<Pending>,
     ) -> Self {
+        let held = Held {
+            file: Arc::new(file),
+            tracker: Tracker::default(),
+            pending,
+            partition: partition.clone(),
+            name: name.to_vec(),
+            hold,
+        };
         Self {
             partition,
             name: name.into(),
-            file: Held::new(file, hold),
+            file: Arc::new(held),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 
-    fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
+    pub(super) fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
         // Data durability is the contract. `sync_data` covers the bytes and metadata required to
         // retrieve them, including file size, while avoiding timestamp-only journal commits.
         // Other platforms retain `sync_all` for their platform-specific guarantees.
@@ -344,11 +373,20 @@ impl crate::Blob for Blob {
         };
         let partition = sync.then(|| self.partition.clone());
         let name = sync.then(|| self.name.clone());
+
+        // Count the write before it is issued and credit it only once it has reached the file.
+        // A trailing whole-file sync covers it and every earlier completed write, while a fused
+        // durable write covers only itself.
+        self.file.tracker.write();
         task::spawn_blocking(move || {
             // Preserve the single-buffer fast path when no option requires per-write flags.
             let bufs = if !sync && !cache.is_disabled() {
                 match bufs.try_into_single() {
-                    Ok(buf) => return Self::write_single_at(&file, offset, buf.as_ref()),
+                    Ok(buf) => {
+                        Self::write_single_at(&file, offset, buf.as_ref())?;
+                        file.tracker.complete();
+                        return Ok(());
+                    }
                     Err(bufs) => bufs,
                 }
             } else {
@@ -368,7 +406,9 @@ impl crate::Blob for Blob {
                         bufs,
                         fused.then_some(libc::RWF_DSYNC),
                     )?;
+                    file.tracker.complete();
                     if sync && !fused {
+                        let seen = file.tracker.begin_sync();
                         file.sync_data().map_err(|e| {
                             Error::BlobSyncFailed(
                                 partition.expect("sync write has a partition"),
@@ -376,15 +416,19 @@ impl crate::Blob for Blob {
                                 e.into(),
                             )
                         })?;
+                        file.tracker.end_sync(seen);
                     }
                 } else {
                     Self::write_vectored_at(cache, &file, offset, bufs, None)?;
+                    file.tracker.complete();
                     if sync {
+                        let seen = file.tracker.begin_sync();
                         Self::sync_inner(
                             &file,
                             partition.as_deref().expect("sync write has a partition"),
                             name.as_deref().expect("sync write has a name"),
                         )?;
+                        file.tracker.end_sync(seen);
                     }
                 }
             }
@@ -399,13 +443,16 @@ impl crate::Blob for Blob {
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        task::spawn_blocking(move || file.set_len(len))
-            .await
-            .map_err(|e| e.into())
-            .and_then(|r| r)
-            .map_err(|e| {
-                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
-            })?;
+        self.file.tracker.write();
+        task::spawn_blocking(move || {
+            file.set_len(len)?;
+            file.tracker.complete();
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.into())
+        .and_then(|r: std::io::Result<()>| r)
+        .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into()))?;
         Ok(())
     }
 
@@ -413,12 +460,17 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
-        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
-            .await
-            .map_err(|e| {
-                let err: std::io::Error = e.into();
-                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), err.into())
-            })?
+        let seen = self.file.tracker.begin_sync();
+        task::spawn_blocking(move || {
+            Self::sync_inner(&file, &partition, &name)?;
+            file.tracker.end_sync(seen);
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            let err: std::io::Error = e.into();
+            Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), err.into())
+        })?
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -426,8 +478,12 @@ impl crate::Blob for Blob {
         let file = self.file.clone();
         let partition = self.partition.clone();
         let name = self.name.clone();
+        let seen = self.file.tracker.begin_sync();
         task::spawn_blocking(move || {
             let result = Self::sync_inner(&file, &partition, &name);
+            if result.is_ok() {
+                file.tracker.end_sync(seen);
+            }
             let _ = tx.send(result);
         });
         Handle::from_receiver(rx)
