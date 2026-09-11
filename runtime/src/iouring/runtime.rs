@@ -108,7 +108,7 @@ use super::{
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, TimerId, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
-    task::{BoxedTask, Running, Target, TaskWaker, Tasks},
+    task::{BoxedTask, Running, Target, Task, TaskWaker, Tasks},
     timeout::TimeoutWheel,
     waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
@@ -743,7 +743,7 @@ impl crate::Spawner for Context {
             parent.register(aborter);
         }
 
-        let task: BoxedTask = Box::pin(future);
+        let task = Task::boxed(future);
         let result = if let Some(active) = active {
             shared.launch(task, active);
             Ok(())
@@ -1922,7 +1922,7 @@ impl crate::Runner for Runner {
                     execution: Execution::default(),
                 })
             },
-            Some(Box::pin(process.collect(Sleep::new))),
+            Some(Task::boxed(process.collect(Sleep::new))),
             Some(tasks),
         )
         .and_then(|(mut worker, output)| {

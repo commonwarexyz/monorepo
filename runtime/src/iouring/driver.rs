@@ -136,15 +136,27 @@ impl Driver {
         })
     }
 
-    /// Accept an owned request into the FIFO without staging kernel work.
+    /// Accept an owned request without staging kernel work.
     ///
-    /// Deadline validation happens during service after the wheel has advanced.
-    pub fn admit(&mut self, request: Request, observer: Observer) -> WaiterId {
-        let timed = request.deadline().is_some();
+    /// Cached time can reject expired requests immediately. Service validates
+    /// remaining deadlines after the wheel has advanced.
+    pub fn admit(
+        &mut self,
+        request: Request,
+        observer: Observer,
+        now: Instant,
+        deferred: &mut Deferred,
+    ) -> WaiterId {
+        let deadline = request.deadline();
 
         // Transfer ownership once. Both queues below carry only this identity.
         let id = self.state.waiters.insert(request, observer);
-        if timed {
+        if let Some(deadline) = deadline {
+            if deadline <= now {
+                self.state.complete(id, Err(Error::Timeout), deferred);
+                return id;
+            }
+
             // A task poll may have taken long enough to leave the wheel behind.
             // Service refreshes it before assigning this deadline a tick.
             self.state.pending_deadlines.push_back(id);
@@ -721,9 +733,12 @@ pub mod tests {
         /// Queue an ordinary request whose result `collect` will consume automatically.
         fn admit(&mut self, request: Request, tag: u64) -> WaiterId {
             let waker = TaskWaker::from(Arc::new(Notify));
-            let id = self
-                .driver
-                .admit(request, Observer::Ordinary(Some(waker.clone())));
+            let id = self.driver.admit(
+                request,
+                Observer::Ordinary(Some(waker.clone())),
+                self.start,
+                &mut self.deferred,
+            );
             self.tracked.push((id, tag, waker));
             id
         }
@@ -906,11 +921,14 @@ pub mod tests {
         // Keep completed results in their slots while the sole operation slot
         // stays occupied. Their queue IDs must still count as stale.
         let mut results = Vec::new();
+        let deadline = harness.start + Duration::from_nanos(1);
         for _ in 0..65 {
             let (socket, _peer) = UnixStream::pair().unwrap();
             results.push(harness.driver.admit(
-                recv(socket, 1, Some(harness.start)),
+                recv(socket, 1, Some(deadline)),
                 Observer::Ordinary(None),
+                harness.start,
+                &mut harness.deferred,
             ));
         }
         harness.service();
@@ -925,8 +943,10 @@ pub mod tests {
         // even though its generation still matches a retained result.
         let (socket, _peer) = UnixStream::pair().unwrap();
         results.push(harness.driver.admit(
-            recv(socket, 1, Some(harness.start)),
+            recv(socket, 1, Some(deadline)),
             Observer::Ordinary(None),
+            harness.start,
+            &mut harness.deferred,
         ));
         harness.service();
 
@@ -1126,9 +1146,12 @@ pub mod tests {
         first_peer.write_all(b"a").unwrap();
 
         // Omit the observer waker so the harness leaves this result in Waiters.
-        let first = harness
-            .driver
-            .admit(recv(first, 1, None), Observer::Ordinary(None));
+        let first = harness.driver.admit(
+            recv(first, 1, None),
+            Observer::Ordinary(None),
+            harness.start,
+            &mut harness.deferred,
+        );
 
         let (second, mut second_peer) = UnixStream::pair().unwrap();
         second_peer.write_all(b"b").unwrap();
@@ -1154,10 +1177,11 @@ pub mod tests {
     fn test_expired_registration_never_stages() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
-        harness.admit(recv(left, 8, Some(harness.start)), 0);
+        let deadline = harness.start + Duration::from_nanos(1);
+        harness.admit(recv(left, 8, Some(deadline)), 0);
 
         // A deadline equal to this turn's time has already expired.
-        harness.service_at(harness.start, true);
+        harness.service_at(deadline, true);
 
         assert!(matches!(
             harness.completed[0].output,
@@ -1999,6 +2023,8 @@ pub mod tests {
         harness.driver.admit(
             Request::Sync(SyncRequest { file: held }),
             Observer::DetachedSync(sender),
+            harness.start,
+            &mut harness.deferred,
         );
 
         // Retained completion receivers do not participate in drain progress.

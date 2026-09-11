@@ -571,16 +571,31 @@ mod tests {
         telemetry::metrics::{Register, Registry},
     };
     use commonware_macros::{select, test_group};
+    use futures::FutureExt as _;
     use std::{
-        io::Write,
+        io::{Read, Write},
         net::TcpStream,
         os::{
             fd::{AsRawFd, OwnedFd},
             unix::net::UnixStream,
         },
-        sync::Arc,
+        pin::pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll, Wake, Waker},
         time::{Duration, Instant},
     };
+
+    #[derive(Default)]
+    struct Notify(AtomicBool);
+
+    impl Wake for Notify {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
 
     /// Allocate receive buffers with the network pool configuration.
     fn test_pool(scope: &mut impl Register) -> BufferPool {
@@ -777,6 +792,58 @@ mod tests {
 
             // Allow some margin for scheduling and timer precision.
             assert!(elapsed < op_timeout * 3);
+        });
+    }
+
+    #[test]
+    fn test_carried_receive_deadline_completes_without_rescheduling() {
+        iouring::Runner::default().start(|context| async move {
+            let timeout = Duration::from_secs(1);
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let mut observer = socket.try_clone().unwrap();
+            let mut registry = Registry::default();
+            let mut stream = Stream::new(
+                Arc::new(socket.into()),
+                timeout,
+                8,
+                test_pool(&mut registry),
+            );
+            let notified = Arc::new(Notify::default());
+            let waker = Waker::from(notified.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            peer.write_all(b"x").unwrap();
+            {
+                let deadline = Instant::now() + timeout;
+                let mut receive = pin!(stream.recv(2));
+                assert!(receive.poll_unpin(&mut cx).is_pending());
+
+                // Let the first refill complete without observing its result.
+                while !notified.0.load(Ordering::Relaxed) {
+                    assert!(Instant::now() < deadline, "first refill did not complete");
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                assert!(Instant::now() < deadline);
+                assert_eq!(
+                    observer.read(&mut [0]).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+
+                // The next refill carries the first call's deadline. A timer
+                // wake proves the worker's cached time has passed that deadline.
+                context.sleep(timeout).await;
+                peer.write_all(b"y").unwrap();
+                assert!(matches!(
+                    receive.poll_unpin(&mut cx),
+                    Poll::Ready(Err(Error::Timeout))
+                ));
+            }
+
+            context.sleep(Duration::from_millis(1)).await;
+            let mut remaining = [0];
+            assert_eq!(observer.read(&mut remaining).unwrap(), 1);
+            assert_eq!(&remaining, b"y");
         });
     }
 

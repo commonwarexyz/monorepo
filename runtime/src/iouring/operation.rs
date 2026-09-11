@@ -69,11 +69,17 @@ impl Operation {
 
         // The driver takes ownership even when the SQ is full. Polling installs
         // a waker only while the request is still pending.
-        let waiter_id = local
-            .driver
-            .as_mut()
-            .unwrap()
-            .admit(request, Observer::Ordinary(None));
+        let Local {
+            driver,
+            deferred,
+            now,
+            ..
+        } = &mut *local;
+        let waiter_id =
+            driver
+                .as_mut()
+                .unwrap()
+                .admit(request, Observer::Ordinary(None), *now, deferred);
 
         Self {
             state: State::Waiting { mailbox, waiter_id },
@@ -176,11 +182,18 @@ pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> 
     } else {
         // Registration needs no task waker. The worker publishes to this
         // channel when the sync finishes.
-        local
-            .driver
-            .as_mut()
-            .unwrap()
-            .admit(Request::Sync(request), Observer::DetachedSync(sender));
+        let Local {
+            driver,
+            deferred,
+            now,
+            ..
+        } = &mut *local;
+        driver.as_mut().unwrap().admit(
+            Request::Sync(request),
+            Observer::DetachedSync(sender),
+            *now,
+            deferred,
+        );
     }
     receiver
 }
@@ -381,16 +394,36 @@ pub mod tests {
 
     #[test]
     fn test_expired_registration_does_not_consume_ready_data() {
-        runner().start(|_| async {
+        let callbacks = Arc::new(Reentrant::default());
+        runner().start(|context| async move {
+            let deadline = Instant::now();
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(Local::current().unwrap().borrow().now >= deadline);
+
             let (fd, mut peer) = socket();
             peer.write_all(b"x").unwrap();
-            let output = recv(fd.clone(), Some(Instant::now())).await.unwrap();
+            let mut operation = recv(fd.clone(), Some(deadline));
+            let waker = callbacks.waker();
             assert!(matches!(
-                output,
-                RequestOutput::Recv(Err((_, Error::Timeout)))
+                operation.poll_unpin(&mut Context::from_waker(&waker)),
+                Poll::Ready(Ok(RequestOutput::Recv(Err((_, Error::Timeout)))))
             ));
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), 0);
+            assert!(
+                Local::current()
+                    .unwrap()
+                    .borrow()
+                    .driver
+                    .as_ref()
+                    .unwrap()
+                    .is_empty()
+            );
 
-            let RequestOutput::Recv(Ok((buffer, len))) = recv(fd, None).await.unwrap() else {
+            let RequestOutput::Recv(Ok((buffer, len))) =
+                recv(fd, Some(Instant::now() + Duration::from_secs(1)))
+                    .await
+                    .unwrap()
+            else {
                 panic!("expired receive consumed ready data");
             };
             assert_eq!(len, 1);
