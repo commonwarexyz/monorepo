@@ -7,7 +7,7 @@ use commonware_runtime::{
     ReadOptions, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
-    mocks::{DelayedSyncContext, PendingSyncs},
+    mocks::{DelayedSyncContext, PendingSyncs, RecordingContext},
     reschedule,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -1896,5 +1896,66 @@ fn test_variable_rewind_surfaces_failed_sync() {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
         .await;
+    });
+}
+
+#[test]
+fn test_fresh_sync_avoids_reset_writes() {
+    deterministic::Runner::default().start(|context| async move {
+        let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4));
+        let fixed_cfg = |partition: &str| fixed::Config {
+            partition: partition.into(),
+            items_per_blob: NZU64!(5),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+            page_cache: cache.clone(),
+        };
+        let (ordinary, ordinary_io) = RecordingContext::new(context.child("fixed_ordinary"));
+        drop(
+            fixed::Journal::<_, u64>::init(ordinary, fixed_cfg("fixed-ordinary"))
+                .await
+                .unwrap(),
+        );
+        let (sync, sync_io) = RecordingContext::new(context.child("fixed_sync"));
+        let journal = crate::journal::authenticated::init_sync::<_, fixed::Journal<_, u64>>(
+            || sync.child("journal"),
+            fixed_cfg("fixed-sync"),
+            0..10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.bounds(), 0..0);
+        assert_eq!(
+            sync_io.snapshot().writes.len(),
+            ordinary_io.snapshot().writes.len()
+        );
+        let variable_cfg = |partition: &str| variable::Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(5),
+            compression: None,
+            codec_config: (),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+            page_cache: cache.clone(),
+        };
+        let (ordinary, ordinary_io) = RecordingContext::new(context.child("variable_ordinary"));
+        drop(
+            variable::Journal::<_, u64>::init(ordinary, variable_cfg("variable-ordinary"))
+                .await
+                .unwrap(),
+        );
+        let (sync, sync_io) = RecordingContext::new(context.child("variable_sync"));
+        let journal = crate::journal::authenticated::init_sync::<_, variable::Journal<_, u64>>(
+            || sync.child("journal"),
+            variable_cfg("variable-sync"),
+            0..10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(journal.bounds(), 0..0);
+        assert_eq!(
+            sync_io.snapshot().writes.len(),
+            ordinary_io.snapshot().writes.len()
+        );
     });
 }
