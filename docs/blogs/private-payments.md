@@ -37,19 +37,16 @@ We demand two properties from a payment system that is meant to run at this rate
    synchronize their state with the chain, similar to traditional payments. Any work done by wallets must only depend on the transactions that they participate in.
 
 <!-- TODO: Add link to Bonsai paper -->
-We are excited to share Bonsai, a private payment scheme in the account model with two operations:
-
-- **send:** debits a user's account and creates a receipt on chain
-- **receive:** claims a receipt and credits the recipient's account
-
-**Leakage:** An external observer only learns that an account carried out *some* action on chain, hiding whether it was a send/receive, the amounts transferred and the link between sender and receiver. 
-<!-- todo: add a pointer to below discussion against zcash -->
-
-Bonsai addresses both the verification cost and the growing state:
+We are excited to share Bonsai, a private payment scheme that addresses both the verification cost and the growing state:
 
 - each operation has a **256-byte payload** and the prototype verifies **over a million operations per second** on an M5 MacBook Pro (18 cores)
 - validators store a **single 32-byte commitment value per account** and a small number of hashes 
 - wallets can **go offline indefinitely** and resume without synchronizing state with the chain
+
+An external observer learns that a particular account came online and performed some
+action (a send/receive) but it does not learn the amount moved or to whom the funds were
+sent/received from.
+<!-- todo: add a pointer to below discussion against zcash -->
 
 ## Our Construction
 
@@ -179,9 +176,12 @@ A sender delivers the receipt opening and its position to the recipient through 
 
 Receiving a receipt does not automatically credit an account. The recipient chooses whether and when to claim it, so they can leave unsolicited payments from unwanted or malicious sources unclaimed.
 
-## Undermining Account Indistinguishability
+## Privacy Beyond the Ledger
 
-Even when the ledger hides the acting account, an RPC service can learn which client submitted each transaction and when. If a wallet submits its own transactions through an identifiable connection or session, the operator can group those submissions.
+As noted earlier, [Ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded-note systems provides stronger **on-chain** privacy than Bonsai as it additionally hides which account is acting. But Bonsai comes with the benefit of a much simpler solution for nullifier management. 
+
+In practice, the privacy gap may be narrower than expected. Even when the ledger hides the acting account, there are several ways to map a transaction to the underlying wallet/user. For instance, when a wallet submits transactions through an RPC node, it can already link each submitted transaction to the corresponding
+party. Or if a wallet submits its own transactions through an identifiable connection or session, the operator can group those submissions under the same user. Both the public ledger and the wallet's network connection matter when evaluating privacy in practice.
 
 In the example below, three wallets submit transactions through one RPC service. Switch between **Ledger observer** and **RPC operator** to see how submission metadata changes the view.
 
@@ -195,7 +195,6 @@ In the example below, three wallets submit transactions through one RPC service.
 </div>
 ```
 
-[Ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded-note systems still provides stronger **on-chain** privacy: it hides which account is acting. But both the public record and the wallet's network connection matter when evaluating privacy in practice. 
 
 ```{=html}
 <script src="private-payments.sim.js"></script>

@@ -154,21 +154,8 @@ Vamsi Policharla</a></div>
         only depend on the transactions that they participate in.</li>
         </ol>
         <!-- TODO: Add link to Bonsai paper -->
-        <p>We are excited to share Bonsai, a private payment scheme in
-        the account model with two operations:</p>
-        <ul>
-        <li><strong>send:</strong> debits a user’s account and creates a
-        receipt on chain</li>
-        <li><strong>receive:</strong> claims a receipt and credits the
-        recipient’s account</li>
-        </ul>
-        <p><strong>Leakage:</strong> An external observer only learns
-        that an account carried out <em>some</em> action on chain,
-        hiding whether it was a send/receive, the amounts transferred
-        and the link between sender and receiver.
-        <!-- todo: add a pointer to below discussion against zcash --></p>
-        <p>Bonsai addresses both the verification cost and the growing
-        state:</p>
+        <p>We are excited to share Bonsai, a private payment scheme that
+        addresses both the verification cost and the growing state:</p>
         <ul>
         <li>each operation has a <strong>256-byte payload</strong> and
         the prototype verifies <strong>over a million operations per
@@ -178,6 +165,11 @@ Vamsi Policharla</a></div>
         <li>wallets can <strong>go offline indefinitely</strong> and
         resume without synchronizing state with the chain</li>
         </ul>
+        <p>An external observer learns that a particular account came
+        online and performed some action (a send/receive) but it does
+        not learn the amount moved or to whom the funds were
+        sent/received from.
+        <!-- todo: add a pointer to below discussion against zcash --></p>
         <h2 id="our-construction">Our Construction</h2>
         <p>As a working example we have four accounts paying each other
         using a random stream of payments. Additionally, we have four
@@ -209,10 +201,6 @@ Vamsi Policharla</a></div>
         authority/bank can still see balances and inflows/outflows of an
         account. However, the bank must remember a unique nullifier for
         every coin that was ever redeemed.</p>
-        <p>Note that this construction provides a very weak form of
-        privacy if the amounts debited/credited are different across
-        different transactions as it’s effectively a finger print for
-        the sender-receiver pair.</p>
         <h3 id="decentralized-ecash">Decentralized ecash</h3>
         <p>In order to provide much faster confirmations, and scale with
         confidence, the most natural strategy is to use a consensus
@@ -221,8 +209,7 @@ Vamsi Policharla</a></div>
         correctly (see <a
         href="https://commonware.xyz/blogs/multimmit">Multimmit</a> for
         example), payments from different parts of the world can be
-        <em>simultaneously</em> ingested into the log, providing much
-        faster confirmations with a truly global payment network.</p>
+        <em>simultaneously</em> ingested into the log.</p>
         <p>However this introduces additional privacy concerns: anyone
         reading the ledger, sees every balance and every account’s
         inflow and outflow. Even if the committee is trusted to run the
@@ -231,14 +218,8 @@ Vamsi Policharla</a></div>
         <h3 id="hide-balances">Hide balances</h3>
         <p>Cryptographic commitments coupled with zero-knowledge proofs
         allow us to both hide balances and <em>verifiably</em> (but in
-        zero-knowledge) update them when a transfer occurs. In fact, <a
-        href="https://eprint.iacr.org/2019/191">Zether</a> follows this
-        recipe, but a payment updates the sender and the receiver in one
-        transaction, so the ledger still sees who paid whom. We can take
-        this one step further by <em>decoupling</em> the updates to
-        sender and receiver balances – as done in ecash – to
-        additionally hide who paid whom.</p>
-        <p>Concretely, we can prove during:</p>
+        zero-knowledge) update them when a transfer occurs. Concretely,
+        we can prove during:</p>
         <ul>
         <li><strong>send</strong>: the new account commitment is the old
         one minus <span class="math inline">v</span>, and the on-chain
@@ -253,19 +234,13 @@ Vamsi Policharla</a></div>
         <p>Balances and amounts are now hidden from the ledger, but it
         still reveals which particular account sent/received funds.</p>
         <h3 id="hide-operations">Hide operations</h3>
-        <p>The ledger reveals the order in which accounts act. If it
-        also reveals which actions are sends and which are receives, an
-        observer can narrow down who might have paid whom: a receive
-        must claim an earlier send. We hide this distinction by proving
-        a strict disjunction of the send and receive relations.</p>
-        <p>Of course this also means that every send and receive carries
-        both a receipt and a nullifier and when naively done, the prover
-        pays the cost of both relations. In practice, this can be
-        optimized to reduce the redundant work being performed. The
-        ledger now only reveals that an account came online and
-        performed some action – send/receive.</p>
-        <p>Note the cost in the storage panel: the nullifier set grows
-        twice as fast.</p>
+        <p>The ledger reveals the order in which accounts act and the
+        operation type. This allows an observer to narrow down who might
+        have paid whom because a receive must claim an earlier send. We
+        hide the operation type by proving a strict disjunction of the
+        send and receive relations, which provides meaningful
+        improvments to the privacy guarantees (see section 6.1 of the
+        Bonsai paper for a detailed discussion).</p>
         <h3 id="scaling-prune-receipts">Scaling: prune receipts</h3>
         <p>We now focus on scaling the system. First, instead of signing
         every single receipt, the ledger appends receipts to a Merkle
@@ -273,68 +248,73 @@ Vamsi Policharla</a></div>
         href="https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md">doc</a>
         or Roberto’s <a
         href="https://commonware.xyz/blogs/mmr">blogpost</a> for an
-        explainer). The receive proof is modified to prove knowledge of
-        an MMR opening under a root <span
+        explainer) and only signs the root. The receive proof is
+        modified to prove knowledge of an MMR opening under a root <span
         class="math inline">\mathsf{root}_\rho</span> which the receiver
         reveals in the clear.</p>
-        <p>For receipts, validators retain the MMR frontier and a
-        bounded window of recent roots. For the concrete case of <span
-        class="math inline">2^{40}</span> receipts, we need at most 40
-        frontier hashes, or 1.25 KiB with 32-byte hashes.</p>
+        <p>Inserting an element in an MMR only requires the
+        <em>frontier</em> – a logarithmic number of hashes – which
+        allows the validators to forget old receipts. For the concrete
+        case of <span class="math inline">2^{40}</span> receipts, we
+        need at most 40 frontier hashes, or 1.25 KiB with 32-byte
+        hashes.</p>
         <h3 id="scaling-delegate-nullifiers">Scaling: delegate
         nullifiers</h3>
         <p>Now we tackle the nullifier set. Unlike receipts where we
-        want to prove <em>membership</em> to claim them, we want to
-        prove <em>non-membership</em> of nullifiers to prevent double
+        prove <em>membership</em>, we need to prove
+        <em>non-membership</em> of nullifiers to prevent double
         spending. MMR’s do not support (efficient) non-membership proofs
         so we cannot simply “forget” previous nullifiers.</p>
-        <p>The <a href="https://tachyon.z.cash/">Tachyon project</a>
-        uses <a href="https://eprint.iacr.org/2025/2031">oblivious
-        synchronization</a> to let validators prune nullifiers. Users
-        can obtain proofs from untrusted services that their coins
-        remain unspent, without letting those services link them to
-        their eventual transactions. Users can be offline, but resuming
-        requires synchronization work by the user or a service that
-        processes the ledger.</p>
+        <p>One approach is to shift the burden of non-membership to the
+        users. For every unspent coin, the user must prove, effectively
+        against the entire history of the ledger, that their coin has
+        not been spent. The <a href="https://tachyon.z.cash/">Tachyon
+        project</a> uses <a
+        href="https://eprint.iacr.org/2025/2031">oblivious
+        synchronization</a> to privately delegate this non-membership
+        proof to an untrusted service, without letting those services
+        link them to their eventual transactions. Users can be offline,
+        but resuming requires synchronization work by the user or a
+        service that processes the ledger.</p>
         <p>We have the benefit of working in the account based model and
-        albeit providing less <em>on-chain</em> privacy than Zcash, it
-        allows us to <strong>efficiently delegate</strong> nullifier
-        storage. Each user remembers the nullifiers for any transactions
-        they received, accumulates them into a <a
+        albeit providing less <em>on-chain</em> privacy than Zcash,
+        Bonsai provides an elegant approach to <strong>delegate</strong>
+        nullifier storage. Each user maintains the nullifiers for any
+        transactions they received, accumulates them into a <a
         href="https://eprint.iacr.org/2016/683">sparse Merkle tree</a>
         and stores the root inside their account commitment. Using
         zero-knowledge proofs they show that it was correctly updated
         whenever they receive funds.</p>
-        <p>Since nullifiers are never published on chain, they no longer
-        need to look random. The nullifier of a receipt can simply be
-        its <strong>position</strong> <span
-        class="math inline">\mathsf{pid}</span> in the receipt MMR.</p>
         <p>Validator storage is now one commitment per account, plus the
         small receipt frontier and recent-root window. But eventually…
         the nullifier set will grow too big for users to manage too?
         We’ve just delayed the problem.</p>
         <h3 id="scaling-prune-nullifiers">Scaling: prune nullifiers</h3>
         <p>Users can also <strong>prune their nullifier state</strong>.
-        Receipt positions increase as receipts are created, although
-        recipients may receive or claim them out of order. For a
-        threshold <span class="math inline">L</span>, a wallet
-        summarizes the claimed positions below <span
+        Since nullifiers are never published on chain, they no longer
+        need to look random. The nullifier of a receipt can simply be
+        its <em>position</em> <span
+        class="math inline">\mathsf{pid}</span> in the receipt MMR.
+        Nullifiers are now temporally ordered based on the time the
+        receipt was created.</p>
+        <p>For a threshold <span class="math inline">L</span>, a wallet
+        can summarize the claimed positions below <span
         class="math inline">L</span> with a frontier of at most <span
         class="math inline">\ell</span> hashes, where <span
-        class="math inline">\ell</span> is the depth of its nullifier
+        class="math inline">\ell</span> is the depth of the nullifier
         tree. It keeps all claimed positions at or above <span
-        class="math inline">L</span>. Together, these suffice to
-        reconstruct insertion proofs for unclaimed positions <span
+        class="math inline">L</span>. Together, these suffice to produce
+        insertion proofs for unclaimed positions at any <span
         class="math inline">\mathsf{pid} \geq L</span>.</p>
         <p>Choosing <span class="math inline">L</span> to retain the
         <span class="math inline">w</span> largest claimed positions
-        bounds this compact hot representation by <span
+        bounds this wallets storage to <span
         class="math inline">\ell</span> hashes plus <span
         class="math inline">w</span> positions, independent of lifetime
-        claims. Older nullifiers remain in cold storage, so a receipt
-        below <span class="math inline">L</span> can still be claimed by
-        retreiving the relevant path from cold storage and updating the
-        frontier.</p>
+        claims. Older nullifiers can be pushed to cold storage, so a
+        receipt below <span class="math inline">L</span> can still be
+        claimed by retreiving the relevant path from cold storage and
+        updating the frontier.</p>
         </div>
         <h2 id="the-full-construction">The full construction</h2>
         <p><strong>Accounts.</strong> An account name <span
@@ -479,13 +459,25 @@ Vamsi Policharla</a></div>
         The recipient chooses whether and when to claim it, so they can
         leave unsolicited payments from unwanted or malicious sources
         unclaimed.</p>
-        <h2 id="undermining-account-indistinguishability">Undermining
-        Account Indistinguishability</h2>
-        <p>Even when the ledger hides the acting account, an RPC service
-        can learn which client submitted each transaction and when. If a
-        wallet submits its own transactions through an identifiable
-        connection or session, the operator can group those
-        submissions.</p>
+        <h2 id="privacy-beyond-the-ledger">Privacy Beyond the
+        Ledger</h2>
+        <p>As noted earlier, <a
+        href="https://eprint.iacr.org/2014/349">Ledger
+        indistinguishability</a> in shielded-note systems provides
+        stronger <strong>on-chain</strong> privacy than Bonsai as it
+        additionally hides which account is acting. But Bonsai comes
+        with the benefit of a much simpler solution for nullifier
+        management.</p>
+        <p>In practice, the privacy gap may be narrower than expected.
+        Even when the ledger hides the acting account, there are several
+        ways to map a transaction to the underlying wallet/user. For
+        instance, when a wallet submits transactions through an RPC
+        node, it can already link each submitted transaction to the
+        corresponding party. Or if a wallet submits its own transactions
+        through an identifiable connection or session, the operator can
+        group those submissions under the same user. Both the public
+        ledger and the wallet’s network connection matter when
+        evaluating privacy in practice.</p>
         <p>In the example below, three wallets submit transactions
         through one RPC service. Switch between <strong>Ledger
         observer</strong> and <strong>RPC operator</strong> to see how
@@ -497,20 +489,6 @@ Vamsi Policharla</a></div>
                 not contain these client labels.</p>
             </noscript>
         </div>
-        <p>These groups identify submission sources: one client may use
-        several accounts, and a relay may submit for several users. The
-        grouping alone does not reveal payment amounts or
-        recipients.</p>
-        <p><a href="https://eprint.iacr.org/2014/349">Ledger
-        indistinguishability</a> in shielded-note systems still provides
-        stronger <strong>on-chain</strong> privacy: it hides which
-        account is acting. Bonsai publishes that account identifier
-        while hiding balances, amounts, the recipient, and whether the
-        action is a send or receive. The RPC observation is available to
-        the service handling the submission; Bonsai’s account identifier
-        is visible to anyone reading the ledger. Both the public record
-        and the wallet’s network connection matter when evaluating
-        privacy in practice.</p>
         <script src="private-payments.sim.js"></script>
         <script src="private-payments.counter.js"></script>
         <script src="private-payments.rpc.js"></script>
