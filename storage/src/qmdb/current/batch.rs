@@ -315,6 +315,16 @@ where
         self.inner.inactivity_floor()
     }
 
+    /// Return the number of active keys after this batch is applied.
+    pub const fn total_active_keys(&self) -> usize {
+        self.inner.total_active_keys()
+    }
+
+    /// Return the operation-log tip before any floor-raise moves are appended.
+    pub const fn fixed_tip(&self) -> Location<F> {
+        self.inner.fixed_tip()
+    }
+
     /// Run one bounded compaction round and return the batch and progress.
     ///
     /// Zero in either budget field disables the round. Later calls resume the scan without

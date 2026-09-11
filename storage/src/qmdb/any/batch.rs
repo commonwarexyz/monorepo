@@ -1018,6 +1018,16 @@ where
         self.floor
     }
 
+    /// Return the number of active keys after this batch is applied.
+    pub const fn total_active_keys(&self) -> usize {
+        self.total_active_keys
+    }
+
+    /// Return the operation-log tip before any floor-raise moves are appended.
+    pub const fn fixed_tip(&self) -> Location<F> {
+        Location::new(self.fixed_tip)
+    }
+
     /// Compact at most the supplied move and scan allowances, returning the batch and progress.
     ///
     /// The scan resumes across calls. Entries moved in earlier rounds are outside the fixed
