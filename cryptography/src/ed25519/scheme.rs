@@ -3,8 +3,11 @@ use crate::{
     ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
-use alloc::borrow::{Cow, ToOwned};
-use bytes::{BufMut, Bytes};
+use alloc::{
+    borrow::{Cow, ToOwned},
+    vec::Vec,
+};
+use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -319,7 +322,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
 /// Ed25519 Batch Verifier.
 pub struct Batch {
-    verifier: ed_core::batch::Verifier,
+    verifier: ed_core::batch::Verifier<Vec<u8>>,
 }
 
 impl BatchVerifier for Batch {
@@ -338,10 +341,11 @@ impl BatchVerifier for Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        self.add_payload(
-            union_unique(namespace, message).into(),
-            public_key,
-            signature,
+        // Keep argument construction here so the signature can be written directly into the queue.
+        self.verifier.queue(
+            public_key.key,
+            ed_core::Signature::from(signature.raw),
+            union_unique(namespace, message),
         );
         true
     }
@@ -351,16 +355,15 @@ impl BatchVerifier for Batch {
     }
 }
 
-impl Batch {
-    /// Queues a signature over an owned payload. Certificate callers can share
-    /// a payload framed once with [`union_unique`].
-    pub(crate) fn add_payload(
+impl<P: AsRef<[u8]> + Sync> ed_core::batch::Verifier<P> {
+    /// Queues a signature over its already-framed payload.
+    pub(super) fn add_payload(
         &mut self,
-        payload: Bytes,
+        payload: P,
         public_key: &PublicKey,
         signature: &Signature,
     ) {
-        self.verifier.queue(
+        self.queue(
             public_key.key,
             ed_core::Signature::from(signature.raw),
             payload,
@@ -703,8 +706,8 @@ mod tests {
         let v1 = vector_1();
         let v2 = vector_2();
         let mut batch = ed25519::Batch::new(2);
-        batch.add_payload(v1.2.into(), &v1.1, &v1.3);
-        batch.add_payload(v2.2.into(), &v2.1, &v2.3);
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -716,12 +719,10 @@ mod tests {
         bad_signature[3] = 0xff;
 
         let mut batch = Batch::new(2);
-        batch.add_payload(v1.2.into(), &v1.1, &v1.3);
-        batch.add_payload(
-            v2.2.into(),
-            &v2.1,
-            &Signature::decode(bad_signature).unwrap(),
-        );
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch
+            .verifier
+            .add_payload(v2.2, &v2.1, &Signature::decode(bad_signature).unwrap());
         assert!(!batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -737,8 +738,8 @@ mod tests {
         let v2 = vector_2();
         // The capacity is a hint: adding more items must still verify.
         let mut batch = Batch::new(1);
-        batch.add_payload(v1.2.into(), &v1.1, &v1.3);
-        batch.add_payload(v2.2.into(), &v2.1, &v2.3);
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 

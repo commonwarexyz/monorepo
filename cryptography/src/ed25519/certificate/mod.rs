@@ -6,9 +6,9 @@
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
-use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
+use super::{PrivateKey, PublicKey, Signature as Ed25519Signature, core::batch::Verifier};
 use crate::{
-    BatchVerifier, Digest, Signer as _, Verifier as _,
+    Digest, Signer as _, Verifier as _,
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
 };
 #[cfg(not(feature = "std"))]
@@ -137,7 +137,7 @@ impl<N: Namespace> Generic<N> {
         let attestations = attestations.into_iter();
         let mut invalid = BTreeSet::new();
         let mut candidates = Vec::with_capacity(attestations.size_hint().0);
-        let mut batch = Batch::new(attestations.size_hint().0);
+        let mut batch = Verifier::<Bytes>::new(attestations.size_hint().0);
 
         for attestation in attestations {
             let Some(public_key) = self.participants.key(attestation.signer) else {
@@ -153,7 +153,7 @@ impl<N: Namespace> Generic<N> {
             candidates.push((attestation, public_key));
         }
 
-        if !candidates.is_empty() && !batch.verify(rng, strategy) {
+        if !candidates.is_empty() && batch.verify(rng, strategy).is_err() {
             // Batch failed: fall back to per-signer verification to isolate faulty attestations.
             for (attestation, public_key) in &candidates {
                 let Some(signature) = attestation.signature.get() else {
@@ -217,7 +217,7 @@ impl<N: Namespace> Generic<N> {
     /// Returns false if the certificate structure is invalid.
     fn batch_verify_certificate<'a, S, D>(
         &self,
-        batch: &mut Batch,
+        batch: &mut Verifier<Bytes>,
         subject: S::Subject<'a, D>,
         certificate: &Certificate,
     ) -> bool
@@ -272,12 +272,12 @@ impl<N: Namespace> Generic<N> {
         R: CryptoRng,
         D: Digest,
     {
-        let mut batch = Batch::new(certificate.signatures.len());
+        let mut batch = Verifier::<Bytes>::new(certificate.signatures.len());
         if !self.batch_verify_certificate::<S, D>(&mut batch, subject, certificate) {
             return false;
         }
 
-        batch.verify(rng, strategy)
+        batch.verify(rng, strategy).is_ok()
     }
 
     /// Verifies multiple certificates in a batch.
@@ -297,14 +297,15 @@ impl<N: Namespace> Generic<N> {
         // Each certificate stages at most one signature per participant.
         let per_certificate = self.participants.len();
         let certificates = certificates.into_iter();
-        let mut batch = Batch::new(certificates.size_hint().0.saturating_mul(per_certificate));
+        let mut batch =
+            Verifier::<Bytes>::new(certificates.size_hint().0.saturating_mul(per_certificate));
         for (subject, certificate) in certificates {
             if !self.batch_verify_certificate::<S, D>(&mut batch, subject, certificate) {
                 return false;
             }
         }
 
-        batch.verify(rng, strategy)
+        batch.verify(rng, strategy).is_ok()
     }
 
     pub const fn is_attributable() -> bool {
