@@ -388,12 +388,9 @@ where
 ///
 /// Created by `UnmerkleizedBatch::prepare`. Call [`Self::compact`] zero
 /// or more times, then [`Self::merkleize`] to append one CommitFloor and compute the root.
-/// All rounds share the original scan tip.
-///
-/// Unlike [`UnmerkleizedBatch::merkleize`], which applies the default compaction budget and
-/// finalizes the batch in one call, this type lets callers bound compaction work across explicit
-/// rounds. Manual compaction is useful when execution cost is more sensitive than disk space cost:
-/// callers can limit work per batch or defer it, accepting slower reclamation of disk space.
+/// All rounds share the original scan tip. See [`crate::qmdb::compaction`] for the scheduling
+/// policies this path supports and how they compare to the single-call
+/// [`UnmerkleizedBatch::merkleize`].
 ///
 /// The database must retain the same root between preparation and finalization. Any root change,
 /// including applying an ancestor, is rejected with [`crate::qmdb::Error::StaleBatch`].

@@ -2,9 +2,23 @@
 //!
 //! A prepared batch accepts zero or more explicit compaction rounds before finalization.
 //! Callers can implement their own scheduling policy by choosing a budget for each round.
-//! The existing `UnmerkleizedBatch::merkleize` path retains its default automatic compaction.
 //! All participants reproducing a root must use the same deterministic policy. Disabling
 //! compaction or providing insufficient sustained work can leave retained history unbounded.
+//!
+//! # Choosing a path
+//!
+//! [`UnmerkleizedBatch::merkleize`](crate::qmdb::any::batch::UnmerkleizedBatch::merkleize)
+//! compacts with the default budget and finalizes in one call, so the floor advances at a rate set
+//! by each batch's own operation count. Manual compaction, reached through
+//! [`UnmerkleizedBatch::prepare`](crate::qmdb::any::batch::UnmerkleizedBatch::prepare), moves that
+//! schedule to the caller: each round's budget caps the entries moved and the locations scanned,
+//! bounding compaction cost per batch independently of how much the batch writes.
+//!
+//! That bound suits deployments where execution time is scarcer than disk space, such as a batch
+//! that must finalize within a block-production deadline. A caller can spend a fixed budget per
+//! batch, or skip rounds entirely, and reclaim space over later batches instead. Space is
+//! reclaimed more slowly in exchange, so sustained budgets must still outpace the rate at which
+//! batches render operations inactive.
 //!
 //! # Example
 //!
@@ -18,8 +32,8 @@
 //! let batch = prepared.merkleize(&db, metadata).await?;
 //! ```
 //!
-//! `CompactionBudget` has no `Default` implementation: callers must choose the move and scan
-//! limits explicitly. The existing automatic path continues to use its established policy.
+//! [`CompactionBudget`] has no `Default` implementation: callers must choose the move and scan
+//! limits explicitly.
 
 use crate::merkle::{Family, Location};
 

@@ -279,6 +279,7 @@ where
 ///
 /// Call `UnmerkleizedBatch::prepare`, then [`Self::compact`] zero or more
 /// times before [`Self::merkleize`]. All rounds share one scan tip and emit one final CommitFloor.
+/// See [`crate::qmdb::compaction`] for the scheduling policies this path supports.
 /// The database must retain the same root throughout. Any root change, including applying an
 /// ancestor, returns [`Error::StaleBatch`].
 pub struct PreparedBatch<F, H, U, const N: usize, S: Strategy>
@@ -737,9 +738,10 @@ where
         prepared.merkleize(db, metadata).await
     }
 
-    /// Resolve user operations without automatic compaction or finalization.
+    /// Resolve user operations for caller-controlled compaction and finalization.
     ///
-    /// Compact the returned batch zero or more times, then call its `merkleize` method.
+    /// Compact the returned batch zero or more times, then call its `merkleize` method. To apply
+    /// the default compaction budget and finalize in one call, use [`Self::merkleize`].
     pub async fn prepare<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -795,9 +797,10 @@ where
         prepared.merkleize(db, metadata).await
     }
 
-    /// Resolve user operations without automatic compaction or finalization.
+    /// Resolve user operations for caller-controlled compaction and finalization.
     ///
-    /// Compact the returned batch zero or more times, then call its `merkleize` method.
+    /// Compact the returned batch zero or more times, then call its `merkleize` method. To apply
+    /// the default compaction budget and finalize in one call, use [`Self::merkleize`].
     pub async fn prepare<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
