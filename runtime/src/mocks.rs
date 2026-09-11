@@ -389,8 +389,8 @@ impl State {
 
     /// Records a durability operation if the gate is armed, returning the
     /// one-shot gate waiter if it has not been consumed yet.
-    const fn observe(&mut self) -> Option<SyncWaiter> {
-        if !self.gate.tracking {
+    const fn observe(&mut self, started: bool) -> Option<SyncWaiter> {
+        if !self.gate.tracking || (started && self.gate.blocking_only) {
             return None;
         }
         self.gate.calls += 1;
@@ -991,7 +991,7 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
             // An armed gate takes precedence over parking.
             (
                 sync,
-                state.observe().or_else(|| state.park()),
+                state.observe(true).or_else(|| state.park()),
                 state.completion_delayed,
             )
         };
@@ -1105,6 +1105,7 @@ impl SyncWaiter {
 #[derive(Default)]
 struct SyncGateState {
     tracking: bool,
+    blocking_only: bool,
     calls: usize,
     waiter: Option<SyncWaiter>,
 }
@@ -1128,6 +1129,16 @@ impl PendingSyncs {
     /// Once the gate is consumed, started syncs park in the deferred queue as
     /// usual while [Self::calls] keeps counting.
     pub fn arm(&self) {
+        self.arm_inner(false);
+    }
+
+    /// Blocks the next blocking sync without consuming the gate on [Blob::start_sync].
+    /// Started syncs retain their ordinary deferred-queue behavior.
+    pub fn arm_blocking(&self) {
+        self.arm_inner(true);
+    }
+
+    fn arm_inner(&self, blocking_only: bool) {
         let mut state = self.state.lock();
         assert!(!state.gate.tracking, "sync gate already armed");
         assert!(
@@ -1135,6 +1146,7 @@ impl PendingSyncs {
             "sync gate already has a waiter"
         );
         state.gate.tracking = true;
+        state.gate.blocking_only = blocking_only;
         state.gate.calls = 0;
         let waiter = state.defer();
         state.gate.waiter = Some(waiter);
@@ -1191,7 +1203,7 @@ impl PendingSyncs {
     }
 
     async fn wait(&self) -> Result<(), Error> {
-        let waiter = self.state.lock().observe();
+        let waiter = self.state.lock().observe(false);
         match waiter {
             Some(waiter) => waiter.wait().await,
             None => Ok(()),
@@ -1433,7 +1445,30 @@ mod tests {
     use super::*;
     use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Stream, deterministic};
     use commonware_macros::select;
+    use futures::FutureExt as _;
     use std::{thread::sleep, time::Duration};
+
+    #[test]
+    fn blocking_sync_gate_does_not_capture_started_syncs() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, _) = context.open("blocking_sync_gate", b"blob").await.unwrap();
+            let (blob, pending) = DelayedSyncBlob::new(blob);
+            pending.unblock();
+            pending.arm_blocking();
+            let DeferredSync { release, blocked } = next_pending_sync(&pending);
+
+            blob.start_sync().await.await.unwrap();
+            assert_eq!(pending.calls(), 0);
+            let mut sync = Box::pin(blob.sync());
+            assert!(sync.as_mut().now_or_never().is_none());
+            blocked.await.unwrap();
+            assert_eq!(pending.calls(), 1);
+            release.send(Ok(())).unwrap();
+            sync.await.unwrap();
+            blob.start_sync().await.await.unwrap();
+            assert_eq!(pending.calls(), 1);
+        });
+    }
 
     #[test]
     fn recording_context_preserves_data_and_records_options() {

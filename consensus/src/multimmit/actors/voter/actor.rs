@@ -62,10 +62,10 @@ use futures::FutureExt as _;
 use std::collections::BTreeSet;
 use std::{
     collections::{BTreeMap, VecDeque},
-    future::pending as pending_forever,
+    future::{Future, pending as pending_forever},
     mem::size_of_val,
     num::NonZeroUsize,
-    panic::AssertUnwindSafe,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
     time::SystemTime,
 };
@@ -143,6 +143,7 @@ pub(super) struct TestHooks<V: Variant, D: Digest> {
     durable: Arc<Mutex<DurableAttemptLedger<V, D>>>,
     events: Arc<Mutex<Vec<TestEvent<V, D>>>>,
     services: Arc<Mutex<Vec<(u64, Lane)>>>,
+    work_quanta: Arc<Mutex<usize>>,
 }
 
 #[cfg(test)]
@@ -152,6 +153,7 @@ impl<V: Variant, D: Digest> Default for TestHooks<V, D> {
             durable: Arc::new(Mutex::new(BTreeMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
             services: Arc::new(Mutex::new(Vec::new())),
+            work_quanta: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -334,11 +336,11 @@ type AppResult<D> = (
 );
 
 /// Submits CPU work directly to the configured strategy while the actor awaits its completion.
-async fn run_crypto_operation<P, O, T>(
+fn run_crypto_operation<P, O, T>(
     strategy: P,
     span: Span,
     operation: O,
-) -> (Span, Result<T, CryptoTaskPanicked>)
+) -> impl Future<Output = (Span, Result<T, CryptoTaskPanicked>)> + Send
 where
     P: Strategy,
     O: FnOnce(P) -> T + Send + 'static,
@@ -346,18 +348,22 @@ where
 {
     let completion_span = span.clone();
     let worker_span = span.clone();
-    let operation = async move {
-        strategy
-            .manual()
-            .spawn(1, move |_| worker_span.in_scope(|| operation(strategy)))
-            .await
-    };
-    let outcome = AssertUnwindSafe(operation)
-        .catch_unwind()
-        .instrument(span)
-        .await
-        .map_err(|_| CryptoTaskPanicked);
-    (completion_span, outcome)
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        strategy.manual().spawn(1, move |_| {
+            worker_span.in_scope(|| operation(strategy))
+        })
+    }));
+    async move {
+        let outcome = match operation {
+            Ok(operation) => AssertUnwindSafe(operation)
+                .catch_unwind()
+                .instrument(span)
+                .await
+                .map_err(|_| CryptoTaskPanicked),
+            Err(_) => Err(CryptoTaskPanicked),
+        };
+        (completion_span, outcome)
+    }
 }
 
 /// One completed asynchronous signature, certificate assembly, or recovery.
@@ -624,7 +630,7 @@ enum RuntimeDisposition {
 
 /// The snapshot write's progress toward returning the checkpoint store.
 enum CheckpointProgress<E: StorageContext, V: Variant, D: Digest> {
-    Writing(Handle<Result<CheckpointStore<E, V, D>, CheckpointError>>),
+    Writing(Handle<Result<CheckpointStore<E, V, D>, Fatal>>),
     Durable(CheckpointStore<E, V, D>),
 }
 
@@ -1860,7 +1866,7 @@ where
         Ok(RuntimeDisposition::Continue)
     }
 
-    /// Drains one bounded Core service cycle, then gives attached runtime tasks one turn.
+    /// Services admitted inputs and at most one semantic work quantum before yielding to runtime tasks.
     async fn drive_core_cycle(&mut self) -> Result<(), (Span, Fatal)> {
         #[cfg(test)]
         debug!("test core cycle started");
@@ -1937,25 +1943,16 @@ where
                         })?;
                     }
                     let span = self.round_span.clone();
-                    self.maybe_checkpoint()
-                        .instrument(span.clone())
-                        .await
+                    span.in_scope(|| self.maybe_checkpoint())
                         .map_err(|fatal| (span, fatal))?;
                 }
                 CoreTurn::Work(work) => {
-                    if !self
-                        .dispatch_work(work, &span)
-                        .instrument(span.clone())
-                        .await
-                        .map_err(|fatal| (span, fatal))?
-                    {
-                        break;
-                    }
+                    span.in_scope(|| self.dispatch_work(work, &span))
+                        .map_err(|fatal| (span, fatal))?;
+                    break;
                 }
                 CoreTurn::Idle => {
-                    self.maybe_checkpoint()
-                        .instrument(span.clone())
-                        .await
+                    span.in_scope(|| self.maybe_checkpoint())
                         .map_err(|fatal| (span, fatal))?;
                     break;
                 }
@@ -1980,26 +1977,28 @@ where
             .inc_by(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
     }
 
-    async fn dispatch_work(
+    fn dispatch_work(
         &mut self,
         work: CoreWork<V, H::Digest>,
         root: &Span,
-    ) -> Result<bool, Fatal> {
+    ) -> Result<(), Fatal> {
         #[cfg(test)]
         debug!(
             view = self.round_view.get(),
             test_root = root.id().map_or(0, |id| id.into_u64()),
             "test machine-owned work"
         );
-        let made_progress = work.work_remaining() || !work.capabilities().is_empty();
+        #[cfg(test)]
+        {
+            *self.test_hooks.work_quanta.lock() += 1;
+        }
         let (capabilities, activities) = work.into_parts();
         self.execute_capabilities(capabilities, root)?;
         self.report_activities(activities);
         self.update_retention_gauges();
         let view = self.update_progress_gauges();
         self.refresh_round_span(view);
-        self.maybe_checkpoint().await?;
-        Ok(made_progress)
+        self.maybe_checkpoint()
     }
 
     fn report_activities(&mut self, activities: Vec<Activity<V, H::Digest>>) {
@@ -3119,7 +3118,7 @@ where
     }
 
     /// Checkpoints an acknowledged snapshot and compacts the journal behind it.
-    async fn maybe_checkpoint(&mut self) -> Result<(), Fatal> {
+    fn maybe_checkpoint(&mut self) -> Result<(), Fatal> {
         // A snapshot is only valid at a quiescent staging pipeline: every staged batch is
         // acknowledged and nothing is emitted-but-unappended. Reaching the checkpoint cadence
         // closes authority-producing ingress until that finite prefix drains and the cut is made.
@@ -3160,7 +3159,6 @@ where
             Err(JournalAdmission::Closed(())) => return Err(Fatal::Closed),
         };
         drop(checkpoint);
-        roll.instrument(roll_span).await?;
         let checkpoints = self.checkpoints.take().ok_or(Fatal::Closed)?;
         let store_span = origin.store_span();
         let pending_span = store_span.clone();
@@ -3169,7 +3167,13 @@ where
             .child("checkpoint")
             .shared(true)
             .spawn(move |_| {
-                async move { checkpoints.store(cut.materialize()).await }.instrument(store_span)
+                async move {
+                    // The admitted roll precedes every post-cut append in the journal FIFO.
+                    // Its acknowledgement also precedes snapshot materialization and storage.
+                    roll.instrument(roll_span).await?;
+                    Ok(checkpoints.store(cut.materialize()).await?)
+                }
+                .instrument(store_span)
             });
         self.pending_checkpoint = Some(PendingCheckpoint {
             store: CheckpointProgress::Writing(store),
@@ -3236,7 +3240,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::utils::mocks::inert_channel;
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{Rayon, Sequential, mocks::CountingStrategy};
     use commonware_runtime::{
         Runner as _, Supervisor as _,
         buffer::paged::{self, CacheRef},
@@ -3414,6 +3418,26 @@ mod tests {
 
     #[test]
     fn ready_persistence_successor_enters_the_ongoing_core_cycle() {
+        ready_runtime_source_between_actions(RuntimeSourceScenario::Persistence);
+    }
+
+    #[test]
+    fn ready_heartbeat_is_serviced_between_component_quanta() {
+        ready_runtime_source_between_actions(RuntimeSourceScenario::Heartbeat);
+    }
+
+    #[test]
+    fn released_signing_is_submitted_before_completion_poll() {
+        ready_runtime_source_between_actions(RuntimeSourceScenario::Signing);
+    }
+
+    enum RuntimeSourceScenario {
+        Persistence,
+        Heartbeat,
+        Signing,
+    }
+
+    fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let committee = Committee::<MinPk>::new(87, 6, Limits::new(2, 1).unwrap());
             let profile = Profile::new(committee.config.clone(), Role::Validator(Participant::new(0)), Tuning::default())
@@ -3446,7 +3470,8 @@ mod tests {
             );
 
             // Issue real barriers without delivering their responses back to Core.
-            let collect = |machine: &mut CoreState<Sha256, MinPk>| {
+            let mut held_signing = None;
+            let mut collect = |machine: &mut CoreState<Sha256, MinPk>| {
                 let mut jobs = Vec::new();
                 loop {
                     let capabilities = match machine.next_action(POLL_BUDGET).unwrap() {
@@ -3484,6 +3509,13 @@ mod tests {
                         }
                     }
                     for job in released {
+                        if matches!(scenario, RuntimeSourceScenario::Signing)
+                            && held_signing.is_none()
+                            && matches!(job.request(), DurableEffect::Sign(_) | DurableEffect::SignBatch(_))
+                        {
+                            held_signing = Some(job);
+                            continue;
+                        }
                         match job.request() {
                             DurableEffect::Sign(request) => {
                                 let artifact = sign_request(&committee.signers[0], request).unwrap();
@@ -3539,6 +3571,7 @@ mod tests {
             let (resolver, _resolver_rx) = mailbox::new(context.child("resolver"), NonZeroUsize::new(64).unwrap());
             let (sender, _receiver) = inert_channel(&committee.identities);
             let hooks = TestHooks::default();
+            let critical_strategy = CountingStrategy::default();
             let initial_view = machine.inspection().view();
             let mut driver = Driver {
                 context: context.child("driver"),
@@ -3548,7 +3581,7 @@ mod tests {
                 last_activity: vec![None; committee.identities.len()],
                 scheme: Arc::new(committee.signers[0].clone()),
                 strategy: Sequential,
-                critical_strategy: Sequential,
+                critical_strategy: critical_strategy.clone(),
                 automaton: MockApplication::default(),
                 relay: RecordingRelay::default(),
                 reporter: RecordingReporter::default(),
@@ -3599,11 +3632,64 @@ mod tests {
                 validator_commands: Vec::new(),
                 validator_receivers: Vec::new(),
                 validator_handles: Vec::new(),
-                metrics: ActorMetrics::new(&context.child("metrics"), 1),
+                metrics: ActorMetrics::new(&context.child("metrics"), committee.identities.len()),
                 test_hooks: hooks.clone(),
             };
             driver.persistence_completed(first_durable, &Span::none()).unwrap();
             assert!(!driver.can_admit(Lane::PersistenceCompletion));
+            if matches!(scenario, RuntimeSourceScenario::Signing) {
+                let job = held_signing.expect("startup must release a real signing request");
+                driver.execute_capabilities(
+                    Capability::Durability(DurabilityCapability::Released(job)).into(),
+                    &Span::none(),
+                ).unwrap();
+                assert_eq!(driver.crypto.len(), 1);
+                let released = hooks.durable_effects();
+                let signing = released.iter().find_map(|(id, attempts)| {
+                    attempts.iter().find_map(|attempt| {
+                        matches!(attempt.effect, DurableEffect::Sign(_) | DurableEffect::SignBatch(_))
+                            .then_some((*id, attempt.generation))
+                    })
+                }).expect("a real durable signing request must reach the executor");
+                assert_eq!(driver.egress.len(), 0);
+                assert_eq!(critical_strategy.spawns(), driver.crypto.len(),
+                    "released crypto must be submitted before polling its completion collection");
+                let (_, _, outcome) = driver.crypto.next_completed().await;
+                let (id, generation) = match outcome.unwrap().unwrap() {
+                    CryptoOutcome::Signed { id, generation, .. }
+                    | CryptoOutcome::SignedBatch { id, generation, .. } => (id, generation),
+                    _ => panic!("the released job must return its signed artifacts"),
+                };
+                assert_eq!((id, generation), signing);
+                assert_eq!(driver.egress.len(), 0);
+                return;
+            }
+            if matches!(scenario, RuntimeSourceScenario::Heartbeat) {
+                driver.heartbeat_at = context.current();
+                let (completions_tx, mut completions) = mailbox::new(context.child("completions"), NonZeroUsize::new(4).unwrap());
+                let (mailbox_tx, mut mailbox) = mailbox::new(context.child("mailbox"), NonZeroUsize::new(4).unwrap());
+                let (observations_tx, mut observations) = mailbox::new_unreliable(context.child("observations"), NonZeroUsize::new(4).unwrap());
+                let (queries_tx, mut queries) = mailbox::new_unreliable(context.child("queries"), NonZeroUsize::new(4).unwrap());
+                let mut readiness = ReadinessCursor {
+                    source: ReadinessCursor::HEARTBEAT,
+                    ..ReadinessCursor::default()
+                };
+                driver.drive_core_cycle().await.unwrap();
+                let first_quanta = *hooks.work_quanta.lock();
+                let work_remained = driver.machine.has_runnable_work();
+                let event = driver.next_runtime_event(&mut readiness, &mut completions, &mut mailbox, &mut observations, &mut queries).await;
+                assert!(matches!(event, Some(RuntimeEvent::Heartbeat)), "the expired heartbeat is ready at the runtime boundary");
+                driver.handle_runtime_event(event.unwrap()).unwrap();
+                assert!(driver.heartbeat_at > context.current());
+                while driver.machine.has_runnable_work() {
+                    driver.drive_core_cycle().await.unwrap();
+                }
+                assert!(*hooks.work_quanta.lock() >= 2, "the fixture must exercise multiple semantic quanta");
+                assert!(work_remained, "the ready heartbeat must be handled before draining the runnable semantic work (ran {first_quanta} quanta)");
+                assert_eq!(first_quanta, 1, "a ready runtime source must be reconsidered after one component quantum");
+                drop((completions_tx, mailbox_tx, observations_tx, queries_tx));
+                return;
+            }
             driver.drive_core_cycle().await.unwrap();
             let services = hooks.services();
             assert_eq!(services.first().map(|(_, lane)| *lane), Some(Lane::PersistenceCompletion));
@@ -3611,6 +3697,10 @@ mod tests {
                 driver.journal_responses.len() < pending,
                 "a ready FIFO successor must enter Core during the cycle that frees its admission slot"
             );
+            while driver.machine.has_runnable_work() {
+                driver.drive_core_cycle().await.unwrap();
+            }
+            let services = hooks.services();
             assert!(services.windows(2).all(|pair| pair[0].0 == pair[1].0));
             assert!(services.iter().filter(|(_, lane)| *lane == Lane::PersistenceCompletion).count() >= 2);
             let acknowledgements = hooks.events().into_iter().filter_map(|event| match event {
@@ -3752,7 +3842,7 @@ mod tests {
                     pending_forever::<
                         Result<
                             CheckpointStore<deterministic::Context, MinPk, Sha256Digest>,
-                            CheckpointError,
+                            Fatal,
                         >,
                     >()
                     .instrument(store_span)
@@ -3991,10 +4081,14 @@ mod tests {
         );
     }
 
-    #[test_traced]
-    fn crypto_strategy_panic_is_reconciled() {
+    #[rstest::rstest]
+    #[case(Sequential)]
+    #[case(CountingStrategy::default())]
+    #[case(Rayon::new(NonZeroUsize::MIN).unwrap())]
+    #[case(Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap())]
+    fn crypto_strategy_panic_is_reconciled(#[case] strategy: impl Strategy) {
         tokio::Runner::default().start(|_| async move {
-            let outcome = run_crypto_operation(Sequential, Span::none(), |_| -> () {
+            let outcome = run_crypto_operation(strategy, Span::none(), |_| -> () {
                 panic!("worker panic")
             })
             .await;

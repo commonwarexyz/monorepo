@@ -731,23 +731,13 @@ pub(crate) type StepParts<V, D> = (Capabilities<V, D>, Vec<Activity<V, D>>);
 pub(crate) struct PollResult<V: Variant, D: Digest> {
     capabilities: Capabilities<V, D>,
     activities: Vec<Activity<V, D>>,
+    #[cfg(any(test, feature = "test-utils"))]
     work_remaining: bool,
 }
 
 impl<V: Variant, D: Digest> PollResult<V, D> {
-    const fn new(
-        capabilities: Capabilities<V, D>,
-        activities: Vec<Activity<V, D>>,
-        work_remaining: bool,
-    ) -> Self {
-        Self {
-            capabilities,
-            activities,
-            work_remaining,
-        }
-    }
-
     /// Returns capabilities in deterministic issuance order.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn capabilities(&self) -> &[Capability<V, D>] {
         &self.capabilities
     }
@@ -759,6 +749,7 @@ impl<V: Variant, D: Digest> PollResult<V, D> {
     }
 
     /// Returns whether another machine-owned quantum is ready.
+    #[cfg(any(test, feature = "test-utils"))]
     pub const fn work_remaining(&self) -> bool {
         self.work_remaining
     }
@@ -1356,8 +1347,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         capabilities.extend(self.emit_staged());
         capabilities.extend(self.take_resolution_capabilities());
         let activities = self.drain_activities();
-        let has_work = self.scheduler.has_work() || self.next_staged_index().is_some();
-        Ok(PollResult::new(capabilities, activities, has_work))
+        Ok(PollResult {
+            capabilities,
+            activities,
+            #[cfg(any(test, feature = "test-utils"))]
+            work_remaining: self.scheduler.has_work() || self.next_staged_index().is_some(),
+        })
     }
 
     /// Reports direct-finality updates and every artifact promoted to ready since the last drain.
@@ -2840,10 +2835,17 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         self.lifecycle = Lifecycle::Live;
         step.activities.extend(self.restore_ready_artifacts()?);
         if recovery {
-            let view = self.durable.view;
-            if self.resolution_needed(view)
-                && let Some(job) = self.request_resolution(view)?
-            {
+            // Retained exits advance startup without peer input. Resolve the first remaining
+            // proof requirement, including a finality-floor probe at the current view.
+            let mut view = self.durable.view;
+            while !self.resolution_needed(view) {
+                view = View::new(
+                    view.get()
+                        .checked_add(1)
+                        .ok_or(StepError::IdentifierExhausted)?,
+                );
+            }
+            if let Some(job) = self.request_resolution(view)? {
                 step.capabilities
                     .push(Capability::Resolver(ResolverCapability::Resolve(job)));
             }

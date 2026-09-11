@@ -62,6 +62,10 @@ the queue that block-rate work shares.
 admission order, producer-header facts, DA choices, views, leader finality, durable events, signing
 reservations, publication obligations, retention, and snapshots.
 
+Each machine work quantum returns control to the voter so it can service ready runtime sources.
+Released cryptographic jobs are submitted immediately; polling their completion does not initiate
+the work. Semantic state remains serial, while submitted jobs run through their execution strategies.
+
 Application block bodies, body codecs, retrieval, dense total-order extraction, durable delivery,
 and application acknowledgements are outside the consensus state machine. The Multimmit marshal
 owns their protocol-facing custody and ordering. Consensus owns opaque application digests, signed
@@ -558,7 +562,9 @@ authority. This is the only permitted persist/work overlap.
    under continuous load rather than waiting for accidental global quiescence.
 2. Only Core may mint `CheckpointCut`, and only at its acknowledged cursor after that staged prefix
    drains. The cut owns the complete durable semantic state at that cursor.
-3. The journal owner treats a cut opaquely. It rolls first, so post-cut authority can append to a
+3. The journal owner treats a cut opaquely. The voter queues its roll before any post-cut append;
+   a shared task awaits the roll acknowledgement before storing the checkpoint. Runtime service
+   continues during that wait. The journal processes the roll first, so post-cut authority can append to a
    retained new section while the replacement checkpoint writes and syncs. Once the checkpoint is
    durable, Core briefly fences new durability-producing transitions until that post-cut suffix is
    idle, admits pruning of the covered sections, and immediately reopens authority while pruning

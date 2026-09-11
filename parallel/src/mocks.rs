@@ -73,7 +73,11 @@ impl Strategy for CountingStrategy {
         }
     }
 
-    fn spawn<F, T>(&self, _: usize, operation: F) -> impl Future<Output = T> + Send + 'static
+    fn spawn<F, T>(
+        &self,
+        _: usize,
+        operation: F,
+    ) -> impl Future<Output = T> + Send + 'static + use<F, T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,

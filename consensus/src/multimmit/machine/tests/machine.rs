@@ -13815,6 +13815,71 @@ fn view_retention_retires_history_while_finality_stalls() {
 }
 
 #[test]
+fn recovery_requests_first_missing_exit_after_retained_prefix() {
+    let mut runner = active_runner(Role::Observer);
+    for view in [1, 2, 4] {
+        let proof = symbolic_nullification(runner.machine(), View::new(view), view);
+        let reserved = runner
+            .reserve(DurableEffect::Broadcast(Arc::new(Artifact::Nullification(
+                proof,
+            ))))
+            .unwrap();
+        runner.persist(&persist_job(&reserved)).unwrap();
+    }
+    // Publication custody is durable before the scheduled view transitions run.
+    assert_eq!(runner.inspect().view(), View::new(1));
+    let recovery = runner.crash_and_restore().unwrap();
+    let requests = recovery
+        .capabilities()
+        .iter()
+        .filter_map(|capability| match capability {
+            Capability::Resolver(ResolverCapability::Resolve(job)) => Some(*job),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests.iter().map(|job| job.view()).collect::<Vec<_>>(),
+        vec![View::new(3)],
+        "recovery must request the first hole beyond its retained exit prefix"
+    );
+    let request = requests[0];
+    let mut persistence = SymbolicPersistence;
+    let drained = runner
+        .drain(&mut persistence, recovery.into_capabilities())
+        .unwrap();
+    assert_eq!(runner.inspect().view(), View::new(3));
+    assert!(drained.iter().all(|capability| !matches!(
+        capability,
+        Capability::Resolver(ResolverCapability::Cancel(job)) if *job == request
+    )));
+
+    let finalized = leader(runner.machine(), 5);
+    let votes = vec![view_vote(runner.machine(), &finalized, 0)];
+    let certificate = lqc(runner.machine(), finalized, &votes);
+    let resolved = runner
+        .submit(Input::ResolutionCompleted(ResolutionCompletion::new(
+            request.id(),
+            request.generation(),
+            request.view(),
+            ViewProof::Lqc(Box::new(certificate)),
+        )))
+        .unwrap();
+    let [Capability::Verification(VerificationCapability::Verify(job))] = resolved.capabilities()
+    else {
+        panic!("the covering L-QC must be authenticated before admission");
+    };
+    let admitted = runner
+        .submit(Input::Verified(SymbolicVerifier::new(true).complete(job)))
+        .unwrap();
+    runner
+        .drain(&mut persistence, admitted.into_capabilities())
+        .unwrap();
+    assert_eq!(runner.inspect().view(), View::new(6));
+    assert_eq!(runner.inspect().finality_floor(), View::new(5));
+    assert_eq!(runner.inspect().resolution_jobs(), 0);
+}
+
+#[test]
 fn invalid_resolved_exit_rearms_exact_want_and_accepts_retry() {
     let profile = profile_for(Role::Observer, 6, 2);
     let (machine, _) = start_profile(profile.clone());

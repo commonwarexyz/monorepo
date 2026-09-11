@@ -983,7 +983,15 @@ fn checkpoint_io_keeps_control_live_and_bounds_authority_suffix() {
             application_log.lock().built >= 3,
             "the checkpoint must follow sustained certificate-driven production"
         );
-        checkpoint_syncs.arm();
+        let roll_appends = gates.appends().len();
+        select! {
+            _ = node.inspect() => {},
+            () = context.sleep(Duration::from_secs(1)) => {
+                panic!("journal rolling blocked read-only inspection");
+            },
+        }
+        assert_eq!(gates.appends().len(), roll_appends, "post-cut authority waits for the journal roll");
+        checkpoint_syncs.arm_blocking();
         let DeferredSync {
             release: checkpoint_store,
             blocked: checkpoint_store_blocked,
@@ -1009,10 +1017,8 @@ fn checkpoint_io_keeps_control_live_and_bounds_authority_suffix() {
             gates.appends().len() > store_appends,
             "checkpoint storage blocked the post-cut journal suffix"
         );
-        assert!(
-            gates.appends().len() - store_appends <= CHECKPOINT_INTERVAL as usize,
-            "a stalled checkpoint exceeded one bounded post-cut interval"
-        );
+        // The cadence fences new ingress; previously admitted work still drains. Once that
+        // finite prefix completes, an unresolved checkpoint must stop further journal growth.
         let bounded_appends = gates.appends().len();
         context.sleep(Duration::from_secs(1)).await;
         assert_eq!(
@@ -1615,11 +1621,10 @@ fn work_quanta_refresh_round_without_reparenting_async_inputs() {
         }
 
         let events = traces.get_by_level(Level::DEBUG);
-        let mut first_view = None;
-        let mut advanced_in_cycle = false;
+        let mut worked_in_cycle = false;
         for event in events.iter() {
             match event.metadata.content.as_str() {
-                "test core cycle started" => first_view = None,
+                "test core cycle started" => worked_in_cycle = false,
                 "test machine-owned work" => {
                     let view = event
                         .metadata
@@ -1629,8 +1634,8 @@ fn work_quanta_refresh_round_without_reparenting_async_inputs() {
                         .expect("work records its owning view")
                         .1
                         .as_str();
-                    advanced_in_cycle |= first_view.is_some_and(|first| first != view);
-                    first_view.get_or_insert(view);
+                    assert!(!worked_in_cycle, "one semantic quantum per actor cycle");
+                    worked_in_cycle = true;
                     let root = event.spans.last().expect("work has a round root");
                     assert_eq!(root.content, "multimmit.voter.round");
                     root.expect_field_exact("view", view).unwrap();
@@ -1638,10 +1643,6 @@ fn work_quanta_refresh_round_without_reparenting_async_inputs() {
                 _ => {}
             }
         }
-        assert!(
-            advanced_in_cycle,
-            "the round advances between quanta in one cycle"
-        );
         events
             .expect_event(|event| {
                 event.metadata.content == "test machine-owned work"

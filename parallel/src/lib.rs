@@ -132,8 +132,9 @@ commonware_macros::stability_scope!(BETA {
         /// returns, and jobs whose measured cost exceeds a small time budget offload. To force a
         /// hand-off on a multi-worker pool, submit through [`manual`](Self::manual).
         ///
-        /// The returned future resolves when the job completes. Blocking on external
-        /// synchronization or I/O inside the job can occupy execution capacity until it returns.
+        /// The returned future does not borrow the strategy and resolves when the job completes.
+        /// Blocking on external synchronization or I/O inside the job can occupy execution
+        /// capacity until it returns.
         /// When the polling thread itself belongs to the strategy's execution resources (e.g. a
         /// runtime whose executor thread is registered as a pool worker), the job (and other
         /// pending work) may be executed inline on that thread rather than waited on.
@@ -144,7 +145,7 @@ commonware_macros::stability_scope!(BETA {
             &self,
             len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<Self, F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static;
@@ -624,7 +625,7 @@ commonware_macros::stability_scope!(BETA {
             &self,
             len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<S, F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
@@ -814,7 +815,7 @@ commonware_macros::stability_scope!(BETA {
             &self,
             _len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
@@ -1038,7 +1039,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             &self,
             len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
