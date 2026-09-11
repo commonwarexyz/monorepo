@@ -140,21 +140,22 @@ O’Grady</a></div>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
         as Browsing the Web</h2>
         <p>If an API responds in milliseconds, no one will wait seconds
-        to pay for it. Bajillion gives the payer a receipt in one round
-        trip to its chosen operator. The recipient can verify it locally
-        and retain it as evidence, so the request needn’t wait for
-        settlement. The operator later nets payments across all
-        participating accounts, without separate channels or funded
-        routes between counterparties.</p>
-        <p>Suppose a payer, <span class="math inline">a</span>, has 100
-        and wants to pay 20 to a recipient, <span
-        class="math inline">b</span>, with 40. The payer signs a request
-        <span class="math inline">S</span> advancing its running total
-        for that recipient. The operator verifies the signature and
-        available funds, records acceptance, and returns its signed
+        to pay for it. Suppose <span class="math inline">a</span> has
+        100 and wants to pay 20 to <span class="math inline">b</span>,
+        who has 40. With Bajillion, <span class="math inline">a</span>
+        sends its chosen operator a signed request <span
+        class="math inline">S</span> advancing its running total for
+        <span class="math inline">b</span>. The operator checks the
+        signature and funds, records acceptance, and returns its signed
         acknowledgment <span class="math inline">R</span> with a proof
-        of the recipient’s entry. The payer forwards the receipt to the
-        recipient.</p>
+        of <span class="math inline">b</span>’s entry. In one round
+        trip, <span class="math inline">a</span> has a receipt to
+        forward to <span class="math inline">b</span>, who can verify it
+        locally and retain it as evidence; the operator can also send it
+        directly to <span class="math inline">b</span>, saving a hop.
+        Settlement comes later, netting payments across all accounts
+        using that operator without separate channels or funded
+        routes.</p>
         <style>
           .clearing-loop {
             aspect-ratio: 1024 / 576;

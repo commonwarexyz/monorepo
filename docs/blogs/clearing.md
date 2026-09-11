@@ -25,9 +25,7 @@ One payment or a bajillion, it all reduces to a handful of offchain settlement r
 
 ## Payments as Fast as Browsing the Web
 
-If an API responds in milliseconds, no one will wait seconds to pay for it. Bajillion gives the payer a receipt in one round trip to its chosen operator. The recipient can verify it locally and retain it as evidence, so the request needn't wait for settlement. The operator later nets payments across all participating accounts, without separate channels or funded routes between counterparties.
-
-Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. The payer signs a request $S$ advancing its running total for that recipient. The operator verifies the signature and available funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of the recipient's entry. The payer forwards the receipt to the recipient.
+If an API responds in milliseconds, no one will wait seconds to pay for it. Suppose $a$ has 100 and wants to pay 20 to $b$, who has 40. With Bajillion, $a$ sends its chosen operator a signed request $S$ advancing its running total for $b$. The operator checks the signature and funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of $b$'s entry. In one round trip, $a$ has a receipt to forward to $b$, who can verify it locally and retain it as evidence; the operator can also send it directly to $b$, saving a hop. Settlement comes later, netting payments across all accounts using that operator without separate channels or funded routes.
 
 ```{=html}
 <style>
