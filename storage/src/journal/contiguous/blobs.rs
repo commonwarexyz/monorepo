@@ -621,11 +621,11 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges.
-    pub(super) async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
+    /// Read sorted, non-overlapping byte ranges into one owned buffer, in range order.
+    pub(super) async fn read_ranges(&self, ranges: &[(u64, usize)]) -> Result<IoBufs, Error> {
         match self {
-            Self::Writer(writer) => Ok(writer.warm_ranges(ranges).await?),
-            Self::Sealed(sealed) => Ok(sealed.warm_ranges(ranges).await?),
+            Self::Writer(writer) => Ok(writer.read_ranges(ranges).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_ranges(ranges).await?),
         }
     }
 }

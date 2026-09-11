@@ -167,10 +167,14 @@ impl<B: Blob> Sealed<B> {
         self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
-    /// Warm the page cache for sorted, non-overlapping `(offset, len)` byte ranges, admitting
-    /// missing pages with coalesced blob reads.
-    pub async fn warm_ranges(&self, ranges: &[(u64, usize)]) -> Result<(), Error> {
-        self.view().warm_ranges(ranges).await
+    /// Read sorted, non-overlapping `(offset, len)` ranges into one owned buffer, in range order.
+    /// All ranges must be within bounds. Missing pages are coalesced across ranges.
+    ///
+    /// # Panics
+    ///
+    /// Panics if ranges are not sorted and non-overlapping.
+    pub async fn read_ranges(&self, ranges: &[(u64, usize)]) -> Result<IoBufs, Error> {
+        self.view().read_ranges(ranges).await
     }
 
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
