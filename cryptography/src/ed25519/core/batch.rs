@@ -81,7 +81,7 @@ impl<P: AsRef<[u8]> + Sync> Verifier<P> {
         }
     }
 
-    /// Queues a signature over the supplied payload without copying it.
+    /// Queues a signature over the supplied payload.
     pub fn queue(&mut self, vk: VerificationKey, sig: Signature, payload: P) {
         self.signatures.push((vk, payload, sig));
     }
