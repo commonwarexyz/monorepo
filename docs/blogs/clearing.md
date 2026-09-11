@@ -21,11 +21,11 @@ If we can't use blockspace to scale to a billion TPS (or at least don't want to 
 
 **Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that existing chains can verify. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
 
-A bajillion payments can share the same settlement records as a handful.
+A bajillion payments reduces to only a handful of offchain settlement records.
 
 ## Payments as Fast as Browsing the Web
 
-If an API responds in milliseconds, paying for it shouldn't take seconds. Bajillion gives the payer a receipt in one round trip to its chosen operator. The recipient can verify it locally and retain it as evidence, so the request needn't wait for settlement. The operator later nets payments across all participating accounts, without separate channels or funded routes between counterparties.
+If an API responds in milliseconds, no one will wait seconds to pay for it. Bajillion gives the payer a receipt in one round trip to its chosen operator. The recipient can verify it locally and retain it as evidence, so the request needn't wait for settlement. The operator later nets payments across all participating accounts, without separate channels or funded routes between counterparties.
 
 Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. The payer signs a request $S$ advancing its running total for that recipient. The operator verifies the signature and available funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of the recipient's entry. The payer forwards the receipt to the recipient.
 
