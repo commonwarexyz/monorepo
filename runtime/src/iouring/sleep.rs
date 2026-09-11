@@ -15,6 +15,7 @@ use super::{
     mailbox::{Mailbox, Message},
     runtime::Local,
     slab::{Id, Slab},
+    timeout::TimeoutWheel,
 };
 use std::{
     cmp::Reverse,
@@ -54,10 +55,7 @@ pub struct Sleep {
 }
 
 impl Sleep {
-    /// Fallback duration when the requested deadline exceeds `Instant`'s range.
-    const OVERFLOW_TIMEOUT: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
-
-    /// Establish a relative deadline, using a far-future fallback on overflow.
+    /// Establish a relative deadline, clamping the duration to [`TimeoutWheel::MAX_TIMEOUT`].
     ///
     /// Zero sleeps take the ready path without reading a clock or accessing TLS.
     pub fn new(duration: Duration) -> Self {
@@ -65,10 +63,9 @@ impl Sleep {
             return Self { state: State::Done };
         }
 
-        let now = Instant::now();
-        let deadline = now
-            .checked_add(duration)
-            .unwrap_or_else(|| now + Self::OVERFLOW_TIMEOUT);
+        let deadline = Instant::now()
+            .checked_add(duration.min(TimeoutWheel::MAX_TIMEOUT))
+            .expect("sleep deadline clamped to TimeoutWheel::MAX_TIMEOUT is not representable");
 
         Self {
             state: State::Unregistered { deadline },
@@ -333,21 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn test_representable_sleep_preserves_requested_duration() {
-        let duration = Duration::from_secs(31 * 365 * 24 * 60 * 60);
-        let before = Instant::now();
-        let sleep = Sleep::new(duration);
-        let after = Instant::now();
-        let State::Unregistered { deadline } = sleep.state else {
-            panic!("positive sleep must retain a deadline");
-        };
-
-        assert!(deadline >= before + duration);
-        assert!(deadline <= after + duration);
-    }
-
-    #[test]
-    fn test_overflowing_sleep_uses_far_future_deadline() {
+    fn test_far_future_sleep_clamps_the_deadline() {
         let before = Instant::now();
         let sleep = Sleep::new(Duration::MAX);
         let after = Instant::now();
@@ -355,8 +338,8 @@ mod tests {
             panic!("positive sleep must retain a deadline");
         };
 
-        assert!(deadline >= before + Sleep::OVERFLOW_TIMEOUT);
-        assert!(deadline <= after + Sleep::OVERFLOW_TIMEOUT);
+        assert!(deadline >= before + TimeoutWheel::MAX_TIMEOUT);
+        assert!(deadline <= after + TimeoutWheel::MAX_TIMEOUT);
     }
 
     #[test]
