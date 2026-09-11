@@ -19,13 +19,15 @@ katex: true
 
 If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching a new recipient means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). Rollups either prove a batch's state transition or publish enough transaction data for anyone to replay and challenge it. Even then, binding sequencer preconfirmations need a separate challenge for signed payments omitted from the batch (see [The Unavoidable Challenge](#the-unavoidable-challenge)).
 
-**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that existing chains can verify. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
+**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that most chains can process. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
 
-One payment or a bajillion, it all reduces to a handful of offchain settlement records.
+One payment or a bajillion, offchain settlement records scale with active accounts and payment pairs.
 
 ## Payments as Fast as Browsing the Web
 
-If an API responds in milliseconds, no one will wait seconds to pay for it. Suppose $a$ has 100 and wants to pay 20 to $b$, who has 40. With Bajillion, $a$ sends its chosen operator a signed request $S$ advancing its running total for $b$. The operator checks the signature and funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of $b$'s entry. In one round trip, $a$ has a receipt to forward to $b$, who can verify it locally and retain it as evidence; the operator can also send it directly to $b$, saving a hop. Settlement comes later, netting payments across all accounts using that operator without separate channels or funded routes.
+If an API responds in milliseconds, no one will wait seconds to pay for it.
+
+Suppose $a$ has 100 and wants to pay 20 to $b$, who has 40. With Bajillion, $a$ sends its chosen operator a signed request $S$ advancing its running total for $b$. The operator checks the signature and funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of $b$'s entry. In one round trip, $a$ has a receipt to forward to $b$, who can verify it locally and retain it as evidence; the operator can also send it directly to $b$, saving a hop. Settlement comes later, netting payments across all accounts using that operator without separate channels or funded routes.
 
 ```{=html}
 <style>
@@ -158,23 +160,37 @@ With no boundary flows, $L_{e+1}=L_e=200$.
 
 These rows update the live account state, a sorted vector of accounts with positive balances committed under $\mathsf{StateRoot}$ in a binary Merkle tree (BMT). Deposits can add accounts, while withdrawals and payments can remove them when their balance reaches zero.
 
-Changed rows and unchanged accounts together determine the next state. The operator rebuilds the full successor tree at each close. Validators retain their assigned state between closes and reconstruct their portions from the changes they receive.
-
 ## Slice the Evidence
 
-The evidence is divided into $S$ deterministic account-key slices (256 in the benchmarks). A validator receives at most two contiguous spans of slices, each with its own range proof.
+The evidence is divided into $S$ deterministic account-key slices (256 in the benchmarks). Each validator receives at most two contiguous spans of slices, each with its own range proof. It retains the state in those spans between closes, so its dealing carries only account changes, payment entries, and proofs.
 
 Shared boundaries make these local checks compose. The coverage commitment binds each boundary's position in the old state, new state, changed rows, and payment entries, together with running totals and two accumulator checksums. Each slice must begin where its predecessor ended.
 
 Take $S=2$ with slice 1 holding $\{a,b\}$ and slice 2 holding $\{c,d\}$. The boundary after $b$ carries debit $20+12=32$ and credit $5+30=35$, which need not balance. Slice 2 resumes from those totals and must finish at $54=54$. Each slice checks its own rows against the boundaries on either side.
 
-The checksums verify the transpose piecewise. An order-independent lattice hash accumulates each entry's payer, recipient, cumulative amount, and count, once from the payer vectors and once from the transpose. Each slice resumes both accumulators, $u$ and $v$, from its opening boundary and must reach the values at its closing boundary. At the end,
+The transpose puts each entry in its recipient's slice; the payer vectors put it in its payer's. For our six payments:
+
+$$
+\begin{array}{c|c|c}
+ & \substack{\text{Slice 1}\\\{a,b\}} & \substack{\text{Slice 2}\\\{c,d\}}\\[0.4em]
+\hline
+\text{By payer} &
+\begin{gathered}a\to b\\\boldsymbol{b\to c}\end{gathered} &
+\begin{gathered}c\to b\\c\to d\\d\to a\\d\to b\end{gathered}\\[0.6em]
+\hline
+\text{By recipient} &
+\begin{gathered}d\to a\\a\to b\\c\to b\\d\to b\end{gathered} &
+\begin{gathered}\boldsymbol{b\to c}\\c\to d\end{gathered}
+\end{array}
+$$
+
+An order-independent lattice hash tracks the payer view in $u$ and the recipient view in $v$, including each entry's payer, recipient, cumulative amount, and count. Each slice resumes both accumulators from its opening boundary, adds its entries, and checks the closing boundary. The $b\to c$ entry is added to $u$ in slice 1 and to $v$ in slice 2. Intermediate checksums can differ; after all slices,
 
 $$
 \boxed{u_S=v_S.}
 $$
 
-This equality proves that the two orderings contain the same multiset of directed entries. Every recipient credit is backed by a payer-signed entry, even though one validator need not see both sides of an edge.
+The final equality checks that both views contain the same multiset of full entries. Every recipient credit is backed by a payer-signed entry, even though one validator need not see both sides of an edge.
 
 The commitment format binds the roots and epoch context in a 32-byte header. Admission also requires a 164-byte root bundle and a terminal coverage proof. The full evidence remains offchain as an authenticated corpus $\mathcal D_e$, retrievable through the challenge deadline $\Delta_e$.
 
@@ -225,11 +241,17 @@ The close commits each changed account's terminal position under $\mathsf{Change
 
 3. **Acknowledgment fork.** The operator countersigns different bodies at the same payer sequence number.
 
-Each challenge is checked in one onchain call using signatures, arithmetic, and Merkle openings. Any holder can submit it. Every receipt a user relies on needs an honest holder who retains the evidence, obtains the public openings, and gets a challenge included by $\Delta_e$. Validators retain the public corpus but cannot reconstruct a private receipt nobody saved.
+Certification has already checked the accounting and signed terminal positions bound by the commitment. Any holder can therefore prove a contradiction with signatures and Merkle openings in one onchain call, without an interactive dispute game. Every receipt a user relies on needs an honest holder who retains the evidence, obtains the public openings, and gets a challenge included by $\Delta_e$. Validators retain the public corpus but cannot reconstruct a private receipt nobody saved.
 
 ## A Deadline to Exit
 
 A successful challenge stops a contested close from finalizing, but users must still be able to get their funds out. Every account can authorize an exact withdrawal or an account close. Normally the operator includes that signed request in the next epoch's boundary. A censored user can instead queue it directly onchain between epoch registrations, a path the settlement integration must keep live.
+
+Once a withdrawal request is queued onchain or included in an admitted close, its carrying close must finalize before the signed deadline $T_w$ to avoid a hard fault. With challenge deadline $\Delta_e$,
+
+$$
+\boxed{\Delta_e<t_{\mathrm{finalize}}<T_w.}
+$$
 
 An exact withdrawal releases its amount if enough funds remain at the epoch boundary. An account close sweeps that epoch's final balance. Once the carrying close finalizes, the user claims the certified payout with a Merkle opening. Each output can be claimed only once.
 
@@ -247,11 +269,9 @@ Recovery needs a correct, live settlement chain and available claim openings eve
 
 A payment reaches finality through an admitted close, after the challenge deadline fixed at epoch registration. Shorter epochs can reduce that wait, but mean preparing and certifying closes more often.
 
-Payments need not wait for earlier closes to finalize. Once epoch $e$'s close is admitted, the operator can register epoch $e+1$ onchain against the resulting $\mathsf{StateRoot}$. Registration fixes deposits and signed withdrawal authorizations before the new epoch's first payment is acknowledged.
+Once epoch $e$'s close is admitted, the operator can register $e+1$ against its $\mathsf{StateRoot}$ and start payments before $e$ finalizes. Registration fixes deposits and signed withdrawal authorizations before the first payment is acknowledged.
 
-Importing predecessor credits into each account's live balance can also overlap new payments.
-
-For an account with no boundary operations, the operator carries forward its preserved head: everything it started with, minus every accepted debit, plus every credit already imported. With predecessor debits fixed, the remaining credit can only add to that head. Writing $\widetilde B_a$ for the preserved head and $\rho_a$ for the credit in flight,
+For accounts without boundary operations, new payments can overlap credit imports. The preserved head $\widetilde B_a$ is the starting balance minus accepted predecessor debits plus credits already imported; $\rho_a$ is the predecessor credit still to come:
 
 $$
 \boxed{B_a^1=\widetilde B_a+\rho_a,\qquad \rho_a\ge0.}
@@ -275,26 +295,20 @@ $$
 Figure 3: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
 :::
 
-Accounts affected by deposits or withdrawal authorizations must resolve their full admitted outcome before spending in the successor epoch.
+Accounts with boundary operations must resolve their full admitted outcome before spending in the successor epoch.
 
 ## The Close Follows Accounts and Edges
 
 The [protocol primitives and benchmarks are in #4664](https://github.com/commonwarexyz/monorepo/pull/4664). Applications supply the operator and wallet services, including durable storage, retries, and live credit reconciliation.
 
-Every profile uses 100 validators and 256 slices on an AWS c8a.4xlarge. Prepare, deal, and seal share an adaptive 16-worker pool. Certificate, challenge, and withdrawal-claim checks run on the calling thread.
-
-The first matrix varies the number of live accounts, $N$, from 1,024 to one million. Every account sends one entry, and the same 512 accounts receive. The active sweep holds $N$ at one million and varies how many accounts send, taking senders in key order.
-
-The full proof-slice corpus contains all 256 slices, each with its own proofs. The posted close is a compact update for a reader holding the previous certified state. Each validator uses its retained state to reconstruct its assigned slices from a compact dealing; the table reports the largest such download. The external certified package is the commitment and certificate.
-
-Stages are measured independently, with one entry per batch. Prepare constructs the new roots using a prebuilt predecessor-state proof cache. Deal constructs dealings for the whole committee. Seal verifies and retains the busiest validator's dealing and signs the commitment.
+Every live account sends a single-entry batch to one of the same 512 recipients. Prepare builds the full successor tree and other roots. Deal constructs the committee's dealings; seal verifies and retains the largest dealing and signs the commitment.
 
 ```{=html}
 <div class="clearing-benchmark-table">
 <table>
   <thead>
     <tr>
-      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
       <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>), all sending</th>
     </tr>
     <tr>
@@ -306,20 +320,6 @@ Stages are measured independently, with one entry per batch. Prepare constructs 
   </thead>
   <tbody>
     <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
-    <tr>
-      <td style="padding-left:20px;">posted close</td>
-      <td style="text-align:right;">85.8 KB</td>
-      <td style="text-align:right;">730 KB</td>
-      <td style="text-align:right;">7.19 MB</td>
-      <td style="text-align:right;">71.8 MB</td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">full proof-slice corpus</td>
-      <td style="text-align:right;">2.07 MB</td>
-      <td style="text-align:right;">6.35 MB</td>
-      <td style="text-align:right;">48.8 MB</td>
-      <td style="text-align:right;">473 MB</td>
-    </tr>
     <tr>
       <td style="padding-left:20px;">prepare</td>
       <td style="text-align:right;">2.50 ms</td>
@@ -358,7 +358,7 @@ Stages are measured independently, with one entry per batch. Prepare constructs 
       <td style="text-align:right;"><strong>32 B</strong></td>
     </tr>
     <tr>
-      <td style="padding-left:20px;">external certified package</td>
+      <td style="padding-left:20px;">commitment + certificate</td>
       <td style="text-align:right;"><strong>101 B</strong></td>
       <td style="text-align:right;"><strong>101 B</strong></td>
       <td style="text-align:right;"><strong>101 B</strong></td>
@@ -419,75 +419,26 @@ Stages are measured independently, with one entry per batch. Prepare constructs 
 </div>
 ```
 
+::: {.image-caption}
+Measured on an AWS c8a.4xlarge with 100 validators and 256 slices. Stages run independently. Prepare, deal, and seal use an adaptive 16-worker pool; prepare starts with a prebuilt predecessor-state proof cache. Certificate, challenge, and withdrawal-claim checks run on the calling thread.
+:::
+
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three log-scale plots show measured latency for preparing roots, dealing all evidence slices, and sealing the busiest validator dealing as live accounts increase from 1,024 to one million.">
 ```
 
 ::: {.image-caption}
-Figure 4: These are four measured profiles, not an interpolation. Both axes are logarithmic, and each point is labeled with its measured latency. Construction and sealing scale approximately linearly once the fixed costs are amortized.
+Figure 4: Prepare, deal, and seal latencies for the four measured profiles above. Both axes are logarithmic.
 :::
 
-The next table fixes the live state at one million accounts and varies how many send; its rightmost column is the fully active case above.
+At one million live accounts, the largest dealing is 103 MB when all send and 182 KB with 1,024 senders. Repeated payments between those pairs reuse the same records, while preparation and sealing still process live state.
 
 ```{=html}
-<div class="clearing-benchmark-table">
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
-      <th colspan="4" style="text-align:center;">Sending accounts (<em>A</em>) out of 1,000,000 live</th>
-    </tr>
-    <tr>
-      <th style="text-align:right;">1,024</th>
-      <th style="text-align:right;">10,000</th>
-      <th style="text-align:right;">100,000</th>
-      <th style="text-align:right;">1,000,000</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="padding-left:20px;">posted close</td>
-      <td style="text-align:right;"><strong>74.0 KB</strong></td>
-      <td style="text-align:right;"><strong>718 KB</strong></td>
-      <td style="text-align:right;"><strong>7.18 MB</strong></td>
-      <td style="text-align:right;">71.8 MB</td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">largest validator dealing</td>
-      <td style="text-align:right;"><strong>182 KB</strong></td>
-      <td style="text-align:right;"><strong>1.40 MB</strong></td>
-      <td style="text-align:right;"><strong>13.6 MB</strong></td>
-      <td style="text-align:right;">103 MB</td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">prepare</td>
-      <td style="text-align:right;">151 ms</td>
-      <td style="text-align:right;">166 ms</td>
-      <td style="text-align:right;">315 ms</td>
-      <td style="text-align:right;">1.78 s</td>
-    </tr>
-    <tr>
-      <td style="padding-left:20px;">seal</td>
-      <td style="text-align:right;">26.1 ms</td>
-      <td style="text-align:right;">62.6 ms</td>
-      <td style="text-align:right;">360 ms</td>
-      <td style="text-align:right;">2.21 s</td>
-    </tr>
-  </tbody>
-</table>
-</div>
-```
-
-Fewer senders reduce the posted close and the largest validator dealing. Preparation and sealing still process live state.
-
-Additional payments over the same pairs share these settlement records, spreading their byte cost over more payments.
-
-```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots amortize fixed byte budgets over one million to one billion accepted payments. The left uses the table's rounded proof-slice corpus sizes for four account counts; the right uses the 101-byte external certified package.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots divide fixed sizes by one million to one billion accepted payments. The left uses the table's rounded largest validator dealings for four account counts; the right uses the 101-byte commitment and certificate.">
 ```
 
 ::: {.image-caption}
-Figure 5: Each line divides a fixed byte budget from the table by the payment count. The corpus curves use rounded table values and hold integer widths fixed. The external certified package stays 101 bytes across profiles.
+Figure 5: Amortizing the table's largest validator dealings and 101-byte commitment with certificate over more payments between the same pairs. Curves use rounded sizes and hold encoded integer widths fixed.
 :::
 
 Challenge proofs grow with their Merkle lookup depths. Withdrawal claims grow with the number of withdrawal outputs $W$ in their close. The separate fixtures below use a 21-byte destination and range from one output to one million, with each claim opening just one leaf. The payment profiles above contain no withdrawals.
@@ -497,7 +448,7 @@ Challenge proofs grow with their Merkle lookup depths. Withdrawal claims grow wi
 <table>
   <thead>
     <tr>
-      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Stage</th>
+      <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
       <th colspan="5" style="text-align:center;">Withdrawal outputs in the close (<em>W</em>)</th>
     </tr>
     <tr>
@@ -532,20 +483,14 @@ Adjust the workload and committee size below to see how much data the operator s
 ```
 
 ::: {.image-caption}
-Figure 6: Average dealing size per validator per close, with total operator egress in parentheses. The dotted line shows the full account state (leaves and Merkle tree levels) for comparison. Both axes use logarithmic scales.
+Figure 6: Average validator dealing per close, with total operator egress in parentheses. Sizes include every assigned span and proof, excluding transport and other protocol messages. The dotted line shows full account state, including Merkle tree levels. Both axes are logarithmic.
 
-Each sender signs one batch, and each sender-recipient pair carries one unit payment. All accounts remain live, with no deposits, withdrawals, or external payouts. This workload differs from the measured fixture above, which credits 512 recipients.
-
-Recipients per account is an average over all $N$ live accounts, including those that send nothing. Accounts follow key order across evenly populated slices. Below an average of one, the first $E$ accounts each pay one of the last $E$, giving $E$ sender-recipient pairs and $\min(N,2E)$ accounts with activity. At integer average $k\ge1$, every account pays its next $k$ neighbors cyclically.
-
-Accounts and pairs are limited to $2^{24}$; recipients per sender are capped at $\min(1024,N-1)$. Validator counts follow $n=3f+1$, with $S=\min(256,2^{\lceil\log_2 n\rceil})$ slices (128 for 100 validators). Each validator receives one or two spans, each with one proof. Dealing sizes count the actual spans assigned to each validator, including repeated delivery of slices shared by several validators. They exclude transport overhead and other protocol messages.
+Each sender signs one batch containing one unit payment per recipient. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, each account pays its next neighbors cyclically. Accounts are evenly spread across slices, whose count varies with the committee (128 at 100 validators). This differs from the benchmarks' 256 slices and 512 recipients. All accounts stay live, with no deposits, withdrawals, or external payouts.
 :::
 
 ## A Bajillion Payments, One Settlement
 
-Payments across many counterparties settle into one net balance change per active account. The close retains the pair entries that let validators check every credit.
-
-Repeated payments across the same network share those records. Their totals and counts may take more bytes as they grow, but the close never carries the payment history.
+More payments between the same pairs add to their totals without adding settlement records. Each active account settles its net change across all counterparties.
 
 ```{=html}
 <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account rows with their proofs.">
@@ -557,4 +502,4 @@ Figure 7: The four-account network carrying 100 million payments of \$0.000001, 
 
 The payer gets a receipt in one round trip to the operator, and that same receipt lets its holder prove a fault if the close contradicts it. Keeping the state available for recovery lets users leave even if the operator disappears.
 
-When the close is clean, those involved keep the receipts. The settlement chain only keeps the change.
+The settlement chain only keeps the change.

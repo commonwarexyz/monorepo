@@ -23,7 +23,6 @@
   </style>
 
   <text class="title" x="34" y="39">The Vanishing Cost of a Payment</text>
-  <text class="axis" x="34" y="68">Fixed table budgets, amortized over payments</text>
 
   <line class="blue series" x1="550" y1="34" x2="585" y2="34"/>
   <circle cx="567.5" cy="34" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
@@ -39,64 +38,66 @@
   <text class="axis-strong green-text" x="1178" y="39">N = 1,000,000</text>
 
   <rect class="frame" x="30" y="90" width="610" height="360" rx="3"/>
-  <text class="panel-title" x="335" y="122">Proof-Slice Corpus (Offchain)</text>
-  <text class="axis" x="95" y="138" text-anchor="end">bytes</text>
-  <line class="grid" x1="105" y1="150" x2="620" y2="150"/>
-  <line class="grid" x1="105" y1="186.67" x2="620" y2="186.67"/>
-  <line class="grid" x1="105" y1="223.33" x2="620" y2="223.33"/>
-  <line class="grid" x1="105" y1="260" x2="620" y2="260"/>
-  <line class="grid" x1="105" y1="296.67" x2="620" y2="296.67"/>
-  <line class="grid" x1="105" y1="333.33" x2="620" y2="333.33"/>
-  <line class="grid" x1="105" y1="370" x2="620" y2="370"/>
-  <line class="grid" x1="150" y1="150" x2="150" y2="370"/>
-  <line class="grid" x1="300" y1="150" x2="300" y2="370"/>
-  <line class="grid" x1="450" y1="150" x2="450" y2="370"/>
-  <line class="grid" x1="600" y1="150" x2="600" y2="370"/>
-  <text class="axis" x="95" y="155" text-anchor="end">1,000</text>
-  <text class="axis" x="95" y="192" text-anchor="end">100</text>
-  <text class="axis" x="95" y="228" text-anchor="end">10</text>
-  <text class="axis" x="95" y="265" text-anchor="end">1</text>
-  <text class="axis" x="95" y="302" text-anchor="end">0.1</text>
-  <text class="axis" x="95" y="338" text-anchor="end">0.01</text>
-  <text class="axis" x="95" y="375" text-anchor="end">0.001</text>
-  <text class="axis-strong" x="150" y="402" text-anchor="middle">1M</text>
-  <text class="axis-strong" x="300" y="402" text-anchor="middle">10M</text>
-  <text class="axis-strong" x="450" y="402" text-anchor="middle">100M</text>
-  <text class="axis-strong" x="600" y="402" text-anchor="middle">1B</text>
-  <text class="axis" x="360" y="428" text-anchor="middle">payments accepted (T)</text>
+  <text class="panel-title" x="335" y="122">Largest Validator Dealing</text>
+  <text class="axis" x="105" y="138">bytes/payment</text>
+  <line class="grid" x1="105" y1="150.00" x2="510" y2="150.00"/>
+  <line class="grid" x1="105" y1="181.43" x2="510" y2="181.43"/>
+  <line class="grid" x1="105" y1="212.86" x2="510" y2="212.86"/>
+  <line class="grid" x1="105" y1="244.29" x2="510" y2="244.29"/>
+  <line class="grid" x1="105" y1="275.71" x2="510" y2="275.71"/>
+  <line class="grid" x1="105" y1="307.14" x2="510" y2="307.14"/>
+  <line class="grid" x1="105" y1="338.57" x2="510" y2="338.57"/>
+  <line class="grid" x1="105" y1="370.00" x2="510" y2="370.00"/>
+  <line class="grid" x1="180" y1="150" x2="180" y2="370"/>
+  <line class="grid" x1="290" y1="150" x2="290" y2="370"/>
+  <line class="grid" x1="400" y1="150" x2="400" y2="370"/>
+  <line class="grid" x1="510" y1="150" x2="510" y2="370"/>
+  <text class="axis" x="95" y="155.00" text-anchor="end">1,000</text>
+  <text class="axis" x="95" y="186.43" text-anchor="end">100</text>
+  <text class="axis" x="95" y="217.86" text-anchor="end">10</text>
+  <text class="axis" x="95" y="249.29" text-anchor="end">1</text>
+  <text class="axis" x="95" y="280.71" text-anchor="end">0.1</text>
+  <text class="axis" x="95" y="312.14" text-anchor="end">0.01</text>
+  <text class="axis" x="95" y="343.57" text-anchor="end">0.001</text>
+  <text class="axis" x="95" y="375.00" text-anchor="end">0.0001</text>
+  <text class="axis-strong" x="180" y="402" text-anchor="middle">1M</text>
+  <text class="axis-strong" x="290" y="402" text-anchor="middle">10M</text>
+  <text class="axis-strong" x="400" y="402" text-anchor="middle">100M</text>
+  <text class="axis-strong" x="510" y="402" text-anchor="middle">1B</text>
+  <text class="axis" x="345" y="428" text-anchor="middle">payments accepted (T)</text>
 
-  <path class="blue series" d="M150 248.41 L300 285.08 L450 321.75 L600 358.41"/>
-  <path class="purple series" d="M150 230.56 L300 267.23 L450 303.90 L600 340.56"/>
-  <path class="orange series" d="M150 198.09 L300 234.76 L450 271.42 L600 308.09"/>
-  <path class="green series" d="M150 161.92 L300 198.59 L450 235.26 L600 271.92"/>
-  <circle cx="150" cy="248.41" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="300" cy="285.08" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="450" cy="321.75" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="600" cy="358.41" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="150" cy="230.56" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="300" cy="267.23" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="450" cy="303.90" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="600" cy="340.56" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="150" cy="198.09" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="300" cy="234.76" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="450" cy="271.42" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="600" cy="308.09" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="150" cy="161.92" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="300" cy="198.59" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="450" cy="235.26" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="600" cy="271.92" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="162" y="237.41">2.07</text>
-  <text class="value blue-text" x="588" y="347.41" text-anchor="end">0.00207</text>
-  <text class="value purple-text" x="162" y="219.56">6.35</text>
-  <text class="value purple-text" x="588" y="329.56" text-anchor="end">0.00635</text>
-  <text class="value orange-text" x="162" y="187.09">48.8</text>
-  <text class="value orange-text" x="588" y="297.09" text-anchor="end">0.0488</text>
-  <text class="value green-text" x="162" y="150.92">473</text>
-  <text class="value green-text" x="588" y="260.92" text-anchor="end">0.473</text>
+  <path class="blue series" d="M180 269.73 L290 301.16 L400 332.59 L510 364.02"/>
+  <path class="purple series" d="M180 243.24 L290 274.66 L400 306.09 L510 337.52"/>
+  <path class="orange series" d="M180 212.45 L290 243.88 L400 275.31 L510 306.74"/>
+  <path class="green series" d="M180 181.03 L290 212.45 L400 243.88 L510 275.31"/>
+  <circle cx="180" cy="269.73" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="290" cy="301.16" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="400" cy="332.59" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="510" cy="364.02" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="180" cy="243.24" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="290" cy="274.66" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="400" cy="306.09" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="510" cy="337.52" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="180" cy="212.45" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="290" cy="243.88" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="400" cy="275.31" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="510" cy="306.74" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="180" cy="181.03" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="290" cy="212.45" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="400" cy="243.88" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="510" cy="275.31" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value blue-text" x="168" y="274.73" text-anchor="end">0.155</text>
+  <text class="value blue-text" x="522" y="369.02" text-anchor="start">0.000155</text>
+  <text class="value purple-text" x="168" y="248.24" text-anchor="end">1.08</text>
+  <text class="value purple-text" x="522" y="342.52" text-anchor="start">0.00108</text>
+  <text class="value orange-text" x="168" y="217.45" text-anchor="end">10.3</text>
+  <text class="value orange-text" x="522" y="311.74" text-anchor="start">0.0103</text>
+  <text class="value green-text" x="168" y="186.03" text-anchor="end">103</text>
+  <text class="value green-text" x="522" y="280.31" text-anchor="start">0.103</text>
 
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>
-  <text class="panel-title" x="980" y="122">External Certified Package (Onchain)</text>
-  <text class="axis" x="760" y="138" text-anchor="end">bytes</text>
+  <text class="panel-title" x="980" y="122">Commitment + Certificate</text>
+  <text class="axis" x="770" y="138">bytes/payment</text>
   <line class="grid" x1="770" y1="150" x2="1255" y2="150"/>
   <line class="grid" x1="770" y1="186.67" x2="1255" y2="186.67"/>
   <line class="grid" x1="770" y1="223.33" x2="1255" y2="223.33"/>
