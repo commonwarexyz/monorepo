@@ -165,7 +165,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufMut, IoBufs, IoBufsMut,
-        ReadOptions, Storage as _, WriteOptions,
+        ReadOptions, Runner, Spawner, Storage as _, WriteOptions,
         deterministic::Auditor,
         mocks::RecordingContext,
         storage::{
@@ -175,6 +175,7 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_utils::sync::Mutex;
+    use rstest::rstest;
     use std::sync::Arc;
 
     fn test_pool() -> BufferPool {
@@ -182,13 +183,23 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
-    #[tokio::test]
-    async fn test_audited_storage() {
-        let inner = MemStorage::new(test_pool());
-        let auditor = Arc::new(crate::deterministic::Auditor::default());
-        let storage = AuditedStorage::new(inner, auditor.clone());
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_audited_storage<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let inner = MemStorage::new(test_pool());
+            let auditor = Arc::new(crate::deterministic::Auditor::default());
+            let storage = AuditedStorage::new(inner, auditor.clone());
 
-        run_storage_tests(storage).await;
+            run_storage_tests(context, storage).await;
+        });
     }
 
     #[tokio::test]

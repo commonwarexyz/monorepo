@@ -250,22 +250,23 @@ pub(crate) fn find_next_key_ascending<K: Ord + Clone>(
         .clone()
 }
 
-/// Returns the previous key to `key` within `possible_previous` (sorted by `.0`, deduplicated).
+/// Returns the previous key to `key` and its mutable value within `possible_previous`
+/// (sorted by `.0`, deduplicated).
 /// The result will "cycle around" to the last entry if `key` is the first key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
-pub(crate) fn find_prev_key<'a, K: Ord, V>(
+pub(crate) fn find_prev_key_mut<'a, K: Ord, V>(
     key: &K,
-    possible_previous: &'a [(K, V)],
-) -> (&'a K, &'a V) {
+    possible_previous: &'a mut [(K, V)],
+) -> (&'a K, &'a mut V) {
     let idx = possible_previous.partition_point(|(k, _)| k < key);
     let (k, v) = if idx > 0 {
-        &possible_previous[idx - 1]
+        &mut possible_previous[idx - 1]
     } else {
         possible_previous
-            .last()
+            .last_mut()
             .expect("possible_previous should not be empty")
     };
     (k, v)
