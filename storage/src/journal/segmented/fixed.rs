@@ -578,16 +578,25 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Open with a ceiling on `(section, logical byte end)`, then validate the retained replay.
     /// Ends inside an item round down to the preceding complete item. Higher sections are removed.
-    /// This validates all retained sections before returning. Work scales with retained data.
+    /// This validates all retained sections before returning. Payload reads are bounded by the
+    /// requested prefix. All section names are still scanned.
     pub async fn init_at_most(
         context: E,
         cfg: Config,
         section: u64,
         end: u64,
     ) -> Result<Self, Error> {
+        let mut end = end - end % Self::CHUNK_SIZE as u64;
+        super::manager::truncate_paged_tail(
+            &context,
+            &cfg.partition,
+            cfg.page_cache.page_size(),
+            section,
+            end,
+        )
+        .await?;
         let mut journal = Self::init(context, cfg).await?;
         // Resolve a torn page before truncation tries to rewrite its partial checksum.
-        let mut end = end - end % Self::CHUNK_SIZE as u64;
         if let Some(blob) = journal.0.manager.get(section)?
             && end > 0
             && end < blob.size()
@@ -1309,6 +1318,67 @@ mod tests {
             }
         }
         journal.sync_all().await.expect("failed to sync");
+    }
+
+    #[test]
+    fn test_segmented_capped_init_bounds_torn_suffix_reads() {
+        deterministic::Runner::default().start(|context| async move {
+            for source_section in [0, 1] {
+                for cap in [0, 8] {
+                    let mut counts = Vec::new();
+                    for pages in [16, 4096] {
+                        let partition = format!("torn-cap-{source_section}-{cap}-{pages}");
+                        let page: Vec<u8> = (0..9u64).flat_map(u64::to_be_bytes).collect();
+                        assert_eq!(page.len(), 72);
+                        super::super::manager::tests::seed_torn_suffix(
+                            &context,
+                            &partition,
+                            source_section,
+                            &page,
+                            pages,
+                        )
+                        .await;
+                        let cfg = Config {
+                            partition,
+                            page_cache: CacheRef::from_pooler(&context, NZU16!(72), NZUsize!(4)),
+                            write_buffer: NZUsize!(144),
+                        };
+                        let (recorded, recordings) = RecordingContext::new(context.child("cap"));
+                        let mut journal =
+                            Journal::<_, u64>::init_at_most(recorded, cfg.clone(), 0, cap)
+                                .await
+                                .unwrap();
+                        let retained = if source_section == 0 { cap } else { 0 };
+                        assert_eq!(journal.size(0).unwrap(), retained);
+                        counts.push(recordings.snapshot().reads.len());
+                        (journal, _) = journal.append(0, &999).await.unwrap();
+                        drop(journal.sync_all().await.unwrap());
+                        let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                            .await
+                            .unwrap();
+                        let mut replay = journal
+                            .replay(0, 0, NZUsize!(144), ReadOptions::default())
+                            .await
+                            .unwrap();
+                        let mut actual = Vec::new();
+                        while let Some(item) = replay.next().await {
+                            actual.push(item.unwrap().2);
+                        }
+                        replay.finish().unwrap();
+                        let expected = if retained == 0 {
+                            vec![999]
+                        } else {
+                            vec![0, 999]
+                        };
+                        assert_eq!(actual, expected);
+                    }
+                    assert_eq!(
+                        counts[0], counts[1],
+                        "discarded suffix reads grew: {counts:?}"
+                    );
+                }
+            }
+        });
     }
 
     #[test_traced]

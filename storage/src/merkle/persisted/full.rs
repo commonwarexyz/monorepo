@@ -448,7 +448,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         };
 
         let mut journal = Box::new(
-            Journal::<E, D>::recover(context.child("merkle_journal"), journal_cfg, None).await?,
+            Journal::<E, D>::recover(context.child("merkle_journal"), journal_cfg, Some(u64::MAX))
+                .await?,
         );
         let bounds = journal.bounds();
         let recovered_size = F::to_nearest_size(Position::<F>::new(bounds.end));
@@ -552,14 +553,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         (journal, _) = journal.prune(*prune_pos).await?;
         let journal = (*journal).finish(*journal_size).await?;
 
-        // The journal was recovered without a bound, so its recovery watermark may still lag
-        // its size. Leave it dirty so the first sync persists the watermark.
         Ok(Self {
             mem: Arc::new(mem),
             pruned_to_pos: prune_pos,
             journal,
             metadata,
-            journal_dirty: true,
+            journal_dirty: false,
             strategy: cfg.config.strategy,
         })
     }
@@ -1264,7 +1263,8 @@ mod tests {
             .await
             .unwrap();
 
-            // The reopened tree has no new nodes, but its checkpoint still needs a sync.
+            // The reopened tree has no new nodes, but a started sync can still fail.
+            assert!(!merkle.journal_dirty);
             let (merkle, handle) = merkle.start_sync().await.unwrap();
             assert!(!pending.lock().is_empty());
             fail_pending_syncs(&pending);
@@ -1333,12 +1333,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_full_sync_after_init_sync_persists_watermark() {
+    fn test_init_sync_publishes_watermark() {
         deterministic::Runner::default().start(|context| async move {
             let size = seed_lagging_watermark(&context).await;
 
-            // A sync target the journal already covers reuses every node, so a sync with
-            // nothing new to flush must still persist the watermark.
+            // Reusing durable nodes must publish the recovery watermark without a later data sync.
             let leaves = Location::<mmr::Family>::try_from(Position::new(size)).unwrap();
             let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init_sync(
                 context.child("sync"),
@@ -1351,7 +1350,6 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(*merkle.size(), size);
-            let merkle = merkle.sync().await.unwrap();
             drop(merkle);
 
             assert_eq!(persisted_watermark(&context).await, Some(size));

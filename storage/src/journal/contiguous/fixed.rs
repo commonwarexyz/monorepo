@@ -565,16 +565,27 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 0
             };
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
+            let required_items = ceiling
+                .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
+                .min(items_per_blob);
+            let limit = if max_size.is_some() {
+                required_items
+                    .saturating_mul(Inner::<E, A>::CHUNK_SIZE_U64)
+                    .min(writer.size())
+            } else {
+                writer.size()
+            };
             let recoverable = writer
-                .recoverable_prefix_len(acknowledged, cfg.replay_buffer, ReadOptions::default())
+                .recoverable_prefix_len_at_most(
+                    acknowledged,
+                    limit,
+                    cfg.replay_buffer,
+                    ReadOptions::default(),
+                )
                 .await?;
-            let valid = Inner::<E, A>::items_to_bytes(recoverable / Inner::<E, A>::CHUNK_SIZE_U64)?;
-            let required = Inner::<E, A>::items_to_bytes(
-                ceiling
-                    .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
-                    .min(items_per_blob),
-            )?;
-            if valid == writer.size() || (max_size.is_some() && valid >= required) {
+            let valid_items = recoverable / Inner::<E, A>::CHUNK_SIZE_U64;
+            let valid = Inner::<E, A>::items_to_bytes(valid_items)?;
+            if valid == writer.size() || (max_size.is_some() && valid_items >= required_items) {
                 continue;
             }
 
@@ -2076,6 +2087,94 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test]
+    fn test_fixed_bounded_recovery_read_count() {
+        for count in [257u64, 4097] {
+            for capacity in [10_000, u64::MAX] {
+                deterministic::Runner::default().start(|context| async move {
+                    let (context, recordings) = RecordingContext::new(context);
+                    let mut cfg = test_cfg(&context, capacity.try_into().unwrap());
+                    cfg.page_cache = CacheRef::from_pooler(&context, NZU16!(256), NZUsize!(3));
+                    cfg.replay_buffer = NZUsize!(1);
+                    let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    for value in 0..count {
+                        (journal, _) = journal.append(&value).await.unwrap();
+                    }
+                    drop(journal.sync().await.unwrap());
+                    for cap in [
+                        None,
+                        Some(33),
+                        Some(32),
+                        Some(count),
+                        Some(count + 1),
+                        Some(u64::MAX),
+                    ] {
+                        let checkpoint =
+                            Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                                .await
+                                .unwrap();
+                        assert_eq!(checkpoint.watermark(), Some(count));
+                        recordings.clear();
+                        let recovery = Recovery::<_, u64>::open(
+                            context.child("recovery"),
+                            cfg.clone(),
+                            checkpoint,
+                            cap,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(recovery.size(), count.min(cap.unwrap_or(count)));
+                        assert_eq!(recovery.pending.get(&0).unwrap().size(), count * 8);
+                        let expected = if cap == Some(32) { 1 } else { 2 };
+                        assert_eq!(
+                            recordings.snapshot().reads.len(),
+                            expected,
+                            "count={count}, capacity={capacity}, cap={cap:?}"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixed_recovery_large_capacity() {
+        for count in [0, 1] {
+            for cap in [
+                None,
+                Some(0),
+                Some(1),
+                Some(u64::MAX / 8 + 1),
+                Some(u64::MAX),
+            ] {
+                deterministic::Runner::default().start(|context| async move {
+                    let cfg = test_cfg(&context, NZU64!(u64::MAX));
+                    let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    for value in 0..count {
+                        (journal, _) = journal.append(&value).await.unwrap();
+                    }
+                    drop(journal.sync().await.unwrap());
+                    let journal = match cap {
+                        None => Journal::<_, u64>::init(context.child("reopen"), cfg).await,
+                        Some(cap) => {
+                            Journal::<_, u64>::init_at_most(context.child("reopen"), cfg, cap).await
+                        }
+                    }
+                    .unwrap();
+                    let retained = count.min(cap.unwrap_or(u64::MAX));
+                    assert_eq!(journal.bounds(), 0..retained);
+                    if retained != 0 {
+                        assert_eq!(journal.read(0).await.unwrap(), 0);
+                    }
+                });
+            }
+        }
     }
 
     #[test_traced]

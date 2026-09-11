@@ -1338,6 +1338,11 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         let terminal = self.terminal_offset(size).await?;
         self.offsets = self.offsets.truncate(size).await?;
 
+        // Establish the retained start in the offsets before deleting discarded data. When no
+        // data blob survives, the offsets are the only durable witness of the floor, and a retry
+        // would otherwise find retained offsets with no data blobs.
+        (self.offsets, _) = self.offsets.prune(self.bounds.start).await?;
+
         let tail = position_to_blob(size, per_blob);
         let retained_bytes = |blob| {
             if blob == tail {
@@ -2710,6 +2715,162 @@ mod tests {
                 .unwrap();
             assert_eq!(journal.bounds(), u64::MAX..u64::MAX);
         });
+    }
+
+    fn check_bounded_empty_publish_retry(cap: Option<u64>) {
+        fn config(context: &deterministic::Context) -> Config<()> {
+            Config {
+                partition: "bounded-empty-publish-floor".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(context, NZU16!(16), NZUsize!(16)),
+                write_buffer: NZUsize!(32),
+                replay_buffer: NZUsize!(128),
+            }
+        }
+
+        // First crash: the data blob below the prune target is gone while the offsets still
+        // start at zero.
+        let ((), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let cfg = config(&context);
+                let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+                for value in 0..15u64 {
+                    (journal, _) = journal.append(&value).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                journal.0.halt_before_offsets_prune = true;
+                {
+                    let prune = journal.prune(10);
+                    futures::pin_mut!(prune);
+                    assert!(futures::poll!(prune.as_mut()).is_pending());
+                }
+                assert_eq!(
+                    context.scan(&cfg.data_partition()).await.unwrap(),
+                    vec![1u64.to_be_bytes().to_vec()]
+                );
+            });
+
+        // Second crash: a bounded publication of the empty prefix at the prune target stops at
+        // its first durability operation, and every unsynced write is lost.
+        let (parked, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    write_rate: Some(deterministic::WriteConfig {
+                        failure_rate: probability!(0.0),
+                        retention_rate: probability!(0.0),
+                        mode: deterministic::PartialWriteMode::Subset,
+                    }),
+                    resize_rate: Some(deterministic::ResizeConfig {
+                        failure_rate: probability!(0.0),
+                        partial_rate: probability!(0.0),
+                    }),
+                    ..Default::default()
+                };
+                let cfg = config(&context);
+                let syncs = PendingSyncs::default();
+                syncs.unblock();
+                let mut recovery = Recovery::<_, u64>::open(
+                    DelayedSyncContext {
+                        inner: context.child("recover"),
+                        pending: syncs.clone(),
+                    },
+                    cfg.clone(),
+                    Some(10),
+                )
+                .await
+                .unwrap();
+                assert_eq!(recovery.bounds, 10..10);
+                assert_eq!(recovery.offsets.bounds(), 0..10);
+                assert_eq!(recovery.discarded, vec![1]);
+                assert!(recovery.pending.is_empty());
+                recovery.offsets = recovery.offsets.truncate(10).await.unwrap();
+                syncs.arm();
+                let gate = next_pending_sync(&syncs);
+                let mut publish = Box::pin(recovery.publish(10));
+                let deleted = commonware_macros::select! {
+                    result = publish.as_mut() => {
+                        let journal = result.unwrap();
+                        assert_eq!(journal.bounds, 10..10);
+                        drop(journal);
+                        None
+                    },
+                    result = gate.blocked => {
+                        result.unwrap();
+                        assert_eq!(syncs.calls(), 1);
+                        Some(context.scan(&cfg.data_partition()).await.unwrap().is_empty())
+                    },
+                };
+                let parked = match deleted {
+                    // Publication needed no durability operation.
+                    None => false,
+                    // The final data blob is gone and the gated write is lost at the crash.
+                    Some(true) => true,
+                    // The offsets floor witness is made durable before the final data blob is
+                    // deleted. Let publication finish so the retry sees the deleted blob.
+                    Some(false) => {
+                        gate.release.send(Ok(())).expect("gated sync is waiting");
+                        let journal = publish.as_mut().await.unwrap();
+                        assert_eq!(journal.bounds, 10..10);
+                        drop(journal);
+                        false
+                    }
+                };
+                drop(publish);
+                parked
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let cfg = config(&context);
+            if parked {
+                let metadata =
+                    Checkpoint::open(context.child("checkpoint"), &cfg.offsets_partition())
+                        .await
+                        .unwrap();
+                assert_eq!(metadata.watermark(), Some(10));
+                assert_eq!(metadata.clear_target(), None);
+                drop(metadata);
+            }
+            let result = match cap {
+                Some(cap) => {
+                    Journal::<_, u64>::init_at_most(context.child("retry"), cfg, cap).await
+                }
+                None => Journal::<_, u64>::init(context.child("retry"), cfg).await,
+            };
+            if cap == Some(9) {
+                assert!(matches!(result, Err(Error::ItemPruned(9))));
+            } else {
+                let journal = result.expect("interrupted publication must remain recoverable");
+                assert_eq!(journal.bounds(), 10..10);
+                let (journal, pos) = journal.append(&99).await.unwrap();
+                assert_eq!(pos, 10);
+                assert_eq!(journal.read(10).await.unwrap(), 99);
+            }
+        });
+    }
+
+    #[test]
+    fn test_bounded_empty_publish_same_cap() {
+        check_bounded_empty_publish_retry(Some(10));
+    }
+
+    #[test]
+    fn test_bounded_empty_publish_larger_cap() {
+        check_bounded_empty_publish_retry(Some(11));
+    }
+
+    #[test]
+    fn test_bounded_empty_publish_lower_cap() {
+        check_bounded_empty_publish_retry(Some(9));
+    }
+
+    #[test]
+    fn test_bounded_empty_publish_ordinary() {
+        check_bounded_empty_publish_retry(None);
     }
 
     #[test]

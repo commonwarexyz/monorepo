@@ -397,12 +397,20 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             let minimum_items = floors.get(&section).copied().unwrap_or(0);
             let (index_end, value_end) = journal.select_cap(section, end, minimum_items).await?;
             let items = index_end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
-            metadata.retain(|key, _| u64::from(key) <= section);
+            let mut changed = false;
+            metadata.retain(|key, _| {
+                let keep = u64::from(key) <= section;
+                changed |= !keep;
+                keep
+            });
             let key = SectionKey::new(section);
             if metadata.get(&key).is_some_and(|floor| *floor > items) {
                 metadata.put(key, items);
+                changed = true;
             }
-            metadata = metadata.sync().await?;
+            if changed {
+                metadata = metadata.sync().await?;
+            }
             journal.index = journal
                 .index
                 .truncate_pending_tail(section, index_end)
@@ -415,7 +423,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             barriers: BTreeMap::new(),
         });
         journal
-            .replay(replay_buffer, read_options, Some(Validation::new()))
+            .replay(replay_buffer, read_options, Validation::new())
             .await
     }
 }
@@ -517,11 +525,21 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
     /// Drain the fixed journal's ordered recovery pass, then reconcile the value tail of each
     /// section. The replay buffer controls every forward index read.
     async fn recover_inferred(self, buffer: NonZeroUsize) -> Result<Oversized<E, I, V>, Error> {
-        let mut replay = self.replay(buffer, ReadOptions::default(), None).await?;
+        let mut replay = self
+            .index
+            .replay(0, 0, buffer, ReadOptions::default())
+            .await?;
         while let Some(result) = replay.next().await {
             result?;
         }
-        Ok(replay.finish_pending()?.repair().await?.into())
+        Ok(Self {
+            index: replay.finish_pending()?,
+            values: self.values,
+            tracking: self.tracking,
+        }
+        .repair()
+        .await?
+        .into())
     }
 
     /// Return the value boundary owned by an optional terminal index entry.
@@ -547,43 +565,17 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
+        let mut value_truncations = BTreeMap::new();
         for section in sections {
             let index_size = self.index.size(section)?;
-            let glob_size = match self.values.size(section) {
-                Ok(size) => size,
-                Err(Error::AlreadyPrunedToSection(oldest)) => {
-                    // This shouldn't happen in normal operation: prune() prunes the index
-                    // first, then the glob. A crash between these would leave the glob
-                    // NOT pruned (opposite of this case). We handle this defensively in
-                    // case of external manipulation or future changes.
-                    warn!(
-                        section,
-                        oldest, "index has section that glob already pruned"
-                    );
-                    0
-                }
-                Err(e) => return Err(e),
-            };
-
-            // Truncate any trailing partial entry
+            let glob_size = self.values.size(section)?;
             let entry_count = index_size / chunk_size;
-            let aligned_size = entry_count * chunk_size;
-            if aligned_size < index_size {
-                warn!(
-                    section,
-                    index_size, aligned_size, "trailing bytes detected: truncating"
-                );
-                self.index = self
-                    .index
-                    .truncate_pending_section(section, aligned_size)
-                    .await?;
-            }
 
             // Values are reachable only through index entries.
             if entry_count == 0 {
                 if glob_size > 0 {
                     debug!(section, glob_size, "truncating orphaned value bytes");
-                    self.values = self.values.truncate_section(section, 0).await?;
+                    value_truncations.insert(section, 0);
                 }
                 continue;
             }
@@ -610,9 +602,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
                     section,
                     glob_size, glob_target, "truncating glob trailing garbage"
                 );
-                self.values = self.values.truncate_section(section, glob_target).await?;
+                value_truncations.insert(section, glob_target);
             }
         }
+
+        self.values = self.values.truncate_sections(&value_truncations).await?;
 
         // Clean up orphan value sections that don't exist in index
         self.cleanup_orphan_value_sections().await
@@ -710,6 +704,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
     /// Truncate value suffixes that became unreachable while fixed replay repaired index pages.
     async fn align_values_to_index(mut self) -> Result<Self, Error> {
         let sections = self.index.sections().collect::<Vec<_>>();
+        let mut value_truncations = BTreeMap::new();
         for section in sections {
             let target = Self::boundary_value_end(section, &self.index.last(section).await?)?;
             let retained = self.values.size(section)?;
@@ -719,9 +714,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
                 )));
             }
             if retained > target {
-                self.values = self.values.truncate_section(section, target).await?;
+                value_truncations.insert(section, target);
             }
         }
+        self.values = self.values.truncate_sections(&value_truncations).await?;
         self.cleanup_orphan_value_sections().await
     }
 
@@ -850,15 +846,12 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
         self,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-        validation: Option<Validation>,
+        validation: Validation,
     ) -> Result<Replay<E, I, V>, Error> {
         let index = self.index.replay(0, 0, buffer, read_options).await?;
-        let phase = match validation {
-            Some(validation) => ReplayPhase::Tracked {
-                values: self.values,
-                validation,
-            },
-            None => ReplayPhase::Recovering(self.values),
+        let phase = ReplayPhase::Tracked {
+            values: self.values,
+            validation,
         };
         Ok(Replay {
             index,
@@ -1182,7 +1175,6 @@ pub struct Replay<E: Context, I: Record, V: Codec> {
 /// Retain the ownership phase while an index replay is in progress.
 enum ReplayPhase<E: Context, V: Codec> {
     Live(Glob<E, V>),
-    Recovering(GlobRecovery<E, V>),
     Tracked {
         values: GlobRecovery<E, V>,
         validation: Validation,
@@ -1260,18 +1252,6 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
         })
     }
 
-    /// Release paired sections only to initialization repair.
-    fn finish_pending(self) -> Result<Recovery<E, I, V>, Error> {
-        let ReplayPhase::Recovering(values) = self.phase else {
-            return Err(Error::ReplayFailed);
-        };
-        Ok(Recovery {
-            index: self.index.finish_pending()?,
-            values,
-            tracking: self.tracking,
-        })
-    }
-
     /// Finish marker-aware startup recovery and return the tracked journal.
     pub async fn finish_tracked(self) -> Result<Oversized<E, I, V>, Error> {
         let ReplayPhase::Tracked { values, validation } = self.phase else {
@@ -1311,12 +1291,17 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, BufMut, BufferPooler, Runner, Storage as _, Supervisor as _, WriteOptions,
+        Blob as _, BufMut, BufferPooler, Clock as _, Runner, Storage as _, Supervisor as _,
+        WriteOptions,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
+        mocks::{
+            DeferredSync, DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs,
+            next_pending_sync,
+        },
     };
     use commonware_utils::{NZU16, NZUsize, probability};
+    use std::time::Duration;
 
     impl<E: crate::Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
@@ -1399,6 +1384,144 @@ mod tests {
         }
     }
 
+    fn value_tail_repairs_overlap(align: bool) {
+        deterministic::Runner::default().start(move |context| async move {
+            let cfg = entry_cfg(&context);
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+            for section in 1..=2 {
+                (journal, _, _, _) = journal
+                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                    .await
+                    .unwrap();
+            }
+            journal = journal.sync_all().await.unwrap();
+
+            // The value sync materializes a crash image with durable value tails and
+            // index additions still confined to the larger index write buffers.
+            for section in 1..=2 {
+                (journal, _, _, _) = journal
+                    .append(
+                        section,
+                        TestEntry::new(100 + section, 0, 0),
+                        &[(100 + section) as u8; 16],
+                    )
+                    .await
+                    .unwrap();
+            }
+            journal.values = journal.values.sync_all().await.unwrap();
+            drop(journal);
+
+            let outer = PendingSyncs::default();
+            let inner = PendingSyncs::default();
+            let delayed = DelayedSyncContext {
+                inner: DelayedSyncContext {
+                    inner: context.child("open"),
+                    pending: inner.clone(),
+                },
+                pending: outer.clone(),
+            };
+            let Recovery {
+                index,
+                values,
+                tracking,
+            } = Recovery::<_, TestEntry, TestValue>::init(
+                delayed,
+                cfg.clone(),
+                RecoveryMode::Infer,
+            )
+            .await
+            .unwrap();
+            let mut replay = index
+                .replay(0, 0, cfg.replay_buffer, ReadOptions::default())
+                .await
+                .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let recovery = Recovery {
+                index: replay.finish_pending().unwrap(),
+                values,
+                tracking,
+            };
+            for section in 1..=2 {
+                assert_eq!(
+                    recovery.index.size(section).unwrap(),
+                    TestEntry::SIZE as u64
+                );
+                let entry = recovery.index.get(section, 0).await.unwrap();
+                let (offset, size) = entry.value_location();
+                assert!(recovery.values.size(section).unwrap() > offset + u64::from(size));
+            }
+
+            // The outer gate holds the first value sync. A second value sync
+            // passes that consumed gate and waits at the inner gate.
+            outer.arm();
+            inner.arm();
+            let DeferredSync {
+                blocked: first_blocked,
+                release: first_release,
+            } = next_pending_sync(&outer);
+            let DeferredSync {
+                blocked: second_blocked,
+                release: second_release,
+            } = next_pending_sync(&inner);
+            let mut repairing = Box::pin(async move {
+                if align {
+                    recovery.align_values_to_index().await
+                } else {
+                    recovery.repair().await
+                }
+            });
+            commonware_macros::select! {
+                _ = repairing.as_mut() => {
+                    panic!("recovery completed before both value syncs were released");
+                },
+                _ = async {
+                    first_blocked.await.unwrap();
+                    second_blocked.await.unwrap();
+                } => {},
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("independent value truncations did not reach both sync gates");
+                },
+            }
+            assert_eq!(outer.calls(), 2);
+            assert_eq!(inner.calls(), 1);
+            second_release.send(Ok(())).unwrap();
+            first_release.send(Ok(())).unwrap();
+            let journal: Oversized<_, TestEntry, TestValue> = repairing.await.unwrap().into();
+            assert_eq!(inner.calls(), 2);
+
+            for section in 1..=2 {
+                assert_eq!(journal.size(section).unwrap(), TestEntry::SIZE as u64);
+                let entry = journal.get(section, 0).await.unwrap();
+                assert_eq!(entry.id, section);
+                let (offset, size) = entry.value_location();
+                assert_eq!(
+                    journal.get_value(section, offset, size).await.unwrap(),
+                    [section as u8; 16],
+                );
+                assert_eq!(
+                    journal.values.size(section).unwrap(),
+                    offset + u64::from(size),
+                );
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_oversized_orphan_value_repair_sync_concurrency() {
+        value_tail_repairs_overlap(false);
+    }
+
+    #[test]
+    fn test_oversized_orphan_value_alignment_sync_concurrency() {
+        value_tail_repairs_overlap(true);
+    }
+
     fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
         Config {
             index_partition: "test-index".into(),
@@ -1422,6 +1545,62 @@ mod tests {
 
     /// Simple test value type with unit config.
     type TestValue = [u8; 16];
+
+    #[test]
+    fn test_tracked_bounded_noop_preserves_metadata() {
+        for cap in [2 * TestEntry::SIZE as u64, u64::MAX] {
+            deterministic::Runner::default().start(|context| async move {
+                let cfg = test_cfg(&context);
+                let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                    &context.child("seed"),
+                    cfg.clone(),
+                    "markers".into(),
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap();
+                while let Some(item) = replay.next().await {
+                    item.unwrap();
+                }
+                let mut journal = replay.finish_tracked().await.unwrap();
+                for id in 0..2 {
+                    (journal, _, _, _) = journal
+                        .append(0, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                        .await
+                        .unwrap();
+                }
+                journal = journal.sync_all().await.unwrap();
+                let mut tracking = journal.tracking.take().unwrap();
+                assert!(tracking.stage_marker(0, 2));
+                tracking.metadata = tracking.metadata.sync().await.unwrap();
+                drop(tracking);
+                drop(journal);
+
+                let (context, recordings) =
+                    commonware_runtime::mocks::RecordingContext::new(context);
+                let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
+                    &context.child("reopen"),
+                    cfg,
+                    "markers".into(),
+                    ReadOptions::default(),
+                    0,
+                    cap,
+                )
+                .await
+                .unwrap();
+                let mut ids = Vec::new();
+                while let Some(item) = replay.next().await {
+                    ids.push(item.unwrap().2.id);
+                }
+                assert_eq!(ids, vec![0, 1]);
+                drop(replay.finish_tracked().await.unwrap());
+                assert!(
+                    recordings.snapshot().writes.is_empty(),
+                    "unchanged markers were rewritten"
+                );
+            });
+        }
+    }
 
     #[test]
     fn test_tracked_bounded_initialization_is_restart_stable() {

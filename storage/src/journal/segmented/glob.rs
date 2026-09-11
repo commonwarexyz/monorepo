@@ -34,7 +34,7 @@ use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
 use commonware_runtime::{BufMut, Error as RError, Handle};
-use std::{io::Cursor, num::NonZeroUsize};
+use std::{collections::BTreeMap, io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
@@ -213,11 +213,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// Truncate an initialization-owned suffix.
     async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.manager.truncate_pending(section, size).await
-    }
-
-    /// Repair one section during initialization.
-    async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.truncate_pending_section(section, size).await
     }
 
     /// See [Glob::prune].
@@ -420,7 +415,19 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     ///
     /// Other sections are unaffected. A shorter length is durable when this returns.
     pub(crate) async fn truncate_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.truncate_pending_section(section, size).await?;
+        self.0
+            .manager
+            .truncate_pending_section(section, size)
+            .await?;
+        Ok(self)
+    }
+
+    /// Durably truncate the selected independent value sections.
+    pub(crate) async fn truncate_sections(
+        mut self,
+        sizes: &BTreeMap<u64, u64>,
+    ) -> Result<Self, Error> {
+        self.0.manager.truncate_pending_sections(sizes).await?;
         Ok(self)
     }
 

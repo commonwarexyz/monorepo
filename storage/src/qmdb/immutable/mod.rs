@@ -251,6 +251,7 @@ where
     /// Initialize from the latest retained commit, discarding uncommitted operations.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
+    #[boxed]
     pub async fn init(
         context: E,
         cfg: Config<T, C::Config, S>,
@@ -259,7 +260,7 @@ where
     where
         C: authenticated::Backing<E>,
     {
-        let journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle_config,
             cfg.log,
@@ -267,20 +268,6 @@ where
             true,
         )
         .await?;
-        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
-    }
-
-    /// Initialize from a pre-constructed authenticated journal.
-    ///
-    /// Seeds an initial commit if the journal is empty, builds the in-memory snapshot,
-    /// and returns the initialized database.
-    #[boxed]
-    pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H, S>,
-        context: E,
-        translator: T,
-        init_buffer: NonZeroUsize,
-    ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
             (journal, _) = journal
@@ -289,7 +276,7 @@ where
             journal = journal.sync().await?;
         }
 
-        let mut snapshot = Index::new(context.child("snapshot"), translator);
+        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let bounds = journal.journal.bounds();
@@ -301,9 +288,6 @@ where
             let inactivity_floor_loc = last_op
                 .has_floor()
                 .expect("last operation should be a commit with floor");
-            if inactivity_floor_loc > last_commit_loc {
-                return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
-            }
 
             // Replay the log from the inactivity floor to build the snapshot. Every retained
             // location is inserted, mirroring the live apply path, so a repeated key keeps
@@ -312,7 +296,7 @@ where
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
-                init_buffer,
+                cfg.init_buffer,
             )
             .await?;
 
@@ -3728,9 +3712,8 @@ pub(super) mod tests {
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
                 if *p == *commit_loc + 1 && *f == *commit_loc));
 
-        // Reopen. `init_from_journal` rebuilds the snapshot by replaying from
-        // the floor (= commit_loc). The only op at/above the floor is the commit, which
-        // contributes no keys — so the rebuilt snapshot is empty.
+        // Reopening rebuilds the snapshot from the inactivity floor. Only the commit
+        // remains at or above that floor, so the rebuilt snapshot contains no keys.
         let db = open_db(context.child("reopened")).await;
         assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
