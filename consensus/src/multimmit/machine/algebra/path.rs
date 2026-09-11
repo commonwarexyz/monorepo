@@ -10,10 +10,14 @@ use crate::{
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use std::collections::{BTreeMap, btree_map::Entry};
 
-/// Read-only parent lookup used by authenticated path reconstruction.
-pub(crate) trait Ancestry<D: Digest> {
-    /// Returns the immediate parent of `block`, if it is locally available.
-    fn parent(&self, block: BlockRef<D>) -> Option<BlockRef<D>>;
+#[cfg(test)]
+std::thread_local! {
+    static PARENT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_parent_lookups() -> usize {
+    PARENT_LOOKUPS.with(|lookups| lookups.replace(0))
 }
 
 /// A compact ancestry index for reconstructed proposal and vote paths.
@@ -85,6 +89,7 @@ impl<D: Digest> PathIndex<D> {
     }
 
     /// Returns whether `descendant` extends or equals `ancestor` in this index.
+    #[cfg(test)]
     pub(crate) fn extends_or_equals(
         &self,
         ancestor: BlockRef<D>,
@@ -95,15 +100,10 @@ impl<D: Digest> PathIndex<D> {
         }
         let mut current = descendant;
         while current.height() > ancestor.height() {
-            current = self.parent(current).ok_or(Error::Vote)?;
+            PARENT_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+            current = self.parents.get(&current).copied().ok_or(Error::Vote)?;
         }
         Ok(current == ancestor)
-    }
-}
-
-impl<D: Digest> Ancestry<D> for PathIndex<D> {
-    fn parent(&self, block: BlockRef<D>) -> Option<BlockRef<D>> {
-        self.parents.get(&block).copied()
     }
 }
 

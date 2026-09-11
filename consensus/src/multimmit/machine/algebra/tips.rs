@@ -1,9 +1,6 @@
 //! Safe and final tip extraction.
 
-use super::{
-    Error, ProposalPaths, VotePaths,
-    path::{Ancestry, PathIndex},
-};
+use super::{Error, ProposalPaths, VotePaths, path::PathIndex};
 use crate::multimmit::{
     config::CodecConfig,
     types::{BlockRef, ChainId, LeaderBlock, Lqc, Position, VoteBody},
@@ -27,16 +24,10 @@ pub(crate) struct PoolExtractor<D: Digest> {
     position_counts: Vec<Vec<usize>>,
     // Extension counts are exact above the proposal tip; proposal ranks use position_counts.
     support: Vec<BTreeMap<BlockRef<D>, usize>>,
-    qualified: Vec<BTreeSet<BlockRef<D>>>,
+    best_supported: Vec<Option<BlockRef<D>>>,
     max_child_support: Vec<BTreeMap<BlockRef<D>, usize>>,
     ancestry: PathIndex<D>,
     len: usize,
-}
-
-impl<D: Digest> Ancestry<D> for PoolExtractor<D> {
-    fn parent(&self, block: BlockRef<D>) -> Option<BlockRef<D>> {
-        self.ancestry.parent(block)
-    }
 }
 
 impl<D: Digest> PoolExtractor<D> {
@@ -66,7 +57,7 @@ impl<D: Digest> PoolExtractor<D> {
             signers_seen: vec![false; config.participants()],
             position_counts,
             support: vec![BTreeMap::new(); config.chains()],
-            qualified: vec![BTreeSet::new(); config.chains()],
+            best_supported: vec![None; config.chains()],
             max_child_support: vec![BTreeMap::new(); config.chains()],
             ancestry,
             len: 0,
@@ -107,11 +98,23 @@ impl<D: Digest> PoolExtractor<D> {
                 .get_mut(position)
                 .ok_or(Error::Vote)? += 1;
             let path = paths.extension(chain_id)?;
+            let proposal = self.proposals.chain(chain_id)?;
+            let proposal_tip = *proposal.last().expect("proposal includes its anchor");
+            // An extension may fork below the proposal tip or reproduce its exact suffix.
+            let extends_proposal = path.get(proposal.len() - 1 - position) == Some(&proposal_tip);
             for block in &path[1..] {
                 let count = self.support[chain].entry(*block).or_default();
                 *count += 1;
-                if *count == self.config.view_quorum() {
-                    self.qualified[chain].insert(*block);
+                if *count == self.config.view_quorum()
+                    && extends_proposal
+                    && block.height() > proposal_tip.height()
+                    && self.best_supported[chain].is_none_or(|best| {
+                        block.height() > best.height()
+                            || block.height() == best.height() && block.digest() < best.digest()
+                    })
+                {
+                    // Sticky support only grows; a qualified descendant remains qualified.
+                    self.best_supported[chain] = Some(*block);
                 }
             }
             for pair in path.windows(2) {
@@ -140,7 +143,7 @@ impl<D: Digest> PoolExtractor<D> {
 
     #[cfg(test)]
     pub(crate) fn final_tip_candidates(&self) -> usize {
-        self.qualified.iter().map(BTreeSet::len).sum()
+        self.best_supported.iter().flatten().count()
     }
 
     /// Extracts the current pool-final tips and settlement facts.
@@ -163,7 +166,7 @@ impl<D: Digest> PoolExtractor<D> {
             let proposal_tip = Position::new((proposal.len() - 1) as u32);
             let base = self.proposals.block(chain_id, position)?;
             let tip = if position == proposal_tip {
-                self.deepest_supported(chain, base)?
+                self.best_supported[chain].unwrap_or(base)
             } else {
                 base
             };
@@ -177,23 +180,6 @@ impl<D: Digest> PoolExtractor<D> {
         }
 
         FinalTips::new(blocks, positions, settled)
-    }
-
-    fn deepest_supported(&self, chain: usize, base: BlockRef<D>) -> Result<BlockRef<D>, Error> {
-        let mut deepest = base;
-        for candidate in &self.qualified[chain] {
-            if candidate.height() <= base.height()
-                || !self.ancestry.extends_or_equals(base, *candidate)?
-            {
-                continue;
-            }
-            if candidate.height() > deepest.height()
-                || candidate.height() == deepest.height() && candidate.digest() < deepest.digest()
-            {
-                deepest = *candidate;
-            }
-        }
-        Ok(deepest)
     }
 }
 
@@ -734,7 +720,7 @@ mod tests {
         assert_eq!(pool.signers_seen, before.signers_seen);
         assert_eq!(pool.position_counts, before.position_counts);
         assert_eq!(pool.support, before.support);
-        assert_eq!(pool.qualified, before.qualified);
+        assert_eq!(pool.best_supported, before.best_supported);
         assert_eq!(pool.max_child_support, before.max_child_support);
         assert_eq!(pool.ancestry, before.ancestry);
         assert_eq!(pool.len, before.len);

@@ -889,6 +889,132 @@ fn partial_position_extensions_share_proposal_ancestry_and_support() {
 }
 
 #[test]
+fn cached_final_tip_matches_every_branch_prefix() {
+    for participants in [6, 7, 11] {
+        let config = config(participants);
+        let leader = leader(participants);
+        let shared = digest(b"shared-child");
+        let other = digest(b"other-child");
+        for partial_forks in [false, true] {
+            let votes = (0..participants)
+                .map(|signer| {
+                    if signer < config.view_quorum() - 1 {
+                        vote_with_digests(&leader, 2, vec![shared], config)
+                    } else if signer == config.view_quorum() - 1 {
+                        vote_with_digests(
+                            &leader,
+                            1,
+                            vec![
+                                if partial_forks {
+                                    digest(b"fork-below-tip")
+                                } else {
+                                    leader.proposals()[0].payloads()[1]
+                                },
+                                shared,
+                            ],
+                            config,
+                        )
+                    } else {
+                        vote_with_digests(&leader, 2, vec![other], config)
+                    }
+                })
+                .collect::<Vec<_>>();
+            for reverse in [false, true] {
+                for rotation in 0..participants {
+                    let mut order = (0..participants).collect::<Vec<_>>();
+                    order.rotate_left(rotation);
+                    if reverse {
+                        order.reverse();
+                    }
+                    let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+                    let mut retained = Vec::new();
+                    for signer in order {
+                        let participant = Participant::new(signer as u32);
+                        assert!(
+                            pool.insert::<Sha256, MinSig>(&leader, participant, &votes[signer])
+                                .unwrap()
+                        );
+                        retained.push((participant, &votes[signer]));
+                        if pool.len() >= config.view_quorum() {
+                            assert_eq!(
+                                pool.final_tips().unwrap(),
+                                FinalTips::from_pool::<Sha256, MinSig, _>(
+                                    &leader,
+                                    retained.iter().copied(),
+                                    config,
+                                )
+                                .unwrap(),
+                                "participants={participants} fork={partial_forks} reverse={reverse} rotation={rotation} prefix={}",
+                                retained.len(),
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        pool.final_tips()
+                            .unwrap()
+                            .get(ChainId::new(0))
+                            .unwrap()
+                            .height(),
+                        Height::new(if partial_forks { 2 } else { 3 }),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cached_final_tip_extraction_performs_no_ancestry_walks() {
+    for depth in [2, 16, 64] {
+        let config = CodecConfig::new(6, 6, Limits::new(2, depth).unwrap()).unwrap();
+        let leader = leader(6);
+        let body = vote_with_digests(
+            &leader,
+            2,
+            (0..depth).map(|i| digest(&i.to_le_bytes())).collect(),
+            config,
+        );
+        let proposals = ProposalPaths::new::<Sha256, MinSig>(&leader).unwrap();
+        let base = proposals.block(ChainId::new(0), Position::new(2)).unwrap();
+        let paths =
+            VotePaths::new::<Sha256, MinSig>(&leader, leader.digest::<Sha256>(), &proposals, &body)
+                .unwrap();
+        let mut ancestry = PathIndex::default();
+        proposals.index(&mut ancestry).unwrap();
+        paths.index_extensions(&mut ancestry).unwrap();
+        let mut pool = PoolExtractor::new::<Sha256, MinSig>(&leader, config).unwrap();
+        let votes = vec![body; config.participants()];
+        for (signer, body) in indexed(&votes) {
+            pool.insert::<Sha256, MinSig>(&leader, signer, body)
+                .unwrap();
+            if pool.len() < config.view_quorum() {
+                continue;
+            }
+            let expected = FinalTips::from_pool::<Sha256, MinSig, _>(
+                &leader,
+                indexed(&votes[..pool.len()]),
+                config,
+            )
+            .unwrap();
+            super::path::take_parent_lookups();
+            // Every qualified prefix is a candidate in an ancestry-scanning extractor.
+            for candidate in &paths.extension(ChainId::new(0)).unwrap()[1..] {
+                assert!(ancestry.extends_or_equals(base, *candidate).unwrap());
+            }
+            assert_eq!(
+                super::path::take_parent_lookups(),
+                (depth * (depth + 1) / 2) as usize,
+            );
+            for _ in 0..8 {
+                assert_eq!(pool.final_tips().unwrap(), expected);
+            }
+            assert_eq!(super::path::take_parent_lookups(), 0);
+            assert_eq!(pool.final_tip_candidates(), 1);
+        }
+    }
+}
+
+#[test]
 fn empty_extensions_retain_no_proposal_support() {
     let config = config(6);
     let leader = leader(6);
