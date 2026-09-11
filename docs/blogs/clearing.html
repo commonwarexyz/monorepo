@@ -371,7 +371,9 @@ O’Grady</a></div>
         <p>Every validator retains the complete operator account state.
         At each close, the operator sends the same compact update to all
         of them: the sending accounts’ terminal signed endpoints, their
-        cumulative payment entries, and the accounts involved.</p>
+        cumulative payment entries, and the accounts involved. This
+        shared dealing can be cached on a CDN for efficient, inexpensive
+        distribution.</p>
         <p>Accounts are named by public key, and payment entries refer
         to those accounts by their position within the close. Each
         validator checks the payer signatures and the operator’s

@@ -164,7 +164,7 @@ QMDB Current Ordered with MMB stores each live account's balance under its publi
 
 ## Keep the State, Send the Changes
 
-Every validator retains the complete operator account state. At each close, the operator sends the same compact update to all of them: the sending accounts' terminal signed endpoints, their cumulative payment entries, and the accounts involved.
+Every validator retains the complete operator account state. At each close, the operator sends the same compact update to all of them: the sending accounts' terminal signed endpoints, their cumulative payment entries, and the accounts involved. This shared dealing can be cached on a CDN for efficient, inexpensive distribution.
 
 Accounts are named by public key, and payment entries refer to those accounts by their position within the close. Each validator checks the payer signatures and the operator's acceptance, derives every recipient's credit, and applies the deposits and withdrawals fixed at epoch registration.
 
