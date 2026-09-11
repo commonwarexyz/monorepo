@@ -159,7 +159,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(value)
     }
 
-    /// See [Glob::verify].
+    /// See [Recovery::verify].
     async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
         // A frame is at least its checksum trailer.
         if (size as usize) < CHECKSUM_SIZE {
@@ -210,14 +210,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.manager.size(section)
     }
 
-    /// See [Glob::rewind].
-    async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind(section, size).await
+    /// Truncate an initialization-owned suffix.
+    async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.truncate_pending(section, size).await
     }
 
-    /// See [Glob::rewind_section].
-    async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind_section(section, size).await
+    /// Repair one section during initialization.
+    async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        self.manager.truncate_pending_section(section, size).await
     }
 
     /// See [Glob::prune].
@@ -280,7 +280,7 @@ impl<E: Context, V: CodecShared> std::fmt::Debug for Glob<E, V> {
 impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+        Ok(Recovery::init(context, cfg).await?.into())
     }
 
     /// Append value to section.
@@ -299,15 +299,6 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Reads directly from blob without any caching.
     pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         self.0.get(section, offset, size).await
-    }
-
-    /// Check whether the entry at `(offset, size)` in `section` has a valid trailing checksum.
-    ///
-    /// Returns `Ok(false)` if the frame is smaller than its checksum trailer, the section
-    /// does not exist, the range is not fully covered by the section, or the checksum does
-    /// not match. Other read failures are propagated.
-    pub(super) async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
-        self.0.verify(section, offset, size).await
     }
 
     /// Inject arbitrary bytes at `offset` in `section`, bypassing entry framing.
@@ -348,22 +339,6 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Get the current size of a section (including buffered data).
     pub fn size(&self, section: u64) -> Result<u64, Error> {
         self.0.size(section)
-    }
-
-    /// Rewind to a specific section and size.
-    ///
-    /// Truncates the section to the given size and removes all sections after it.
-    pub async fn rewind(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.rewind(section, size).await?;
-        Ok(self)
-    }
-
-    /// Rewind only the given section to a specific size.
-    ///
-    /// Unlike `rewind`, this does not affect other sections.
-    pub async fn rewind_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.rewind_section(section, size).await?;
-        Ok(self)
     }
 
     /// Prune sections before min.
@@ -407,6 +382,71 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     }
 }
 
+/// Owns value sections until paired initialization has finished.
+pub(crate) struct Recovery<E: Context, V: Codec>(Box<Inner<E, V>>);
+
+impl<E: Context, V: CodecShared> From<Recovery<E, V>> for Glob<E, V> {
+    /// Publish every value section after paired recovery.
+    fn from(mut recovery: Recovery<E, V>) -> Self {
+        recovery.0.manager.publish_all();
+        Self(recovery.0)
+    }
+}
+
+impl<E: Context, V: CodecShared> Recovery<E, V> {
+    /// Open the uncached sections under paired initialization ownership.
+    pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+    }
+
+    /// Check whether the entry at `(offset, size)` in `section` has a valid trailing checksum.
+    ///
+    /// Returns `Ok(false)` if the frame is smaller than its checksum trailer, the section
+    /// does not exist, the range is not fully covered by the section, or the checksum does
+    /// not match. Other read failures are propagated.
+    pub(crate) async fn verify(&self, section: u64, offset: u64, size: u32) -> Result<bool, Error> {
+        self.0.verify(section, offset, size).await
+    }
+
+    /// Truncate to a specific section and size.
+    ///
+    /// Truncates the section to the given size and removes all sections after it.
+    pub(crate) async fn truncate(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.truncate_pending(section, size).await?;
+        Ok(self)
+    }
+
+    /// Truncate only the given section to a specific size.
+    ///
+    /// Other sections are unaffected.
+    pub(crate) async fn truncate_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
+        self.0.truncate_pending_section(section, size).await?;
+        Ok(self)
+    }
+
+    /// Return the size of a section during recovery.
+    pub(crate) fn size(&self, section: u64) -> Result<u64, Error> {
+        self.0.size(section)
+    }
+
+    /// Return the retained section numbers.
+    pub(crate) fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.0.sections()
+    }
+
+    /// Make repaired value sections durable.
+    pub(crate) async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
+        self.0.sync(sections).await?;
+        Ok(self)
+    }
+
+    /// Remove an orphaned value section.
+    pub(crate) async fn remove_section(mut self, section: u64) -> Result<Self, Error> {
+        self.0.remove_section(section).await?;
+        Ok(self)
+    }
+}
+
 /// Flip one byte inside value frame `frame` of the blob at `name`, breaking that frame's CRC
 /// while leaving every other frame valid. Models a value torn by a crash after its index entry
 /// became durable. Addresses uncompressed fixed-size frames: `frame_size` is the encoded value
@@ -438,6 +478,35 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
+
+    impl<E: crate::Context, V: CodecShared> Glob<E, V> {
+        pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
+            let (context, partition, factory) = self.0.manager.test_configuration();
+            (
+                context,
+                Config {
+                    partition,
+                    write_buffer: factory.capacity,
+                    compression: self.0.compression,
+                    codec_config: self.0.codec_config.clone(),
+                },
+            )
+        }
+
+        async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
+            let (context, partition, factory) = self.0.manager.test_configuration();
+            let cfg = Config {
+                partition,
+                write_buffer: factory.capacity,
+                compression: self.0.compression,
+                codec_config: self.0.codec_config.clone(),
+            };
+            _ = self.sync_all().await?;
+            let pending = Recovery::init(context, cfg).await?;
+            let pending = pending.truncate_section(section, end).await?;
+            Ok(pending.into())
+        }
+    }
 
     fn test_cfg() -> Config<()> {
         Config {
@@ -629,7 +698,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_glob_rewind() {
+    fn test_glob_truncate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
@@ -648,13 +717,13 @@ mod tests {
             }
             glob = glob.sync(1).await.expect("Failed to sync");
 
-            // Rewind to after the third value
+            // Truncate to after the third value
             let (third_offset, third_size) = locations[2];
-            let rewind_size = third_offset + u64::from(third_size);
+            let truncate_size = third_offset + u64::from(third_size);
             let glob = glob
-                .rewind_section(1, rewind_size)
+                .test_reopen_section(1, truncate_size)
                 .await
-                .expect("Failed to rewind");
+                .expect("Failed to truncate");
 
             // First three values should still be readable
             for (i, (offset, size)) in locations.iter().take(3).enumerate() {

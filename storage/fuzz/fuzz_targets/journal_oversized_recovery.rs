@@ -122,9 +122,9 @@ struct FuzzInput {
     routes: [u8; 24],
     /// Per-entry action applied after its append: pipeline a sync of its section, release one
     /// held completion, settle everything held, sync one section, or sync everything. Tracked
-    /// mode adds an empty flush that publishes marker debt, a prune, and a section rewind.
-    /// These ops complete before the fault window opens, so the marker-before-data ordering
-    /// inside rewind is not falsifiable here. Prune's ordering is made falsifiable by the
+    /// mode adds an empty flush that publishes marker debt, a prune, and bounded section initialization.
+    /// These ops complete before the fault window opens, so the marker-before-data ordering inside
+    /// bounded initialization is not falsifiable here. Prune's ordering is made falsifiable by the
     /// interrupted-prune final op and by the remove faults armed around every prune.
     ops: [u8; 24],
     /// Shape of the faulted crash: flush everything then abandon the requests (also the
@@ -229,9 +229,9 @@ async fn frame_valid(
 /// truncating at the first invalid value.
 ///
 /// Markers trail durability: under crash cuts (no bit rot) a floor was published only after a
-/// completed joint sync covered it, and prune or rewind durably move markers before data can
-/// shrink, so a floor can never exceed the section's durable record count and every frame below
-/// it must still be in bounds and checksum-valid. Both halves are asserted here against the
+/// completed joint sync covered it, and prune or bounded initialization durably move markers before
+/// data can shrink, so a floor can never exceed the section's durable record count and every frame
+/// below it must still be in bounds and checksum-valid. Both halves are asserted here against the
 /// image-derived boundaries.
 ///
 /// Maps each section to `(id, value readable)` per retained position, asserting identity against
@@ -451,7 +451,7 @@ fn fuzz(input: FuzzInput) {
 
             // Every sync completion below stays parked until an op resolves it, so requests pipeline
             // and completions resolve in op-chosen order. The model mirrors each section's logical
-            // ids through appends, prunes, and rewinds.
+            // ids through appends, prunes, and bounded initialization.
             let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
             let mut durable: BTreeMap<u64, u64> = BTreeMap::new();
             let mut model: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
@@ -570,29 +570,45 @@ fn fuzz(input: FuzzInput) {
                                 }
                             }
                         } else {
-                            // Rewind one live section below its current length: its tracked floor
-                            // durably lowers before the freed index and value ranges can be reused.
+                            // Close every owner before bounded initialization of the selected
+                            // section.
                             let live: Vec<u64> = counts.keys().copied().collect();
                             if let Some(&section) =
                                 live.get(usize::from(op >> 4) % live.len().max(1))
                             {
-                                let count = counts[&section];
-                                let keep = count * u64::from(op >> 6) / 4;
-                                oversized = drive_pending_syncs(
-                                    &pending,
-                                    oversized
-                                        .rewind_section(section, keep * TestEntry::SIZE as u64),
-                                )
+                                let keep = counts[&section] * u64::from(op >> 6) / 4;
+                                _ = drive_pending_syncs(&pending, oversized.sync_all())
+                                    .await
+                                    .expect("sync before reopen failed");
+                                for (_, _, handle) in held.drain(..) {
+                                    handle.await.expect("prior sync failed");
+                                }
+                                oversized = drive_pending_syncs(&pending, async {
+                                    let bounded_context = context.child("capped");
+                                    let mut replay = Oversized::init_with_metadata_at_most(
+                                        &bounded_context,
+                                        config(&context),
+                                        METADATA_PARTITION.into(),
+                                        ReadOptions::default(),
+                                        section,
+                                        keep * TestEntry::SIZE as u64,
+                                    )
+                                    .await?;
+                                    while let Some(item) = replay.next().await {
+                                        item?;
+                                    }
+                                    replay.finish_tracked().await
+                                })
                                 .await
-                                .expect("rewind failed");
+                                .expect("bounded initialization failed");
+                                counts.retain(|candidate, _| *candidate <= section);
+                                model.retain(|candidate, _| *candidate <= section);
                                 counts.insert(section, keep);
                                 model
                                     .get_mut(&section)
-                                    .expect("rewound section is modeled")
+                                    .expect("selected section is modeled")
                                     .truncate(keep as usize);
-                                if let Some(durable) = durable.get_mut(&section) {
-                                    *durable = (*durable).min(keep);
-                                }
+                                durable = counts.clone();
                             }
                         }
                     }
