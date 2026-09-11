@@ -1,4 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 470">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 470" role="img" aria-labelledby="title description">
+  <title id="title">The Vanishing Cost of a Payment: Keyed Updates</title>
+  <desc id="description">Logarithmic plots model unit payments between fixed cyclic account pairs, with one recipient per sender. The left panel uses full 32-byte account keys and includes sequence, cumulative amount, and payment-count varint widths. At one million payments the updates are 108,659 bytes for 1,024 accounts, 1,030,115 bytes for 10,000 accounts, 10,383,732 bytes for 100,000 accounts, 103,983,732 bytes for 1,000,000 accounts. Each validator receives the complete update. The right panel divides the 101-byte commitment and certificate for 100 validators by payment count.</desc>
   <rect width="1320" height="470" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -38,66 +40,68 @@
   <text class="axis-strong green-text" x="1178" y="39">N = 1,000,000</text>
 
   <rect class="frame" x="30" y="90" width="610" height="360" rx="3"/>
-  <text class="panel-title" x="335" y="122">Largest Validator Dealing</text>
-  <text class="axis" x="105" y="138">bytes/payment</text>
-  <line class="grid" x1="105" y1="150.00" x2="510" y2="150.00"/>
-  <line class="grid" x1="105" y1="181.43" x2="510" y2="181.43"/>
-  <line class="grid" x1="105" y1="212.86" x2="510" y2="212.86"/>
-  <line class="grid" x1="105" y1="244.29" x2="510" y2="244.29"/>
-  <line class="grid" x1="105" y1="275.71" x2="510" y2="275.71"/>
-  <line class="grid" x1="105" y1="307.14" x2="510" y2="307.14"/>
-  <line class="grid" x1="105" y1="338.57" x2="510" y2="338.57"/>
-  <line class="grid" x1="105" y1="370.00" x2="510" y2="370.00"/>
-  <line class="grid" x1="180" y1="150" x2="180" y2="370"/>
-  <line class="grid" x1="290" y1="150" x2="290" y2="370"/>
-  <line class="grid" x1="400" y1="150" x2="400" y2="370"/>
-  <line class="grid" x1="510" y1="150" x2="510" y2="370"/>
-  <text class="axis" x="95" y="155.00" text-anchor="end">1,000</text>
-  <text class="axis" x="95" y="186.43" text-anchor="end">100</text>
-  <text class="axis" x="95" y="217.86" text-anchor="end">10</text>
-  <text class="axis" x="95" y="249.29" text-anchor="end">1</text>
-  <text class="axis" x="95" y="280.71" text-anchor="end">0.1</text>
-  <text class="axis" x="95" y="312.14" text-anchor="end">0.01</text>
-  <text class="axis" x="95" y="343.57" text-anchor="end">0.001</text>
-  <text class="axis" x="95" y="375.00" text-anchor="end">0.0001</text>
-  <text class="axis-strong" x="180" y="402" text-anchor="middle">1M</text>
-  <text class="axis-strong" x="290" y="402" text-anchor="middle">10M</text>
+  <text class="panel-title" x="335" y="122">Complete Update per Validator</text>
+  <text class="axis" x="335" y="145" text-anchor="middle">modeled keyed encoding</text>
+  <text class="axis" x="105" y="162">bytes/payment</text>
+  <line class="grid" x1="105" y1="170" x2="500" y2="170"/>
+  <text class="axis" x="95" y="175" text-anchor="end">1,000</text>
+  <line class="grid" x1="105" y1="195" x2="500" y2="195"/>
+  <text class="axis" x="95" y="200" text-anchor="end">100</text>
+  <line class="grid" x1="105" y1="220" x2="500" y2="220"/>
+  <text class="axis" x="95" y="225" text-anchor="end">10</text>
+  <line class="grid" x1="105" y1="245" x2="500" y2="245"/>
+  <text class="axis" x="95" y="250" text-anchor="end">1</text>
+  <line class="grid" x1="105" y1="270" x2="500" y2="270"/>
+  <text class="axis" x="95" y="275" text-anchor="end">0.1</text>
+  <line class="grid" x1="105" y1="295" x2="500" y2="295"/>
+  <text class="axis" x="95" y="300" text-anchor="end">0.01</text>
+  <line class="grid" x1="105" y1="320" x2="500" y2="320"/>
+  <text class="axis" x="95" y="325" text-anchor="end">0.001</text>
+  <line class="grid" x1="105" y1="345" x2="500" y2="345"/>
+  <text class="axis" x="95" y="350" text-anchor="end">0.0001</text>
+  <line class="grid" x1="105" y1="370" x2="500" y2="370"/>
+  <text class="axis" x="95" y="375" text-anchor="end">0.00001</text>
+  <line class="grid" x1="200" y1="170" x2="200" y2="370"/>
+  <text class="axis-strong" x="200" y="402" text-anchor="middle">1M</text>
+  <line class="grid" x1="300" y1="170" x2="300" y2="370"/>
+  <text class="axis-strong" x="300" y="402" text-anchor="middle">10M</text>
+  <line class="grid" x1="400" y1="170" x2="400" y2="370"/>
   <text class="axis-strong" x="400" y="402" text-anchor="middle">100M</text>
-  <text class="axis-strong" x="510" y="402" text-anchor="middle">1B</text>
-  <text class="axis" x="345" y="428" text-anchor="middle">payments accepted (T)</text>
-
-  <path class="blue series" d="M180 269.73 L290 301.16 L400 332.59 L510 364.02"/>
-  <path class="purple series" d="M180 243.24 L290 274.66 L400 306.09 L510 337.52"/>
-  <path class="orange series" d="M180 212.45 L290 243.88 L400 275.31 L510 306.74"/>
-  <path class="green series" d="M180 181.03 L290 212.45 L400 243.88 L510 275.31"/>
-  <circle cx="180" cy="269.73" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="290" cy="301.16" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="400" cy="332.59" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="510" cy="364.02" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
-  <circle cx="180" cy="243.24" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="290" cy="274.66" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="400" cy="306.09" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="510" cy="337.52" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
-  <circle cx="180" cy="212.45" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="290" cy="243.88" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="400" cy="275.31" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="510" cy="306.74" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
-  <circle cx="180" cy="181.03" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="290" cy="212.45" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="400" cy="243.88" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <circle cx="510" cy="275.31" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
-  <text class="value blue-text" x="168" y="274.73" text-anchor="end">0.155</text>
-  <text class="value blue-text" x="522" y="369.02" text-anchor="start">0.000155</text>
-  <text class="value purple-text" x="168" y="248.24" text-anchor="end">1.08</text>
-  <text class="value purple-text" x="522" y="342.52" text-anchor="start">0.00108</text>
-  <text class="value orange-text" x="168" y="217.45" text-anchor="end">10.3</text>
-  <text class="value orange-text" x="522" y="311.74" text-anchor="start">0.0103</text>
-  <text class="value green-text" x="168" y="186.03" text-anchor="end">103</text>
-  <text class="value green-text" x="522" y="280.31" text-anchor="start">0.103</text>
+  <line class="grid" x1="500" y1="170" x2="500" y2="370"/>
+  <text class="axis-strong" x="500" y="402" text-anchor="middle">1B</text>
+  <text class="axis" x="350" y="428" text-anchor="middle">payments accepted (T)</text>
+  <path class="blue series" d="M200.00 269.10 L202.50 269.72 L205.00 270.35 L207.50 270.97 L210.00 271.60 L212.50 272.22 L215.00 272.85 L217.50 273.47 L220.00 274.10 L222.50 274.72 L225.00 275.35 L227.50 275.97 L230.00 276.60 L232.50 277.22 L235.00 277.85 L237.50 278.47 L240.00 279.10 L242.50 279.72 L245.00 280.35 L247.50 280.97 L250.00 281.60 L252.50 282.22 L255.00 282.85 L257.50 283.47 L260.00 284.10 L262.50 284.72 L265.00 285.35 L267.50 285.97 L270.00 286.60 L272.50 287.22 L275.00 287.85 L277.50 288.47 L280.00 289.10 L282.50 289.72 L285.00 290.35 L287.50 290.97 L290.00 291.60 L292.50 292.22 L295.00 292.85 L297.50 293.47 L300.00 294.10 L302.50 294.72 L305.00 295.35 L307.50 295.97 L310.00 296.60 L312.50 297.22 L315.00 297.85 L317.50 298.47 L320.00 299.10 L322.47 299.72 L322.47 299.72 L322.47 299.41 L322.50 299.42 L325.00 300.05 L327.50 300.67 L330.00 301.30 L332.50 301.92 L335.00 302.55 L337.50 303.17 L340.00 303.80 L342.50 304.42 L345.00 305.05 L347.50 305.67 L350.00 306.30 L352.50 306.92 L355.00 307.55 L357.50 308.17 L360.00 308.80 L362.50 309.42 L365.00 310.05 L367.50 310.67 L370.00 311.30 L372.50 311.92 L375.00 312.55 L377.50 313.17 L380.00 313.80 L382.50 314.42 L385.00 315.05 L387.50 315.67 L390.00 316.30 L392.50 316.92 L395.00 317.55 L397.50 318.17 L400.00 318.80 L402.50 319.42 L405.00 320.05 L407.50 320.67 L410.00 321.30 L412.50 321.92 L415.00 322.55 L417.50 323.17 L420.00 323.80 L422.50 324.42 L425.00 325.05 L427.50 325.67 L430.00 326.30 L432.50 326.92 L435.00 327.55 L437.50 328.17 L440.00 328.80 L442.50 329.42 L445.00 330.05 L447.50 330.67 L450.00 331.30 L452.50 331.92 L455.00 332.55 L457.50 333.17 L460.00 333.80 L462.50 334.42 L465.00 335.05 L467.50 335.67 L470.00 336.30 L472.50 336.92 L475.00 337.55 L477.50 338.17 L480.00 338.80 L482.50 339.42 L485.00 340.05 L487.50 340.67 L490.00 341.30 L492.50 341.92 L495.00 342.55 L497.50 343.17 L500.00 343.80"/>
+  <circle cx="200" cy="269.10" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="300" cy="294.10" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="400" cy="318.80" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <circle cx="500" cy="343.80" r="5" fill="#fff" stroke="#2424d4" stroke-width="3"/>
+  <text class="value blue-text" x="188" y="274.10" text-anchor="end">0.109</text>
+  <text class="value blue-text" x="512" y="348.80" text-anchor="start">0.000112</text>
+  <path class="purple series" d="M200.00 244.68 L202.50 245.30 L205.00 245.93 L207.50 246.55 L210.00 247.18 L210.38 247.27 L210.38 247.27 L210.72 247.05 L212.50 247.49 L215.00 248.12 L217.50 248.74 L220.00 249.37 L222.50 249.99 L225.00 250.62 L227.50 251.24 L230.00 251.87 L232.50 252.49 L235.00 253.12 L237.50 253.74 L240.00 254.37 L242.50 254.99 L245.00 255.62 L247.50 256.24 L250.00 256.87 L252.50 257.49 L255.00 258.12 L257.50 258.74 L260.00 259.37 L262.50 259.99 L265.00 260.62 L267.50 261.24 L270.00 261.87 L272.50 262.49 L275.00 263.12 L277.50 263.74 L280.00 264.37 L282.50 264.99 L285.00 265.62 L287.50 266.24 L290.00 266.87 L292.50 267.49 L295.00 268.12 L297.50 268.74 L300.00 269.37 L302.50 269.99 L305.00 270.62 L307.50 271.24 L310.00 271.87 L312.50 272.49 L315.00 273.12 L317.50 273.74 L320.00 274.37 L322.50 274.99 L325.00 275.62 L327.50 276.24 L330.00 276.87 L332.50 277.49 L335.00 278.12 L337.50 278.74 L340.00 279.37 L342.50 279.99 L345.00 280.62 L347.50 281.24 L350.00 281.87 L352.50 282.49 L355.00 283.12 L357.50 283.74 L360.00 284.37 L362.50 284.99 L365.00 285.62 L367.50 286.24 L370.00 286.87 L372.50 287.49 L375.00 288.12 L377.50 288.74 L380.00 289.37 L382.50 289.99 L385.00 290.62 L387.50 291.24 L390.00 291.87 L392.50 292.49 L395.00 293.12 L397.50 293.74 L400.00 294.37 L402.50 294.99 L405.00 295.62 L407.50 296.24 L410.00 296.87 L412.50 297.49 L415.00 298.12 L417.50 298.74 L420.00 299.37 L421.44 299.73 L421.44 299.73 L421.44 299.42 L422.50 299.69 L425.00 300.31 L427.50 300.94 L430.00 301.56 L432.50 302.19 L435.00 302.81 L437.50 303.44 L440.00 304.06 L442.50 304.69 L445.00 305.31 L447.50 305.94 L450.00 306.56 L452.50 307.19 L455.00 307.81 L457.50 308.44 L460.00 309.06 L462.50 309.69 L465.00 310.31 L467.50 310.94 L470.00 311.56 L472.50 312.19 L475.00 312.81 L477.50 313.44 L480.00 314.06 L482.50 314.69 L485.00 315.31 L487.50 315.94 L490.00 316.56 L492.50 317.19 L495.00 317.81 L497.50 318.44 L500.00 319.06"/>
+  <circle cx="200" cy="244.68" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="300" cy="269.37" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="400" cy="294.37" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <circle cx="500" cy="319.06" r="5" fill="#fff" stroke="#7a3db8" stroke-width="3"/>
+  <text class="value purple-text" x="188" y="249.68" text-anchor="end">1.03</text>
+  <text class="value purple-text" x="512" y="324.06" text-anchor="start">0.00109</text>
+  <path class="orange series" d="M200.00 219.59 L202.50 220.22 L205.00 220.84 L207.50 221.47 L210.00 222.09 L212.50 222.72 L215.00 223.34 L217.50 223.97 L220.00 224.59 L222.50 225.22 L225.00 225.84 L227.50 226.47 L230.00 227.09 L232.50 227.72 L235.00 228.34 L237.50 228.97 L240.00 229.59 L242.50 230.22 L245.00 230.84 L247.50 231.47 L250.00 232.09 L252.50 232.72 L255.00 233.34 L257.50 233.97 L260.00 234.59 L262.50 235.22 L265.00 235.84 L267.50 236.47 L270.00 237.09 L272.50 237.72 L275.00 238.34 L277.50 238.97 L280.00 239.59 L282.50 240.22 L285.00 240.84 L287.50 241.47 L290.00 242.09 L292.50 242.72 L295.00 243.34 L297.50 243.97 L300.00 244.59 L302.50 245.22 L305.00 245.84 L307.50 246.47 L310.00 247.09 L310.38 247.19 L310.38 247.19 L310.72 246.96 L312.50 247.41 L315.00 248.03 L317.50 248.66 L320.00 249.28 L322.50 249.91 L325.00 250.53 L327.50 251.16 L330.00 251.78 L332.50 252.41 L335.00 253.03 L337.50 253.66 L340.00 254.28 L342.50 254.91 L345.00 255.53 L347.50 256.16 L350.00 256.78 L352.50 257.41 L355.00 258.03 L357.50 258.66 L360.00 259.28 L362.50 259.91 L365.00 260.53 L367.50 261.16 L370.00 261.78 L372.50 262.41 L375.00 263.03 L377.50 263.66 L380.00 264.28 L382.50 264.91 L385.00 265.53 L387.50 266.16 L390.00 266.78 L392.50 267.41 L395.00 268.03 L397.50 268.66 L400.00 269.28 L402.50 269.91 L405.00 270.53 L407.50 271.16 L410.00 271.78 L412.50 272.41 L415.00 273.03 L417.50 273.66 L420.00 274.28 L422.50 274.91 L425.00 275.53 L427.50 276.16 L430.00 276.78 L432.50 277.41 L435.00 278.03 L437.50 278.66 L440.00 279.28 L442.50 279.91 L445.00 280.53 L447.50 281.16 L450.00 281.78 L452.50 282.41 L455.00 283.03 L457.50 283.66 L460.00 284.28 L462.50 284.91 L465.00 285.53 L467.50 286.16 L470.00 286.78 L472.50 287.41 L475.00 288.03 L477.50 288.66 L480.00 289.28 L482.50 289.91 L485.00 290.53 L487.50 291.16 L490.00 291.78 L492.50 292.41 L495.00 293.03 L497.50 293.66 L500.00 294.28"/>
+  <circle cx="200" cy="219.59" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="300" cy="244.59" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="400" cy="269.28" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <circle cx="500" cy="294.28" r="5" fill="#fff" stroke="#b45f06" stroke-width="3"/>
+  <text class="value orange-text" x="188" y="224.59" text-anchor="end">10.4</text>
+  <text class="value orange-text" x="512" y="299.28" text-anchor="start">0.0107</text>
+  <path class="green series" d="M200.00 194.58 L202.50 195.20 L205.00 195.83 L207.50 196.45 L210.00 197.08 L212.50 197.70 L215.00 198.33 L217.50 198.95 L220.00 199.58 L222.50 200.20 L225.00 200.83 L227.50 201.45 L230.00 202.08 L232.50 202.70 L235.00 203.33 L237.50 203.95 L240.00 204.58 L242.50 205.20 L245.00 205.83 L247.50 206.45 L250.00 207.08 L252.50 207.70 L255.00 208.33 L257.50 208.95 L260.00 209.58 L262.50 210.20 L265.00 210.83 L267.50 211.45 L270.00 212.08 L272.50 212.70 L275.00 213.33 L277.50 213.95 L280.00 214.58 L282.50 215.20 L285.00 215.83 L287.50 216.45 L290.00 217.08 L292.50 217.70 L295.00 218.33 L297.50 218.95 L300.00 219.58 L302.50 220.20 L305.00 220.83 L307.50 221.45 L310.00 222.08 L312.50 222.70 L315.00 223.33 L317.50 223.95 L320.00 224.58 L322.50 225.20 L325.00 225.83 L327.50 226.45 L330.00 227.08 L332.50 227.70 L335.00 228.33 L337.50 228.95 L340.00 229.58 L342.50 230.20 L345.00 230.83 L347.50 231.45 L350.00 232.08 L352.50 232.70 L355.00 233.33 L357.50 233.95 L360.00 234.58 L362.50 235.20 L365.00 235.83 L367.50 236.45 L370.00 237.08 L372.50 237.70 L375.00 238.33 L377.50 238.95 L380.00 239.58 L382.50 240.20 L385.00 240.83 L387.50 241.45 L390.00 242.08 L392.50 242.70 L395.00 243.33 L397.50 243.95 L400.00 244.58 L402.50 245.20 L405.00 245.83 L407.50 246.45 L410.00 247.08 L410.38 247.17 L410.38 247.17 L410.72 246.95 L412.50 247.39 L415.00 248.02 L417.50 248.64 L420.00 249.27 L422.50 249.89 L425.00 250.52 L427.50 251.14 L430.00 251.77 L432.50 252.39 L435.00 253.02 L437.50 253.64 L440.00 254.27 L442.50 254.89 L445.00 255.52 L447.50 256.14 L450.00 256.77 L452.50 257.39 L455.00 258.02 L457.50 258.64 L460.00 259.27 L462.50 259.89 L465.00 260.52 L467.50 261.14 L470.00 261.77 L472.50 262.39 L475.00 263.02 L477.50 263.64 L480.00 264.27 L482.50 264.89 L485.00 265.52 L487.50 266.14 L490.00 266.77 L492.50 267.39 L495.00 268.02 L497.50 268.64 L500.00 269.27"/>
+  <circle cx="200" cy="194.58" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="300" cy="219.58" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="400" cy="244.58" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <circle cx="500" cy="269.27" r="5" fill="#fff" stroke="#2f7d3d" stroke-width="3"/>
+  <text class="value green-text" x="188" y="199.58" text-anchor="end">104</text>
+  <text class="value green-text" x="512" y="274.27" text-anchor="start">0.107</text>
 
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>
   <text class="panel-title" x="980" y="122">Commitment + Certificate</text>
-  <text class="axis" x="770" y="138">bytes/payment</text>
+  <text class="axis" x="770" y="145">bytes/payment</text>
   <line class="grid" x1="770" y1="150" x2="1255" y2="150"/>
   <line class="grid" x1="770" y1="186.67" x2="1255" y2="186.67"/>
   <line class="grid" x1="770" y1="223.33" x2="1255" y2="223.33"/>

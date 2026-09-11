@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 590" role="img" aria-labelledby="title description">
   <title id="title">Netting Across Accounts</title>
-  <desc id="description">100 million payments of $0.000001 across six directed pairs produce four net balance changes in one epoch. Account a sends $30 and receives $10, ending at $80. Account b sends $25 and receives $55, ending at $70. Account c sends $20 and receives $25, ending at $30. Account d sends $25 and receives $10, ending at $20. The close carries four account rows and six cumulative entries with consistency proofs.</desc>
+  <desc id="description">100 million payments of $0.000001 across six directed pairs produce four net balance changes in one epoch. Account a sends $30 and receives $10, ending at $80. Account b sends $25 and receives $55, ending at $70. Account c sends $20 and receives $25, ending at $30. Account d sends $25 and receives $10, ending at $20. The close carries four account rows, six cumulative entries, and signed endpoints.</desc>
   <rect width="1320" height="590" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -98,5 +98,5 @@
 
   <rect class="close" x="34" y="500" width="1252" height="76" rx="6"/>
   <text class="close-title" x="660" y="531">4 active accounts · 6 payment pairs</text>
-  <text class="note" x="660" y="558">One row per account · one cumulative entry per pair · consistency proofs</text>
+  <text class="note" x="660" y="558">One row per account · one cumulative entry per pair · signed endpoints</text>
 </svg>

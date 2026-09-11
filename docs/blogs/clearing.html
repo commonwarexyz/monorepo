@@ -101,11 +101,13 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
-        <p><em>Update (9/11/26): Operators can now process payments to
-        the same recipient in parallel across payers, with one signature
-        check covering each payer’s batch. Validators retain state
-        between closes and receive only account changes, cumulative
-        payment entries, and proofs.</em></p>
+        <p><em>Design preview using QMDB Current Ordered with MMB for
+        account state. End-to-end performance has not been
+        measured.</em></p>
+        <p><em>Update (9/11/26): Operators can process payments to the
+        same recipient in parallel across payers, with one signature
+        check covering each payer’s batch. Validators retain the account
+        state in QMDB and apply only the changes at each close.</em></p>
         <p><em>Update (8/20/26): Clearing now uses a 32-byte commitment
         and BLS12-381 multisignatures for the commitment
         certificate.</em></p>
@@ -220,10 +222,10 @@ O’Grady</a></div>
         class="math inline">\mathcal A_e</span>.</p>
         <p>The payer tracks a balance <span
         class="math inline">B_a</span> and a cumulative debit <span
-        class="math inline">D_a</span>. Its activity within an epoch is
-        one strictly recipient-sorted vector <span
-        class="math inline">V_a</span> with one cumulative entry per
-        recipient it paid. The entry <span
+        class="math inline">D_a</span> that starts at zero each epoch.
+        Its activity within that epoch is one strictly recipient-sorted
+        vector <span class="math inline">V_a</span> with one cumulative
+        entry per recipient it paid. The entry <span
         class="math inline">(G,J)</span> for <span
         class="math inline">b</span> is <span
         class="math inline">a</span>’s cumulative credit to <span
@@ -269,9 +271,8 @@ O’Grady</a></div>
         <p>Bajillion defines each payment as an update to the payer’s
         outgoing vector. This lets the operator accept payments from
         different payers in parallel, even when they share a recipient.
-        Incoming credit stays a promise until the epoch ends, when the
-        operator collates it. A payment of <span
-        class="math inline">x</span> on the edge <span
+        Incoming credit stays a promise until the epoch ends. A payment
+        of <span class="math inline">x</span> on the edge <span
         class="math inline">a\rightarrow b</span> advances only that
         edge’s entry in <span class="math inline">a</span>’s vector:</p>
         <p><span class="math display">
@@ -305,15 +306,11 @@ O’Grady</a></div>
         \end{bmatrix}
         </span></p>
         <p>Each payer’s last vector of the epoch is its terminal vector.
-        When the epoch ends, the operator sorts the union of terminal
-        entries by recipient, then payer, into the transpose. These are
-        the same entries viewed from the receiving side and committed
-        under <span class="math inline">\mathsf{TransposeRoot}_e</span>.
-        <span class="math inline">b</span>’s three entries sum to <span
-        class="math inline">20+4+6=30</span>. Each entry can be opened
-        separately under its payer’s signed vector root and the
-        transpose root.</p>
-        <h2 id="one-row-per-changed-account">One Row per Changed
+        The operator and validators derive incoming credits from these
+        vectors: <span class="math inline">b</span> receives <span
+        class="math inline">20+4+6=30</span> across three payments. Each
+        entry is authenticated by its payer’s signed vector root.</p>
+        <h2 id="one-row-per-active-account">One Row per Active
         Account</h2>
         <p>Netting each of the four accounts’ debits and credits gives
         exact successor balances: <span class="math inline">a</span>
@@ -343,11 +340,9 @@ O’Grady</a></div>
         payout onchain after finalization. The row validator derives
         each settlement output from the same balance equation and signed
         authorizations.</p>
-        <p>Each row binds the account’s old and new state and, when it
-        sent, its terminal signed endpoint. The rows are sorted by
-        account and carry running totals, so a validator can check that
-        its portion begins where the preceding portion ended. The final
-        row carries the epoch’s totals, including gross debit <span
+        <p>Each row describes the account’s activity and, when it sent,
+        its terminal signed endpoint. Every validator derives the
+        resulting balances and checks the epoch’s gross debit <span
         class="math inline">D_e</span> and credit <span
         class="math inline">C_e</span>:</p>
         <p><span class="math display">
@@ -364,111 +359,69 @@ O’Grady</a></div>
         </span></p>
         <p>With no boundary flows, <span
         class="math inline">L_{e+1}=L_e=200</span>.</p>
-        <p>These rows update the live account state, a sorted vector of
-        accounts with positive balances committed under <span
-        class="math inline">\mathsf{StateRoot}</span> in a binary Merkle
-        tree (BMT). Deposits can add accounts, while withdrawals and
-        payments can remove them when their balance reaches zero.</p>
-        <h2 id="slice-the-evidence">Slice the Evidence</h2>
-        <p>We don’t want every validator to store the entire account
-        state.</p>
-        <p>The evidence is divided into <span
-        class="math inline">S</span> deterministic account-key slices
-        (256 in the benchmarks). Each validator receives at most two
-        contiguous spans of slices, each with its own range proof. It
-        retains the state in those spans between closes, so its dealing
-        carries only account changes, payment entries, and proofs.</p>
-        <p>Shared boundaries make these local checks compose. The
-        coverage commitment binds each boundary’s position in the old
-        state, new state, changed rows, and payment entries, together
-        with running totals and two accumulator checksums. Each slice
-        must begin where its predecessor ended.</p>
-        <p>Take <span class="math inline">S=2</span> with slice 1
-        holding <span class="math inline">\{a,b\}</span> and slice 2
-        holding <span class="math inline">\{c,d\}</span>. The boundary
-        after <span class="math inline">b</span> carries debit <span
-        class="math inline">20+12=32</span> and credit <span
-        class="math inline">5+30=35</span>, which need not balance.
-        Slice 2 resumes from those totals and must finish at <span
-        class="math inline">54=54</span>. Each slice checks its own rows
-        against the boundaries on either side.</p>
-        <p>The transpose puts each entry in its recipient’s slice; the
-        payer vectors put it in its payer’s. For our six payments:</p>
-        <p><span class="math display">
-        \begin{array}{c|c|c}
-        &amp; \substack{\text{Slice 1}\\\{a,b\}} &amp;
-        \substack{\text{Slice 2}\\\{c,d\}}\\[0.4em]
-        \hline
-        \text{By payer} &amp;
-        \begin{gathered}a\to b\\\boldsymbol{b\to c}\end{gathered} &amp;
-        \begin{gathered}c\to b\\c\to d\\d\to a\\d\to
-        b\end{gathered}\\[0.6em]
-        \hline
-        \text{By recipient} &amp;
-        \begin{gathered}d\to a\\a\to b\\c\to b\\d\to b\end{gathered}
-        &amp;
-        \begin{gathered}\boldsymbol{b\to c}\\c\to d\end{gathered}
-        \end{array}
-        </span></p>
-        <p>An order-independent lattice hash tracks the payer view in
-        <span class="math inline">u</span> and the recipient view in
-        <span class="math inline">v</span>, including each entry’s
-        payer, recipient, cumulative amount, and count. Each slice
-        resumes both accumulators from its opening boundary, adds its
-        entries, and checks the closing boundary. The <span
-        class="math inline">b\to c</span> entry is added to <span
-        class="math inline">u</span> in slice 1 and to <span
-        class="math inline">v</span> in slice 2. Intermediate checksums
-        can differ; after all slices,</p>
-        <p><span class="math display">
-        \boxed{u_S=v_S.}
-        </span></p>
-        <p>The final equality checks that both views contain the same
-        multiset of full entries. Every recipient credit is backed by a
-        payer-signed entry, even though one validator need not see both
-        sides of an edge.</p>
-        <p>The commitment format binds the roots and epoch context in a
-        32-byte header. Admission also requires a 164-byte root bundle
-        and a terminal coverage proof. The full evidence remains
-        offchain as an authenticated corpus <span
-        class="math inline">\mathcal D_e</span>, retrievable through the
-        challenge deadline <span
-        class="math inline">\Delta_e</span>.</p>
-        <h2 id="seal-every-dealing-up-front">Seal Every Dealing Up
-        Front</h2>
+        <p>QMDB Current Ordered with MMB stores each live account’s
+        balance under its public key, committed by <span
+        class="math inline">\mathsf{StateRoot}</span>. Presence means
+        the account is live. Deposits can add accounts, while
+        withdrawals and payments can remove them when their balance
+        reaches zero. Payment totals and counts belong to the epoch’s
+        evidence.</p>
+        <h2 id="keep-the-state-send-the-changes">Keep the State, Send
+        the Changes</h2>
+        <p>Every validator retains the complete operator account state.
+        At each close, the operator sends the same compact update to all
+        of them: the sending accounts’ terminal signed endpoints, their
+        cumulative payment entries, and the accounts involved.</p>
+        <p>Accounts are named by public key, and payment entries refer
+        to those accounts by their position within the close. Each
+        validator checks the payer signatures and the operator’s
+        acceptance, derives every recipient’s credit, and applies the
+        deposits and withdrawals fixed at epoch registration.</p>
+        <p>Validators derive the balance changes and apply the same
+        canonical QMDB batch to the same predecessor database. QMDB
+        updates its authenticated state without rebuilding the tree over
+        every live account. Validators already hold the prior state, so
+        the operator needs no separate state-change proof.</p>
+        <p>The payer vectors are the common source of truth for both
+        sides of every payment. Validators build a BMT of the epoch’s
+        account activity, retaining terminal payment positions and
+        settlement outputs for challenges and claims. This evidence
+        includes accounts whose balances stay unchanged. A 32-byte
+        commitment binds the activity BMT, withdrawal-output BMT, and
+        QMDB state root to the epoch, predecessor, and checked
+        settlement totals.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="The certified close binds QMDB balances, account activity, and withdrawal outputs. Each payer's payment BMT is nested in its activity record. The running example expands account c: its balance is 26, its terminal debit is 11, and its payment tree contains b with amount 4 and count 1 and d with amount 7 and count 1. Withdrawal leaves show the destination and amount format used when withdrawals are requested.">
+        <div class="image-caption">
+        <p>Figure 2: The close binds the three resulting roots. Each
+        payer’s payment tree is nested in its activity record, which
+        remains present even when its payments leave the balance
+        unchanged.</p>
+        </div>
+        <p>The settlement chain holds pooled custody and the certified
+        state root. Validators keep the account records and evidence
+        available for challenges and recovery.</p>
+        <h2 id="certify-the-whole-close">Certify the Whole Close</h2>
         <p>A committee of <span class="math inline">n=3f+1</span>
         validators tolerates at most <span class="math inline">f</span>
-        Byzantine members. Each slice is assigned to <span
-        class="math inline">q=2f+1</span> consecutive validators around
-        a ring, starting at <span class="math inline">\lfloor
-        ns/S\rfloor</span> for slice <span class="math inline">s</span>.
-        This sliding window gives each validator at most two contiguous
-        spans, so range proofs and accumulator start states travel once
-        per span.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-ring-assignment.svg" alt="Sixteen validators on a ring with eleven-holder windows for slices 0, 5, and 10. Beside the ring, sixteen rows show each validator's assigned slices as one span, or two at the wrap.">
+        Byzantine members. Every signer checks the complete close,
+        retains its evidence, and signs the same commitment. A
+        certificate needs <span class="math inline">q=2f+1</span>
+        signatures.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same compact update to every validator. Each validator checks it against the balances it retains in QMDB, derives the account activity and balance changes, and signs the resulting commitment. A quorum of signatures forms the certificate.">
         <div class="image-caption">
-        <p>Figure 2: With sixteen validators and sixteen slices, each
-        slice has eleven holders. The holder window slides around the
-        ring (left); each validator’s assigned slices form one span, or
-        two at the wrap (right).</p>
+        <p>Figure 3: Each validator checks the same update against its
+        complete prior state. With 100 validators and at most 33 faulty
+        members, a 67-signature certificate includes at least 34 honest
+        validators that checked and retain the entire close.</p>
         </div>
-        <p>A validator authenticates every row, signature, state
-        transition, and boundary check in its assigned spans. It then
-        signs the commitment and keeps the evidence available through
-        the challenge deadline.</p>
-        <p>The certificate needs <span class="math inline">q</span>
-        signers, all signing the same commitment. Quorum intersection
-        guarantees that an honest signer authenticated and retains each
-        slice, though that signer may differ by slice. Every slice <span
-        class="math inline">j</span>’s holders share more than <span
-        class="math inline">f</span> validators with the certificate’s
-        signers:</p>
-        <p><span class="math display">
-        \begin{aligned}
-        n&amp;=100,\qquad f=33,\qquad q=2f+1=67,\\[0.3em]
-        |\mathsf{signers}\;\cap\;\mathsf{holders}_j|&amp;\;\ge\;2q-n=34&gt;f.
-        \end{aligned}
-        </span></p>
+        <p>An honest signer makes the close and its proof-serving state
+        durable before publishing its vote. It keeps predecessor and
+        successor proofs available while the close is pending and
+        through its challenge deadline <span
+        class="math inline">\Delta_e</span>, and retains the last
+        finalized state for recovery. A new validator joins from an
+        authenticated database snapshot, then applies the following
+        updates in order.</p>
         <p>The certificate is one 48-byte aggregate signature plus a
         <span class="math inline">\lceil n/8\rceil</span>-byte signer
         bitmap, with proofs of possession checked when the committee
@@ -504,11 +457,12 @@ O’Grady</a></div>
         committee (or TEE or SNARK/STARK) can certify the exact
         public-validity relation over selected inputs. None proves the
         nonexistence of an additional private signature.</p>
-        <p>The close commits each changed account’s terminal position
+        <p>The close commits each active account’s terminal position
         under <span class="math inline">\mathsf{ChangeRoot}_e</span>. An
-        opening of that position supports receipt challenges and
-        external-payout claims. A holder can prove three kinds of
-        contradiction:</p>
+        opening supports receipt challenges and external-payout claims.
+        A payer absent from this BMT has a public debit of zero for the
+        epoch, so a BMT absence proof suffices to challenge an omitted
+        payment. A holder can prove three kinds of contradiction:</p>
         <ol type="1">
         <li><p><strong>Debit mismatch.</strong> For example, the close
         records a cumulative debit of 20 after the operator acknowledged
@@ -548,8 +502,8 @@ O’Grady</a></div>
         <p>An exact withdrawal releases its amount if enough funds
         remain at the epoch boundary. An account close sweeps that
         epoch’s final balance. Once the carrying close finalizes, the
-        user claims the certified payout with a Merkle opening. Each
-        output can be claimed only once.</p>
+        user claims the certified payout with an opening in that close’s
+        withdrawal-output BMT. Each output can be claimed only once.</p>
         <p>Custody remains onchain throughout. Finalization reserves
         withdrawals and external payouts, and individual claims reduce
         the reserve and the chain’s assets together. A challenged or
@@ -561,9 +515,10 @@ O’Grady</a></div>
         may still finalize. Recovery then freezes the last finalized
         state root.</p>
         <p>The recovery rules keep finalized payouts independently
-        claimable and refund unadmitted deposits. Accounts recover from
-        the frozen state using Merkle openings. Payments in a
-        never-admitted or invalidated close do not debit that state.</p>
+        claimable and refund unadmitted deposits. Accounts recover their
+        balances with QMDB proofs against the frozen root, and each
+        account can claim only once. Payments in a never-admitted or
+        invalidated close do not debit that state.</p>
         <p>Recovery needs a correct, live settlement chain and available
         claim openings even when the operator disappears. The settlement
         integration must apply each claim atomically with its
@@ -607,7 +562,7 @@ O’Grady</a></div>
           <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 3: After predecessor admission and successor
+        <p>Figure 4: After predecessor admission and successor
         registration, the admitted epoch-<span
         class="math inline">e</span> balance is <span
         class="math inline">80+\rho_a=85</span>, while the live
@@ -621,21 +576,21 @@ O’Grady</a></div>
         admitted outcome before spending in the successor epoch.</p>
         <h2 id="the-close-follows-accounts-and-edges">The Close Follows
         Accounts and Edges</h2>
-        <p>The <a
-        href="https://github.com/commonwarexyz/monorepo/pull/4664">protocol
-        primitives and benchmarks are in #4664</a>. Applications supply
-        the operator and wallet services, including durable storage,
-        retries, and live credit reconciliation.</p>
-        <p>Every live account sends a single-entry batch to one of the
-        same 512 recipients. Prepare builds the full successor tree and
-        other roots. Deal constructs the committee’s dealings; seal
-        verifies and retains the largest dealing and signs the
-        commitment.</p>
+        <p>Each validator receives one complete update per close. It
+        names each active account once, followed by signed endpoints and
+        cumulative payment entries. The update never carries the payment
+        history.</p>
+        <p>The size model below keeps the signed-payment field widths
+        from <a
+        href="https://github.com/commonwarexyz/monorepo/pull/4664">#4664</a>,
+        with full account keys replacing ranks in the live state. Every
+        account pays its next neighbor once, and each of 100 validators
+        receives the same update.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
             <tr>
-              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Measurement</th>
+              <th rowspan="2" style="text-align:left; vertical-align:bottom;">Per close</th>
               <th colspan="4" style="text-align:center;">Live accounts (<em>N</em>), all sending</th>
             </tr>
             <tr>
@@ -646,132 +601,89 @@ O’Grady</a></div>
             </tr>
           </thead>
           <tbody>
-            <tr><th colspan="5" style="text-align:left;">Construction</th></tr>
             <tr>
-              <td style="padding-left:20px;">prepare</td>
-              <td style="text-align:right;">2.50 ms</td>
-              <td style="text-align:right;">17.0 ms</td>
-              <td style="text-align:right;">178 ms</td>
-              <td style="text-align:right;">1.78 s</td>
+              <td>Validator dealing</td>
+              <td style="text-align:right;">106 KB</td>
+              <td style="text-align:right;">1.03 MB</td>
+              <td style="text-align:right;">10.4 MB</td>
+              <td style="text-align:right;">104 MB</td>
             </tr>
             <tr>
-              <td style="padding-left:20px;">deal</td>
-              <td style="text-align:right;">2.70 ms</td>
-              <td style="text-align:right;">2.89 ms</td>
-              <td style="text-align:right;">6.75 ms</td>
-              <td style="text-align:right;">42.9 ms</td>
-            </tr>
-            <tr><th colspan="5" style="text-align:left;">Certification</th></tr>
-            <tr>
-              <td style="padding-left:20px;">largest validator dealing</td>
-              <td style="text-align:right;">155 KB</td>
-              <td style="text-align:right;">1.08 MB</td>
-              <td style="text-align:right;">10.3 MB</td>
+              <td>Total operator egress</td>
+              <td style="text-align:right;">10.6 MB</td>
               <td style="text-align:right;">103 MB</td>
+              <td style="text-align:right;">1.04 GB</td>
+              <td style="text-align:right;">10.4 GB</td>
             </tr>
             <tr>
-              <td style="padding-left:20px;">seal</td>
-              <td style="text-align:right;">10.1 ms</td>
-              <td style="text-align:right;">33.2 ms</td>
-              <td style="text-align:right;">227 ms</td>
-              <td style="text-align:right;">2.21 s</td>
-            </tr>
-            <tr><th colspan="5" style="text-align:left;">Settlement</th></tr>
-            <tr>
-              <td style="padding-left:20px;">commitment</td>
-              <td style="text-align:right;"><strong>32 B</strong></td>
-              <td style="text-align:right;"><strong>32 B</strong></td>
-              <td style="text-align:right;"><strong>32 B</strong></td>
-              <td style="text-align:right;"><strong>32 B</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">commitment + certificate</td>
+              <td>Commitment + certificate</td>
               <td style="text-align:right;"><strong>101 B</strong></td>
               <td style="text-align:right;"><strong>101 B</strong></td>
               <td style="text-align:right;"><strong>101 B</strong></td>
               <td style="text-align:right;"><strong>101 B</strong></td>
             </tr>
+            <tr><th colspan="5" style="text-align:left;">Retained between closes</th></tr>
             <tr>
-              <td style="padding-left:20px;">check certified commitment</td>
-              <td style="text-align:right;"><strong>0.668 ms</strong></td>
-              <td style="text-align:right;"><strong>0.667 ms</strong></td>
-              <td style="text-align:right;"><strong>0.668 ms</strong></td>
-              <td style="text-align:right;"><strong>0.668 ms</strong></td>
-            </tr>
-            <tr><th colspan="5" style="text-align:left;">Dispute</th></tr>
-            <tr>
-              <td style="padding-left:20px;">HigherAckDebit challenge</td>
-              <td style="text-align:right;"><strong>620 B</strong></td>
-              <td style="text-align:right;"><strong>748 B</strong></td>
-              <td style="text-align:right;"><strong>844 B</strong></td>
-              <td style="text-align:right;"><strong>940 B</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">HigherAckEntry challenge</td>
-              <td style="text-align:right;"><strong>671 B</strong></td>
-              <td style="text-align:right;"><strong>799 B</strong></td>
-              <td style="text-align:right;"><strong>895 B</strong></td>
-              <td style="text-align:right;"><strong>991 B</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">AckFork challenge</td>
-              <td style="text-align:right;"><strong>417 B</strong></td>
-              <td style="text-align:right;"><strong>417 B</strong></td>
-              <td style="text-align:right;"><strong>417 B</strong></td>
-              <td style="text-align:right;"><strong>417 B</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">check HigherAckDebit</td>
-              <td style="text-align:right;"><strong>0.218 ms</strong></td>
-              <td style="text-align:right;"><strong>0.218 ms</strong></td>
-              <td style="text-align:right;"><strong>0.220 ms</strong></td>
-              <td style="text-align:right;"><strong>0.217 ms</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">check HigherAckEntry</td>
-              <td style="text-align:right;"><strong>0.219 ms</strong></td>
-              <td style="text-align:right;"><strong>0.219 ms</strong></td>
-              <td style="text-align:right;"><strong>0.221 ms</strong></td>
-              <td style="text-align:right;"><strong>0.218 ms</strong></td>
-            </tr>
-            <tr>
-              <td style="padding-left:20px;">check AckFork</td>
-              <td style="text-align:right;"><strong>0.212 ms</strong></td>
-              <td style="text-align:right;"><strong>0.215 ms</strong></td>
-              <td style="text-align:right;"><strong>0.216 ms</strong></td>
-              <td style="text-align:right;"><strong>0.212 ms</strong></td>
+              <td>Account records per validator</td>
+              <td style="text-align:right;">41.0 KB</td>
+              <td style="text-align:right;">400 KB</td>
+              <td style="text-align:right;">4.00 MB</td>
+              <td style="text-align:right;">40.0 MB</td>
             </tr>
           </tbody>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 4: Measured on an AWS c8a.4xlarge with 100 validators
-        and 256 slices. Stages run independently. Prepare, deal, and
-        seal use an adaptive 16-worker pool; prepare starts with a
-        prebuilt predecessor-state proof cache. Certificate, challenge,
-        and withdrawal-claim checks run on the calling thread.</p>
+        <p>Figure 5: Modeled keyed updates, with one signed unit payment
+        per account and no boundary flows. Egress is 100 copies of the
+        dealing, excluding transport and other messages. Account records
+        count 32-byte keys and 8-byte balances; QMDB indexes, history,
+        and retained evidence are additional. Admission supplies roots
+        and totals alongside the commitment and certificate.</p>
         </div>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-benchmark-matrix.svg" alt="Three log-scale plots show measured latency for preparing roots, dealing all evidence slices, and sealing the busiest validator dealing as live accounts increase from 1,024 to one million.">
+        <p>With 1,024 senders each paying a different recipient outside
+        that group, only 2,048 of a million accounts change and the
+        modeled update is 141 KB. Validators check those senders and
+        payment entries, then update the affected accounts in QMDB.</p>
+        <p>Repeated payments between the same pairs reuse these
+        settlement records, spreading their byte cost over more
+        payments.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots show modeled bytes per payment as one million to one billion unit payments pass between fixed pairs. The left shows one validator's keyed update for four account counts, including growing cumulative counters. The right shows the 101-byte commitment and certificate.">
         <div class="image-caption">
-        <p>Figure 5: Prepare, deal, and seal latencies for the four
-        measured profiles above. Both axes are logarithmic.</p>
+        <p>Figure 6: More unit payments on the same pairs spread the
+        update and certificate cost. Every account pays its next
+        neighbor, and the model includes growing counter widths. Left:
+        one validator’s keyed update. Right: the 101-byte commitment and
+        certificate for 100 validators.</p>
         </div>
-        <p>At one million live accounts, the largest dealing is 103 MB
-        when all send and 182 KB with 1,024 senders. Preparation still
-        rebuilds the full account tree, and validators check their
-        assigned state, including accounts with no activity.</p>
-        <p>Repeated payments between those pairs reuse the same
-        records.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots divide fixed sizes by one million to one billion accepted payments. The left uses the table's rounded largest validator dealings for four account counts; the right uses the 101-byte commitment and certificate.">
+        <h3 id="proof-sizes">Proof Sizes</h3>
+        <p>The receipt and per-close claim trees remain BMTs. A debit
+        mismatch for a changed payer, an entry mismatch, and an
+        acknowledgment fork therefore keep their existing proof
+        formats.</p>
+        <div class="clearing-benchmark-table">
+        <table>
+          <thead>
+            <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Challenge</th><th colspan="4" style="text-align:center;">Changed accounts, all sending</th></tr>
+            <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Debit mismatch</td><td style="text-align:right;">620 B</td><td style="text-align:right;">748 B</td><td style="text-align:right;">844 B</td><td style="text-align:right;">940 B</td></tr>
+            <tr><td>Entry mismatch</td><td style="text-align:right;">671 B</td><td style="text-align:right;">799 B</td><td style="text-align:right;">895 B</td><td style="text-align:right;">991 B</td></tr>
+            <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td></tr>
+          </tbody>
+        </table>
+        </div>
         <div class="image-caption">
-        <p>Figure 6: Amortizing the table’s largest validator dealings
-        and 101-byte commitment with certificate over more payments
-        between the same pairs. Curves use rounded sizes and hold
-        encoded integer widths fixed.</p>
+        <p>Figure 7: Reference BMT challenge payloads for payers
+        included in the close, with Ed25519 receipts and one-entry
+        vectors. They exclude the separately supplied close and chain
+        transaction framing.</p>
         </div>
-        <p>Challenge proofs grow with their Merkle lookup depths.
-        Withdrawal claims grow with the number of withdrawal outputs
-        <span class="math inline">W</span> in their close.</p>
+        <p>A normal withdrawal opens a certified output in its close’s
+        BMT. Its proof grows with the number of withdrawal outputs <span
+        class="math inline">W</span>, independently of the live account
+        database.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -789,7 +701,7 @@ O’Grady</a></div>
           </thead>
           <tbody>
             <tr>
-              <td style="padding-left:20px;">claim proof</td>
+              <td>Withdrawal-output claim</td>
               <td style="text-align:right;"><strong>39 B</strong></td>
               <td style="text-align:right;"><strong>359 B</strong></td>
               <td style="text-align:right;"><strong>487 B</strong></td>
@@ -800,40 +712,61 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 7: Each claim opens one withdrawal output with a
-        21-byte destination. The payment profiles above contain no
-        withdrawals.</p>
+        <p>Figure 8: Encoded withdrawal output and its BMT opening, with
+        a 21-byte destination. Values use maximum-depth paths for each
+        output count. Chain transaction framing is excluded.</p>
         </div>
-        <p>Adjust the workload and committee size below to see how much
-        data the operator sends to validators.</p>
-        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive operator-to-validator dealing calculator. Sliders set live accounts, average recipients per account, and validators. Results show the average dealing per validator with its composition, total operator egress per close, and a full-state size reference.">
-          <noscript>At one million accounts each paying its next neighbor, the operator sends an average of 113 MB to each of 100 validators per close, totaling 11.3 GB. The full account state is 129 MB. Enable JavaScript to change the workload.</noscript>
+        <p>QMDB proofs authenticate balances for forced withdrawal
+        intake and recovery. A recovery claim opens the account’s
+        balance at the frozen finalized root.</p>
+        <div class="clearing-benchmark-table">
+        <table>
+          <thead>
+            <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">QMDB proof payload</th><th colspan="5" style="text-align:center;">Live accounts</th></tr>
+            <tr><th style="text-align:right;">1</th><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Account present</td><td style="text-align:right;">207 B</td><td style="text-align:right;">497 B</td><td style="text-align:right;">593 B</td><td style="text-align:right;">691 B</td><td style="text-align:right;">819 B</td></tr>
+            <tr><td>Account absent</td><td style="text-align:right;">240 B</td><td style="text-align:right;">530 B</td><td style="text-align:right;">626 B</td><td style="text-align:right;">724 B</td><td style="text-align:right;">852 B</td></tr>
+            <tr><td>Recovery balance opening</td><td style="text-align:right;">238 B</td><td style="text-align:right;">528 B</td><td style="text-align:right;">624 B</td><td style="text-align:right;">722 B</td><td style="text-align:right;">850 B</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <div class="image-caption">
+        <p>Figure 9: Measured Current Ordered proofs after one insertion
+        batch, using the middle key and adjacent absence. SHA-256/MMB,
+        32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the
+        known account key; recovery includes it. All omit the trusted
+        root and chain framing. Sizes vary with history and proof
+        position.</p>
+        </div>
+        <p>Adjust the workload and committee size below to estimate the
+        operator’s traffic. Every validator receives the same update;
+        adding validators changes total egress.</p>
+        <div id="clearing-fig-calculator" class="clearing-calculator" role="region" aria-label="Interactive calculator for keyed validator dealings. Sliders set live accounts, average recipients per account, and validators. Results show one modeled update per validator, its composition, total operator egress, and a dotted reference for the encoded account records.">
+          <noscript>Each validator retains the complete account state and receives one compact update per close. Total operator egress is the update size multiplied by the validator count. Enable JavaScript to change the workload.</noscript>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
-        <p>Figure 8: Average validator dealing per close, with total
-        operator egress in parentheses. Sizes include every assigned
-        span and proof, excluding transport and other protocol messages.
-        The dotted line shows full account state, including Merkle tree
-        levels. Both axes are logarithmic.</p>
-        <p>Each sender signs one batch containing one unit payment per
-        recipient. Recipients per account averages over all live
-        accounts: below one, the first senders pay the last recipients
-        in key order; otherwise, each account pays its next neighbors
-        cyclically. Accounts are evenly spread across slices, whose
-        count varies with the committee (128 at 100 validators). This
-        differs from the benchmarks’ 256 slices and 512 recipients. All
-        accounts stay live, with no deposits, withdrawals, or external
-        payouts.</p>
+        <p>Figure 10: Modeled keyed update per validator, with total
+        operator egress in parentheses. Dotted: all live account records
+        (40 bytes each), before database overhead and retained evidence.
+        Both axes are logarithmic; certificates, transport, and other
+        messages are excluded.</p>
+        <p>Each sender signs one batch of unit payments. Recipients per
+        account averages over all live accounts: below one, the first
+        senders pay the last recipients in key order; otherwise, every
+        account pays its next neighbors cyclically. All accounts stay
+        live, with no deposits, withdrawals, or external payouts.</p>
         </div>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
         <p>Repeated payments between the same pairs share settlement
         records. Each active account settles its net change across all
         counterparties.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account rows with their proofs.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
         <div class="image-caption">
-        <p>Figure 9: The four-account network carrying 100 million
+        <p>Figure 11: The four-account network carrying 100 million
         payments of $0.000001, one atomic unit each. Every sender uses
         its own opening funds. The arrows group independent payments by
         sender and recipient, with both directions between <span

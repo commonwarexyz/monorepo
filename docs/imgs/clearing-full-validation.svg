@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 610" role="img" aria-labelledby="title description">
+  <title id="title">Every Validator Applies the Same Changes</title>
+  <desc id="description">Illustrative four-account update and three of 100 validators. The operator sends the same compact update, containing terminal sender vectors and signed endpoints, to every validator. Each retains every live account balance in QMDB Current Ordered, derives all recipient credits, checks the close, applies balance changes, and signs the resulting commitment. A certificate requires 67 of 100 signatures.</desc>
+  <rect width="1320" height="610" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 26px; font-weight: 700; fill: #111; }
+    .subtitle { font-size: 16px; fill: #666; }
+    .heading { font-size: 20px; font-weight: 700; fill: #111; text-anchor: middle; }
+    .label { font-size: 18px; fill: #333; text-anchor: middle; }
+    .note { font-size: 16px; fill: #666; text-anchor: middle; }
+    .vector { font-size: 18px; fill: #2424d4; }
+    .frame { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .rule { stroke: #dedede; stroke-width: 1; }
+    .wire { fill: none; stroke: #2424d4; stroke-width: 2; }
+    .arrow { marker-end: url(#arrow); }
+    .blue { fill: #2424d4; }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#2424d4" stroke-width="1.2"/>
+    </marker>
+  </defs>
+
+  <text class="title" x="34" y="39">Every Validator Applies the Same Changes</text>
+  <text class="subtitle" x="34" y="66">Illustrative update: 4 accounts · 3 of 100 validators shown</text>
+
+  <text class="heading blue" x="844" y="121">Same compact update to every validator</text>
+  <path class="wire" d="M171 190 V148 H1152"/>
+  <path class="wire arrow" d="M530 148 V190"/>
+  <path class="wire arrow" d="M838 148 V190"/>
+  <path class="wire arrow" d="M1152 148 V190"/>
+
+  <rect class="frame" x="34" y="190" width="275" height="275" rx="6"/>
+  <text class="heading" x="171.5" y="224">Operator</text>
+  <text class="note" x="171.5" y="254">terminal sender vectors</text>
+  <text class="vector" x="64" y="289">a → b</text>
+  <text class="vector" x="64" y="320">b → c</text>
+  <text class="vector" x="64" y="351">c → b, d</text>
+  <text class="vector" x="64" y="382">d → a, b</text>
+  <path class="rule" d="M54 400 H289"/>
+  <text class="label" x="171.5" y="434">+ signed endpoints</text>
+
+  <rect class="frame" x="402" y="190" width="256" height="275" rx="6"/>
+  <text class="heading" x="530" y="224">Validator 1</text>
+  <text class="label" x="530" y="260">QMDB balances</text>
+  <text class="label blue" x="530" y="286">+ signed update</text>
+  <path class="rule" d="M422 302 H638"/>
+  <text class="label" x="530" y="333">Derive all credits</text>
+  <text class="label" x="530" y="364">Check entire close</text>
+  <text class="label" x="530" y="395">Apply balance changes</text>
+  <text class="label blue" x="530" y="439">Sign commitment</text>
+
+  <rect class="frame" x="710" y="190" width="256" height="275" rx="6"/>
+  <text class="heading" x="838" y="224">Validator 2</text>
+  <text class="label" x="838" y="260">QMDB balances</text>
+  <text class="label blue" x="838" y="286">+ signed update</text>
+  <path class="rule" d="M730 302 H946"/>
+  <text class="label" x="838" y="333">Derive all credits</text>
+  <text class="label" x="838" y="364">Check entire close</text>
+  <text class="label" x="838" y="395">Apply balance changes</text>
+  <text class="label blue" x="838" y="439">Sign commitment</text>
+
+  <text class="heading" x="992" y="336">…</text>
+
+  <rect class="frame" x="1018" y="190" width="268" height="275" rx="6"/>
+  <text class="heading" x="1152" y="224">Validator 100</text>
+  <text class="label" x="1152" y="260">QMDB balances</text>
+  <text class="label blue" x="1152" y="286">+ signed update</text>
+  <path class="rule" d="M1038 302 H1266"/>
+  <text class="label" x="1152" y="333">Derive all credits</text>
+  <text class="label" x="1152" y="364">Check entire close</text>
+  <text class="label" x="1152" y="395">Apply balance changes</text>
+  <text class="label blue" x="1152" y="439">Sign commitment</text>
+
+  <path class="wire" d="M530 465 V493 H1152 V465 M838 465 V493"/>
+  <path class="wire arrow" d="M838 493 V518"/>
+  <rect x="402" y="518" width="884" height="76" rx="6" fill="#f4f4ff" stroke="#2424d4" stroke-width="1.5"/>
+  <text class="heading blue" x="844" y="549">One resulting commitment</text>
+  <text class="label" x="844" y="576">Certificate: 67 of 100 signatures</text>
+  <text class="note" x="171.5" y="540">State stays local</text>
+  <text class="note" x="171.5" y="566">between closes.</text>
+</svg>
