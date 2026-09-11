@@ -20,6 +20,7 @@ pub trait Journal<F: Family>: Sized + Send {
     type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error<F>>;
 
     /// Create/open a journal for syncing the given range.
+    ///
     /// The factory creates a context with the same identity for each recovery attempt.
     ///
     /// The implementation must:

@@ -172,7 +172,7 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// True while the journal may contain flushed nodes that have not yet been made durable.
+    /// True while flushed nodes or a started sync still require a full journal sync.
     pub(crate) journal_dirty: bool,
 
     /// The strategy to use for parallelization.
@@ -448,7 +448,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         };
 
         let mut journal = Box::new(
-            Journal::<E, D>::recover(context.child("merkle_journal"), journal_cfg, None).await?,
+            Journal::<E, D>::recover(context.child("merkle_journal"), journal_cfg, Some(u64::MAX))
+                .await?,
         );
         let bounds = journal.bounds();
         let recovered_size = F::to_nearest_size(Position::<F>::new(bounds.end));
@@ -677,8 +678,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
 
-        // Sync the journal to ensure durability before returning. This covers nodes appended by
-        // the flush above as well as nodes left non-durable by earlier [Self::flush] calls.
+        // Observe pending sync failures and persist nodes from this or earlier flushes.
         if self.journal_dirty {
             self.journal = self.journal.sync().await?;
             self.journal_dirty = false;
@@ -696,6 +696,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self = self.flush_internal().await?;
         let (journal, handle) = self.journal.start_sync().await?;
         self.journal = journal;
+        self.journal_dirty = true;
         Ok((self, handle))
     }
 
@@ -1069,7 +1070,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
     use std::{
@@ -1216,6 +1220,140 @@ mod tests {
         ));
 
         mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_sync_observes_clean_start_sync_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let cfg = test_config(&context);
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let merkle = drive_pending_syncs(
+                &pending,
+                Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                    context.child("seed"),
+                    &hasher,
+                    cfg.clone(),
+                ),
+            )
+            .await
+            .unwrap();
+
+            // Complete the data sync after the checkpoint has sampled its durable boundary.
+            let batch = merkle.new_batch().add(&hasher, &test_digest(0));
+            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let merkle = merkle.apply_batch(&batch).unwrap();
+            let (merkle, handle) = merkle.start_sync().await.unwrap();
+            assert!(!pending.lock().is_empty());
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            drop(merkle);
+
+            let merkle = drive_pending_syncs(
+                &pending,
+                Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                    context.child("reopen"),
+                    &hasher,
+                    cfg,
+                ),
+            )
+            .await
+            .unwrap();
+
+            // The reopened tree has no new nodes, but a started sync can still fail.
+            assert!(!merkle.journal_dirty);
+            let (merkle, handle) = merkle.start_sync().await.unwrap();
+            assert!(!pending.lock().is_empty());
+            fail_pending_syncs(&pending);
+            drop(handle);
+
+            // Full sync must report a failure from an unobserved completion handle.
+            let error = merkle.sync().await.expect_err("sync failure was lost");
+            assert!(matches!(
+                error,
+                Error::Journal(JError::Metadata(crate::metadata::Error::Runtime(_)))
+            ));
+        });
+    }
+
+    /// Build a tree whose nodes are all durable while the journal's recovery watermark still
+    /// lags. `start_sync` advances the watermark with the durable size sampled before its data
+    /// sync completes, so a delayed first sync leaves the watermark at 0. Returns the node count.
+    async fn seed_lagging_watermark(context: &deterministic::Context) -> u64 {
+        let pending = PendingSyncs::default();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let delayed = DelayedSyncContext {
+            inner: context.child("delayed"),
+            pending: pending.clone(),
+        };
+        let merkle = drive_pending_syncs(
+            &pending,
+            Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                delayed.child("seed"),
+                &hasher,
+                test_config(context),
+            ),
+        )
+        .await
+        .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let merkle = merkle.apply_batch(&batch).unwrap();
+        let size = *merkle.size();
+
+        // Flush first so the appends' own blob syncs complete, then start a sync whose data
+        // fsync is still in flight when the watermark samples the durable size.
+        let merkle = drive_pending_syncs(&pending, merkle.flush()).await.unwrap();
+        let (merkle, handle) = merkle.start_sync().await.unwrap();
+        drive_pending_syncs(&pending, handle).await.unwrap();
+        drop(merkle);
+
+        let lagging = persisted_watermark(context).await.unwrap();
+        assert!(
+            lagging < size,
+            "watermark {lagging} covers all {size} nodes"
+        );
+        size
+    }
+
+    /// Read the recovery watermark persisted for the test journal partition.
+    async fn persisted_watermark(context: &deterministic::Context) -> Option<u64> {
+        Journal::<_, Digest>::persisted_watermark(
+            context.child("probe"),
+            &test_config(context).journal_partition,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test_traced]
+    fn test_init_sync_publishes_watermark() {
+        deterministic::Runner::default().start(|context| async move {
+            let size = seed_lagging_watermark(&context).await;
+
+            // Reusing durable nodes must publish the recovery watermark without a later data sync.
+            let leaves = Location::<mmr::Family>::try_from(Position::new(size)).unwrap();
+            let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init_sync(
+                context.child("sync"),
+                SyncConfig {
+                    config: test_config(&context),
+                    range: non_empty_range!(Location::new(0), leaves),
+                    pinned_nodes: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(*merkle.size(), size);
+            drop(merkle);
+
+            assert_eq!(persisted_watermark(&context).await, Some(size));
+        });
     }
 
     #[test_traced]

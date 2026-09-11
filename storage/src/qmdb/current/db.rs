@@ -568,7 +568,7 @@ where
             std::future::pending::<()>().await;
         }
 
-        (self.any, _) = self.any.prune_log(prune_loc).await?;
+        self.any = self.any.prune_log(prune_loc).await?;
         self.any.update_metrics();
         self.update_metrics();
         Ok(self)

@@ -28,7 +28,6 @@ use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
 use crate::{
     Context,
-    journal::contiguous::variable::Config as JournalConfig,
     merkle::{Family, Location, Proof, batch, compact as compact_merkle},
     qmdb::{
         self, Error,
@@ -353,20 +352,46 @@ where
     /// Initialize from a retained witness.
     /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
     /// `None` selects the latest retained state.
+    ///
+    /// Fresh storage receives a durable bootstrap commit and witness.
+    #[boxed]
     pub async fn init(
         context: E,
         cfg: Config<C, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
-        let merkle = compact_merkle::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(
-            merkle,
+        let Config {
+            strategy,
+            witness: witness_config,
+            commit_codec_config,
+        } = cfg;
+        let mut merkle = compact_merkle::Merkle::new(strategy);
+        let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, V>>(
             context.child("witness"),
-            cfg.witness,
-            cfg.commit_codec_config,
+            witness_config,
             max_size,
+            &mut merkle,
+            &commit_codec_config,
+            Operation::<F, V>::Commit(None, Location::new(0))
+                .encode()
+                .to_vec(),
         )
-        .await
+        .await?;
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+            return Err(Error::DataCorrupted("last operation was not a commit"));
+        };
+        let last_commit_loc = witness.with(|w| w.size()) - 1;
+        let root = witness.with(|w| w.root);
+
+        Ok(Self {
+            merkle,
+            root,
+            last_commit_loc,
+            last_commit_metadata,
+            inactivity_floor_loc,
+            commit_codec_config,
+            witness,
+        })
     }
 
     fn encode_commit_op(metadata: Option<V::Value>, inactivity_floor_loc: Location<F>) -> Vec<u8> {
@@ -404,50 +429,6 @@ where
 
         let witness = witness::Store::from_import(journal, imported);
         let root = witness.with(|w| w.root);
-        Ok(Self {
-            merkle,
-            root,
-            last_commit_loc,
-            last_commit_metadata,
-            inactivity_floor_loc,
-            commit_codec_config,
-            witness,
-        })
-    }
-
-    /// Open a compact db from persisted compact state and rebuild its witness store.
-    ///
-    /// On first open, this bootstraps the initial commit and its witness so every later
-    /// initialization can assume the journal tip is a complete compact witness.
-    #[boxed]
-    pub(crate) async fn init_from_merkle(
-        mut merkle: compact_merkle::Merkle<F, H::Digest, S>,
-        witness_context: E,
-        witness_config: JournalConfig<()>,
-        commit_codec_config: C,
-        max_size: Option<Location<F>>,
-    ) -> Result<Self, Error<F>>
-    where
-        F: Family,
-        Operation<F, V>: Read<Cfg = C>,
-    {
-        let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, V>>(
-            witness_context,
-            witness_config,
-            max_size,
-            &mut merkle,
-            &commit_codec_config,
-            Operation::<F, V>::Commit(None, Location::new(0))
-                .encode()
-                .to_vec(),
-        )
-        .await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
-        let last_commit_loc = witness.with(|w| w.size()) - 1;
-        let root = witness.with(|w| w.root);
-
         Ok(Self {
             merkle,
             root,
@@ -678,7 +659,9 @@ where
 mod tests {
     use super::*;
     use crate::{
+        journal::contiguous::variable::Config as JournalConfig,
         merkle::{mmb, mmr},
+        metadata::{Config as MetadataConfig, Metadata},
         qmdb::{
             any::value::FixedEncoding, compact::witness, verify_proof,
             verify_proof_and_pinned_nodes,
@@ -694,7 +677,10 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize,
+        sequence::{U64, VecU64},
+    };
     use core::future::Future;
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -721,16 +707,22 @@ mod tests {
         witness_cfg: JournalConfig<()>,
         cap: Location<F>,
     ) -> Result<TestDb<F>, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(Sequential);
-        Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, (), Some(cap)).await
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
+        Db::init(context, cfg, Some(cap)).await
     }
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
         let witness_cfg = witness_config(partition, &context);
-        let merkle = crate::merkle::compact::Merkle::new(Sequential);
-        Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, (), None)
-            .await
-            .unwrap()
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
@@ -1020,12 +1012,16 @@ mod tests {
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
         let witness_cfg = witness_config(partition, context);
-        let merkle = crate::merkle::compact::Merkle::new(Sequential);
+        let cfg = Config {
+            strategy: Sequential,
+            witness: witness_cfg,
+            commit_codec_config: (),
+        };
         let context = DelayedSyncContext {
             inner: context.child(label),
             pending: pending.clone(),
         };
-        DelayedDb::init_from_merkle(merkle, context.child("witness"), witness_cfg, (), None)
+        DelayedDb::init(context, cfg, None)
     }
 
     /// Apply a single-append batch carrying `seed` as both value and metadata.
@@ -1956,10 +1952,24 @@ mod tests {
                     .await;
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
-                // The commit already made the state durable, so this is a no-op.
+                // Commit persists witness data; sync must also persist recovery metadata
                 let db = db.sync().await.unwrap();
                 db.root()
             };
+
+            // Check the watermark before reopening can rebuild the offsets journal
+            let metadata = Metadata::<_, u64, VecU64>::init(
+                context.child("checkpoint"),
+                MetadataConfig {
+                    partition: format!("{partition}-witness_offsets-metadata"),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            // Key 3 records the durable prefix: the bootstrap witness and the applied batch
+            assert_eq!(metadata.get(&3).copied().map(u64::from), Some(2));
+            drop(metadata);
 
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root);
@@ -2060,15 +2070,13 @@ mod tests {
             pinned_nodes.push(Sha256::fill(0xff));
             witness::tests::overwrite_tip(journal, op_bytes, size, pinned_nodes).await;
 
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-                None,
-            )
-            .await;
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened =
+                TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
         });
     }
@@ -2105,16 +2113,14 @@ mod tests {
             drop(journal);
 
             // The tip entry is intact, so reopen succeeds.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen"),
-                witness_config(partition, &context),
-                (),
-                None,
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened = TestDb::<mmr::Family>::init(context.child("reopen"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(reopened.target(), tip_target);
 
             // The corrupt entry fails the recovery before any truncation.
@@ -2132,16 +2138,14 @@ mod tests {
             ));
 
             // The newer history survives: reopen still lands on the original tip.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen2"),
-                witness_config(partition, &context),
-                (),
-                None,
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened = TestDb::<mmr::Family>::init(context.child("reopen2"), cfg, None)
+                .await
+                .unwrap();
             assert_eq!(reopened.target(), tip_target);
             reopened.destroy().await.unwrap();
         });
@@ -2169,15 +2173,13 @@ mod tests {
             drop(journal);
 
             // Reopen must fail rather than bootstrap a fresh db.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-                None,
-            )
-            .await;
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened =
+                TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("witness journal has no tip"))
@@ -2211,15 +2213,13 @@ mod tests {
             .to_vec();
             witness::tests::overwrite_tip(journal, bad_op, size, pinned_nodes).await;
 
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-                None,
-            )
-            .await;
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened =
+                TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("invalid compact witness"))
@@ -2250,16 +2250,14 @@ mod tests {
             pinned_nodes[0] = Sha256::fill(0xff);
             witness::tests::overwrite_tip(journal, op_bytes, size, pinned_nodes).await;
 
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(
-                merkle,
-                context.child("reopen_witness"),
-                witness_config(partition, &context),
-                (),
-                None,
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_config(partition, &context),
+                commit_codec_config: (),
+            };
+            let reopened = TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None)
+                .await
+                .unwrap();
             assert_ne!(reopened.target(), tampered_target);
             reopened.destroy().await.unwrap();
         });
@@ -2492,16 +2490,13 @@ mod tests {
             // section-aligned and never drops a partial section).
             let mut witness_cfg = witness_config("keyless-prune-rewind", &context);
             witness_cfg.items_per_section = NZU64!(1);
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let mut db: TestDb<mmr::Family> = Db::init_from_merkle(
-                merkle,
-                context.child("witness"),
-                witness_cfg.clone(),
-                (),
-                None,
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_cfg.clone(),
+                commit_codec_config: (),
+            };
+            let mut db: TestDb<mmr::Family> =
+                Db::init(context.child("db"), cfg, None).await.unwrap();
 
             // Commit A, B, C.
             let mut sizes = Vec::new();
@@ -2528,16 +2523,15 @@ mod tests {
             ));
 
             // Reopen at B after the durable prune.
-            let merkle = crate::merkle::compact::Merkle::new(Sequential);
-            let db: TestDb<mmr::Family> = Db::init_from_merkle(
-                merkle,
-                context.child("witness").with_attribute("index", 2),
-                witness_cfg.clone(),
-                (),
-                None,
-            )
-            .await
-            .unwrap();
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_cfg.clone(),
+                commit_codec_config: (),
+            };
+            let db: TestDb<mmr::Family> =
+                Db::init(context.child("db").with_attribute("index", 2), cfg, None)
+                    .await
+                    .unwrap();
             let db = {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(context.child("cap"), witness_cfg.clone(), sizes[1])

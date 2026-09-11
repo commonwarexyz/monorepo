@@ -319,10 +319,6 @@ pub enum Error<F: Family> {
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
-    /// The recovered database does not match the complete target supplied to initialization.
-    #[error("database does not match initialization target")]
-    InitializationTargetMismatch,
-
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 

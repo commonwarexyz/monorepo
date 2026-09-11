@@ -28,6 +28,11 @@
 //! between-cycle faulted attempt runs the reset itself so its staged clear can crash anywhere,
 //! and the cycle's clean recovery then checks the staged-clear contract (see [Recovery]).
 //!
+//! `CrashAtMost` markers end a cycle like `Crash`, but route the next recovery through
+//! `init_at_most` on the crashed image: the between-cycle faulted attempt runs the bounded
+//! initialization so its truncation can crash anywhere, and the cycle's clean recovery reruns
+//! it and checks the capped contract (see [Recovery::AtMost]).
+//!
 //! # Expected
 //!
 //! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
@@ -141,6 +146,9 @@ enum JournalOperation {
     Crash,
     /// End the current cycle and recover through an `init_at_size` reset (see [Recovery::Reset]).
     Reset { size: u64, complete: bool },
+    /// End the current cycle by crashing and recover through `init_at_most` (see
+    /// [Recovery::AtMost]).
+    CrashAtMost { size: u64 },
 }
 
 /// Fuzz input containing fault injection parameters and operations.
@@ -326,6 +334,23 @@ impl Expected {
     /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not certain.
     fn prune_failed(&mut self, ceiling: u64) {
         self.max_prune = self.max_prune.max(ceiling);
+    }
+
+    /// The cap a `CrashAtMost` marker with raw `size` selects: at least the pruning ceiling, so
+    /// a clean bounded recovery is never asked for a pruned position, and at most one past the
+    /// size ceiling, so the cap sometimes exceeds everything the crash could have left.
+    fn bounded_target(&self, size: u64) -> u64 {
+        self.max_prune + size % (self.max_size.saturating_sub(self.max_prune) + 2)
+    }
+
+    /// Bounds after `init_at_most(target)` recovers the crashed image, whether or not a faulted
+    /// attempt at the same cap truncated first: the cap bounds the recovered size, and every
+    /// position the crash made durable survives up to the cap.
+    fn capped(&self, target: u64) -> Self {
+        let mut capped = self.clone();
+        capped.durable_len = self.durable_len.min(target);
+        capped.max_size = self.max_size.min(target);
+        capped
     }
 }
 
@@ -827,6 +852,11 @@ async fn run_ops<J: FuzzJournal>(
                     drop(synced);
                     match J::init_at_most(ctx.child("capped"), cfg.clone(), target).await {
                         Ok(journal) => {
+                            assert_eq!(
+                                journal.bounds().end,
+                                target.min(bounds.end),
+                                "bounded initialization landed off its cap"
+                            );
                             expected.reopened(journal.bounds().end);
                             journal
                         }
@@ -945,7 +975,9 @@ async fn run_ops<J: FuzzJournal>(
 
             // `split_into_cycles` strips the cycle markers. A stray one defensively ends the
             // cycle.
-            JournalOperation::Crash | JournalOperation::Reset { .. } => return,
+            JournalOperation::Crash
+            | JournalOperation::Reset { .. }
+            | JournalOperation::CrashAtMost { .. } => return,
         };
     }
 }
@@ -961,6 +993,19 @@ enum Recovery {
     /// the prior state (the clear intent never became durable) or the completed reset (a
     /// durable intent finished during `init`), never a mix.
     Reset { target: u64, complete: bool },
+    /// The between-cycle faulted attempt ran `init_at_most` on the crashed image, so its
+    /// truncation may have crashed anywhere. The recovery reruns `init_at_most` at the same cap
+    /// and must land within [Expected::capped]. `size` is the marker's raw value, resolved
+    /// against the crash-time bounds by [Expected::bounded_target].
+    AtMost { size: u64 },
+}
+
+/// The initializer a between-cycle faulted attempt runs on the crashed image.
+#[derive(Clone, Copy)]
+enum Attempt {
+    Init,
+    Reset(u64),
+    AtMost(u64),
 }
 
 /// One crash cycle: how to recover the crashed journal and the ops to run before the next crash.
@@ -1024,6 +1069,17 @@ where
                 }
                 journal
             }
+
+            // A clean bounded recovery caps whatever the crash and the faulted bounded attempt
+            // left, keeping every durable position below the cap.
+            Recovery::AtMost { size } => {
+                let target = expected.bounded_target(size);
+                let journal = J::init_at_most(ctx.child("journal"), cfg, target)
+                    .await
+                    .expect("clean init_at_most should succeed");
+                assert_matches_expected(&journal, &expected.capped(target)).await;
+                journal
+            }
         };
 
         let mut expected = to_expected(&journal).await;
@@ -1047,14 +1103,15 @@ where
 ///
 /// Each restart draws fresh fault selectors from the runtime rng carried by the
 /// checkpoint, so a multi-cycle run can hit a different mutation class (write, sync,
-/// resize, or remove) at each recovery. With `reset`, the attempt runs
-/// `init_at_size(target)` instead of `init`, planting a staged clear that the crash can
-/// interrupt anywhere: before the intent is durable, mid-clear, or after completion.
+/// resize, or remove) at each recovery. [Attempt::Reset] runs `init_at_size(target)`
+/// instead of `init`, planting a staged clear that the crash can interrupt anywhere: before
+/// the intent is durable, mid-clear, or after completion. [Attempt::AtMost] runs
+/// `init_at_most(target)` on the crashed image, so its truncation can crash anywhere.
 fn faulted_restart<J: FuzzJournal + Send + 'static>(
     checkpoint: deterministic::Checkpoint,
     partition: String,
     params: Params,
-    reset: Option<u64>,
+    attempt: Attempt,
 ) -> deterministic::Checkpoint
 where
     J::Config: Send,
@@ -1064,16 +1121,18 @@ where
         async move {
             let cfg = J::config(&partition, &ctx, &params);
             let ctx = ctx.child("faulted_recovery");
-            match reset {
-                Some(target) => J::init_at_size(ctx, cfg, target).await,
-                None => J::init(ctx, cfg).await,
+            match attempt {
+                Attempt::Init => J::init(ctx, cfg).await,
+                Attempt::Reset(target) => J::init_at_size(ctx, cfg, target).await,
+                Attempt::AtMost(target) => J::init_at_most(ctx, cfg, target).await,
             }
         }
     })
 }
 
-/// Split the operation stream into one [Cycle] per crash, cutting at each `Crash` or `Reset`
-/// marker. A `Reset` marker selects `init_at_size` recovery for the cycle that follows it.
+/// Split the operation stream into one [Cycle] per crash, cutting at each `Crash`, `Reset` or
+/// `CrashAtMost` marker. A `Reset` marker selects `init_at_size` recovery for the cycle that
+/// follows it, and a `CrashAtMost` marker selects `init_at_most` recovery.
 /// Always returns at least one cycle (possibly with no ops), so a bare recovery is still
 /// exercised.
 fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Cycle> {
@@ -1087,6 +1146,7 @@ fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Cycle> {
                 target: size % MAX_RESET_SIZE,
                 complete: *complete,
             },
+            JournalOperation::CrashAtMost { size } => Recovery::AtMost { size: *size },
             _ => {
                 current.push(op.clone());
                 continue;
@@ -1134,13 +1194,14 @@ where
             run_cycle::<J>(runner, expected, cycle.clone(), partition.clone(), params);
         expected = next;
 
-        // The faulted attempt before a reset cycle runs the reset itself, so its staged clear
-        // can crash at any point.
-        let reset = match cycles.get(i + 1).map(|cycle| cycle.recovery) {
-            Some(Recovery::Reset { target, .. }) => Some(target),
-            _ => None,
+        // The faulted attempt before a reset or bounded cycle runs that initializer itself, so
+        // its staged clear or truncation can crash at any point.
+        let attempt = match cycles.get(i + 1).map(|cycle| cycle.recovery) {
+            Some(Recovery::Reset { target, .. }) => Attempt::Reset(target),
+            Some(Recovery::AtMost { size }) => Attempt::AtMost(expected.bounded_target(size)),
+            _ => Attempt::Init,
         };
-        let checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, reset);
+        let checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, attempt);
         runner = deterministic::Runner::from(checkpoint);
     }
 

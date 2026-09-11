@@ -570,16 +570,27 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 0
             };
             let writer = pending.get_mut(&blob).expect("suspect blob is present");
+            let required_items = ceiling
+                .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
+                .min(items_per_blob);
+            let limit = if max_size.is_some() {
+                required_items
+                    .saturating_mul(Inner::<E, A>::CHUNK_SIZE_U64)
+                    .min(writer.size())
+            } else {
+                writer.size()
+            };
             let recoverable = writer
-                .recoverable_prefix_len(acknowledged, cfg.replay_buffer, ReadOptions::default())
+                .recoverable_prefix_len_at_most(
+                    acknowledged,
+                    limit,
+                    cfg.replay_buffer,
+                    ReadOptions::default(),
+                )
                 .await?;
-            let valid = Inner::<E, A>::items_to_bytes(recoverable / Inner::<E, A>::CHUNK_SIZE_U64)?;
-            let required = Inner::<E, A>::items_to_bytes(
-                ceiling
-                    .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
-                    .min(items_per_blob),
-            )?;
-            if valid == writer.size() || (max_size.is_some() && valid >= required) {
+            let valid_items = recoverable / Inner::<E, A>::CHUNK_SIZE_U64;
+            let valid = Inner::<E, A>::items_to_bytes(valid_items)?;
+            if valid == writer.size() || (max_size.is_some() && valid_items >= required_items) {
                 continue;
             }
 
@@ -612,7 +623,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             checkpoint
                 .watermark()
                 .map(|watermark| watermark.min(ceiling)),
-            ceiling,
         )?;
 
         Ok(Self {
@@ -900,10 +910,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         items_per_blob: u64,
         pruning_boundary: u64,
         watermark_hint: Option<u64>,
-        ceiling: u64,
     ) -> Result<RecoveredBounds, Error> {
         let (size, has_gap) =
-            Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary, ceiling)?;
+            Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary)?;
 
         let recovery_watermark = match watermark_hint {
             Some(watermark) if watermark > size => {
@@ -996,12 +1005,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         items_per_blob: u64,
         pruning_boundary: u64,
         blob: u64,
-        ceiling: u64,
     ) -> Result<BlobFill, Error> {
         let len = pending
             .get(&blob)
-            .map_or(0, |writer| writer.size() / Self::CHUNK_SIZE_U64)
-            .min(ceiling.saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?));
+            .map_or(0, |writer| writer.size() / Self::CHUNK_SIZE_U64);
         // A blob's capacity is `items_per_blob`, unless the pruning boundary falls mid-blob
         // (from `init_at_size`), in which case the skipped prefix reduces it.
         let start = super::blob_first_position(blob, items_per_blob)?;
@@ -1024,7 +1031,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         pending: &BTreeMap<u64, PagedRecovery<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        ceiling: u64,
     ) -> Result<(u64, bool), Error> {
         let oldest = pending.keys().next().copied();
         let newest = pending.keys().next_back().copied();
@@ -1035,8 +1041,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         let mut size = pruning_boundary;
         for blob in oldest..=newest {
-            let fill =
-                Self::classify_fill(pending, items_per_blob, pruning_boundary, blob, ceiling)?;
+            let fill = Self::classify_fill(pending, items_per_blob, pruning_boundary, blob)?;
             match fill {
                 // Complete: count its items and keep walking.
                 BlobFill::Full { len } => {
@@ -1977,7 +1982,9 @@ impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recover
     }
 
     async fn finish(self, size: u64) -> Result<Self::Journal, Error> {
-        Ok(Journal(Box::new(Self::publish(self, size).await?)))
+        Journal(Box::new(Self::publish(self, size).await?))
+            .commit()
+            .await
     }
 }
 
@@ -2010,8 +2017,8 @@ mod tests {
         buffer::paged::{Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
-            drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, VisibleContext, WriteFaultContext,
+            WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
@@ -2026,8 +2033,17 @@ mod tests {
                 .expect("recovery watermark must exist after init")
         }
 
-        /// Reopen a shorter prefix for recovery/fault fixtures, releasing the previous owner.
+        /// Sync, then reopen a shorter prefix for recovery/fault fixtures.
         pub(in super::super) async fn test_truncate(
+            self: Box<Self>,
+            cap: u64,
+        ) -> Result<Box<Self>, Error> {
+            self.sync().await?.test_reopen_at_most(cap).await
+        }
+
+        /// Reopen a shorter prefix without syncing first, releasing the previous owner. Faults
+        /// armed by the caller therefore reach recovery rather than the closing sync.
+        pub(in super::super) async fn test_reopen_at_most(
             self: Box<Self>,
             cap: u64,
         ) -> Result<Box<Self>, Error> {
@@ -2039,10 +2055,20 @@ mod tests {
                 write_buffer,
                 replay_buffer: write_buffer,
             };
-            _ = self.sync().await?;
+            drop(self);
             let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
             let recovery = Recovery::<E, A>::open(context, cfg, checkpoint, Some(cap)).await?;
             Ok(Box::new(recovery.publish(cap).await?))
+        }
+    }
+
+    impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
+        /// Read the recovery watermark persisted for `partition` without opening the journal.
+        pub(crate) async fn persisted_watermark(
+            context: E,
+            partition: &str,
+        ) -> Result<Option<u64>, Error> {
+            Ok(Checkpoint::open(context, partition).await?.watermark())
         }
     }
 
@@ -2066,6 +2092,94 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test]
+    fn test_fixed_bounded_recovery_read_count() {
+        for count in [257u64, 4097] {
+            for capacity in [10_000, u64::MAX] {
+                deterministic::Runner::default().start(|context| async move {
+                    let (context, recordings) = RecordingContext::new(context);
+                    let mut cfg = test_cfg(&context, capacity.try_into().unwrap());
+                    cfg.page_cache = CacheRef::from_pooler(&context, NZU16!(256), NZUsize!(3));
+                    cfg.replay_buffer = NZUsize!(1);
+                    let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    for value in 0..count {
+                        (journal, _) = journal.append(&value).await.unwrap();
+                    }
+                    drop(journal.sync().await.unwrap());
+                    for cap in [
+                        None,
+                        Some(33),
+                        Some(32),
+                        Some(count),
+                        Some(count + 1),
+                        Some(u64::MAX),
+                    ] {
+                        let checkpoint =
+                            Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                                .await
+                                .unwrap();
+                        assert_eq!(checkpoint.watermark(), Some(count));
+                        recordings.clear();
+                        let recovery = Recovery::<_, u64>::open(
+                            context.child("recovery"),
+                            cfg.clone(),
+                            checkpoint,
+                            cap,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(recovery.size(), count.min(cap.unwrap_or(count)));
+                        assert_eq!(recovery.pending.get(&0).unwrap().size(), count * 8);
+                        let expected = if cap == Some(32) { 1 } else { 2 };
+                        assert_eq!(
+                            recordings.snapshot().reads.len(),
+                            expected,
+                            "count={count}, capacity={capacity}, cap={cap:?}"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixed_recovery_large_capacity() {
+        for count in [0, 1] {
+            for cap in [
+                None,
+                Some(0),
+                Some(1),
+                Some(u64::MAX / 8 + 1),
+                Some(u64::MAX),
+            ] {
+                deterministic::Runner::default().start(|context| async move {
+                    let cfg = test_cfg(&context, NZU64!(u64::MAX));
+                    let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    for value in 0..count {
+                        (journal, _) = journal.append(&value).await.unwrap();
+                    }
+                    drop(journal.sync().await.unwrap());
+                    let journal = match cap {
+                        None => Journal::<_, u64>::init(context.child("reopen"), cfg).await,
+                        Some(cap) => {
+                            Journal::<_, u64>::init_at_most(context.child("reopen"), cfg, cap).await
+                        }
+                    }
+                    .unwrap();
+                    let retained = count.min(cap.unwrap_or(u64::MAX));
+                    assert_eq!(journal.bounds(), 0..retained);
+                    if retained != 0 {
+                        assert_eq!(journal.read(0).await.unwrap(), 0);
+                    }
+                });
+            }
+        }
     }
 
     #[test_traced]
@@ -2611,7 +2725,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let faults = WriteFaults::default();
-            let cfg = test_cfg(&context, NZU64!(100));
+
+            // Two items per page make the two-item cap page aligned, so the armed write fault can
+            // only reach the checkpoint rewrite that lowers the watermark.
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, NZU16!(16), PAGE_CACHE_SIZE),
+                ..test_cfg(&context, NZU64!(100))
+            };
             let make = |faults: WriteFaults| {
                 Inner::<_, u64>::init(
                     WriteFaultContext {
@@ -2629,10 +2749,10 @@ mod tests {
             let journal = journal.sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
 
-            // Truncate must durably lower the watermark before touching blob state. When the
-            // lowering fails, the truncate fails with the blobs intact.
+            // Recovery must durably lower the watermark before touching blob state. When the
+            // lowering fails, the reopen fails with the blobs intact.
             faults.arm();
-            assert!(journal.test_truncate(2).await.is_err());
+            assert!(journal.test_reopen_at_most(2).await.is_err());
             faults.disarm();
 
             let journal = make(faults).await.unwrap();
@@ -4168,6 +4288,15 @@ mod tests {
 
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // A bound does not excuse the overlong blob, whether it cuts inside the blob or at
+            // its boundary.
+            for cap in [3, 5] {
+                let result =
+                    Journal::<_, Digest>::init_at_most(context.child("capped"), cfg.clone(), cap)
+                        .await;
+                assert!(matches!(result, Err(Error::Corruption(_))), "cap {cap}");
+            }
         });
     }
 
@@ -4448,6 +4577,187 @@ mod tests {
                 .expect("failed to re-initialize journal");
             journal.destroy().await.unwrap();
         });
+    }
+
+    /// Reopen at a page-aligned bound, append over the freed pages, then crash with the appends
+    /// retained and any unsynced resize lost. Recovery must not join the new pages with the
+    /// discarded suffix.
+    #[test_traced]
+    fn test_fixed_journal_init_at_most_truncation_survives_crash() {
+        // Two digests per page make the four-item bound page aligned. The two-page write buffer
+        // floor sends a five-item append down the direct path: four items land in two full pages
+        // and the fifth stays buffered, so the old pages behind them are never rewritten.
+        const PAGE_SIZE: NonZeroU16 = NZU16!(64);
+        const BOUND: u64 = 4;
+        fn cfg(pooler: &impl BufferPooler) -> Config {
+            Config {
+                partition: "init-at-most-truncation-crash".into(),
+                items_per_blob: NZU64!(100),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(2048),
+            }
+        }
+        let appended: Vec<Digest> = (100..105u64).map(test_digest).collect();
+
+        let executor = deterministic::Runner::default();
+        let (appended, checkpoint) = executor.start_and_recover(|context| async move {
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg(&context))
+                .await
+                .unwrap();
+            for i in 0..12u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Keep unsynced writes and drop unsynced resizes at the crash.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            let journal =
+                Journal::<_, Digest>::init_at_most(context.child("cap"), cfg(&context), BOUND)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 0..BOUND);
+            let (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            drop(journal);
+            appended
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal = Journal::<_, Digest>::init(context.child("recover"), cfg(&context))
+                .await
+                .unwrap();
+            let size = journal.size();
+            assert!(
+                (BOUND..=BOUND + appended.len() as u64).contains(&size),
+                "recovered size {size} is not a prefix of the new history"
+            );
+            for pos in 0..BOUND {
+                assert_eq!(journal.read(pos).await.unwrap(), test_digest(pos));
+            }
+            for pos in BOUND..size {
+                assert_eq!(
+                    journal.read(pos).await.unwrap(),
+                    appended[(pos - BOUND) as usize],
+                    "content at retained position {pos} was never written there"
+                );
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Repair a torn tail at a page-aligned item boundary during init, append over the freed
+    /// pages, then crash with the appends retained and any unsynced resize lost. Recovery must
+    /// not join the new pages with the discarded suffix. The default fault arm drops the appends
+    /// too, so recovery must land exactly on the repaired size.
+    #[test_traced]
+    fn test_fixed_journal_repair_truncation_survives_crash() {
+        // Two digests per page make the four-item repair target page aligned. The two-page write
+        // buffer floor sends a five-item append down the direct path: four items land in two full
+        // pages and the fifth stays buffered, so the old pages behind them are never rewritten.
+        const PAGE_SIZE: NonZeroU16 = NZU16!(64);
+        const REPAIRED: u64 = 4;
+        fn cfg(pooler: &impl BufferPooler) -> Config {
+            Config {
+                partition: "repair-truncation-crash".into(),
+                items_per_blob: NZU64!(100),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(2048),
+            }
+        }
+
+        for retained in [true, false] {
+            let appended: Vec<Digest> = (100..105u64).map(test_digest).collect();
+
+            let executor = deterministic::Runner::default();
+            let (appended, checkpoint) = executor.start_and_recover(|context| async move {
+                let cfg = cfg(&context);
+                let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..12u64 {
+                    (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                }
+
+                // Commit leaves the watermark behind, so init scans the whole blob.
+                let journal = journal.commit().await.unwrap();
+                drop(journal);
+
+                // Tear page 2 of the six-page blob. Init stops at the hole and repairs the blob
+                // to the four items on pages 0 and 1, leaving pages 3 to 5 behind the target.
+                corrupt_page(
+                    &context,
+                    &blob_partition(&cfg),
+                    &0u64.to_be_bytes(),
+                    2,
+                    PAGE_SIZE.get() as u64,
+                )
+                .await;
+
+                // Keep unsynced writes and drop unsynced resizes at the crash. The default
+                // drops both.
+                *context.storage_fault_config().write() = if retained {
+                    deterministic::FaultConfig {
+                        write_rate: Some(deterministic::WriteConfig {
+                            failure_rate: probability!(0.0),
+                            retention_rate: probability!(1.0),
+                            mode: deterministic::PartialWriteMode::Prefix,
+                        }),
+                        resize_rate: Some(deterministic::ResizeConfig {
+                            failure_rate: probability!(0.0),
+                            partial_rate: probability!(0.0),
+                        }),
+                        ..Default::default()
+                    }
+                } else {
+                    deterministic::FaultConfig::default()
+                };
+                let journal = Journal::<_, Digest>::init(context.child("repair"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 0..REPAIRED);
+                let (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+                drop(journal);
+                appended
+            });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let journal = Journal::<_, Digest>::init(context.child("recover"), cfg(&context))
+                    .await
+                    .unwrap();
+                let size = journal.size();
+                let kept = if retained { appended.len() as u64 } else { 0 };
+                assert!(
+                    (REPAIRED..=REPAIRED + kept).contains(&size),
+                    "recovered size {size} is not a prefix of the new history"
+                );
+                for pos in 0..REPAIRED {
+                    assert_eq!(journal.read(pos).await.unwrap(), test_digest(pos));
+                }
+                for pos in REPAIRED..size {
+                    assert_eq!(
+                        journal.read(pos).await.unwrap(),
+                        appended[(pos - REPAIRED) as usize],
+                        "content at retained position {pos} was never written there"
+                    );
+                }
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 
     #[test_traced]
@@ -4733,7 +5043,8 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(writer.size(), 16);
-            writer.truncate(20).await.unwrap();
+            writer.append(&[0; 4]).await.unwrap();
+            assert_eq!(writer.size(), 20);
             writer.sync().await.unwrap();
             drop(writer);
 
@@ -7339,5 +7650,69 @@ mod tests {
 
             journal.destroy().await.unwrap();
         });
+    }
+
+    #[test]
+    fn test_unbounded_recovery_finish_is_durable() {
+        fn config(context: &deterministic::Context, page_size: NonZeroU16) -> Config {
+            let mut cfg = test_cfg(context, NZU64!(10));
+            cfg.page_cache = CacheRef::from_pooler(context, page_size, NZUsize!(16));
+            cfg.write_buffer = NZUsize!(8);
+            cfg
+        }
+        for page_size in [NZU16!(8), NZU16!(16)] {
+            let ((), checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let cfg = config(&context, page_size);
+                    let visible = VisibleContext::new(context.child("visible"));
+                    let journal = Journal::<_, u64>::init(visible.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                    let (journal, _) = journal.append(&42).await.unwrap();
+                    let (journal, reader) = journal.snapshot().await.unwrap();
+                    assert_eq!(reader.read(0).await.unwrap(), 42);
+                    drop(reader);
+                    drop(journal);
+
+                    let recovery = <Journal<_, u64> as authenticated::Backing<_>>::recover(
+                        visible.child("recover"),
+                        cfg.clone(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(authenticated::BackingRecovery::bounds(&recovery), 0..1);
+                    assert_eq!(
+                        authenticated::BackingRecovery::read(&recovery, 0)
+                            .await
+                            .unwrap(),
+                        42
+                    );
+
+                    // The retained page is visible across opens but has not survived a sync.
+                    let (blob, durable_len) = context
+                        .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                        .await
+                        .unwrap();
+                    assert_eq!(durable_len, 0);
+                    drop(blob);
+
+                    let journal = authenticated::BackingRecovery::finish(recovery, 1)
+                        .await
+                        .unwrap();
+                    assert_eq!(journal.read(0).await.unwrap(), 42);
+                    drop(journal);
+                    drop(visible);
+                });
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let cfg = config(&context, page_size);
+                let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 0..1);
+                assert_eq!(journal.read(0).await.unwrap(), 42);
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 }

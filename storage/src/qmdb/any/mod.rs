@@ -2709,100 +2709,146 @@ pub(crate) mod test {
         });
     }
 
-    /// `prune()` must advance the bitmap only as far as the authenticated journal actually
-    /// pruned. Journal pruning is section-granular while bitmap pruning rounds to chunk
-    /// boundaries, so a coarse `items_per_section` can leave the journal retaining from the
-    /// start while the bitmap has already crossed the next chunk boundary. A subsequent
-    /// bounded initialization at a still-retained early commit must still succeed.
     #[test_traced("INFO")]
-    fn test_any_prune_keeps_bitmap_aligned_with_journal() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Bitmap chunk size in bits. The bug requires the bitmap to round across at least
-            // one chunk boundary while the journal cannot prune any section.
-            const BITMAP_CHUNK_BITS: u64 =
-                commonware_utils::bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
-            // Items-per-section is chosen so that no full section fits in the test's op count,
-            // forcing the journal to retain from 0 even when prune is requested past the first
-            // bitmap chunk boundary.
-            const ITEMS_PER_SECTION: u64 = 2048;
-            const { assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS) };
-
+    fn test_any_bounded_reopen_below_pruned_bitmap() {
+        deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
-            let mut cfg = variable_db_config::<OneCap>("rg", &ctx);
-            cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
-
-            let db: UnorderedVariable =
-                UnorderedVariableDb::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
-
+            let mut cfg = variable_db_config::<OneCap>("coarse-prune", &ctx);
+            cfg.journal_config.items_per_section = NZU64!(2048);
+            let db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
+                .await
+                .unwrap();
             let (db, _) = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
-            let initialization_bound = db.size();
-            // Keep the selected commit below the bitmap chunk boundary that pruning must preserve.
-            assert!(
-                *initialization_bound < BITMAP_CHUNK_BITS,
-                "initialization_bound {initialization_bound:?} must be < {BITMAP_CHUNK_BITS} for \
-                 the bug to manifest"
-            );
-            let root_at_target = db.root();
-
-            let (db, _) = commit_writes(
-                db,
-                (0..700).map(|i| (key(i), Some(val(1_000 + i)))),
-                None,
-            )
-            .await;
-            let (db, _) = commit_writes(
-                db,
-                (0..700).map(|i| (key(i), Some(val(10_000 + i)))),
-                None,
-            )
-            .await;
-
-            // Pre-recovery size must actually exceed the initialization target so the recovery is
-            // not a no-op.
-            let pre_prune_size = db.size();
-            assert!(pre_prune_size > initialization_bound);
-
+            let target = db.size();
+            let root = db.root();
+            let (db, _) =
+                commit_writes(db, (0..700).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
+            let (db, _) =
+                commit_writes(db, (0..700).map(|i| (key(i), Some(val(10_000 + i)))), None).await;
             let prune_loc = Location::new(600);
-            // prune_loc must cross at least one bitmap chunk boundary; otherwise the buggy
-            // bitmap prune would correctly stay at 0 and the test would pass even unfixed.
-            assert!(
-                *prune_loc > BITMAP_CHUNK_BITS,
-                "prune_loc {prune_loc:?} must exceed one bitmap chunk ({BITMAP_CHUNK_BITS} bits)"
-            );
-            // prune_loc must lie within the first journal section so the journal cannot
-            // prune any section, leaving bounds.start at 0 to expose the bitmap drift.
-            assert!(
-                *prune_loc < ITEMS_PER_SECTION,
-                "prune_loc {prune_loc:?} must be < {ITEMS_PER_SECTION} so the journal retains section 0"
-            );
             assert!(db.inactivity_floor_loc() >= prune_loc);
-
+            let live_root = db.root();
             let db = db.prune(prune_loc).await.unwrap();
+            assert_eq!(db.root(), live_root);
+            assert_eq!(db.bounds().start, Location::new(0));
+            assert!(*target < db.bitmap.pruned_bits());
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
+            drop(db.sync().await.unwrap());
 
-            // Journal could not prune any section, so it still retains from 0. The bitmap
-            // must therefore also remain at 0.
-            let bounds = db.bounds();
-            assert_eq!(bounds.start, Location::new(0));
-            assert_eq!(
-                db.bitmap.pruned_bits(),
-                0,
-                "bitmap pruned past journal retained start"
-            );
+            for cap in [Some(target), None] {
+                let db = UnorderedVariable::init(ctx.child("reopen"), cfg.clone(), cap)
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), target);
+                assert_eq!(db.root(), root);
+                for i in 0..100 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
+                }
+                assert_eq!(db.get(&key(100)).await.unwrap(), None);
+                drop(db);
+            }
+        });
+    }
 
-            // Reopen at the still-retained early commit must succeed and restore visible
-            // state (root match implies the snapshot was rebuilt correctly).
-            _ = db.sync().await.unwrap();
-            let db = UnorderedVariable::init(
-                ctx.child("cap"),
-                cfg.clone(),
-                Some(initialization_bound),
-            )
-            .await.unwrap();
-            assert_eq!(db.size(), initialization_bound);
-            assert_eq!(db.root(), root_at_target);
+    /// Valid children of an applied parent retain their state across bitmap pruning,
+    /// including children merkleized before pruning and children constructed afterward.
+    #[test_traced("INFO")]
+    fn test_any_live_child_across_coarse_prune() {
+        deterministic::Runner::default().start(|context| async move {
+            const CHUNK_BITS: u64 =
+                commonware_utils::bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+            const { assert!(CHUNK_BITS <= 600) };
 
-            db.destroy().await.unwrap();
+            for child_after_prune in [false, true] {
+                let mut reference = None;
+                for prune in [false, true] {
+                    let suffix = format!("any-live-child-{child_after_prune}-{prune}");
+                    let ctx = context.child("db").with_attribute("case", &suffix);
+                    let mut cfg = variable_db_config::<OneCap>(&suffix, &ctx);
+                    cfg.journal_config.items_per_section = NZU64!(2048);
+                    let db = UnorderedVariable::init(ctx.child("storage"), cfg, None)
+                        .await
+                        .unwrap();
+                    let (mut db, _) =
+                        commit_writes(db, (0..700).map(|i| (key(i), Some(val(i)))), None).await;
+
+                    let mut parent = db.new_batch();
+                    for i in 0..700 {
+                        parent = parent.write(key(i), (i != 1).then(|| val(10_000 + i)));
+                    }
+                    let parent = parent.merkleize(&db, None).await.unwrap();
+                    (db, _) = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+                    db = db.commit().await.unwrap();
+
+                    let make_child = || {
+                        parent
+                            .new_batch::<Sha256>()
+                            .write(key(0), Some(val(20_000)))
+                            .write(key(1), Some(val(20_001)))
+                            .write(key(2), None)
+                    };
+                    let child = if child_after_prune {
+                        None
+                    } else {
+                        Some(make_child().merkleize(&db, None).await.unwrap())
+                    };
+
+                    let prune_loc = Location::new(600);
+                    assert!(db.inactivity_floor_loc() >= prune_loc);
+                    let parent_root = db.root();
+                    if prune {
+                        db = db.prune(prune_loc).await.unwrap();
+                    }
+                    assert_eq!(db.root(), parent_root);
+                    assert_eq!(db.bounds().start, Location::new(0));
+                    assert_eq!(
+                        db.bitmap.pruned_bits(),
+                        if prune {
+                            600 / CHUNK_BITS * CHUNK_BITS
+                        } else {
+                            0
+                        },
+                    );
+
+                    let child = match child {
+                        Some(child) => child,
+                        None => make_child().merkleize(&db, None).await.unwrap(),
+                    };
+                    for (i, expected) in [
+                        (0, Some(val(20_000))),
+                        (1, Some(val(20_001))),
+                        (2, None),
+                        (3, Some(val(10_003))),
+                        (700, None),
+                    ] {
+                        assert_eq!(child.get(&key(i), &db).await.unwrap(), expected);
+                    }
+                    let child_root = child.root();
+                    let operations = child.operations();
+                    (db, _) = db.apply_batch(child).await.unwrap();
+                    assert_eq!(db.root(), child_root);
+
+                    let mut values = Vec::new();
+                    for i in 0..=700 {
+                        let expected = match i {
+                            0 => Some(val(20_000)),
+                            1 => Some(val(20_001)),
+                            2 | 700 => None,
+                            _ => Some(val(10_000 + i)),
+                        };
+                        let actual = db.get(&key(i)).await.unwrap();
+                        assert_eq!(actual, expected);
+                        values.push(actual);
+                    }
+                    let observed = (db.root(), operations, values);
+                    if let Some(reference) = &reference {
+                        assert_eq!(&observed, reference);
+                    } else {
+                        reference = Some(observed);
+                    }
+                    db.destroy().await.unwrap();
+                }
+            }
         });
     }
 
