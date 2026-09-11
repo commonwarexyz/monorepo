@@ -155,6 +155,18 @@ impl IoBufs {
         }
     }
 
+    /// Returns the readable chunk at the given index without advancing the buffers.
+    ///
+    /// Returns `None` when `index` is greater than or equal to [`Self::chunk_count`].
+    pub fn chunk_at(&self, index: usize) -> Option<&[u8]> {
+        match &self.inner {
+            IoBufsInner::Single(buf) => (index == 0 && !buf.is_empty()).then(|| buf.as_ref()),
+            IoBufsInner::Pair(bufs) => bufs.get(index).map(AsRef::as_ref),
+            IoBufsInner::Triple(bufs) => bufs.get(index).map(AsRef::as_ref),
+            IoBufsInner::Chunked(bufs) => bufs.get(index).map(AsRef::as_ref),
+        }
+    }
+
     /// Whether all buffers are empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -1930,6 +1942,34 @@ mod tests {
             .chunk_count(),
             4
         );
+    }
+
+    #[test]
+    fn test_iobufs_chunk_at() {
+        let chunks = [b"ab".as_slice(), b"cd", b"ef", b"gh", b"ij"];
+        for count in 0..=chunks.len() {
+            let mut bufs = IoBufs::from(
+                chunks[..count]
+                    .iter()
+                    .map(|chunk| IoBuf::from(*chunk))
+                    .collect::<Vec<_>>(),
+            );
+            for (index, chunk) in chunks[..count].iter().enumerate() {
+                assert_eq!(bufs.chunk_at(index), Some(*chunk));
+            }
+            assert_eq!(bufs.chunk_at(count), None);
+            assert_eq!(bufs.chunk_at(usize::MAX), None);
+            assert_eq!(bufs.len(), count * 2);
+
+            // Indexing follows the readable chunks after partial and whole
+            // chunks are consumed, including representation transitions.
+            if count > 0 {
+                bufs.advance(1);
+                assert_eq!(bufs.chunk_at(0), Some(b"b".as_slice()));
+                bufs.advance(1);
+                assert_eq!(bufs.chunk_at(0), chunks[1..count].first().copied());
+            }
+        }
     }
 
     #[test]

@@ -1537,15 +1537,7 @@ where
             assigned_shard_verified: false,
         }
     }
-}
 
-impl<P, B, C, H> CommonState<P, B, C, H>
-where
-    P: PublicKey,
-    B: Digestible,
-    C: CodingScheme,
-    H: Hasher,
-{
     /// Verify the assigned shard and store it.
     ///
     /// When `is_participant` is true, the validated shard is stored for

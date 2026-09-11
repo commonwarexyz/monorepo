@@ -255,8 +255,9 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 }
             }
 
+            // Keep the initial byte count for classifying a failed header read.
             let before_remaining = self.replay.remaining();
-            let (item_size, varint_len) = match decode_length_prefix(&mut self.replay) {
+            let (item_size, varint_len) = match self.replay.read_length() {
                 Ok(result) => result,
                 Err(err) => {
                     if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
@@ -300,13 +301,11 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             };
             let item_len = next_offset - self.offset;
 
-            // `take(item_size)` advances past exactly the payload bytes after the header was
-            // consumed by `decode_length_prefix`.
-            match decode_item::<V>(
-                (&mut self.replay).take(item_size),
-                &self.codec_config,
-                self.compressed,
-            ) {
+            // Limit reads to this frame's payload so decoding cannot consume the next frame.
+            match self
+                .replay
+                .decode::<V>(item_size, &self.codec_config, self.compressed)
+            {
                 Ok(item) => {
                     let pos = self.pos;
                     let Some(next_pos) = self.pos.checked_add(1) else {
@@ -607,28 +606,33 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         })
     }
 
-    /// Build one replay state for each data blob touched by `[start_pos, bounds.end)`.
+    /// Build one replay state for each data blob touched by `range`.
     async fn replay_states(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Vec<ReplayState<'a, E::Blob, V>>, Error> {
         let bounds = self.bounds();
-        if start_pos > bounds.end {
-            return Err(Error::ItemOutOfRange(start_pos));
+        if range.start > range.end || range.end > bounds.end {
+            return Err(Error::ItemOutOfRange(if range.start > range.end {
+                range.start
+            } else {
+                range.end
+            }));
         }
-        if start_pos < bounds.start {
-            return Err(Error::ItemPruned(start_pos));
+        if range.start < bounds.start {
+            return Err(Error::ItemPruned(range.start));
         }
 
         let mut states = Vec::new();
-        if start_pos < bounds.end {
+        if range.start < range.end {
             // The first blob may start at a nonzero data offset; subsequent blob states always
             // start at byte offset 0.
             let items_per_blob = self.items_per_blob.get();
+            let start_pos = range.start;
             let start_blob = position_to_blob(start_pos, items_per_blob);
-            let end_blob = position_to_blob(bounds.end - 1, items_per_blob);
+            let end_blob = position_to_blob(range.end - 1, items_per_blob);
             let start_offset = self.offsets.read(start_pos).await?;
 
             for blob in start_blob..=end_blob {
@@ -643,7 +647,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 } else {
                     blob_first_position(blob, items_per_blob)?
                 };
-                let end_pos = super::blob_end_position(blob, items_per_blob, bounds.end);
+                let end_pos = super::blob_end_position(blob, items_per_blob, range.end);
 
                 // Store codec settings in the state because the stream owns states across await
                 // points and cannot borrow `self`.
@@ -1038,13 +1042,13 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         items
     }
 
-    async fn replay(
+    async fn replay_range(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let states = self.replay_states(start_pos, buffer, read_options).await?;
+        let states = self.replay_states(range, buffer, read_options).await?;
 
         Ok(super::replay_stream_from_states(states))
     }
@@ -2224,7 +2228,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
-        range: core::ops::Range<u64>,
+        range: Range<u64>,
     ) -> Result<Self, Error> {
         Ok(Self(Inner::init_sync(context, cfg, range).await?))
     }
@@ -2397,16 +2401,14 @@ impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
         self.reader().try_read_many_sync(positions)
     }
 
-    async fn replay(
+    async fn replay_range(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
         let reader = self.reader();
-        let states = reader
-            .replay_states(start_pos, buffer, read_options)
-            .await?;
+        let states = reader.replay_states(range, buffer, read_options).await?;
 
         Ok(super::replay_stream_from_states(states))
     }
@@ -2435,13 +2437,13 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         Contiguous::try_read_many_sync(&*self.0, positions)
     }
 
-    async fn replay(
+    async fn replay_range(
         &self,
-        start_pos: u64,
+        range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        Contiguous::replay(&*self.0, start_pos, buffer, read_options).await
+        Contiguous::replay_range(&*self.0, range, buffer, read_options).await
     }
 }
 
@@ -3790,6 +3792,78 @@ mod tests {
             (journal, pos) = journal.append(&999).await.unwrap();
             assert_eq!(pos, 20);
             assert_eq!(journal.read(20).await.unwrap(), 999);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `replay_range` yields exactly the requested positions, spanning blob boundaries, and
+    /// validates the range against `bounds()`.
+    #[test_traced]
+    fn test_variable_replay_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "replay-range".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+
+            // Append 40 items across 4 blobs.
+            for i in 0..40u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // A mid-journal range crossing blob boundaries yields exactly [start, end).
+            {
+                let stream = journal
+                    .replay_range(7..25, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
+                futures::pin_mut!(stream);
+                for i in 7..25u64 {
+                    let (pos, item) = stream.next().await.unwrap().unwrap();
+                    assert_eq!(pos, i);
+                    assert_eq!(item, i * 100);
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            // An empty range yields an empty stream.
+            {
+                let stream = journal
+                    .replay_range(5..5, NZUsize!(20), ReadOptions::default())
+                    .await
+                    .unwrap();
+                futures::pin_mut!(stream);
+                assert!(stream.next().await.is_none());
+            }
+
+            // A range past the journal's end is rejected.
+            let res = journal
+                .replay_range(0..41, NZUsize!(20), ReadOptions::default())
+                .await
+                .map(|_| ());
+            assert!(matches!(
+                res,
+                Err(crate::journal::Error::ItemOutOfRange(41))
+            ));
+
+            // An inverted range is rejected.
+            #[allow(clippy::reversed_empty_ranges)]
+            let res = journal
+                .replay_range(10..5, NZUsize!(20), ReadOptions::default())
+                .await
+                .map(|_| ());
+            assert!(matches!(
+                res,
+                Err(crate::journal::Error::ItemOutOfRange(10))
+            ));
 
             journal.destroy().await.unwrap();
         });
