@@ -781,14 +781,28 @@ impl std::fmt::Display for Kind {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Returns this certificate's type.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn kind(&self) -> Kind {
         match self {
             Self::Notarization(_) => Kind::Notarization,
             Self::Nullification(_) => Kind::Nullification,
             Self::Finalization(_) => Kind::Finalization,
+        }
+    }
+
+    /// Verifies this certificate against the provided signing scheme.
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
+    where
+        S: scheme::Scheme<D>,
+    {
+        match self {
+            Self::Notarization(notarization) => notarization.verify(rng, scheme, strategy),
+            Self::Nullification(nullification) => {
+                nullification.verify::<_, D>(rng, scheme, strategy)
+            }
+            Self::Finalization(finalization) => finalization.verify(rng, scheme, strategy),
         }
     }
 }
@@ -864,22 +878,6 @@ impl<S: Scheme, D: Digest> Viewable for Certificate<S, D> {
             Self::Notarization(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalization(v) => v.view(),
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> Certificate<S, D> {
-    /// Verifies this certificate against the provided signing scheme.
-    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
-    where
-        S: scheme::Scheme<D>,
-    {
-        match self {
-            Self::Notarization(notarization) => notarization.verify(rng, scheme, strategy),
-            Self::Nullification(nullification) => {
-                nullification.verify::<_, D>(rng, scheme, strategy)
-            }
-            Self::Finalization(finalization) => finalization.verify(rng, scheme, strategy),
         }
     }
 }
