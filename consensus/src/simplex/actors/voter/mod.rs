@@ -83,7 +83,6 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
-    use commonware_utils::channel::fallible::OneshotExt;
     use commonware_p2p::{
         Receiver as _, Recipients,
         simulated::{Config as NConfig, Link, Network, Oracle},
@@ -98,7 +97,10 @@ mod tests {
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
     use commonware_utils::{
-        NZU16, NZU32, NZUsize, channel::oneshot, non_empty, probability, sync::Mutex,
+        NZU16, NZU32, NZUsize,
+        channel::{fallible::OneshotExt, oneshot},
+        non_empty, probability,
+        sync::Mutex,
     };
     use futures::FutureExt;
     use rand_core::CryptoRng;
@@ -210,12 +212,12 @@ mod tests {
         certify_latency_ms: f64,
         /// Views and parents supplied to mock application proposal requests.
         propose_requests: Option<ProposeRequests>,
-        /// Views and outgoing leaders supplied with optimistic proposal requests.
+        /// Views and outgoing leaders supplied with handoff proposal requests.
         optimistic_requests: Option<OptimisticRequests>,
         /// Whether mock application proposal requests should remain pending.
         stall_proposals: bool,
-        /// Whether the mock application accepts optimistic handoff requests.
-        propose_optimistically: bool,
+        /// Whether the mock application accepts pipelined handoff requests.
+        accept_handoffs: bool,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         /// Whether every mock application verification should fail.
@@ -238,7 +240,7 @@ mod tests {
                 propose_requests: None,
                 optimistic_requests: None,
                 stall_proposals: false,
-                propose_optimistically: false,
+                accept_handoffs: false,
                 verify_requests: None,
                 fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
@@ -291,7 +293,7 @@ mod tests {
         let (mut actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
         actor.set_stall_proposals(options.stall_proposals);
-        actor.set_propose_optimistically(options.propose_optimistically);
+        actor.set_accept_handoffs(options.accept_handoffs);
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
@@ -301,10 +303,10 @@ mod tests {
             }));
         }
         if let Some(optimistic_requests) = optimistic_requests {
-            actor.set_optimistic_propose_observer(Box::new(move |context, parent_leader| {
+            actor.set_handoff_propose_observer(Box::new(move |context, outgoing_leader| {
                 optimistic_requests
                     .lock()
-                    .push((context.view(), parent_leader));
+                    .push((context.view(), outgoing_leader));
             }));
         }
         if let Some(verify_requests) = verify_requests {
@@ -3321,7 +3323,7 @@ mod tests {
                 VoterOptions {
                     leader_timeout: Duration::from_secs(2),
                     // The certification timeout fires between the view-2
-                    // optimistic proposal request (issued with view 1's
+                    // handoff proposal request (issued with view 1's
                     // notarize after one propose latency) and its response
                     // (a second propose latency later): handling the view-1
                     // timeout must not drop the in-flight request.
@@ -3763,7 +3765,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     local_index,
                     propose_latency_ms: 10.0,
-                    propose_optimistically: true,
+                    accept_handoffs: true,
                     ..Default::default()
                 },
             )
@@ -3969,7 +3971,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     certifier,
-                    propose_optimistically: true,
+                    accept_handoffs: true,
                     ..Default::default()
                 },
             )
@@ -4055,6 +4057,94 @@ mod tests {
         });
     }
 
+    /// A pending handoff request becomes an ordinary request when its parent
+    /// certifies, without waiting for the application's handoff response.
+    #[test_traced]
+    fn test_pipelined_handoff_reissues_stalled_proposal_after_parent_certification() {
+        let n = 5;
+        let namespace = b"pipelined_handoff_reissues_after_certification".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let outgoing = participants[outgoing_index].clone();
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_requests: Some(propose_requests.clone()),
+                    stall_proposals: true,
+                    accept_handoffs: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let parent = prepare_pipelined_handoff_tip(
+                &mut context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                &relay,
+            )
+            .await;
+
+            wait_for_request(&context, &propose_requests, View::new(3), |request| {
+                request.0
+            })
+            .await;
+            assert_eq!(
+                propose_requests.lock().as_slice(),
+                &[(View::new(3), View::new(2))]
+            );
+
+            let (_, notarization) = build_notarization(&schemes, &parent, quorum(n));
+            mailbox.recovered(Certificate::Notarization(notarization));
+
+            let deadline = context.current() + Duration::from_secs(2);
+            while propose_requests.lock().len() < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "ordinary proposal was not reissued after parent certification"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(2))];
+            assert_eq!(propose_requests.lock().as_slice(), &expected);
+        });
+    }
+
     /// A stalled proposal build on an abandoned outgoing tip must be
     /// superseded while the incoming term-start view is still live.
     #[test_traced]
@@ -4102,7 +4192,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     stall_proposals: true,
-                    propose_optimistically: true,
+                    accept_handoffs: true,
                     ..Default::default()
                 },
             )

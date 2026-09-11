@@ -1770,7 +1770,7 @@ mod tests {
         link: Link,
         elector: RoundRobin<Sha256>,
         propose_latency: (f64, f64),
-        propose_optimistically: bool,
+        accept_handoffs: bool,
     ) -> (
         Vec<RoundRobinReporter>,
         usize,
@@ -1814,7 +1814,7 @@ mod tests {
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.child("application"), application_cfg);
-            actor.set_propose_optimistically(propose_optimistically);
+            actor.set_accept_handoffs(accept_handoffs);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -1880,7 +1880,7 @@ mod tests {
                     ViewDelta::new(128),
                 ),
                 /* propose_latency */ (10.0, 0.0),
-                /* propose_optimistically */ false,
+                /* accept_handoffs */ false,
             )
             .await;
 
@@ -1941,7 +1941,7 @@ mod tests {
                         ViewDelta::new(4),
                 ),
                 /* propose_latency */ (10.0, 0.0),
-                /* propose_optimistically */ true,
+                /* accept_handoffs */ true,
             )
             .await;
 
@@ -2000,7 +2000,7 @@ mod tests {
                 },
                 RoundRobin::<Sha256>::default(),
                 /* propose_latency */ (10.0, 0.0),
-                /* propose_optimistically */ true,
+                /* accept_handoffs */ true,
             )
             .await;
 
@@ -2057,7 +2057,7 @@ mod tests {
                     ViewDelta::new(100),
                 ),
                 /* propose_latency */ (1.0, 0.0),
-                /* propose_optimistically */ false,
+                /* accept_handoffs */ false,
             )
             .await;
 

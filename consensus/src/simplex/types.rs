@@ -36,7 +36,7 @@ pub struct Context<D: Digest, P: PublicKey> {
     pub parent: (View, D),
 }
 
-impl<D: Digest, P: PublicKey> crate::ProposalContext for Context<D, P> {
+impl<D: Digest, P: PublicKey> crate::HandoffContext for Context<D, P> {
     type PublicKey = P;
 }
 
