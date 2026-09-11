@@ -316,15 +316,13 @@ enum BlobFill {
     Overfull { len: u64, capacity: u64 },
 }
 
-/// The recovered journal size, durability floor, and any pending tail repair derived from the
-/// reconciled pruning boundary and on-disk blob lengths.
+/// The recovered journal size and durability floor derived from the reconciled pruning boundary
+/// and on-disk blob lengths.
 struct RecoveredBounds {
     /// Size: one past the last recovered item.
     size: u64,
     /// Recovery watermark to persist (a floor on durable size).
     recovery_watermark: u64,
-    /// A short or missing non-tail blob makes the newer suffix unreachable.
-    has_gap: bool,
 }
 
 /// Configuration for `Journal` storage.
@@ -446,7 +444,6 @@ pub struct Recovery<E: Context, A> {
     discarded: Vec<u64>,
     bounds: Range<u64>,
     watermark: u64,
-    has_gap: bool,
     bounded: bool,
     /// The physical suffix has been reconciled with the selected logical end.
     prepared: bool,
@@ -494,7 +491,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 discarded: Vec::new(),
                 bounds: target..target,
                 watermark: target,
-                has_gap: false,
                 prepared: true,
                 bounded: max_size.is_some(),
                 _marker: PhantomData,
@@ -610,7 +606,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let RecoveredBounds {
             size,
             recovery_watermark,
-            has_gap,
         } = Inner::<E, A>::recover_bounds(
             &pending,
             items_per_blob,
@@ -629,7 +624,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             discarded,
             bounds: pruning_boundary..size.min(ceiling),
             watermark: recovery_watermark.min(ceiling),
-            has_gap,
             bounded: max_size.is_some(),
             prepared: false,
             _marker: PhantomData,
@@ -764,12 +758,11 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         if let Some(writer) = self.pending.get_mut(&tail_blob) {
             if bytes < writer.size() {
                 writer.truncate(bytes).await?;
-            } else if self.has_gap || (self.bounded && self.watermark < size) {
+            } else {
                 writer.sync().await?;
             }
         }
         self.bounds.end = size;
-        self.has_gap = false;
         self.prepared = true;
         Ok(self)
     }
@@ -860,7 +853,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         self.discarded.clear();
         self.bounds = size..size;
         self.watermark = size;
-        self.has_gap = false;
         self.prepared = true;
         self.checkpoint = self
             .checkpoint
@@ -938,7 +930,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok(RecoveredBounds {
             size,
             recovery_watermark,
-            has_gap,
         })
     }
 
@@ -2913,39 +2904,67 @@ mod tests {
         }
     }
 
+    /// Regression: recovered items beyond the persisted recovery watermark must be durable once
+    /// `commit` returns, even when the commit appends nothing.
     #[test_traced]
-    fn test_fixed_commit_syncs_recovered_tail_past_recovery_watermark() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut cfg = test_cfg(&context, NZU64!(10));
-            cfg.partition = "init-adopted-fixed".into();
+    fn test_fixed_commit_makes_recovered_tail_durable() {
+        let ((), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let cfg = test_cfg(&context, NZU64!(10));
+                let visible = VisibleContext::new(context.child("visible"));
+                let journal = Journal::<_, u64>::init(visible.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                let (journal, _) = journal.append(&1).await.unwrap();
+                let journal = journal.sync().await.unwrap();
 
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            (journal, _) = journal.append(&1).await.unwrap();
-            (journal, _) = journal.append(&2).await.unwrap();
-            let journal = journal.sync().await.unwrap();
-            // Simulate the state left by a crash after item 2 became visible to recovery, but
-            // before the persisted recovery watermark advanced past item 1.
-            let journal = journal.test_set_recovery_watermark(1).await.unwrap();
-            drop(journal);
+                // Item 2 rewrites the tail page without a sync, so recovery can read it beyond
+                // the persisted watermark while the durable page still holds only item 1.
+                let (journal, _) = journal.append(&2).await.unwrap();
+                let (journal, reader) = journal.snapshot().await.unwrap();
+                assert_eq!(reader.read(1).await.unwrap(), 2);
+                drop(reader);
+                drop(journal);
+                let (blob, len) = context
+                    .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                let durable = blob
+                    .read_at(0, len as usize, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                drop(blob);
+                let (blob, visible_len) = visible
+                    .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                assert_eq!(visible_len, len);
+                let seen = blob
+                    .read_at(0, len as usize, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                drop(blob);
+                assert_ne!(durable.as_ref(), seen.as_ref());
 
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                let journal = Journal::<_, u64>::init(visible.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(journal.size(), 2);
+                assert_eq!(journal.0.recovery_watermark(), 1);
+                let journal = journal.commit().await.unwrap();
+                drop(journal);
+                drop(visible);
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
             assert_eq!(journal.size(), 2);
-
-            // Regression: commit() must force a data sync before callers can rely on recovered
-            // bytes beyond the persisted recovery watermark.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(probability!(1.0)),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit() must sync recovered data beyond the persisted recovery watermark"
-            );
+            assert_eq!(journal.read(1).await.unwrap(), 2);
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -4066,47 +4085,60 @@ mod tests {
         });
     }
 
-    /// Regression: legacy upgrade (no recovery watermark) must sync the recovered tail before
-    /// callers can advance the watermark. Without this, init could install a durable watermark for
-    /// data that was only in the OS page cache.
+    /// Regression: a legacy upgrade (no recovery watermark) derives its watermark from the tail
+    /// blob start, and the recovered tail beyond it must be durable once `commit` returns.
     #[test_traced]
-    fn test_fixed_journal_legacy_upgrade_syncs_recovered_tail() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
+    fn test_fixed_journal_legacy_upgrade_makes_recovered_tail_durable() {
+        let ((), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let cfg = test_cfg(&context, NZU64!(5));
+                let visible = VisibleContext::new(context.child("visible"));
+                let mut journal = Journal::<_, Digest>::init(visible.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..5u64 {
+                    (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                }
+                let mut journal = journal.sync().await.unwrap();
 
-            for i in 0..7u64 {
-                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
-            }
-            let mut journal = journal.sync().await.unwrap();
-
-            // Remove the watermark to simulate a legacy journal.
-            {
+                // Remove the watermark to simulate a legacy journal.
                 journal.0.checkpoint.set_watermark(None);
                 journal.0.checkpoint = journal.0.checkpoint.sync().await.unwrap();
-            }
-            drop(journal);
 
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                // The tail blob receives items without a sync, so recovery can read them while
+                // no sync has covered them.
+                for i in 5..7u64 {
+                    (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                }
+                let (journal, reader) = journal.snapshot().await.unwrap();
+                assert_eq!(reader.read(6).await.unwrap(), test_digest(6));
+                drop(reader);
+                drop(journal);
+                let (blob, durable_len) = context
+                    .open(&blob_partition(&cfg), &1u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                drop(blob);
+                assert_eq!(durable_len, 0);
+
+                let journal = Journal::<_, Digest>::init(visible.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(journal.size(), 7);
+                // Watermark at tail blob start (blob 1 = position 5).
+                assert_eq!(journal.0.recovery_watermark(), 5);
+                let journal = journal.commit().await.unwrap();
+                drop(journal);
+                drop(visible);
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg)
                 .await
                 .unwrap();
             assert_eq!(journal.size(), 7);
-            // Watermark at tail blob start (blob 1 = position 5).
-            assert_eq!(journal.0.recovery_watermark(), 5);
-
-            // Inject sync faults. If commit skipped the recovered tail sync, it would succeed
-            // despite the fault.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(probability!(1.0)),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit must sync recovered data before the watermark can advance"
-            );
+            assert_eq!(journal.read(6).await.unwrap(), test_digest(6));
+            journal.destroy().await.unwrap();
         });
     }
 
