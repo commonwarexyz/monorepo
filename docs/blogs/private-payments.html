@@ -108,7 +108,7 @@ Vamsi Policharla</a></div>
         TPS</a> with <a
         href="https://github.com/commonwarexyz/constantinople">Constantinople</a>.
         Much higher with <a
-        href="(https://commonware.xyz/blogs/pipelining-simplex)">stable
+        href="https://commonware.xyz/blogs/pipelining-simplex">stable
         leader</a>, <a
         href="https://commonware.xyz/blogs/multimmit">multiple
         proposers</a> and clearing solutions such as <a
@@ -134,8 +134,8 @@ Vamsi Policharla</a></div>
         <u>a petabyte every year</u></li>
         </ul>
         <p>While bandwidth and compute costs can (unsatisfactorily) be
-        overcome with biggers machines, it is simply impractical for
-        validators to store the nullifiers</p>
+        overcome with bigger machines, it is simply impractical for
+        validators to store the nullifiers.</p>
         <blockquote>
         <p><em>How do we process one million private transactions per
         second on commodity hardware?</em></p>
@@ -144,9 +144,9 @@ Vamsi Policharla</a></div>
         to run at this rate <strong><em>indefinitely</em></strong>:</p>
         <ol type="1">
         <li>Validator state must be succinct in the number of
-        transactions but can grow with the number of accounts. Validator
-        perform a constant amount of work to process every transaction,
-        independent of the number accounts.</li>
+        transactions but can grow with the number of accounts.
+        Validators perform a constant amount of work to process every
+        transaction, independent of the number of accounts.</li>
         <li>Wallets can be offline for indefinite periods of time. When
         they are back online they must be able to send/receive payments
         without having to synchronize their state with the chain,
@@ -167,8 +167,7 @@ Vamsi Policharla</a></div>
         </ul>
         <p>An external observer learns that a particular account came
         online and performed some action (a send/receive) but it does
-        not learn the amount moved or to whom the funds were
-        sent/received from.
+        not learn the amount or the counterparty.
         <!-- todo: add a pointer to below discussion against zcash --></p>
         <h2 id="our-construction">Our Construction</h2>
         <p>As a working example we have four accounts paying each other
@@ -239,7 +238,7 @@ Vamsi Policharla</a></div>
         have paid whom because a receive must claim an earlier send. We
         hide the operation type by proving a strict disjunction of the
         send and receive relations, which provides meaningful
-        improvments to the privacy guarantees (see section 6.1 of the
+        improvements to the privacy guarantees (see section 6.1 of the
         Bonsai paper for a detailed discussion).</p>
         <h3 id="scaling-prune-receipts">Scaling: prune receipts</h3>
         <p>We now focus on scaling the system. First, instead of signing
@@ -263,7 +262,7 @@ Vamsi Policharla</a></div>
         <p>Now we tackle the nullifier set. Unlike receipts where we
         prove <em>membership</em>, we need to prove
         <em>non-membership</em> of nullifiers to prevent double
-        spending. MMR’s do not support (efficient) non-membership proofs
+        spending. MMRs do not support (efficient) non-membership proofs
         so we cannot simply “forget” previous nullifiers.</p>
         <p>One approach is to shift the burden of non-membership to the
         users. For every unspent coin, the user must prove, effectively
@@ -308,12 +307,12 @@ Vamsi Policharla</a></div>
         class="math inline">\mathsf{pid} \geq L</span>.</p>
         <p>Choosing <span class="math inline">L</span> to retain the
         <span class="math inline">w</span> largest claimed positions
-        bounds this wallets storage to <span
+        bounds the wallet’s storage to <span
         class="math inline">\ell</span> hashes plus <span
         class="math inline">w</span> positions, independent of lifetime
         claims. Older nullifiers can be pushed to cold storage, so a
         receipt below <span class="math inline">L</span> can still be
-        claimed by retreiving the relevant path from cold storage and
+        claimed by retrieving the relevant path from cold storage and
         updating the frontier.</p>
         </div>
         <h2 id="the-full-construction">The full construction</h2>
@@ -350,7 +349,7 @@ Vamsi Policharla</a></div>
         \rho = \mathsf{Com}_{\mathsf{rec}}\big(v,\ \mathsf{Sen},\
         \mathsf{Rec},\ 1;\ r&#39;&#39;\big),
         </span></p>
-        <p>whose last entry demarcates whether it’s a real receipt
+        <p>whose last entry indicates whether it’s a real receipt
         (coming from the send branch) or a dummy receipt (coming from
         the receive branch). The position <span
         class="math inline">\mathsf{pid}</span> at which the ledger
@@ -462,7 +461,7 @@ Vamsi Policharla</a></div>
         <h2 id="privacy-beyond-the-ledger">Privacy Beyond the
         Ledger</h2>
         <p>As noted earlier, <a
-        href="https://eprint.iacr.org/2014/349">Ledger
+        href="https://eprint.iacr.org/2014/349">ledger
         indistinguishability</a> in shielded-note systems provides
         stronger <strong>on-chain</strong> privacy than Bonsai as it
         additionally hides which account is acting. But Bonsai comes
@@ -472,12 +471,12 @@ Vamsi Policharla</a></div>
         Even when the ledger hides the acting account, there are several
         ways to map a transaction to the underlying wallet/user. For
         instance, when a wallet submits transactions through an RPC
-        node, it can already link each submitted transaction to the
-        corresponding party. Or if a wallet submits its own transactions
-        through an identifiable connection or session, the operator can
-        group those submissions under the same user. Both the public
-        ledger and the wallet’s network connection matter when
-        evaluating privacy in practice.</p>
+        node, the node can already link each submitted transaction to
+        the corresponding party. Or if a wallet submits its own
+        transactions through an identifiable connection or session, the
+        operator can group those submissions under the same user. Both
+        the public ledger and the wallet’s network connection matter
+        when evaluating privacy in practice.</p>
         <p>In the example below, three wallets submit transactions
         through one RPC service. Switch between <strong>Ledger
         observer</strong> and <strong>RPC operator</strong> to see how
@@ -499,16 +498,16 @@ Vamsi Policharla</a></div>
         href="https://commonware.xyz/blogs/batch-pari">Pari + batch
         verification</a> can be found <a
         href="https://github.com/guruvamsi-policharla/zk-pari/pull/2">here</a>.
-        Pari is not zero-knowledge as described in the <a
+        Pari, as described in the <a
         href="https://eprint.iacr.org/2024/1245">original paper</a> or
-        its <a href="https://eprint.iacr.org/2025/1485">improvement</a>.
-        We use vanishing-polynomial masks to add zk while ensuring the
-        proof size remains unchanged at <span class="math inline">2
-        \mathbb{G}_1 + \mathbb{F}</span> (128 bytes), there is
-        negligible overhead on the prover, and the batch-verification
-        strategy carries over. All numbers below are on an M5 MacBook
-        Pro (6 performance + 12 efficiency cores, 48 GB RAM) over
-        BLS12-381, single-threaded unless stated, and exclude
+        its <a href="https://eprint.iacr.org/2025/1485">improvement</a>,
+        is not zero-knowledge. We use vanishing-polynomial masks to add
+        zk while ensuring the proof size remains unchanged at <span
+        class="math inline">2 \mathbb{G}_1 + \mathbb{F}</span> (128
+        bytes), there is negligible overhead on the prover, and the
+        batch-verification strategy carries over. All numbers below are
+        on an M5 MacBook Pro (6 performance + 12 efficiency cores, 48 GB
+        RAM) over BLS12-381, single-threaded unless stated, and exclude
         serialization, deserialization, and subgroup checks.</p>
         <p><strong>Batch Verification.</strong> We first isolate
         proof-system costs using a squaring circuit with <span

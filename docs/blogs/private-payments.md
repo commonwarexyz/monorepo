@@ -15,7 +15,7 @@ katex: true
 <link rel="stylesheet" href="private-payments.css">
 ```
 
-The commonware stack can now comfortably process payments at [~250K TPS](https://x.com/_patrickogrady/status/2077449338230640739) with [Constantinople](https://github.com/commonwarexyz/constantinople). Much higher with [stable leader]((https://commonware.xyz/blogs/pipelining-simplex)), [multiple proposers](https://commonware.xyz/blogs/multimmit) and clearing solutions such as [bajillion](https://commonware.xyz/blogs/clearing). We now turn our attention to privacy. What's stopping us from reaching similar throughputs for private payments?
+The commonware stack can now comfortably process payments at [~250K TPS](https://x.com/_patrickogrady/status/2077449338230640739) with [Constantinople](https://github.com/commonwarexyz/constantinople). Much higher with [stable leader](https://commonware.xyz/blogs/pipelining-simplex), [multiple proposers](https://commonware.xyz/blogs/multimmit) and clearing solutions such as [bajillion](https://commonware.xyz/blogs/clearing). We now turn our attention to privacy. What's stopping us from reaching similar throughputs for private payments?
 
 Our goal is to support private payments at over a million transactions per second, with low latency. Let's suppose each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (using [Groth16](https://eprint.iacr.org/2016/260), say). To support a million transactions per second:
 
@@ -23,7 +23,7 @@ Our goal is to support private payments at over a million transactions per secon
 - **compute:** every validator needs the equivalent of <u>500-1000 dedicated CPU cores</u>
 - **storage:** since you opened this page, the nullifier set (to prevent double spending) would have grown by <span class="live" id="live-bytes">0 MB</span> across <span class="live" id="live-txs">0</span> transactions, amounting to <u>a petabyte every year</u>
 
-While bandwidth and compute costs can (unsatisfactorily) be overcome with biggers machines, it is simply impractical for validators to store the nullifiers
+While bandwidth and compute costs can (unsatisfactorily) be overcome with bigger machines, it is simply impractical for validators to store the nullifiers.
 
 > *How do we process one million private transactions per second on commodity hardware?*
 
@@ -31,7 +31,7 @@ We demand two properties from a payment system that is meant to run at this rate
 ***indefinitely***:
 
 1. Validator state must be succinct in the number of transactions but can grow with the number of
-   accounts. Validator perform a constant amount of work to process every transaction, independent of the number accounts.
+   accounts. Validators perform a constant amount of work to process every transaction, independent of the number of accounts.
 2. Wallets can be offline for indefinite periods of time.
    When they are back online they must be able to send/receive payments without having to
    synchronize their state with the chain, similar to traditional payments. Any work done by wallets must only depend on the transactions that they participate in.
@@ -40,12 +40,11 @@ We demand two properties from a payment system that is meant to run at this rate
 We are excited to share Bonsai, a private payment scheme that addresses both the verification cost and the growing state:
 
 - each operation has a **256-byte payload** and the prototype verifies **over a million operations per second** on an M5 MacBook Pro (18 cores)
-- validators store a **single 32-byte commitment value per account** and a small number of hashes 
+- validators store a **single 32-byte commitment value per account** and a small number of hashes
 - wallets can **go offline indefinitely** and resume without synchronizing state with the chain
 
 An external observer learns that a particular account came online and performed some
-action (a send/receive) but it does not learn the amount moved or to whom the funds were
-sent/received from.
+action (a send/receive) but it does not learn the amount or the counterparty.
 <!-- todo: add a pointer to below discussion against zcash -->
 
 ## Our Construction
@@ -91,7 +90,7 @@ Balances and amounts are now hidden from the ledger, but it still reveals which 
 
 ### Hide operations
 
-The ledger reveals the order in which accounts act and the operation type. This allows an observer to narrow down who might have paid whom because a receive must claim an earlier send. We hide the operation type by proving a strict disjunction of the send and receive relations, which provides meaningful improvments to the privacy guarantees (see section 6.1 of the Bonsai paper for a detailed discussion).
+The ledger reveals the order in which accounts act and the operation type. This allows an observer to narrow down who might have paid whom because a receive must claim an earlier send. We hide the operation type by proving a strict disjunction of the send and receive relations, which provides meaningful improvements to the privacy guarantees (see section 6.1 of the Bonsai paper for a detailed discussion).
 
 ### Scaling: prune receipts
 
@@ -101,7 +100,7 @@ Inserting an element in an MMR only requires the *frontier* -- a logarithmic num
 
 ### Scaling: delegate nullifiers
 
-Now we tackle the nullifier set. Unlike receipts where we prove *membership*, we need to prove *non-membership* of nullifiers to prevent double spending. MMR's do not support (efficient) non-membership proofs so we cannot simply "forget" previous nullifiers. 
+Now we tackle the nullifier set. Unlike receipts where we prove *membership*, we need to prove *non-membership* of nullifiers to prevent double spending. MMRs do not support (efficient) non-membership proofs so we cannot simply "forget" previous nullifiers.
 
 One approach is to shift the burden of non-membership to the users. For every unspent coin, the user must prove, effectively against the entire history of the ledger, that their coin has not been spent. The [Tachyon project](https://tachyon.z.cash/) uses [oblivious synchronization](https://eprint.iacr.org/2025/2031) to privately delegate this non-membership proof to an untrusted service, without letting those services link them to their eventual transactions. Users can be offline, but resuming requires synchronization work by the user or a service that processes the ledger.
 
@@ -115,7 +114,7 @@ Users can also **prune their nullifier state**. Since nullifiers are never publi
 
 For a threshold $L$, a wallet can summarize the claimed positions below $L$ with a frontier of at most $\ell$ hashes, where $\ell$ is the depth of the nullifier tree. It keeps all claimed positions at or above $L$. Together, these suffice to produce insertion proofs for unclaimed positions at any $\mathsf{pid} \geq L$.
 
-Choosing $L$ to retain the $w$ largest claimed positions bounds this wallets storage to $\ell$ hashes plus $w$ positions, independent of lifetime claims. Older nullifiers can be pushed to cold storage, so a receipt below $L$ can still be claimed by retreiving the relevant path from cold storage and updating the frontier.
+Choosing $L$ to retain the $w$ largest claimed positions bounds the wallet's storage to $\ell$ hashes plus $w$ positions, independent of lifetime claims. Older nullifiers can be pushed to cold storage, so a receipt below $L$ can still be claimed by retrieving the relevant path from cold storage and updating the frontier.
 :::
 
 ## The full construction
@@ -140,7 +139,7 @@ $$
 \rho = \mathsf{Com}_{\mathsf{rec}}\big(v,\ \mathsf{Sen},\ \mathsf{Rec},\ 1;\ r''\big),
 $$
 
-whose last entry demarcates whether it's a real receipt (coming from the send branch) or a dummy receipt (coming from the receive branch). The position $\mathsf{pid}$ at which the ledger inserts $\rho$ into the MMR is the payment's identifier *and* its nullifier.
+whose last entry indicates whether it's a real receipt (coming from the send branch) or a dummy receipt (coming from the receive branch). The position $\mathsf{pid}$ at which the ledger inserts $\rho$ into the MMR is the payment's identifier *and* its nullifier.
 
 Positions are unique, so distinct receipts always carry distinct nullifiers and no send can block another pending payment (see [Faerie Gold attack](https://zips.z.cash/protocol/protocol.pdf)). The nullifier is inserted into the tree inside the account commitment and is never published on chain. No public nullifier tells the sender which receipt a receive claims.
 
@@ -178,10 +177,9 @@ Receiving a receipt does not automatically credit an account. The recipient choo
 
 ## Privacy Beyond the Ledger
 
-As noted earlier, [Ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded-note systems provides stronger **on-chain** privacy than Bonsai as it additionally hides which account is acting. But Bonsai comes with the benefit of a much simpler solution for nullifier management. 
+As noted earlier, [ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded-note systems provides stronger **on-chain** privacy than Bonsai as it additionally hides which account is acting. But Bonsai comes with the benefit of a much simpler solution for nullifier management.
 
-In practice, the privacy gap may be narrower than expected. Even when the ledger hides the acting account, there are several ways to map a transaction to the underlying wallet/user. For instance, when a wallet submits transactions through an RPC node, it can already link each submitted transaction to the corresponding
-party. Or if a wallet submits its own transactions through an identifiable connection or session, the operator can group those submissions under the same user. Both the public ledger and the wallet's network connection matter when evaluating privacy in practice.
+In practice, the privacy gap may be narrower than expected. Even when the ledger hides the acting account, there are several ways to map a transaction to the underlying wallet/user. For instance, when a wallet submits transactions through an RPC node, the node can already link each submitted transaction to the corresponding party. Or if a wallet submits its own transactions through an identifiable connection or session, the operator can group those submissions under the same user. Both the public ledger and the wallet's network connection matter when evaluating privacy in practice.
 
 In the example below, three wallets submit transactions through one RPC service. Switch between **Ledger observer** and **RPC operator** to see how submission metadata changes the view.
 
@@ -195,7 +193,6 @@ In the example below, three wallets submit transactions through one RPC service.
 </div>
 ```
 
-
 ```{=html}
 <script src="private-payments.sim.js"></script>
 <script src="private-payments.counter.js"></script>
@@ -204,7 +201,7 @@ In the example below, three wallets submit transactions through one RPC service.
 
 ## Scalable Private Payments
 
-A prototype of our payment system where the NIZK is instantiated with [Pari + batch verification](https://commonware.xyz/blogs/batch-pari) can be found [here](https://github.com/guruvamsi-policharla/zk-pari/pull/2). Pari is not zero-knowledge as described in the [original paper](https://eprint.iacr.org/2024/1245) or its [improvement](https://eprint.iacr.org/2025/1485). We use vanishing-polynomial masks to add zk while ensuring the proof size remains unchanged at $2 \mathbb{G}_1 + \mathbb{F}$ (128 bytes), there is negligible overhead on the prover, and the batch-verification strategy carries over. All numbers below are on an M5 MacBook Pro (6 performance + 12 efficiency cores, 48 GB RAM) over BLS12-381, single-threaded unless stated, and exclude serialization, deserialization, and subgroup checks.
+A prototype of our payment system where the NIZK is instantiated with [Pari + batch verification](https://commonware.xyz/blogs/batch-pari) can be found [here](https://github.com/guruvamsi-policharla/zk-pari/pull/2). Pari, as described in the [original paper](https://eprint.iacr.org/2024/1245) or its [improvement](https://eprint.iacr.org/2025/1485), is not zero-knowledge. We use vanishing-polynomial masks to add zk while ensuring the proof size remains unchanged at $2 \mathbb{G}_1 + \mathbb{F}$ (128 bytes), there is negligible overhead on the prover, and the batch-verification strategy carries over. All numbers below are on an M5 MacBook Pro (6 performance + 12 efficiency cores, 48 GB RAM) over BLS12-381, single-threaded unless stated, and exclude serialization, deserialization, and subgroup checks.
 
 **Batch Verification.** We first isolate proof-system costs using a squaring circuit with $2^{12}$ constraints and one public input. Individual verification takes about $0.7$ ms; batching reduces the amortized cost to $11.7$ $\mu$s per proof. At $N = 65{,}536$ the three MSMs account for over 90% of the 771 ms total time. Computing the Fiat-Shamir challenges takes 36 ms, the statement evaluations 25 ms (with inversions batched across proofs), and the final pairings under a millisecond.
 
