@@ -120,8 +120,10 @@ Vamsi Policharla</a></div>
         transaction is <span class="math inline">\approx 200</span>
         bytes and takes <span class="math inline">0.5-1</span> ms to
         verify (using <a
-        href="https://eprint.iacr.org/2016/260">Groth16</a>, say). To
-        support a million transactions per second:</p>
+        href="https://eprint.iacr.org/2016/260">Groth16</a> with a <a
+        href="https://eprint.iacr.org/2014/349">shielded-note
+        scheme</a>, say). To support a million transactions per
+        second:</p>
         <ul>
         <li><strong>bandwidth:</strong> leaders need to disseminate
         <u>200 MB of data, every second</u></li>
@@ -133,25 +135,26 @@ Vamsi Policharla</a></div>
         id="live-txs" class="live">0</span> transactions, amounting to
         <u>a petabyte every year</u></li>
         </ul>
-        <p>While bandwidth and compute costs can (unsatisfactorily) be
-        overcome with bigger machines, it is simply impractical for
-        validators to store the nullifiers.</p>
+        <p>While bandwidth and compute costs can be overcome with bigger
+        machines, it is simply impractical for validators to store the
+        nullifiers.</p>
         <blockquote>
         <p><em>How do we process one million private transactions per
         second on commodity hardware?</em></p>
         </blockquote>
-        <p>We demand two properties from a payment system that is meant
-        to run at this rate <strong><em>indefinitely</em></strong>:</p>
+        <p>To get there, we need to rethink what validators and wallets
+        are responsible for. Concretely, a system that runs at this rate
+        indefinitely needs:</p>
         <ol type="1">
-        <li>Validator state must be succinct in the number of
-        transactions but can grow with the number of accounts.
-        Validators perform a constant amount of work to process every
-        transaction, independent of the number of accounts.</li>
-        <li>Wallets can be offline for indefinite periods of time. When
-        they are back online they must be able to send/receive payments
-        without having to synchronize their state with the chain,
-        similar to traditional payments. Any work done by wallets must
-        only depend on the transactions that they participate in.</li>
+        <li><strong>Succinct validator state.</strong> Validator storage
+        may grow with the number of accounts, but not with the number of
+        transactions, and processing a transaction takes a constant
+        amount of work regardless of how many accounts exist.</li>
+        <li><strong>Offline wallets.</strong> Wallets can go offline for
+        arbitrarily long and, upon returning, send and receive payments
+        without synchronizing with the chain, just like traditional
+        payments. The work a wallet does depends only on the
+        transactions it participates in.</li>
         </ol>
         <!-- TODO: Add link to Bonsai paper -->
         <p>We are excited to share Bonsai, a private payment scheme that

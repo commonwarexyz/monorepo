@@ -456,25 +456,24 @@
 }
 
 #rpc-diagram .rpc-controls {
-    display: flex;
     flex-wrap: wrap;
-    gap: 8px 20px;
-    margin: 0;
-    padding: 8px 12px;
-    border: 1px solid #ddd;
+    gap: 6px;
+    margin: 0 0 6px;
 }
 
-#rpc-diagram .rpc-controls label {
-    cursor: pointer;
+#rpc-diagram .rpc-controls .sim-title {
+    margin-right: 4px;
 }
 
-#rpc-diagram input {
-    accent-color: #0000ee;
+#rpc-diagram .rpc-controls button[aria-pressed="false"] {
+    background-color: white;
+    color: #0000ee;
+    box-shadow: inset 0 0 0 1px #0000ee;
 }
 
-#rpc-diagram input:focus-visible {
+#rpc-diagram .rpc-controls button:focus-visible {
     outline: 2px solid #0000ee;
-    outline-offset: 3px;
+    outline-offset: 2px;
 }
 
 #rpc-diagram .rpc-status,

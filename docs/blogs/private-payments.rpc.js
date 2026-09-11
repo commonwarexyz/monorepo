@@ -7,11 +7,11 @@
 
         const sources = ['A', 'B', 'A', 'C', 'B', 'A'];
         mount.innerHTML = `
-            <fieldset class="rpc-controls">
-                <legend>View as</legend>
-                <label><input type="radio" name="rpc-observer" value="ledger" checked> Ledger observer</label>
-                <label><input type="radio" name="rpc-observer" value="rpc"> RPC operator</label>
-            </fieldset>
+            <div class="sim-stepper rpc-controls" role="group" aria-label="View as">
+                <span class="sim-title">View as</span>
+                <button type="button" data-view="ledger" aria-pressed="true">Ledger observer</button>
+                <button type="button" data-view="rpc" aria-pressed="false">RPC operator</button>
+            </div>
             <p class="rpc-status" role="status"></p>
             <div class="rpc-flow">
                 <div class="rpc-node">
@@ -56,16 +56,18 @@
             groups.appendChild(group);
         }
 
-        function update() {
-            const operator = mount.querySelector('input:checked').value === 'rpc';
+        const buttons = [...mount.querySelectorAll('.rpc-controls button')];
+        function update(view) {
+            const operator = view === 'rpc';
+            for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.view === view));
             groups.hidden = !operator;
             mount.querySelector('.rpc-hidden').hidden = operator;
             mount.querySelector('.rpc-status').textContent = operator
                 ? 'The RPC can group repeated submissions by client/session. The ledger contains no such client labels.'
                 : 'The ledger reveals the ordered transactions without their submission sources.';
         }
-        mount.querySelector('.rpc-controls').addEventListener('change', update);
-        update();
+        for (const b of buttons) b.addEventListener('click', () => update(b.dataset.view));
+        update('ledger');
     }
 
     document.addEventListener('DOMContentLoaded', init);

@@ -17,24 +17,20 @@ katex: true
 
 The commonware stack can now comfortably process payments at [~250K TPS](https://x.com/_patrickogrady/status/2077449338230640739) with [Constantinople](https://github.com/commonwarexyz/constantinople). Much higher with [stable leader](https://commonware.xyz/blogs/pipelining-simplex), [multiple proposers](https://commonware.xyz/blogs/multimmit) and clearing solutions such as [bajillion](https://commonware.xyz/blogs/clearing). We now turn our attention to privacy. What's stopping us from reaching similar throughputs for private payments?
 
-Our goal is to support private payments at over a million transactions per second, with low latency. Let's suppose each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (using [Groth16](https://eprint.iacr.org/2016/260), say). To support a million transactions per second:
+Our goal is to support private payments at over a million transactions per second, with low latency. Let's suppose each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (using [Groth16](https://eprint.iacr.org/2016/260) with a [shielded-note scheme](https://eprint.iacr.org/2014/349), say). To support a million transactions per second:
 
 - **bandwidth:** leaders need to disseminate <u>200 MB of data, every second</u>
 - **compute:** every validator needs the equivalent of <u>500-1000 dedicated CPU cores</u>
 - **storage:** since you opened this page, the nullifier set (to prevent double spending) would have grown by <span class="live" id="live-bytes">0 MB</span> across <span class="live" id="live-txs">0</span> transactions, amounting to <u>a petabyte every year</u>
 
-While bandwidth and compute costs can (unsatisfactorily) be overcome with bigger machines, it is simply impractical for validators to store the nullifiers.
+While bandwidth and compute costs can be overcome with bigger machines, it is simply impractical for validators to store the nullifiers.
 
 > *How do we process one million private transactions per second on commodity hardware?*
 
-We demand two properties from a payment system that is meant to run at this rate
-***indefinitely***:
+To get there, we need to rethink what validators and wallets are responsible for. Concretely, a system that runs at this rate indefinitely needs:
 
-1. Validator state must be succinct in the number of transactions but can grow with the number of
-   accounts. Validators perform a constant amount of work to process every transaction, independent of the number of accounts.
-2. Wallets can be offline for indefinite periods of time.
-   When they are back online they must be able to send/receive payments without having to
-   synchronize their state with the chain, similar to traditional payments. Any work done by wallets must only depend on the transactions that they participate in.
+1. **Succinct validator state.** Validator storage may grow with the number of accounts, but not with the number of transactions, and processing a transaction takes a constant amount of work regardless of how many accounts exist.
+2. **Offline wallets.** Wallets can go offline for arbitrarily long and, upon returning, send and receive payments without synchronizing with the chain, just like traditional payments. The work a wallet does depends only on the transactions it participates in.
 
 <!-- TODO: Add link to Bonsai paper -->
 We are excited to share Bonsai, a private payment scheme that addresses both the verification cost and the growing state:
