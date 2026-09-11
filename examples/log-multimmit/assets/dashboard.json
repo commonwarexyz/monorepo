@@ -10638,7 +10638,7 @@
         "type": "prometheus",
         "uid": "PBFA97CFB590B2093"
       },
-      "description": "Time from beginning proposal preparation until a direct quorum first finalizes a leader that includes the block.",
+      "description": "Time from accepted local proposal signing to the first local consensus finality observation covering the block, including advances from late votes. Excludes construction, pre-sign custody, and ordered delivery.",
       "fieldConfig": {
         "defaults": {
           "color": {

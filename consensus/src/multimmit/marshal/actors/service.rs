@@ -308,6 +308,7 @@ where
                 );
             }
             Request::Hint(activity) => match activity {
+                crate::multimmit::types::Activity::TransactionProposed { .. } => {}
                 crate::multimmit::types::Activity::ProtocolAccepted {
                     artifact_id,
                     artifact,

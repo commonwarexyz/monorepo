@@ -5285,12 +5285,17 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
 
         let completion = self.prepare_signing_completion(effect, completion)?;
+        let mut step = Step::new(StepStatus::EffectCompleted { admission: None }, Vec::new());
+        if let PendingSigningCompletion::One { artifact, .. } = &completion
+            && let Artifact::TransactionBlock(block) = artifact.as_ref()
+        {
+            step.activities.push(Activity::TransactionProposed {
+                block: block.header().block_ref::<H>(),
+            });
+        }
         self.pending_signing.insert(id, completion);
         self.scheduler.enqueue(WorkKey::CompleteEffect(id));
-        Ok(Step::new(
-            StepStatus::EffectCompleted { admission: None },
-            Vec::new(),
-        ))
+        Ok(step)
     }
 
     fn prepare_signing_completion(

@@ -11073,7 +11073,7 @@ fn record_protocol_acceptances(
 ) {
     accepted.extend(activities.iter().filter_map(|activity| match activity {
         Activity::ProtocolAccepted { artifact_id, .. } => Some(*artifact_id),
-        Activity::HistoryAccepted { .. } => None,
+        Activity::HistoryAccepted { .. } | Activity::TransactionProposed { .. } => None,
         Activity::LeaderFinalized { .. } | Activity::LeaderFinalityUpdated { .. } => None,
     }));
 }
@@ -11600,7 +11600,9 @@ fn proposal_accepts_exact_tip_history_and_rejects_an_incorrect_commitment() {
                     commitment, record, ..
                 } => Some((*commitment, record.commitment::<Sha256>())),
                 Activity::ProtocolAccepted { .. } => None,
-                Activity::LeaderFinalized { .. } | Activity::LeaderFinalityUpdated { .. } => None,
+                Activity::TransactionProposed { .. }
+                | Activity::LeaderFinalized { .. }
+                | Activity::LeaderFinalityUpdated { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(

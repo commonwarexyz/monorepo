@@ -3,19 +3,26 @@
 use crate::{
     multimmit::{
         machine::{Artifact, ArtifactId, FinalityFact},
-        types::TipRecord,
+        types::{BlockRef, TipRecord},
     },
     types::View,
 };
 use commonware_cryptography::{Digest, bls12381::primitives::variant::Variant};
 use std::sync::Arc;
 
-/// A contextually admitted or durably committed Multimmit fact.
+/// A local proposal, contextually admitted artifact, or consensus finality observation.
 ///
 /// Activities are idempotent, best-effort observations. They do not acknowledge delivery,
 /// authorize protocol progress, or control retention.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity<V: Variant, D: Digest> {
+    /// A local transaction block has been signed, before its publication is persisted.
+    ///
+    /// This is not evidence of dissemination or finality. Retries may report the same block.
+    TransactionProposed {
+        /// Exact identity of the signed producer block.
+        block: BlockRef<D>,
+    },
     /// A leader obtained its first direct finality quorum.
     LeaderFinalized {
         /// Exact producer-chain tips supported by the first direct finality quorum.

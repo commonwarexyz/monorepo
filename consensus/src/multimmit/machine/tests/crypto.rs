@@ -5,8 +5,8 @@ use crate::{
         config::{CodecConfig, Config, LeaderSchedule, Limits},
         scheme::bls12381_threshold::{Roster, Scheme},
         types::{
-            Anchor, BlockRef, CertificateId, ChainId, ChainProposal, EpochGenesis, Extension,
-            Height, LeaderBlock, Position, ViewMessage, Vote, VoteBody, Vqc,
+            Activity, Anchor, BlockRef, CertificateId, ChainId, ChainProposal, EpochGenesis,
+            Extension, Height, LeaderBlock, Position, ViewMessage, Vote, VoteBody, Vqc,
             genesis_tip_commitment,
         },
     },
@@ -473,6 +473,15 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
     ));
     let artifact_id = artifact.id::<Sha256>();
     let duplicate = artifact.clone();
+    let stale = machine
+        .step(Input::EffectCompleted(EffectCompletion::Signed {
+            id: sign.id(),
+            generation: sign.generation() + 1,
+            artifact: Arc::new(artifact.clone()),
+        }))
+        .unwrap();
+    assert_eq!(stale.status(), &StepStatus::StaleCompletion);
+    assert!(stale.activities().is_empty());
     let signed = machine
         .step(Input::EffectCompleted(EffectCompletion::Signed {
             id: sign.id(),
@@ -480,6 +489,22 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
             artifact: Arc::new(artifact),
         }))
         .unwrap();
+    assert_eq!(
+        signed.activities(),
+        &[Activity::TransactionProposed {
+            block: header.block_ref::<Sha256>(),
+        }]
+    );
+    assert!(signed.capabilities().is_empty());
+    let repeated = machine
+        .step(Input::EffectCompleted(EffectCompletion::Signed {
+            id: sign.id(),
+            generation: sign.generation(),
+            artifact: Arc::new(duplicate.clone()),
+        }))
+        .unwrap();
+    assert_eq!(repeated.status(), &StepStatus::StaleCompletion);
+    assert!(repeated.activities().is_empty());
     // The completion parks; its staging (and the self-admission the old status reported)
     // arrives when the scheduler drains it into a barrier.
     assert!(matches!(

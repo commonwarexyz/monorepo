@@ -130,7 +130,7 @@ struct ProposalStart {
     finalized: bool,
 }
 
-/// Tracks a producer's blocks from build to consensus finality and to ordered delivery.
+/// Tracks signed local proposals to consensus finality and to ordered delivery.
 ///
 /// Finality is the pool fact that places the block under a directly finalized leader. Ordering
 /// is the block's delivery in the total order. A start is kept until the block is ordered or
@@ -146,7 +146,6 @@ pub struct ProposalLatency {
     finality_evicted: Counter,
     benchmark_quorum: Option<usize>,
     starts: Counter,
-    cancellations: Counter,
     outstanding: Gauge,
     nonfinalized: Gauge,
     proposed_early: Counter,
@@ -164,11 +163,7 @@ impl ProposalLatency {
             benchmark_quorum: None,
             starts: context.counter(
                 "proposal_started",
-                "locally built blocks tracked for latency",
-            ),
-            cancellations: context.counter(
-                "proposal_cancelled",
-                "tracked proposal attempts cancelled",
+                "locally signed proposals tracked for latency",
             ),
             outstanding: context.gauge(
                 "proposal_outstanding",
@@ -196,12 +191,12 @@ impl ProposalLatency {
             ),
             finality: context.histogram(
                 "proposal_finalization_latency",
-                "time from block build to inclusion by a directly finalized leader",
+                "time from signed local proposal to first local consensus finality",
                 WAN_LATENCY,
             ),
             ordering: context.histogram(
                 "proposal_ordering_latency",
-                "time from block build to delivery in the total order",
+                "time from signed local proposal to delivery in the total order",
                 WAN_LATENCY,
             ),
             input_finality: context.histogram(
@@ -222,7 +217,7 @@ impl ProposalLatency {
 
     /// Enables unsampled INFO events and first-finality classification for a benchmark run.
     ///
-    /// Supply the consensus quorum before cloning this tracker. Samples cover locally built
+    /// Supply the consensus quorum before cloning this tracker. Samples cover locally signed
     /// blocks while retained in memory; restart, eviction, and missing staged ancestry can
     /// prevent observing finality. Logger or process loss must be checked against metric counts.
     pub const fn enable_benchmark(mut self, quorum: NonZeroUsize) -> Self {
@@ -255,6 +250,7 @@ impl ProposalLatency {
         };
         info!(
             benchmark_event = event,
+            latency_start = "signed_proposal",
             reason,
             chain = start.block.chain().get(),
             height = start.block.height().get(),
@@ -269,7 +265,6 @@ impl ProposalLatency {
             votes = evidence.map(|(_, votes)| votes as u64),
             quorum = self.benchmark_quorum.map(|quorum| quorum as u64),
             starts = self.starts.get(),
-            cancellations = self.cancellations.get(),
             drops = self.dropped.get(),
             finality_evictions = self.finality_evicted.get(),
             proposed_early = self.proposed_early.get(),
@@ -311,21 +306,8 @@ impl ProposalLatency {
             input_ready_at,
             finalized: false,
         };
-        self.sample(&start, "start", "built", started_at, None);
+        self.sample(&start, "start", "signed", started_at, None);
         started.push_back(start);
-    }
-
-    fn cancel(&self, block: BlockRef<Sha256Digest>, reason: &str) {
-        let mut started = self.started.lock();
-        if let Some(index) = started.iter().position(|start| start.block == block) {
-            let start = started.remove(index).unwrap();
-            self.cancellations.inc();
-            self.outstanding.dec();
-            if !start.finalized {
-                self.nonfinalized.dec();
-            }
-            self.sample(&start, "cancellation", reason, SystemTime::now(), None);
-        }
     }
 
     fn finalize(
@@ -589,7 +571,6 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
         let body_size = self.production.body_size;
         let marshal = self.marshal.clone();
         let staged = self.staged.clone();
-        let proposal_latency = self.metrics.proposal_latency.clone();
         let input_queue = self.metrics.input_queue.clone();
         let workload = self.workload.clone();
         let input_ready_at = workload.as_ref().map(|workload| {
@@ -624,10 +605,9 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                     _ = sender.closed() => return,
                     () = runtime.sleep_until(next_build) => {},
                 }
-                // Proposal latency starts at construction; input queueing is measured separately.
-                let started_at = runtime.current();
+                let construction_at = runtime.current();
                 if let Some(input_ready_at) = input_ready_at {
-                    input_queue.observe_between(input_ready_at, started_at);
+                    input_queue.observe_between(input_ready_at, construction_at);
                 }
                 let block = Arc::new(TransactionBlock::from_context(
                     context,
@@ -636,24 +616,18 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                 let body_digest = block.header().body_digest();
                 let block_digest = block.digest();
                 let reference = block.reference();
-                proposal_latency.start(reference, started_at, input_ready_at);
                 let custody = select! {
-                    _ = sender.closed() => {
-                        proposal_latency.cancel(reference, "receiver_closed");
-                        return;
-                    },
+                    _ = sender.closed() => return,
                     result = marshal.stage_block(Arc::clone(&block)) => result,
                 };
                 let custody = match custody {
                     Ok(custody) => custody,
                     Err(error) => {
-                        proposal_latency.cancel(reference, "stage_error");
                         warn!(?reference, %error, "cannot stage proposed block");
                         return;
                     }
                 };
                 if !staged.insert_with_custody(block, Some(custody)) {
-                    proposal_latency.cancel(reference, "staged_identity_conflict");
                     return;
                 }
                 debug!(
@@ -664,9 +638,9 @@ impl<E: Clock + Spawner> Automaton for Application<E> {
                     body_size,
                     "produced body"
                 );
-                if sender.send(body_digest).is_err() {
-                    proposal_latency.cancel(reference, "receiver_closed");
-                } else if let Some(workload) = workload {
+                if sender.send(body_digest).is_ok()
+                    && let Some(workload) = workload
+                {
                     workload.lock().admit(context.height().get());
                 }
             });
@@ -780,6 +754,19 @@ impl<E: Clock + Spawner> Reporter for Application<E> {
     type Activity = Activity<MinPk, Sha256Digest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
+        if let Activity::TransactionProposed { block } = &activity {
+            if Some(block.chain()) == self.producer_chain {
+                let now = self.context.current();
+                let input_ready_at = self
+                    .workload
+                    .as_ref()
+                    .and_then(|workload| workload.lock().ready_at(block.height().get(), now));
+                self.metrics
+                    .proposal_latency
+                    .start(*block, now, input_ready_at);
+            }
+            return Feedback::Ok;
+        }
         if let Activity::LeaderFinalized { fact } | Activity::LeaderFinalityUpdated { fact } =
             &activity
         {
@@ -800,7 +787,8 @@ impl<E: Clock + Spawner> Reporter for Application<E> {
                 }
                 _ => None,
             },
-            Activity::HistoryAccepted { .. }
+            Activity::TransactionProposed { .. }
+            | Activity::HistoryAccepted { .. }
             | Activity::LeaderFinalized { .. }
             | Activity::LeaderFinalityUpdated { .. } => None,
         };
@@ -921,7 +909,7 @@ mod tests {
                 };
                 let started = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
                 latency.start(block(1), started, None);
-                latency.cancel(block(1), "receiver_closed");
+                latency.order(block(1));
                 assert!(output.0.lock().is_empty());
                 let latency = latency.enable_benchmark(NZUsize!(3));
                 latency.start(block(2), started, Some(started - Duration::from_secs(2)));
@@ -935,7 +923,7 @@ mod tests {
                 latency.order(block(2));
                 latency.start(block(3), started, None);
                 latency.start(block(4), started, None);
-                latency.cancel(block(4), "stage_error");
+                latency.order(block(4));
             });
             let output = String::from_utf8(output.0.lock().clone()).unwrap();
             let events: Vec<serde_yaml::Value> = output
@@ -945,6 +933,8 @@ mod tests {
             assert_eq!(events.len(), 7);
             let first = &events[0]["fields"];
             assert_eq!(first["benchmark_event"].as_str(), Some("start"));
+            assert_eq!(first["latency_start"].as_str(), Some("signed_proposal"));
+            assert_eq!(first["reason"].as_str(), Some("signed"));
             assert_eq!(first["started_at_us"].as_u64(), Some(10_000_000));
             assert_eq!(first["input_ready_at_us"].as_u64(), Some(8_000_000));
             assert_eq!(first["elapsed_us"].as_u64(), Some(0));
@@ -969,9 +959,8 @@ mod tests {
                 Some("eviction")
             );
             let last = &events[6]["fields"];
-            assert_eq!(last["benchmark_event"].as_str(), Some("cancellation"));
+            assert_eq!(last["benchmark_event"].as_str(), Some("ordered"));
             assert_eq!(last["starts"].as_u64(), Some(4));
-            assert_eq!(last["cancellations"].as_u64(), Some(2));
             assert_eq!(last["drops"].as_u64(), Some(1));
             assert_eq!(last["outstanding"].as_u64(), Some(0));
             assert_eq!(last["nonfinalized"].as_u64(), Some(0));
@@ -1045,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_censored_starts_remain_visible_until_cancel_or_eviction() {
+    fn benchmark_censored_starts_remain_visible_until_ordering_or_eviction() {
         deterministic::Runner::default().start(|runtime| async move {
             let latency = ProposalLatency::new(&runtime, NZUsize!(2)).enable_benchmark(NZUsize!(2));
             let block = |height| {
@@ -1057,7 +1046,8 @@ mod tests {
             };
             let now = SystemTime::now();
             latency.start(block(1), now, Some(now - Duration::from_secs(2)));
-            latency.start(block(1), now, None);
+            latency.start(block(1), now + Duration::from_secs(1), None);
+            assert_eq!(latency.started.lock()[0].started_at, now);
             latency.start(block(2), now, None);
             assert_eq!(latency.starts.get(), 2);
             assert_eq!(latency.outstanding.get(), 2);
@@ -1067,9 +1057,8 @@ mod tests {
             assert_eq!(latency.finality_evicted.get(), 1);
             assert_eq!(latency.outstanding.get(), 2);
             assert_eq!(latency.nonfinalized.get(), 2);
-            latency.cancel(block(2), "stage_error");
-            latency.cancel(block(2), "receiver_closed");
-            assert_eq!(latency.cancellations.get(), 1);
+            latency.order(block(2));
+            latency.order(block(2));
             assert_eq!(latency.outstanding.get(), 1);
             assert_eq!(latency.nonfinalized.get(), 1);
             latency.order(block(3));
@@ -1129,7 +1118,7 @@ mod tests {
             assert_eq!(latency.dropped.get(), 2);
             assert_eq!(latency.finality_evicted.get(), 1);
 
-            latency.cancel(reference(3), "test");
+            latency.order(reference(3));
             latency.start(reference(4), runtime.current(), None);
             latency.order(reference(4));
             latency.start(reference(5), runtime.current(), None);
@@ -1139,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn input_finality_includes_queueing_and_ignores_cancelled_proposals() {
+    fn input_finality_includes_queueing_and_records_finality_once() {
         deterministic::Runner::default().start(|context| async move {
             let latency = ProposalLatency::new(&context, NZUsize!(2));
             let staged = Staged::default();
@@ -1152,8 +1141,6 @@ mod tests {
             };
             let started = SystemTime::now();
             let input = started - Duration::from_secs(1);
-            latency.start(block(1), started, Some(input));
-            latency.cancel(block(1), "test");
             latency.finalize(&[block(1)], &[Height::new(100)], 3, View::new(1), &staged);
             latency.start(block(2), started, Some(input));
             latency.finalize(&[block(2)], &[Height::new(100)], 3, View::new(1), &staged);

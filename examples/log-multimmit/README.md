@@ -23,6 +23,22 @@ The terminal UI uses one screen:
 
 Press the arrows to scroll the total order and `esc` to quit.
 
+## Proposal latency
+
+`application_proposal_finalization_latency` starts when the local machine accepts a completed
+transaction-block signature, before persisting its publication. It ends at the first local
+consensus finality observation covering that block, after resolving its retained ancestry.
+Late votes can advance that finality; each block contributes once. Ordered delivery is a
+separate metric because marshal also waits for ordering proofs and materializes the output.
+
+These boundaries approximate Bluebottle's `transaction_committed_latency`: after local proposal
+construction/signing, through local commit processing, without application execution. Our payload
+custody precedes signing and is excluded; Bluebottle inserts its full block into storage after
+starting its timer. Both exclude input batching. The input-finality metric additionally includes
+the wait from availability of the last input byte. Raw benchmark events identify this start as
+`latency_start="signed_proposal"`; construction-start recordings have a different boundary.
+Samples remain per-block observations, not averages of per-node percentile gauges.
+
 # Key Material
 
 Multimmit uses one ordinary BLS12-381 roster plus two independent threshold sharings, one for data
