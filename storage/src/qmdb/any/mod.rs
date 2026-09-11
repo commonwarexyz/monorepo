@@ -133,6 +133,17 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
+    /// Steady-state page-cache capacity (in pages) to grow the log's page cache to after the
+    /// snapshot build. Create the log's page cache (in the merkle and journal configs) at the
+    /// smaller size wanted during init, and set this to the larger size wanted for serving: the
+    /// snapshot build reads the log once (streamed replay plus scattered collision probes) and gets
+    /// no reuse from a large data cache, so a small cache during init frees memory for the snapshot
+    /// index. After the build the cache is grown to this size, discarding the pages cached during
+    /// init (re-fetched on demand). `None` leaves the cache at its configured size. Only grows (a
+    /// value not larger than the configured size is ignored). Assumes the merkle and log journals
+    /// share one page cache, as in the standard configuration.
+    pub page_cache_size: Option<NonZeroUsize>,
+
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
@@ -186,6 +197,15 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    // The snapshot build below runs with the caller-configured page cache. For a memory-constrained
+    // init the caller sizes that cache small: the build streams the log once and probes scattered
+    // collisions, gaining no reuse from a large data cache, so a small cache leaves room for the
+    // snapshot index. After the build the cache is grown to its steady-state size (see
+    // `page_cache_size`). Assumes the merkle and log journals share one page cache (the standard
+    // configuration).
+    let page_cache = cfg.merkle_config.page_cache.clone();
+    let serving_page_cache_size = cfg.page_cache_size;
+
     let mut log = authenticated::Journal::<F, E, J, H, S>::new(
         context.child("log"),
         cfg.merkle_config,
@@ -205,7 +225,7 @@ where
     let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
-    db::Db::init_from_log(
+    let db = db::Db::init_from_log(
         snapshot_context,
         index,
         log,
@@ -215,7 +235,17 @@ where
         cfg.init_cache_size,
         metrics,
     )
-    .await
+    .await?;
+
+    // Grow the log's page cache to its steady-state size for the grafted-tree rebuild and serving.
+    // Pages cached during the build are discarded; they are re-fetched on demand. Only grows, so a
+    // value not larger than the caller's cache is a no-op.
+    if let Some(size) = serving_page_cache_size {
+        if size > page_cache.capacity() {
+            page_cache.resize(size);
+        }
+    }
+    Ok(db)
 }
 
 #[cfg(test)]
@@ -300,6 +330,7 @@ pub(crate) mod test {
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            page_cache_size: None,
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -357,6 +388,7 @@ pub(crate) mod test {
             },
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            page_cache_size: None,
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }

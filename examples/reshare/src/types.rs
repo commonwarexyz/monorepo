@@ -486,6 +486,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
         },
         translator: TwoCap,
         init_cache_size: Some(NZUsize!(1024)),
+        page_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }

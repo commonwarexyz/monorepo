@@ -181,6 +181,7 @@ pub fn any_fix_cfg_full<B>(
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        page_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency,
     }
@@ -214,6 +215,7 @@ pub fn cur_fix_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        page_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -235,6 +237,7 @@ pub fn any_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        page_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -257,6 +260,7 @@ pub fn cur_var_digest_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        page_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -286,6 +290,7 @@ pub fn any_var_vec_cfg_with(
         ),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        page_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -313,6 +318,7 @@ pub fn cur_var_vec_cfg_with(
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_cache_size: INIT_CACHE_SIZE,
+        page_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }

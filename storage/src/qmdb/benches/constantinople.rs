@@ -366,6 +366,7 @@ fn main() {
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    page_cache_size: None,
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -384,6 +385,7 @@ fn main() {
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    page_cache_size: None,
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -401,6 +403,7 @@ fn main() {
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    page_cache_size: None,
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -421,6 +424,7 @@ fn main() {
                     },
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    page_cache_size: None,
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -433,6 +437,7 @@ fn main() {
                     journal_config,
                     translator: EightCap,
                     init_cache_size: Some(NZUsize!(1 << 18)),
+                    page_cache_size: None,
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };

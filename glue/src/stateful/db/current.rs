@@ -1274,6 +1274,7 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            page_cache_size: None,
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }
@@ -1306,6 +1307,7 @@ mod tests {
             grafted_metadata_partition: format!("stateful-current-grafted-{suffix}"),
             translator: TwoCap,
             init_cache_size: Some(NZUsize!(1024)),
+            page_cache_size: None,
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }

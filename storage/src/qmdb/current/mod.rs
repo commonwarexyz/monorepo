@@ -380,6 +380,13 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// collisions without re-reading the log; `None` disables it.
     pub init_cache_size: Option<NonZeroUsize>,
 
+    /// Page-cache capacity (in pages) to shrink the log's page cache to for the duration of the
+    /// snapshot build, restored to its original size before serving. Lets init run with a small
+    /// page cache (the build gets no reuse from a large data cache) while the full cache is reserved
+    /// for steady-state operation. `None` leaves it at its configured size. See
+    /// [`crate::qmdb::any::Config::page_cache_size`].
+    pub page_cache_size: Option<NonZeroUsize>,
+
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
@@ -398,6 +405,7 @@ impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
             init_cache_size: cfg.init_cache_size,
+            page_cache_size: cfg.page_cache_size,
             init_buffer: cfg.init_buffer,
             init_concurrency: cfg.init_concurrency,
         }
@@ -776,6 +784,7 @@ pub mod tests {
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            page_cache_size: None,
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -819,6 +828,7 @@ pub mod tests {
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
             init_cache_size: Some(NZUsize!(1024)),
+            page_cache_size: None,
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -1740,6 +1750,7 @@ pub mod tests {
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
                 init_cache_size: Some(NZUsize!(1024)),
+                page_cache_size: None,
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(1),
             };

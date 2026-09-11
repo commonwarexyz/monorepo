@@ -216,6 +216,22 @@ impl CacheRef {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Replace the backing cache with an empty one holding at most `capacity` pages, discarding all
+    /// currently cached pages. Blob ids assigned via [Self::next_id] stay valid, so previously cached
+    /// pages are simply re-fetched on their next access.
+    ///
+    /// Intended for a one-time capacity handoff at a quiescent point (for example, growing a small
+    /// init-time cache to the full runtime size once startup finishes). It takes the write lock and
+    /// must not run concurrently with reads or writes through this cache.
+    pub fn resize(&self, capacity: NonZeroUsize) {
+        *self.cache.write() = Cache::new(self.pool.clone(), self.page_size, capacity);
+    }
+
+    /// The maximum number of pages the backing cache currently holds.
+    pub fn capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.cache.read().capacity()).expect("cache capacity is non-zero")
+    }
+
     /// Convert a logical offset into the number of the page it belongs to and the offset within
     /// that page.
     pub fn offset_to_page(&self, offset: u64) -> (u64, u64) {
@@ -486,6 +502,11 @@ impl Cache {
             pool,
             page_fetches: AHashMap::new(),
         }
+    }
+
+    /// The maximum number of pages this cache can hold.
+    fn capacity(&self) -> usize {
+        self.cache.capacity()
     }
 
     /// Convert a logical offset into the number of the page it belongs to and the offset within
