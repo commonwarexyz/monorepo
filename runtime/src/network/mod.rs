@@ -186,7 +186,7 @@ mod tests {
                 set.push(
                     context
                         .child("connection")
-                        .with_attribute("client", client)
+                        .with_attribute("index", client)
                         .spawn(move |_| async move {
                             let received = stream
                                 .recv(CLIENT_SEND_DATA.len())
@@ -215,7 +215,7 @@ mod tests {
             set.push(
                 context
                     .child("client")
-                    .with_attribute("client", client)
+                    .with_attribute("index", client)
                     .spawn(move |_| async move {
                         // Connect to the server
                         let (mut sink, mut stream) = network
@@ -738,7 +738,7 @@ mod tests {
                 set.push(
                     context
                         .child("connection")
-                        .with_attribute("client", client)
+                        .with_attribute("index", client)
                         .spawn(move |_| async move {
                             // Echo every message back to the connected client.
                             for _ in 0..NUM_MESSAGES {
@@ -764,7 +764,7 @@ mod tests {
             set.push(
                 context
                     .child("client")
-                    .with_attribute("client", client)
+                    .with_attribute("index", client)
                     .spawn(move |_| async move {
                         // Dial the server and repeatedly verify the echoed payload.
                         let (mut sink, mut stream) = network.dial(addr).await.unwrap();
