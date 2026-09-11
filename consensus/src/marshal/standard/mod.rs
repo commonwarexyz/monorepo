@@ -43,7 +43,7 @@ pub use variant::Standard;
 mod tests {
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, OptimisticProposal, Relay, Reporter,
+        Automaton, CertifiableAutomaton, HandoffProposal, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -1983,15 +1983,15 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
-        async fn propose_optimistic(
+        async fn propose_handoff(
             &mut self,
             context: Self::Context,
-            parent_leader: PublicKey,
-        ) -> oneshot::Receiver<OptimisticProposal<Self::Digest>> {
+            outgoing_leader: PublicKey,
+        ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
             match self {
-                Self::Inline(inline) => inline.propose_optimistic(context, parent_leader).await,
+                Self::Inline(inline) => inline.propose_handoff(context, outgoing_leader).await,
                 Self::Deferred(deferred) => {
-                    deferred.propose_optimistic(context, parent_leader).await
+                    deferred.propose_handoff(context, outgoing_leader).await
                 }
             }
         }
@@ -3268,11 +3268,11 @@ mod tests {
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
                 let optimistic_rx = wrapper
-                    .propose_optimistic(reproposal_context.clone(), default_leader())
+                    .propose_handoff(reproposal_context.clone(), default_leader())
                     .await;
                 assert_eq!(
                     optimistic_rx.await.expect("optimistic decision missing"),
-                    OptimisticProposal::DeferUntilCertified,
+                    HandoffProposal::WaitForParentCertification,
                     "{kind:?}: application deferral must precede automatic boundary reproposal"
                 );
 

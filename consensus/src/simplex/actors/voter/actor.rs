@@ -4,7 +4,7 @@ use super::{
     state::{CertificateFetch, Config as StateConfig, State, Verify},
 };
 use crate::{
-    CertifiableAutomaton, LATENCY, OptimisticProposal, Relay, Reporter, Viewable,
+    CertifiableAutomaton, HandoffProposal, LATENCY, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
         actors::{Kind, batcher, resolver},
@@ -110,13 +110,19 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 }
 
 enum ProposalResponse<D> {
-    Propose(D),
-    DeferUntilCertified,
+    Proposed(D),
+    WaitForParentCertification,
 }
 
 enum ProposalReceiver<D> {
     Ready(oneshot::Receiver<D>),
-    Optimistic(oneshot::Receiver<OptimisticProposal<D>>),
+    Handoff(oneshot::Receiver<HandoffProposal<D>>),
+}
+
+impl<D> ProposalReceiver<D> {
+    const fn is_handoff(&self) -> bool {
+        matches!(self, Self::Handoff(_))
+    }
 }
 
 type PendingProposal<D, P> = Option<Request<Context<D, P>, ProposalReceiver<D>>>;
@@ -129,12 +135,12 @@ impl<D> Future for ProposalReceiver<D> {
         match self.get_mut() {
             Self::Ready(receiver) => Pin::new(receiver)
                 .poll(cx)
-                .map(|result| result.map(ProposalResponse::Propose)),
-            Self::Optimistic(receiver) => Pin::new(receiver).poll(cx).map(|result| {
+                .map(|result| result.map(ProposalResponse::Proposed)),
+            Self::Handoff(receiver) => Pin::new(receiver).poll(cx).map(|result| {
                 result.map(|proposal| match proposal {
-                    OptimisticProposal::Propose(payload) => ProposalResponse::Propose(payload),
-                    OptimisticProposal::DeferUntilCertified => {
-                        ProposalResponse::DeferUntilCertified
+                    HandoffProposal::Proposed(payload) => ProposalResponse::Proposed(payload),
+                    HandoffProposal::WaitForParentCertification => {
+                        ProposalResponse::WaitForParentCertification
                     }
                 })
             }),
@@ -395,7 +401,7 @@ impl<
         &mut self,
     ) -> Option<Request<Context<D, S::PublicKey>, ProposalReceiver<D>>> {
         // Check if we are ready to propose
-        let context = self.state.try_propose()?;
+        let (context, outgoing_leader) = self.state.try_propose()?.into_parts();
 
         // Request proposal from application
         let span = info_span!(
@@ -404,16 +410,16 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let receiver = if let Some(parent_leader) = self.state.optimistic_parent_leader(&context) {
+        let receiver = if let Some(outgoing_leader) = outgoing_leader {
             let receiver = async {
-                debug!(round = ?context.round, "requested optimistic proposal from automaton");
+                debug!(round = ?context.round, "requested handoff proposal from automaton");
                 self.automaton
-                    .propose_optimistic(context.clone(), parent_leader)
+                    .propose_handoff(context.clone(), outgoing_leader)
                     .await
             }
             .instrument(span.clone())
             .await;
-            ProposalReceiver::Optimistic(receiver)
+            ProposalReceiver::Handoff(receiver)
         } else {
             let receiver = async {
                 debug!(round = ?context.round, "requested proposal from automaton");
@@ -473,12 +479,15 @@ impl<
         pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
         // Keep requests for optimistic future views unless their captured proposal
-        // ancestry has been superseded, and clear requests for exited views.
+        // ancestry has been superseded, and clear requests for exited views. A
+        // pending handoff becomes an ordinary request as soon as its parent certifies.
         // Certification for an exited view can continue after its verification
         // receiver is dropped.
         let current_view = self.state.current_view();
         if pending_propose.as_ref().is_some_and(|request| {
-            request.view() < current_view || self.state.supersede_proposal_request(&request.0)
+            request.view() < current_view
+                || self.state.supersede_proposal_request(&request.0)
+                || (request.2.is_handoff() && self.state.release_certified_handoff(&request.0))
         }) {
             *pending_propose = None;
         }
@@ -712,9 +721,9 @@ impl<
     ) -> Option<View> {
         // Try to use result
         let proposed = match proposed {
-            Ok(ProposalResponse::Propose(proposed)) => proposed,
-            Ok(ProposalResponse::DeferUntilCertified) => {
-                self.state.defer_proposal(&context);
+            Ok(ProposalResponse::Proposed(proposed)) => proposed,
+            Ok(ProposalResponse::WaitForParentCertification) => {
+                self.state.defer_handoff(&context);
                 return None;
             }
             Err(err) => {

@@ -308,7 +308,6 @@ impl<H: Hasher> RoundRobin<H> {
         self.terms = Terms::stable(term_length, stall_timeout, optimistic_views);
         self
     }
-
 }
 
 impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {

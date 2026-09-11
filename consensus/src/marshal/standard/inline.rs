@@ -43,8 +43,8 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, OptimisticDecision,
-    OptimisticProposal, Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, HandoffPolicy, HandoffProposal,
+    Relay, Reporter,
     marshal::{
         Update,
         application::gates::{GateOutcome, Gates},
@@ -598,42 +598,42 @@ where
     ES: Epocher,
 {
     #[allow(clippy::async_yields_async)]
-    #[tracing::instrument(name = "marshal.inline.propose_optimistic", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn propose_optimistic(
+    #[tracing::instrument(name = "marshal.inline.propose_handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn propose_handoff(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
-        parent_leader: <Self::Context as crate::ProposalContext>::PublicKey,
-    ) -> oneshot::Receiver<OptimisticProposal<Self::Digest>> {
-        let mut optimistic = self.clone();
+        outgoing_leader: <Self::Context as crate::HandoffContext>::PublicKey,
+    ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
+        let mut handoff = self.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
             .lock()
             .await
-            .child("propose_optimistic")
+            .child("propose_handoff")
             .with_attribute("round", consensus_context.round);
         context.spawn(move |runtime_context| async move {
-            let decision = optimistic.application.propose_optimistic(
+            let decision = handoff.application.handoff_policy(
                 (
-                    runtime_context.child("app_propose_optimistic"),
+                    runtime_context.child("app_handoff_policy"),
                     consensus_context.clone(),
                 ),
-                parent_leader,
+                outgoing_leader,
             );
             let decision = select! {
                 _ = tx.closed() => return,
                 decision = decision => decision,
             };
-            if decision == OptimisticDecision::DeferUntilCertified {
-                tx.send_lossy(OptimisticProposal::DeferUntilCertified);
+            if decision == HandoffPolicy::WaitForParentCertification {
+                tx.send_lossy(HandoffProposal::WaitForParentCertification);
                 return;
             }
-            let proposal = Automaton::propose(&mut optimistic, consensus_context).await;
+            let proposal = Automaton::propose(&mut handoff, consensus_context).await;
             select! {
                 _ = tx.closed() => {},
                 result = proposal => {
                     if let Ok(digest) = result {
-                        tx.send_lossy(OptimisticProposal::Propose(digest));
+                        tx.send_lossy(HandoffProposal::Proposed(digest));
                     }
                 },
             }

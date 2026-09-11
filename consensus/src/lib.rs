@@ -174,19 +174,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
-    /// Context metadata required to request an optimistic proposal.
-    pub trait ProposalContext {
+    /// Context metadata required to request a pipelined handoff proposal.
+    pub trait HandoffContext {
         /// Identity key of a proposal's leader.
         type PublicKey: PublicKey;
     }
 
-    /// An application's response to an optimistic proposal request.
+    /// An application's response to a pipelined handoff proposal request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum OptimisticProposal<D> {
-        /// Propose the supplied payload.
-        Propose(D),
+    pub enum HandoffProposal<D> {
+        /// Use the supplied payload for the handoff.
+        Proposed(D),
         /// Wait until the parent has been certified before requesting a proposal again.
-        DeferUntilCertified,
+        WaitForParentCertification,
     }
 
     /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
@@ -195,27 +195,27 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
-        /// Generate a payload whose parent has not yet been certified.
+        /// Generate a payload for a pipelined term handoff whose parent has not yet been certified.
         ///
-        /// Returning [`OptimisticProposal::Propose`] has the same verification and
+        /// Returning [`HandoffProposal::Proposed`] has the same verification and
         /// certification commitments as returning a payload from [`Automaton::propose`].
-        /// Returning [`OptimisticProposal::DeferUntilCertified`] explicitly declines
+        /// Returning [`HandoffProposal::WaitForParentCertification`] explicitly declines
         /// speculative construction while allowing consensus to retry through the ordinary
         /// proposal path once the parent is certified. Keep the response pending while the
         /// decision or construction is still in progress. Closing the response is terminal
         /// for this request and should be reserved for cases such as shutdown.
-        fn propose_optimistic(
+        fn propose_handoff(
             &mut self,
             _context: Self::Context,
-            _parent_leader: <Self::Context as ProposalContext>::PublicKey,
-        ) -> impl Future<Output = oneshot::Receiver<OptimisticProposal<Self::Digest>>> + Send
+            _outgoing_leader: <Self::Context as HandoffContext>::PublicKey,
+        ) -> impl Future<Output = oneshot::Receiver<HandoffProposal<Self::Digest>>> + Send
         where
-            Self::Context: ProposalContext,
+            Self::Context: HandoffContext,
         {
             #[allow(clippy::async_yields_async)]
             async move {
                 let (sender, receiver) = oneshot::channel();
-                sender.send_lossy(OptimisticProposal::DeferUntilCertified);
+                sender.send_lossy(HandoffProposal::WaitForParentCertification);
                 receiver
             }
         }
@@ -323,13 +323,13 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
 
-    /// An application's policy decision for an optimistic proposal opportunity.
+    /// An application's policy for a pipelined term handoff.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum OptimisticDecision {
+    pub enum HandoffPolicy {
         /// Proceed through the ordinary proposal path without waiting for parent certification.
-        Propose,
+        Pipeline,
         /// Wait for the parent to certify before proposing.
-        DeferUntilCertified,
+        WaitForParentCertification,
     }
 
     /// Application is a minimal interface for standard implementations that operate over a stream
@@ -369,20 +369,22 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Decide whether to build on a parent that has not yet been certified.
         ///
-        /// `parent_leader` identifies the leader that proposed the uncertified parent.
-        /// Returning [`OptimisticDecision::Propose`] continues through [`Self::propose`],
-        /// including any automatic epoch-boundary or recovery behavior. Returning
-        /// [`OptimisticDecision::DeferUntilCertified`] waits until the parent certifies before
-        /// invoking [`Self::propose`]. The parent is necessarily uncertified when this hook is
-        /// called, so certification status is implicit rather than duplicated in the arguments.
+        /// `outgoing_leader` identifies the leader that proposed the uncertified parent.
+        /// Returning [`HandoffPolicy::Pipeline`] allows the marshal to continue through its
+        /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
+        /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
+        /// [`HandoffPolicy::WaitForParentCertification`] waits until the parent certifies before
+        /// requesting that ordinary path again. The parent is necessarily uncertified when this
+        /// hook is called, so certification status is implicit rather than duplicated in the
+        /// arguments.
         ///
         /// This future may be cancelled before it completes and must be cancellation-safe.
-        fn propose_optimistic(
+        fn handoff_policy(
             &mut self,
             _context: (E, Self::Context),
-            _parent_leader: <Self::SigningScheme as Verifier>::PublicKey,
-        ) -> impl Future<Output = OptimisticDecision> + Send {
-            async move { OptimisticDecision::DeferUntilCertified }
+            _outgoing_leader: <Self::SigningScheme as Verifier>::PublicKey,
+        ) -> impl Future<Output = HandoffPolicy> + Send {
+            async move { HandoffPolicy::WaitForParentCertification }
         }
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
