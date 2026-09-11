@@ -667,6 +667,15 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// The same holds for a blob reopened within a run. A blob has one open at
+    /// a time, see [`Storage::open_versioned`]. Once every handle to a blob has
+    /// been dropped and every operation issued through those handles has
+    /// completed (its future was awaited, or its [`Blob::start_sync`] handle
+    /// resolved), a handle returned by a later open reads only crash-durable
+    /// bytes. Writes and resizes that no completed sync covered are either made
+    /// durable before the open returns or are not visible through the new
+    /// handle.
+    ///
     /// # Cancellation
     ///
     /// Dropping an operation's future does not guarantee cancellation: the
@@ -703,10 +712,15 @@ stability_scope!(BETA {
         /// Open an existing blob in a given partition or create a new one, returning
         /// the blob and its length.
         ///
-        /// Multiple instances of the same blob can be opened concurrently, however,
-        /// writing to the same blob concurrently may lead to undefined behavior.
+        /// A blob has one open at a time. Clone the returned blob to share it, and
+        /// drop every clone before opening the blob again.
         ///
         /// An Ok result indicates the blob is durably created (or already exists).
+        ///
+        /// # Panics
+        ///
+        /// Panics if a handle from an earlier open of the blob is still alive and the
+        /// blob has not been removed since.
         ///
         /// # Versions
         ///
@@ -853,21 +867,25 @@ stability_scope!(BETA {
     /// To support blob implementations that enable concurrent reads and
     /// writes, blobs are responsible for maintaining synchronization.
     ///
-    /// Cloning a blob is similar to wrapping a single file descriptor in
-    /// a lock whereas opening a new blob (of the same name) is similar to
-    /// opening a new file descriptor. If multiple blobs are opened with the same
-    /// name, they are not expected to coordinate access to underlying storage
-    /// and writing to both is undefined behavior.
+    /// Cloning a blob shares one open, similar to wrapping a single file
+    /// descriptor in a lock. A blob has one open at a time: opening it again
+    /// while any clone is alive panics, so clones are the only way to share
+    /// access to a blob.
     ///
-    /// When a blob is dropped, any unsynced changes may be discarded. Implementations
-    /// may attempt to sync during drop but errors will go unhandled. Call `sync`
-    /// before dropping to ensure all changes are durably persisted.
+    /// Dropping the last clone of a blob whose writes or resizes are not covered
+    /// by a completed [Blob::sync] does not make them durable at a known point.
+    /// A runtime may sync them afterwards, surfacing a failure only to the next
+    /// [Storage::open_versioned] of the same blob, or a later handle may not see
+    /// them at all. Call `sync` before dropping to make changes durable and to
+    /// observe errors.
     ///
     /// # Durability
     ///
     /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
-    /// unchanged.
+    /// unchanged. A blob reopened within a run after every clone was dropped and every
+    /// operation issued through them completed reads only bytes a sync covered, see the
+    /// `Storage` durability notes.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
@@ -912,6 +930,9 @@ stability_scope!(BETA {
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Ensure all pending data is durably persisted.
+        ///
+        /// A runtime may return at once when no mutation issued through this blob's clones
+        /// remains uncovered by a completed sync, so callers may sync freely.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that all pending data is durably persisted.
@@ -1467,6 +1488,7 @@ mod tests {
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
+            drop(blob);
             let (blob, len) = context
                 .open(partition, name)
                 .await
@@ -1593,6 +1615,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after write");
 
             // Re-open and check length
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
@@ -1604,6 +1627,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after resize");
 
             // Re-open and check length again
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, new_len);
 
@@ -1626,6 +1650,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
+            drop(blob);
             let (blob, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, data.len() as u64);
 

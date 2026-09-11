@@ -1,10 +1,10 @@
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
-    storage::hold::Hold,
+    storage::{Generation, Pending, Sender, Tracker, defer_sync, hold::Hold},
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     fs::File,
     io::IoSlice,
@@ -52,16 +52,19 @@ impl Cache {
 /// A blob's file bundled with the hold on its storage directory.
 ///
 /// An operation must capture the file to touch it, so it carries the hold
-/// into the blocking pool without having to remember to.
+/// into the blocking pool without having to remember to, and keeps the open's
+/// obligation pending until it has finished. Dropping the last reference
+/// resolves that obligation: at once when a completed sync covers every
+/// mutation, and otherwise through a deferred sync that the next open of the
+/// blob waits for.
 struct Held {
-    file: File,
-    _hold: Arc<Hold>,
-}
-
-impl Held {
-    fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
-        Arc::new(Self { file, _hold: hold })
-    }
+    file: Arc<File>,
+    tracker: Tracker,
+    hold: Arc<Hold>,
+    pending: Arc<Pending>,
+    key: (String, Vec<u8>),
+    /// Resolves the obligation the open registered when its last handle dropped.
+    promise: Mutex<Option<Sender>>,
 }
 
 impl Deref for Held {
@@ -72,39 +75,97 @@ impl Deref for Held {
     }
 }
 
+impl Drop for Held {
+    fn drop(&mut self) {
+        let Some(sender) = self.promise.lock().take() else {
+            return;
+        };
+        if !self.tracker.is_dirty() {
+            self.pending.resolve(&self.key, sender, Ok(()));
+            return;
+        }
+        let file = self.file.clone();
+        let hold = self.hold.clone();
+        let key = self.key.clone();
+        defer_sync(self.pending.clone(), self.key.clone(), sender, move || {
+            let _hold = hold;
+            Blob::sync_inner(&file, &key.0, &key.1)
+        });
+    }
+}
+
+/// One open of a blob, shared by its clones.
+///
+/// Dropping the last clone releases the name and registers the obligation a
+/// later open waits for, which [Held] resolves once every operation issued
+/// through this open has finished.
+struct Open {
+    held: Arc<Held>,
+    generation: Arc<Generation>,
+}
+
+impl Deref for Open {
+    type Target = Held;
+
+    fn deref(&self) -> &Held {
+        &self.held
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        if let Some(sender) = self.generation.release() {
+            *self.held.promise.lock() = Some(sender);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Blob {
-    partition: String,
-    name: Vec<u8>,
-    file: Arc<Held>,
+    open: Arc<Open>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
+    #[cfg(test)]
+    after_start_sync: Option<Arc<std::sync::Barrier>>,
 }
 
 impl Blob {
     pub(crate) fn new(
-        partition: String,
-        name: &[u8],
         file: File,
         pool: BufferPool,
         data_offset: u64,
         hold: Arc<Hold>,
+        generation: Arc<Generation>,
     ) -> Self {
+        let held = Arc::new(Held {
+            file: Arc::new(file),
+            tracker: Tracker::default(),
+            hold,
+            pending: generation.pending.clone(),
+            key: generation.key.clone(),
+            promise: Mutex::new(None),
+        });
         Self {
-            partition,
-            name: name.into(),
-            file: Held::new(file, hold),
+            open: Arc::new(Open { held, generation }),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
+            #[cfg(test)]
+            after_start_sync: None,
         }
     }
 
-    fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
+    /// Number of syncs this open skipped because it had nothing to persist.
+    #[cfg(test)]
+    pub(super) fn skipped_syncs(&self) -> u64 {
+        self.open.tracker.skipped()
+    }
+
+    pub(super) fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
         // Data durability is the contract. `sync_data` covers the bytes and metadata required to
         // retrieve them, including file size, while avoiding timestamp-only journal commits.
         // Other platforms retain `sync_all` for their platform-specific guarantees.
@@ -296,7 +357,7 @@ impl crate::Blob for Blob {
         if len == 0 {
             return Ok(bufs);
         }
-        let file = self.file.clone();
+        let file = self.open.held.clone();
         let pool = self.pool.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled(self.dont_cache_supported.clone())
@@ -327,7 +388,7 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let file = self.file.clone();
+        let file = self.open.held.clone();
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
@@ -342,51 +403,48 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
-        let partition = sync.then(|| self.partition.clone());
-        let name = sync.then(|| self.name.clone());
+
+        // Plain syscall paths own mutation debt before submission, including worker unwind.
+        // Durability is fused for one submission. Larger writes finish with one full-file sync.
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                let flags = (sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE).then_some(libc::RWF_DSYNC);
+            } else {
+                let flags = None;
+            }
+        }
+        let fused = flags.is_some();
+        if !fused {
+            self.open.tracker.write();
+        }
         task::spawn_blocking(move || {
             // Preserve the single-buffer fast path when no option requires per-write flags.
             let bufs = if !sync && !cache.is_disabled() {
                 match bufs.try_into_single() {
-                    Ok(buf) => return Self::write_single_at(&file, offset, buf.as_ref()),
+                    Ok(buf) => {
+                        Self::write_single_at(&file, offset, buf.as_ref())?;
+                        file.tracker.complete();
+                        return Ok(());
+                    }
                     Err(bufs) => bufs,
                 }
             } else {
                 bufs
             };
 
-            cfg_if! {
-                if #[cfg(target_os = "linux")] {
-                    // Fuse durability only when the write fits one submission. Fusing every batch
-                    // would serialize the batches behind per-call durability waits. Plain batches
-                    // stay pipelined and finish with one data sync.
-                    let fused = sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE;
-                    Self::write_vectored_at(
-                        cache,
-                        &file,
-                        offset,
-                        bufs,
-                        fused.then_some(libc::RWF_DSYNC),
-                    )?;
-                    if sync && !fused {
-                        file.sync_data().map_err(|e| {
-                            Error::BlobSyncFailed(
-                                partition.expect("sync write has a partition"),
-                                hex(name.as_deref().expect("sync write has a name")),
-                                e.into(),
-                            )
-                        })?;
-                    }
-                } else {
-                    Self::write_vectored_at(cache, &file, offset, bufs, None)?;
-                    if sync {
-                        Self::sync_inner(
-                            &file,
-                            partition.as_deref().expect("sync write has a partition"),
-                            name.as_deref().expect("sync write has a name"),
-                        )?;
-                    }
-                }
+            let result = Self::write_vectored_at(cache, &file, offset, bufs, flags);
+            if fused && result.is_err() {
+                file.tracker.write();
+            }
+            result?;
+            if !fused {
+                file.tracker.complete();
+            }
+            if sync && !fused {
+                let seen = file.tracker.begin_sync();
+                let (partition, name) = &file.key;
+                Self::sync_inner(&file, partition, name)?;
+                file.tracker.end_sync(seen);
             }
             Ok(())
         })
@@ -395,40 +453,73 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let file = self.file.clone();
+        let file = self.open.held.clone();
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        task::spawn_blocking(move || file.set_len(len))
-            .await
-            .map_err(|e| e.into())
-            .and_then(|r| r)
-            .map_err(|e| {
-                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
-            })?;
+        self.open.tracker.write();
+        task::spawn_blocking(move || {
+            file.set_len(len)?;
+            file.tracker.complete();
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.into())
+        .and_then(|r: std::io::Result<()>| r)
+        .map_err(|e| {
+            let (partition, name) = &self.open.key;
+            Error::BlobResizeFailed(partition.clone(), hex(name), e.into())
+        })?;
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
-        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
-            .await
-            .map_err(|e| {
-                let err: std::io::Error = e.into();
-                Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), err.into())
-            })?
+        if !self.open.tracker.is_dirty() {
+            #[cfg(test)]
+            self.open.tracker.skip_sync();
+            return Ok(());
+        }
+        let file = self.open.held.clone();
+        let seen = self.open.tracker.begin_sync();
+        task::spawn_blocking(move || {
+            let (partition, name) = &file.key;
+            Self::sync_inner(&file, partition, name)?;
+            file.tracker.end_sync(seen);
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            let err: std::io::Error = e.into();
+            let (partition, name) = &self.open.key;
+            Error::BlobSyncFailed(partition.clone(), hex(name), err.into())
+        })?
     }
 
     async fn start_sync(&self) -> Handle<()> {
+        if !self.open.tracker.is_dirty() {
+            #[cfg(test)]
+            self.open.tracker.skip_sync();
+            return Handle::ready(Ok(()));
+        }
         let (tx, rx) = oneshot::channel();
-        let file = self.file.clone();
-        let partition = self.partition.clone();
-        let name = self.name.clone();
+        let file = self.open.held.clone();
+        let seen = self.open.tracker.begin_sync();
+        #[cfg(test)]
+        let after_start_sync = self.after_start_sync.clone();
         task::spawn_blocking(move || {
-            let result = Self::sync_inner(&file, &partition, &name);
+            // Release this operation's blob ownership before publishing its completion.
+            let (partition, name) = &file.key;
+            let result = Self::sync_inner(&file, partition, name);
+            if result.is_ok() {
+                file.tracker.end_sync(seen);
+            }
+            drop(file);
             let _ = tx.send(result);
+            #[cfg(test)]
+            if let Some(gate) = after_start_sync {
+                gate.wait();
+                gate.wait();
+            }
         });
         Handle::from_receiver(rx)
     }
@@ -437,6 +528,138 @@ impl crate::Blob for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        Blob as _, BufferPoolConfig, Storage as _,
+        storage::{
+            Layout,
+            tokio::{Config, Storage},
+        },
+        telemetry::metrics::Registry,
+    };
+
+    struct PanickingOwner {
+        entered: Option<::tokio::sync::oneshot::Sender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl AsRef<[u8]> for PanickingOwner {
+        fn as_ref(&self) -> &[u8] {
+            b"x"
+        }
+    }
+
+    impl Drop for PanickingOwner {
+        fn drop(&mut self) {
+            let _ = self.entered.take().unwrap().send(());
+            let _ = self.release.recv();
+            panic!("buffer owner dropped");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reopen_syncs_fallback_write_after_owner_panic() {
+        let storage_directory =
+            std::env::temp_dir().join(format!("storage_tokio_owner_panic_{}", std::process::id()));
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let (entered, entering) = ::tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let mut chunks = vec![crate::IoBuf::from(bytes::Bytes::from_owner(
+            PanickingOwner {
+                entered: Some(entered),
+                release: released,
+            },
+        ))];
+        let count = if cfg!(target_os = "linux") { 1025 } else { 4 };
+        for _ in 1..count {
+            chunks.push(crate::IoBuf::from(vec![b'x']));
+        }
+        let writing_blob = blob.clone();
+        let writing =
+            ::tokio::spawn(
+                async move { writing_blob.write_at(0, chunks, WriteOptions::SYNC).await },
+            );
+        let entered = ::tokio::time::timeout(std::time::Duration::from_secs(10), entering).await;
+        let bytes = blob.read_at(0, 1, ReadOptions::default()).await;
+        release.send(()).unwrap();
+        let result = writing.await.unwrap();
+        entered.unwrap().unwrap();
+        assert_eq!(bytes.unwrap().coalesce().as_ref(), b"x");
+        assert!(matches!(result, Err(Error::WriteFailed)));
+
+        let (release, gate) = std::sync::mpsc::channel();
+        *storage.pending.before_sync.lock() = Some(gate);
+        drop(blob);
+        let mut reopen = Box::pin(storage.open("partition", b"blob"));
+        let early = ::tokio::time::timeout(std::time::Duration::from_millis(20), &mut reopen).await;
+        release.send(()).ok();
+        let waited = early.is_err();
+        let (blob, size) = match early {
+            Ok(result) => result.unwrap(),
+            Err(_) => reopen.as_mut().await.unwrap(),
+        };
+        drop(reopen);
+        assert!(size >= 1);
+        assert_eq!(
+            blob.read_at(0, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            b"x"
+        );
+        drop(blob);
+        let syncs = storage.pending.finished();
+        drop(storage);
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            waited,
+            "reopen returned before the failed write was made durable"
+        );
+        assert_eq!(syncs, 1);
+    }
+
+    #[tokio::test]
+    async fn test_reopen_after_start_sync_completion() {
+        let storage_directory = std::env::temp_dir().join(format!(
+            "storage_tokio_sync_completion_{}",
+            std::process::id()
+        ));
+        let mut registry = Registry::default();
+        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
+        let (mut blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        blob.after_start_sync = Some(gate.clone());
+
+        // Keep the completed sync worker alive while the caller writes and closes the blob.
+        blob.write_at(0, b"before", WriteOptions::default())
+            .await
+            .unwrap();
+        blob.start_sync().await.await.unwrap();
+        gate.wait();
+        let observed: Result<_, Error> = async {
+            blob.write_at(0, b"after sync", WriteOptions::default())
+                .await?;
+            drop(blob);
+            let (reopened, len) = storage.open("partition", b"blob").await?;
+            let bytes = reopened
+                .read_at(0, len as usize, ReadOptions::default())
+                .await?;
+            Ok((len, bytes.coalesce(), storage.pending.finished()))
+        }
+        .await;
+
+        // Release the worker before checking results so a failure cannot strand it.
+        gate.wait();
+        let (len, bytes, syncs) = observed.unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(len, 10);
+        assert_eq!(bytes.as_ref(), b"after sync");
+        assert_eq!(syncs, 1, "reopen did not wait for the later write's sync");
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[test]

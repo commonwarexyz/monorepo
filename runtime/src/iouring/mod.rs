@@ -434,7 +434,8 @@ impl Handle {
     ///
     /// A durable write that fits one submission carries `RWF_DSYNC` and is durable on completion.
     /// A larger write is submitted plain and finished with one data sync, so it performs one
-    /// device flush at the end instead of one per submission.
+    /// device flush at the end instead of one per submission. Returns whether completion
+    /// includes that whole-file sync.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
     pub(crate) async fn write_at(
         &self,
@@ -443,7 +444,7 @@ impl Handle {
         bufs: IoBufs,
         options: WriteOptions,
         cache: Cache,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let state = if !options.contains(WriteOptions::SYNC) {
             WriteAtState::Writing
         } else if bufs.chunk_count() <= IOVEC_BATCH_SIZE {
@@ -451,6 +452,7 @@ impl Handle {
         } else {
             WriteAtState::WritingBeforeSync
         };
+        let synced = matches!(state, WriteAtState::WritingBeforeSync);
         let (tx, rx) = oneshot::channel();
         self.enqueue(Request::WriteAt(WriteAtRequest {
             file,
@@ -464,7 +466,8 @@ impl Handle {
         }))
         .await
         .map_err(|_| Error::WriteFailed)?;
-        rx.await.map_err(|_| Error::WriteFailed)?
+        rx.await.map_err(|_| Error::WriteFailed)??;
+        Ok(synced)
     }
 
     /// Submit a logical fsync request and wait for its completion.

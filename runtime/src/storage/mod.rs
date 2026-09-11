@@ -5,11 +5,26 @@ use commonware_macros::stability_scope;
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::{BlobVersion, Error};
     use std::{
+        collections::HashMap,
         fs::File,
         io::{Read as _, Seek as _, SeekFrom},
         ops::RangeInclusive,
         path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
     };
+    use ::tokio::sync::watch;
+    use commonware_formatting::hex;
+    #[cfg(test)]
+    use crate::{Blob as _, BufferPool, ReadOptions, WriteOptions, buffer::Write};
+    #[cfg(test)]
+    use commonware_utils::NZUsize;
+    #[cfg(test)]
+    use std::time::Duration;
+    #[cfg(test)]
+    use ::tokio::time::timeout;
 
     /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
     /// but did not `fsync` are crash-durable before any storage structure reads.
@@ -65,6 +80,407 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 e.into(),
             )
         })
+    }
+
+    /// Deferred syncs and the live opens that can still register them.
+    ///
+    /// A name has at most one live open. Its identity binds registration to that open, while
+    /// the receiver retains outstanding work and errors until the name is removed or recreated.
+    #[derive(Default)]
+    pub(crate) struct Pending {
+        syncs: commonware_utils::sync::Mutex<HashMap<(String, Vec<u8>), Entry>>,
+        #[cfg(test)]
+        finished: AtomicU64,
+        #[cfg(test)]
+        deferred: commonware_utils::sync::Mutex<Vec<Receiver>>,
+        #[cfg(test)]
+        before_sync: commonware_utils::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        #[cfg(test)]
+        fail_creation_after: commonware_utils::sync::Mutex<Option<usize>>,
+    }
+
+    #[derive(Default)]
+    struct Entry {
+        identity: std::sync::Weak<Generation>,
+        sync: Option<Receiver>,
+    }
+
+    /// The live open of one namespace entry, dropped with the last handle of that open.
+    pub(crate) struct Generation {
+        pending: Arc<Pending>,
+        key: (String, Vec<u8>),
+    }
+
+    impl Generation {
+        /// Release the name for a later open, returning the sender that resolves the obligation
+        /// every later open waits for. `None` once the name was removed or recreated, or while a
+        /// retained failure still blocks it.
+        pub(crate) fn release(&self) -> Option<Sender> {
+            self.pending.start(self)
+        }
+    }
+
+    impl Drop for Generation {
+        fn drop(&mut self) {
+            let mut syncs = self.pending.syncs.lock();
+            if syncs.get(&self.key).is_some_and(|entry| {
+                std::ptr::eq(entry.identity.as_ptr(), self) && entry.sync.is_none()
+            }) {
+                syncs.remove(&self.key);
+            }
+        }
+    }
+
+    /// The result of a pending sync, `None` while it runs.
+    type Outcome = Option<Result<(), Error>>;
+    type Receiver = watch::Receiver<Outcome>;
+    pub(crate) type Sender = watch::Sender<Outcome>;
+
+    impl Pending {
+        /// Attach a fresh open to a name while the backend holds its namespace lock.
+        ///
+        /// # Panics
+        ///
+        /// Panics while a handle from an earlier open of the name is still alive.
+        pub(crate) fn attach(
+            self: &Arc<Self>,
+            partition: &str,
+            name: &[u8],
+        ) -> (Arc<Generation>, Option<Receiver>) {
+            let key = (partition.to_owned(), name.to_vec());
+            let mut syncs = self.syncs.lock();
+            let entry = syncs.entry(key.clone()).or_default();
+            assert!(
+                entry.identity.upgrade().is_none(),
+                "blob {partition}/{} is already open",
+                hex(name)
+            );
+            let generation = Arc::new(Generation { pending: self.clone(), key });
+            entry.identity = Arc::downgrade(&generation);
+            (generation, entry.sync.clone())
+        }
+
+        /// Register work only while this identity still owns its name and no earlier obligation
+        /// is outstanding.
+        fn start(&self, generation: &Generation) -> Option<Sender> {
+            let mut syncs = self.syncs.lock();
+            let entry = syncs.get_mut(&generation.key)?;
+            if !std::ptr::eq(entry.identity.as_ptr(), generation) || entry.sync.is_some() {
+                return None;
+            }
+            let (sender, receiver) = watch::channel(None);
+            entry.sync = Some(receiver);
+            Some(sender)
+        }
+
+        /// Publish a deferred sync's result, see [Self::resolve].
+        fn finish(&self, key: &(String, Vec<u8>), sender: Sender, result: Result<(), Error>) {
+            #[cfg(test)]
+            if result.is_ok() {
+                self.finished.fetch_add(1, Ordering::AcqRel);
+            }
+            self.resolve(key, sender, result);
+        }
+
+        /// Publish an obligation's result. A success releases its debt and a failure retains it.
+        pub(crate) fn resolve(
+            &self,
+            key: &(String, Vec<u8>),
+            sender: Sender,
+            result: Result<(), Error>,
+        ) {
+            if result.is_ok() {
+                let mut syncs = self.syncs.lock();
+                if let Some(entry) = syncs.get_mut(key)
+                    && entry.sync.as_ref().is_some_and(|receiver| receiver.same_channel(&sender.subscribe()))
+                {
+                    entry.sync = None;
+                    if entry.identity.upgrade().is_none() {
+                        syncs.remove(key);
+                    }
+                }
+            }
+            let _ = sender.send(Some(result));
+        }
+
+        /// Wait for the obligation captured when the file was opened.
+        pub(crate) async fn wait(receiver: Option<Receiver>) -> Result<(), Error> {
+            let Some(mut receiver) = receiver else {
+                return Ok(());
+            };
+            receiver
+                .wait_for(Option::is_some)
+                .await
+                .map_or(Err(Error::Closed), |outcome| {
+                    outcome.clone().expect("outcome is published")
+                })
+        }
+
+        /// Detach a removed name, or every name in a removed partition.
+        pub(crate) fn forget(&self, partition: &str, name: Option<&[u8]>) {
+            if let Some(name) = name {
+                self.syncs.lock().remove(&(partition.to_owned(), name.to_vec()));
+            } else {
+                self.syncs.lock().retain(|(stored, _), _| {
+                    stored != partition
+                });
+            }
+        }
+
+        /// Number of registered syncs.
+        #[cfg(test)]
+        pub(crate) fn len(&self) -> usize {
+            self.syncs.lock().values().filter(|entry| entry.sync.is_some()).count()
+        }
+
+        /// Number of syncs that finished successfully.
+        #[cfg(test)]
+        pub(crate) fn finished(&self) -> u64 {
+            self.finished.load(Ordering::Acquire)
+        }
+    }
+
+    /// Tracks the writes to one blob file that no completed sync covers.
+    ///
+    /// Shared by every handle of one open, it counts mutations requiring a full-file barrier.
+    /// Each sync credits only mutations completed before it began, so a mutation racing a sync
+    /// stays dirty.
+    #[derive(Default)]
+    pub(crate) struct Tracker {
+        written: AtomicU64,
+        completed: AtomicU64,
+        synced: AtomicU64,
+        #[cfg(test)]
+        skipped: AtomicU64,
+    }
+
+    impl Tracker {
+        /// Record a mutation that needs a completed sync.
+        pub(crate) fn write(&self) {
+            self.written.fetch_add(1, Ordering::AcqRel);
+        }
+
+        /// Count a successful plain write or resize.
+        pub(crate) fn complete(&self) {
+            self.completed.fetch_add(1, Ordering::AcqRel);
+        }
+
+        /// Observe the completed writes a sync about to be issued will cover.
+        pub(crate) fn begin_sync(&self) -> u64 {
+            self.completed.load(Ordering::Acquire)
+        }
+
+        /// Credit a completed sync with the writes observed when it began.
+        pub(crate) fn end_sync(&self, seen: u64) {
+            self.synced.fetch_max(seen, Ordering::AcqRel);
+        }
+
+        /// Whether writes were issued that no completed sync covers.
+        pub(crate) fn is_dirty(&self) -> bool {
+            self.written.load(Ordering::Acquire) != self.synced.load(Ordering::Acquire)
+        }
+
+        /// Record a sync that found nothing to persist. Callers sync freely and the runtime
+        /// skips the device flush when every mutation through the open is already covered.
+        #[cfg(test)]
+        pub(crate) fn skip_sync(&self) {
+            self.skipped.fetch_add(1, Ordering::AcqRel);
+        }
+
+        /// Number of syncs skipped because the open was clean.
+        #[cfg(test)]
+        pub(crate) fn skipped(&self) -> u64 {
+            self.skipped.load(Ordering::Acquire)
+        }
+    }
+
+    /// Run a deferred sync for a blob whose open ended dirty, resolving its obligation with
+    /// `sender`.
+    ///
+    /// The sync runs on the blocking pool when a runtime is available and inline otherwise. A
+    /// pool that is shutting down may discard queued work, so a blob dropped dirty during runtime
+    /// teardown relies on the next start's flush. `sync` must own everything the sync needs,
+    /// including the directory hold.
+    pub(crate) fn defer_sync(
+        pending: Arc<Pending>,
+        key: (String, Vec<u8>),
+        sender: Sender,
+        sync: impl FnOnce() -> Result<(), Error> + Send + 'static,
+    ) {
+        #[cfg(test)]
+        let gate = {
+            pending.deferred.lock().push(sender.subscribe());
+            pending.before_sync.lock().take()
+        };
+        let work = move || {
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                let _ = gate.recv();
+            }
+            let result = sync();
+            pending.finish(&key, sender, result);
+        };
+        match ::tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(work);
+            }
+            Err(_) => work(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pending: &Pending) {
+        for partial in [true, false] {
+            *pending.fail_creation_after.lock() = Some(if partial { 1 } else { usize::MAX });
+            assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)));
+            if !partial {
+                for _ in 0..2 {
+                    assert!(matches!(storage.open("failed_creation", b"blob").await, Err(Error::Closed)),
+                        "a parseable header must not hide the failed creation barrier");
+                }
+                storage.remove("failed_creation", Some(b"blob")).await.unwrap();
+            }
+            let (blob, size) = storage.open("failed_creation", b"blob").await.unwrap();
+            assert_eq!(size, 0);
+            drop(blob);
+            storage.remove("failed_creation", None).await.unwrap();
+        }
+        assert!(pending.deferred.lock().is_empty(), "failed creation must not launch a sync job");
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
+        storage: &S,
+        pending: &Pending,
+        pool: &BufferPool,
+    ) {
+        for by_name in [true, false] {
+            for unlink_first in [false, true] {
+                let partition = "remove_live_dirty";
+                let name = b"blob";
+                let (blob, size) = storage.open(partition, name).await.unwrap();
+                let mut writer = Write::new(blob, size, NZUsize!(1), pool.clone());
+                writer.write_at(0, b"dirty").await.unwrap();
+                writer.wait_for_sync().await.unwrap();
+                let before = pending.deferred.lock().len();
+                let finished = pending.finished();
+                let target = by_name.then_some(name.as_slice());
+
+                if unlink_first {
+                    storage.remove(partition, target).await.unwrap();
+                    assert_eq!(
+                        writer.read_at(0, 5).await.unwrap().coalesce().as_ref(),
+                        b"dirty",
+                    );
+                    drop(writer);
+                } else {
+                    drop(writer);
+                    storage.remove(partition, target).await.unwrap();
+                }
+
+                let jobs = pending.deferred.lock()[before..].to_vec();
+                assert_eq!(jobs.len(), usize::from(!unlink_first));
+                for mut job in jobs {
+                    timeout(Duration::from_secs(10), job.wait_for(Option::is_some))
+                        .await.unwrap().unwrap().clone().unwrap().unwrap();
+                }
+                assert_eq!(pending.finished() - finished, u64::from(!unlink_first));
+                if by_name {
+                    storage.remove(partition, None).await.unwrap();
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &Pending) {
+        for (case, options) in [WriteOptions::SYNC, WriteOptions::SYNC | WriteOptions::DONT_CACHE].into_iter().enumerate() {
+            let before = pending.finished();
+            let (blob, _) = storage.open("durable_writes", &[case as u8]).await.unwrap();
+            blob.write_at(0, b"first", options).await.unwrap();
+            blob.write_at(5, b"second", options).await.unwrap();
+            drop(blob);
+            let (blob, size) = storage.open("durable_writes", &[case as u8]).await.unwrap();
+            assert_eq!(size, 11);
+            assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
+            drop(blob);
+            assert_eq!(pending.finished(), before, "successful durable writes need no reopen sync");
+        }
+
+        for plain_first in [false, true] {
+            let before = pending.finished();
+            let name = if plain_first { b"prior".as_slice() } else { b"later".as_slice() };
+            let (blob, _) = storage.open("durable_writes", name).await.unwrap();
+            let (first, second) = if plain_first {
+                (WriteOptions::default(), WriteOptions::SYNC)
+            } else {
+                (WriteOptions::SYNC, WriteOptions::default())
+            };
+            blob.write_at(0, b"first", first).await.unwrap();
+            blob.write_at(5, b"second", second).await.unwrap();
+            drop(blob);
+            let (blob, size) = storage.open("durable_writes", name).await.unwrap();
+            assert_eq!(size, 11);
+            assert_eq!(blob.read_at(0, 11, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"firstsecond");
+            drop(blob);
+            let needs_sync = !plain_first || cfg!(target_os = "linux");
+            assert_eq!(pending.finished() - before, u64::from(needs_sync));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn check_recreate_reopen<S: crate::Storage>(storage: &S, pending: &Pending) {
+        drop(storage.open("independent", b"ready").await.unwrap());
+        for remove_name in [true, false] {
+            let partition = "recreate_pending";
+            let name = b"blob";
+            let (old, _) = storage.open(partition, name).await.unwrap();
+            old.write_at(0, b"old", WriteOptions::default()).await.unwrap();
+            storage.remove(partition, remove_name.then_some(name.as_slice())).await.unwrap();
+            assert_eq!(old.read_at(0, 3, ReadOptions::default()).await.unwrap().coalesce().as_ref(), b"old");
+
+            let (current, len) = storage.open(partition, name).await.unwrap();
+            assert_eq!(len, 0);
+            let reader = current.clone();
+            current.write_at(0, b"new", WriteOptions::default()).await.unwrap();
+
+            // Dropping the sender also releases the worker if an assertion unwinds.
+            let (release, gate) = std::sync::mpsc::channel();
+            pending.deferred.lock().clear();
+            *pending.before_sync.lock() = Some(gate);
+            drop(current);
+            drop(old);
+            drop(reader);
+            let jobs = pending.deferred.lock().clone();
+            if let Some(mut obsolete) = jobs.get(1).cloned() {
+                timeout(Duration::from_secs(10), obsolete.wait_for(Option::is_some))
+                    .await.unwrap().unwrap().clone().unwrap().unwrap();
+            }
+
+            let mut reopen = Box::pin(storage.open(partition, name));
+            let early = timeout(Duration::from_millis(50), &mut reopen).await;
+            let completed_early = early.is_ok();
+            let clean_progress = timeout(Duration::from_secs(5), async {
+                let names = storage.scan("independent").await?;
+                let (blob, len) = storage.open("independent", b"ready").await?;
+                drop(blob);
+                Ok::<_, Error>((names, len))
+            }).await;
+            drop(release);
+            let (reopened, len) = match early {
+                Ok(result) => result,
+                Err(_) => reopen.await,
+            }.unwrap();
+            let bytes = reopened.read_at(0, 3, ReadOptions::default()).await.unwrap().coalesce();
+            drop(reopened);
+            storage.remove(partition, None).await.unwrap();
+            assert_eq!(len, 3);
+            assert_eq!(bytes.as_ref(), b"new");
+            assert!(!completed_early, "reopen exposed the replacement before its deferred sync");
+            let (names, len) = clean_progress.expect("a dirty sync blocked another partition").unwrap();
+            assert_eq!(names, vec![b"ready".to_vec()]);
+            assert_eq!(len, 0);
+        }
     }
 
     /// Reads a blob's leading bytes and resolves its header (see [header::resolve]).
@@ -128,6 +544,169 @@ pub(crate) mod tests {
         WriteOptions,
     };
     use futures::FutureExt;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod tracker {
+        use crate::{
+            Error,
+            storage::{Pending, Tracker, defer_sync},
+        };
+        use std::sync::Arc;
+
+        #[test]
+        fn test_synced_writes_are_clean() {
+            let tracker = Tracker::default();
+            assert!(!tracker.is_dirty());
+            tracker.write();
+            assert!(tracker.is_dirty());
+            tracker.complete();
+            let seen = tracker.begin_sync();
+            tracker.end_sync(seen);
+            assert!(!tracker.is_dirty());
+        }
+
+        #[test]
+        fn test_unlanded_write_is_not_credited() {
+            let tracker = Tracker::default();
+            tracker.write();
+
+            // The sync began before the write reached the file, so it cannot cover it.
+            let seen = tracker.begin_sync();
+            tracker.complete();
+            tracker.end_sync(seen);
+            assert!(tracker.is_dirty());
+            let later = tracker.begin_sync();
+            tracker.end_sync(later);
+            assert!(!tracker.is_dirty());
+        }
+
+        #[test]
+        fn test_write_racing_sync_stays_dirty() {
+            let tracker = Tracker::default();
+            tracker.write();
+            tracker.complete();
+            let seen = tracker.begin_sync();
+            tracker.write();
+            tracker.complete();
+            tracker.end_sync(seen);
+            assert!(tracker.is_dirty());
+
+            // A sync observing both writes clears the state, and a stale completion
+            // cannot regress it.
+            let later = tracker.begin_sync();
+            tracker.end_sync(later);
+            tracker.end_sync(seen);
+            assert!(!tracker.is_dirty());
+        }
+
+        fn key() -> (String, Vec<u8>) {
+            ("a".to_owned(), b"1".to_vec())
+        }
+
+        #[tokio::test]
+        async fn test_wait_observes_pending_sync() {
+            let pending = Arc::new(Pending::default());
+            let (generation, wait) = pending.attach("a", b"1");
+            Pending::wait(wait).await.unwrap();
+            let sender = generation.release().unwrap();
+            drop(generation);
+            let (generation, wait) = pending.attach("a", b"1");
+            let waiter = tokio::spawn(Pending::wait(wait));
+            tokio::task::yield_now().await;
+            assert!(!waiter.is_finished());
+            pending.finish(&key(), sender, Ok(()));
+            waiter.await.unwrap().unwrap();
+            assert_eq!(pending.len(), 0);
+            assert_eq!(pending.finished(), 1);
+            drop(generation);
+            assert!(pending.syncs.lock().is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_failed_sync_stays_until_forgotten() {
+            let pending = Arc::new(Pending::default());
+            let (generation, _) = pending.attach("a", b"1");
+            let sender = generation.release().unwrap();
+            pending.finish(&key(), sender, Err(Error::Closed));
+            drop(generation);
+            for _ in 0..2 {
+                let (generation, wait) = pending.attach("a", b"1");
+                assert!(matches!(Pending::wait(wait).await, Err(Error::Closed)));
+                // A failed open cannot replace the retained failure with its own release.
+                assert!(generation.release().is_none());
+                drop(generation);
+                assert_eq!(pending.len(), 1);
+            }
+            pending.forget("a", Some(b"1"));
+            let (generation, wait) = pending.attach("a", b"1");
+            Pending::wait(wait).await.unwrap();
+            drop(generation);
+            assert!(pending.syncs.lock().is_empty());
+        }
+
+        #[test]
+        fn test_live_open_refuses_a_second_attach() {
+            let pending = Arc::new(Pending::default());
+            let (first, _) = pending.attach("a", b"1");
+            let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pending.attach("a", b"1")
+            }));
+            assert!(second.is_err(), "a live open must refuse a second open");
+            drop(first);
+            drop(pending.attach("a", b"1"));
+        }
+
+        #[test]
+        fn test_generations_retire_and_release_clean_entries() {
+            let pending = Arc::new(Pending::default());
+            let (first, _) = pending.attach("a", b"1");
+            let sender = first.release().unwrap();
+            drop(first);
+            assert_eq!(pending.syncs.lock().len(), 1);
+            pending.finish(&key(), sender, Ok(()));
+            assert!(pending.syncs.lock().is_empty());
+
+            for name in 0..128u64 {
+                drop(pending.attach("clean", &name.to_be_bytes()));
+                assert!(pending.syncs.lock().is_empty());
+            }
+
+            let (old, _) = pending.attach("a", b"1");
+            pending.forget("a", Some(b"1"));
+            let (current, _) = pending.attach("a", b"1");
+            let current_sync = current.release().unwrap();
+            assert!(old.release().is_none());
+            drop(old);
+            assert_eq!(pending.len(), 1);
+            drop(current);
+            assert_eq!(pending.len(), 1);
+            pending.finish(&key(), current_sync, Ok(()));
+            assert!(pending.syncs.lock().is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_defer_sync_runs_on_the_blocking_pool() {
+            let pending = Arc::new(Pending::default());
+            let (generation, _) = pending.attach("a", b"1");
+            let sender = generation.release().unwrap();
+            drop(generation);
+            defer_sync(pending.clone(), key(), sender, || Ok(()));
+            Pending::wait(pending.attach("a", b"1").1).await.unwrap();
+            assert_eq!(pending.finished(), 1);
+            assert_eq!(pending.len(), 0);
+        }
+
+        #[test]
+        fn test_defer_sync_runs_inline_without_a_runtime() {
+            let pending = Arc::new(Pending::default());
+            let (generation, _) = pending.attach("a", b"1");
+            let sender = generation.release().unwrap();
+            drop(generation);
+            defer_sync(pending.clone(), key(), sender, || Ok(()));
+            assert_eq!(pending.finished(), 1);
+            assert!(pending.syncs.lock().is_empty());
+        }
+    }
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(storage: S)
@@ -354,7 +933,7 @@ pub(crate) mod tests {
         assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
     }
 
-    /// Removal liveness is per-blob, not per-handle: clones taken before or after removal keep
+    /// Removal liveness is per-open, not per-handle: clones taken before or after removal keep
     /// reading regardless of other handles' lifetimes, and out-of-bounds reads still fail.
     async fn test_read_after_remove_handle_clones<S>(storage: &S)
     where
@@ -372,11 +951,6 @@ pub(crate) mod tests {
             .unwrap();
         first.sync().await.unwrap();
         let second = first.clone();
-        // Opened independently: a distinct handle to the same blob, not a clone.
-        let (independent, _) = storage
-            .open("read_after_remove_clones", b"name")
-            .await
-            .unwrap();
 
         storage
             .remove("read_after_remove_clones", Some(b"name"))
@@ -387,7 +961,7 @@ pub(crate) mod tests {
         let third = first.clone();
         drop(first);
 
-        for handle in [&second, &third, &independent] {
+        for handle in [&second, &third] {
             let read = handle
                 .read_at(0, data.len(), ReadOptions::default())
                 .await
