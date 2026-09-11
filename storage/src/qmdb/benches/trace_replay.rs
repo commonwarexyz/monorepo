@@ -122,30 +122,52 @@ const EMPTY_CODE_HASH: [u8; 32] = [
     0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b, 0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,
 ];
 
-#[derive(Clone, Default)]
-struct Account {
-    balance: [u8; 32],
-    nonce: u64,
-    code_hash: Option<[u8; 32]>,
-}
-
 fn account_key(addr: &[u8]) -> Key {
     Sha256::hash(&[addr])
 }
 fn storage_key(addr: &[u8], slot: &[u8]) -> Key {
     Sha256::hash(&[addr, slot])
 }
-fn encode_account(a: &Account) -> Vec<u8> {
+
+/// A fresh account record: nonce 0, balance 0, empty-code hash. Overlaid with a block's field
+/// changes for accounts that have no on-disk record yet.
+fn default_account_record() -> Vec<u8> {
     let mut v = Vec::with_capacity(72);
-    v.extend_from_slice(&a.nonce.to_be_bytes());
-    v.extend_from_slice(&a.balance);
-    v.extend_from_slice(&a.code_hash.unwrap_or(EMPTY_CODE_HASH));
+    v.extend_from_slice(&[0u8; 8]);
+    v.extend_from_slice(&[0u8; 32]);
+    v.extend_from_slice(&EMPTY_CODE_HASH);
     v
 }
 
-/// One block's staged mutations, keyed by 32-byte QMDB key (last-write-wins within the block).
+/// The fields of one account changed within a block. Untouched fields are read from the
+/// account's current on-disk record at flush, so no cross-block account state is kept in memory.
+#[derive(Default)]
+struct AccountDelta {
+    nonce: Option<[u8; 8]>,
+    balance: Option<[u8; 32]>,
+    code_hash: Option<[u8; 32]>,
+}
+
+/// Overlay a block's field changes onto a 72-byte account record
+/// (nonce[8] || balance[32] || codeHash[32]).
+fn apply_account_delta(mut rec: Vec<u8>, d: &AccountDelta) -> Vec<u8> {
+    if let Some(n) = &d.nonce {
+        rec[0..8].copy_from_slice(n);
+    }
+    if let Some(b) = &d.balance {
+        rec[8..40].copy_from_slice(b);
+    }
+    if let Some(c) = &d.code_hash {
+        rec[40..72].copy_from_slice(c);
+    }
+    rec
+}
+
+/// One block's staged mutations. Storage writes carry a full value; account writes carry only
+/// the changed fields, reconstructed into a full record from current state at flush.
 struct BlockMuts {
-    writes: HashMap<Key, Option<Value>>,
+    storage: HashMap<Key, Option<Value>>,
+    accounts: HashMap<[u8; 20], AccountDelta>,
     reads: Vec<Key>,
 }
 
@@ -297,9 +319,6 @@ fn main() {
             init_start.elapsed().as_secs_f64()
         );
 
-        // Running account state, so a single field change writes the account's full record.
-        let mut accounts: HashMap<[u8; 20], Account> = HashMap::new();
-
         // Stream the trace from a file, or from stdin when the path is "-"
         // (e.g. `zstd -dc trace.zst | trace_replay -`), so the whole file never
         // has to fit in RAM.
@@ -311,7 +330,8 @@ fn main() {
         let mut r = BufReader::with_capacity(1 << 20, reader);
         let mut cur_block: Option<u64> = None;
         let mut muts = BlockMuts {
-            writes: HashMap::new(),
+            storage: HashMap::new(),
+            accounts: HashMap::new(),
             reads: Vec::new(),
         };
         let mut blocks_done = 0u64;
@@ -333,11 +353,28 @@ fn main() {
         // Helper: flush the accumulated block into QMDB (merkleize + apply, commit every K).
         macro_rules! flush_block {
             () => {{
+                // Ordered write set: account writes (reconstructed from current state) first,
+                // then storage writes (full value). Parallel key/spec lists let one stage pass
+                // cover both, rebuilding each account record from the value staging returns.
+                let mut write_keys: Vec<Key> =
+                    Vec::with_capacity(muts.accounts.len() + muts.storage.len());
+                let mut account_specs: Vec<([u8; 20], AccountDelta)> =
+                    Vec::with_capacity(muts.accounts.len());
+                for (addr, delta) in muts.accounts.drain() {
+                    write_keys.push(account_key(&addr));
+                    account_specs.push((addr, delta));
+                }
+                let n_accounts = account_specs.len();
+                let mut storage_vals: Vec<Option<Value>> = Vec::with_capacity(muts.storage.len());
+                for (k, v) in muts.storage.drain() {
+                    write_keys.push(k);
+                    storage_vals.push(v);
+                }
+
                 // Distinct touched keys (reads plus writes).
-                let mut touched: Vec<Key> =
-                    Vec::with_capacity(muts.reads.len() + muts.writes.len());
+                let mut touched: Vec<Key> = Vec::with_capacity(muts.reads.len() + write_keys.len());
                 let mut seen: HashSet<Key> = HashSet::new();
-                for k in muts.reads.iter().chain(muts.writes.keys()) {
+                for k in muts.reads.iter().chain(write_keys.iter()) {
                     if seen.insert(k.clone()) {
                         touched.push(k.clone());
                     }
@@ -346,17 +383,31 @@ fn main() {
 
                 let rt = Instant::now();
                 if is_builder {
-                    // Builder (no access list): reads discovered serially during execution.
+                    // Builder (no access list): reads discovered serially during execution. Those
+                    // reads of account keys double as the current records to overlay this block.
+                    let acct_key_set: HashSet<Key> =
+                        write_keys[..n_accounts].iter().cloned().collect();
+                    let mut acct_cur: HashMap<Key, Option<Value>> = HashMap::new();
                     let rb = db.new_batch();
                     for k in &touched {
-                        let _ = rb.get(k, &db).await.unwrap();
+                        let v = rb.get(k, &db).await.unwrap();
+                        if acct_key_set.contains(k) {
+                            acct_cur.insert(k.clone(), v);
+                        }
                     }
                     read_ns += rt.elapsed().as_nanos();
-                    // Net block writes committed as one batch.
                     let wt = Instant::now();
                     let mut wb = db.new_batch();
-                    for (k, v) in muts.writes.drain() {
-                        wb = wb.write(k, v);
+                    for (i, (_addr, delta)) in account_specs.iter().enumerate() {
+                        let rec = acct_cur
+                            .get(&write_keys[i])
+                            .and_then(|v| v.clone())
+                            .unwrap_or_else(default_account_record);
+                        wb = wb.write(write_keys[i].clone(), Some(apply_account_delta(rec, delta)));
+                        total_writes += 1;
+                    }
+                    for (j, v) in storage_vals.into_iter().enumerate() {
+                        wb = wb.write(write_keys[n_accounts + j].clone(), v);
                         total_writes += 1;
                     }
                     let mt = Instant::now();
@@ -367,34 +418,30 @@ fn main() {
                     apply_ns += at.elapsed().as_nanos();
                     write_ns += wt.elapsed().as_nanos();
                 } else {
-                    // Follower (full access list): prefetch read-only keys with get_many, and
-                    // stage only the keys we will update. Staging a read-only key reserves a
-                    // staged update slot it never uses, so a plain batch read is leaner.
-                    let read_only: Vec<&Key> = touched
-                        .iter()
-                        .filter(|k| !muts.writes.contains_key(*k))
-                        .collect();
+                    // Follower (full access list): prefetch read-only keys, then stage the write
+                    // keys. Staging returns their current values, which the account writes are
+                    // rebuilt from, so no cross-block account state is held in memory.
+                    let write_set: HashSet<Key> = write_keys.iter().cloned().collect();
+                    let read_only: Vec<&Key> =
+                        touched.iter().filter(|k| !write_set.contains(*k)).collect();
                     if !read_only.is_empty() {
                         let _ = db.new_batch().get_many(&read_only, &db).await.unwrap();
                     }
-                    let write_keys: Vec<&Key> = muts.writes.keys().collect();
-                    let (_vals, staged) = db.new_batch().stage(&write_keys, &db).await.unwrap();
+                    let key_refs: Vec<&Key> = write_keys.iter().collect();
+                    let (vals, staged) = db.new_batch().stage(&key_refs, &db).await.unwrap();
                     read_ns += rt.elapsed().as_nanos();
-                    // Map each write key to its slot in the staged set (off the timing path).
-                    let widx: HashMap<Key, usize> = write_keys
-                        .iter()
-                        .enumerate()
-                        .map(|(i, k)| ((*k).clone(), i))
-                        .collect();
                     let wt = Instant::now();
-                    let updates: Vec<(usize, Option<Value>)> = muts
-                        .writes
-                        .drain()
-                        .map(|(k, v)| {
-                            total_writes += 1;
-                            (widx[&k], v)
-                        })
-                        .collect();
+                    let mut updates: Vec<(usize, Option<Value>)> =
+                        Vec::with_capacity(write_keys.len());
+                    for (i, (_addr, delta)) in account_specs.iter().enumerate() {
+                        let rec = vals[i].clone().unwrap_or_else(default_account_record);
+                        updates.push((i, Some(apply_account_delta(rec, delta))));
+                        total_writes += 1;
+                    }
+                    for (j, v) in storage_vals.into_iter().enumerate() {
+                        updates.push((n_accounts + j, v));
+                        total_writes += 1;
+                    }
                     let mt = Instant::now();
                     let m = staged.merkleize(updates, Vec::new(), None, &db, &mut Proportional).await.unwrap();
                     merkleize_ns += mt.elapsed().as_nanos();
@@ -480,46 +527,37 @@ fn main() {
                         let key = storage_key(&b[0..20], &b[20..52]);
                         let val: [u8; 32] = b[52..84].try_into().unwrap();
                         if val == [0u8; 32] {
-                            muts.writes.insert(key, None);
+                            muts.storage.insert(key, None);
                         } else {
-                            muts.writes.insert(key, Some(val.to_vec()));
+                            muts.storage.insert(key, Some(val.to_vec()));
                         }
                     }
                     BAL => {
                         let mut b = [0u8; 52];
                         r.read_exact(&mut b).unwrap();
                         let addr: [u8; 20] = b[0..20].try_into().unwrap();
-                        let bal: [u8; 32] = b[20..52].try_into().unwrap();
-                        let a = accounts.entry(addr).or_default();
-                        a.balance = bal;
-                        muts.writes
-                            .insert(account_key(&addr), Some(encode_account(a)));
+                        muts.accounts.entry(addr).or_default().balance =
+                            Some(b[20..52].try_into().unwrap());
                     }
                     NONCE => {
                         let mut b = [0u8; 28];
                         r.read_exact(&mut b).unwrap();
                         let addr: [u8; 20] = b[0..20].try_into().unwrap();
-                        let nonce = u64::from_be_bytes(b[20..28].try_into().unwrap());
-                        let a = accounts.entry(addr).or_default();
-                        a.nonce = nonce;
-                        muts.writes
-                            .insert(account_key(&addr), Some(encode_account(a)));
+                        muts.accounts.entry(addr).or_default().nonce =
+                            Some(b[20..28].try_into().unwrap());
                     }
                     CODE => {
                         let mut b = [0u8; 52];
                         r.read_exact(&mut b).unwrap();
                         let addr: [u8; 20] = b[0..20].try_into().unwrap();
-                        let ch: [u8; 32] = b[20..52].try_into().unwrap();
-                        let a = accounts.entry(addr).or_default();
-                        a.code_hash = Some(ch);
-                        muts.writes
-                            .insert(account_key(&addr), Some(encode_account(a)));
+                        muts.accounts.entry(addr).or_default().code_hash =
+                            Some(b[20..52].try_into().unwrap());
                     }
                     t => panic!("bad record tag {t}"),
                 }
             }
         }
-        if cur_block.is_some() && !muts.writes.is_empty() {
+        if cur_block.is_some() && !(muts.storage.is_empty() && muts.accounts.is_empty()) {
             flush_block!();
         }
         // Drain the last in-flight pipelined sync, then a full sync: it persists metadata, makes
@@ -529,6 +567,7 @@ fn main() {
             prev.await.unwrap();
         }
         let _db = db.sync().await.unwrap();
+        eprintln!("FINAL_ROOT {}", _db.root());
 
         let elapsed = start.elapsed();
         let db_bytes = std::process::Command::new("du")
