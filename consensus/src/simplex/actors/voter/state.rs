@@ -1038,8 +1038,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 // A pipelined term-start leader can propose before it holds the
                 // outgoing certificate. Ask any peer for that parent; retain
                 // leader affinity for ordinary same-term repair.
-                let target = (!proposal_view.is_term_start(self.term_length()))
-                    .then(|| leader.clone());
+                let target =
+                    (!proposal_view.is_term_start(self.term_length())).then(|| leader.clone());
                 Some((*parent_view, Kind::Notarization, target))
             }
             _ => None,
@@ -1090,8 +1090,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                         ?err,
                         "proposal exists but ancestry is not yet certified"
                     );
-                    let Some((missing, kind, target)) =
-                        self.resolve_ancestry(&err, &leader.key)
+                    let Some((missing, kind, target)) = self.resolve_ancestry(&err, &leader.key)
                     else {
                         continue;
                     };
@@ -2022,6 +2021,7 @@ mod tests {
 
     /// Like [setup_state], but signs as `schemes[signer]` (rather than the
     /// verifier) and parameterizes `optimistic_views`.
+    #[allow(clippy::too_many_arguments)]
     fn setup_state_with(
         context: &mut deterministic::Context,
         validators: usize,
@@ -2032,17 +2032,18 @@ mod tests {
         optimistic_views: ViewDelta,
         skip_budget: u64,
     ) -> (Fixture<ed25519::Scheme>, TestState) {
+        let config = if term_length == TermLength::ONE {
+            <RoundRobin>::default()
+        } else {
+            <RoundRobin>::default().with_term(term_length, Duration::from_secs(4), optimistic_views)
+        };
         setup_state_from_config(
             context,
             validators,
             signer,
             epoch,
             view_retention,
-            <RoundRobin>::default().with_term(
-                term_length,
-                Duration::from_secs(4),
-                optimistic_views,
-            ),
+            config,
             skip_budget,
         )
     }
@@ -7118,7 +7119,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_from_config(&mut context, 1, 0, 9, 10, handoff_terms());
+            ) = setup_state_from_config(&mut context, 1, 0, 9, 10, handoff_terms(), 0);
 
             let certified = fetch_proposal(4, 3, 64);
             let notarization = build_notarization(&verifier, &schemes, &certified);
@@ -7241,7 +7242,7 @@ mod tests {
                     schemes, verifier, ..
                 },
                 mut state,
-            ) = setup_state_from_config(&mut context, 4, 3, 9, 10, handoff_terms());
+            ) = setup_state_from_config(&mut context, 4, 3, 9, 10, handoff_terms(), 0);
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
             // Without the opt-in, the term start waits for certified ancestry.
