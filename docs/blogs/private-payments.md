@@ -15,7 +15,7 @@ katex: true
 <link rel="stylesheet" href="private-payments.css">
 ```
 
-THe commonware stack can now comfortably process payments at [~250K TPS](https://x.com/_patrickogrady/status/2077449338230640739) with [Constantinople](https://github.com/commonwarexyz/constantinople). Much higher with [stable leader]((https://commonware.xyz/blogs/pipelining-simplex)), [multiple proposers](https://commonware.xyz/blogs/multimmit) and clearing solutions such as [bajillion](https://commonware.xyz/blogs/clearing). We now turn our attention to privacy. What's stopping us from reaching similar throughputs for private payments?
+The commonware stack can now comfortably process payments at [~250K TPS](https://x.com/_patrickogrady/status/2077449338230640739) with [Constantinople](https://github.com/commonwarexyz/constantinople). Much higher with [stable leader]((https://commonware.xyz/blogs/pipelining-simplex)), [multiple proposers](https://commonware.xyz/blogs/multimmit) and clearing solutions such as [bajillion](https://commonware.xyz/blogs/clearing). We now turn our attention to privacy. What's stopping us from reaching similar throughputs for private payments?
 
 Our goal is to support private payments at over a million transactions per second, with low latency. Let's suppose each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (using [Groth16](https://eprint.iacr.org/2016/260), say). To support a million transactions per second:
 
@@ -23,24 +23,26 @@ Our goal is to support private payments at over a million transactions per secon
 - **compute:** every validator needs the equivalent of <u>500-1000 dedicated CPU cores</u>
 - **storage:** since you opened this page, the nullifier set (to prevent double spending) would have grown by <span class="live" id="live-bytes">0 MB</span> across <span class="live" id="live-txs">0</span> transactions, amounting to <u>a petabyte every year</u>
 
-While bandwidth and compute costs can (unsatisfactorily) be overcome with biggers machines, it is simply impractical for validator to store the nullifier sets.
+While bandwidth and compute costs can (unsatisfactorily) be overcome with biggers machines, it is simply impractical for validators to store the nullifiers
 
 > *How do we process one million private transactions per second on commodity hardware?*
 
-We demand two properties from a payment system that hides amounts, provides privacy for users, and is meant to run at this rate
-indefinitely:
+We demand two properties from a payment system that is meant to run at this rate
+***indefinitely***:
 
 1. Validator state must be succinct in the number of transactions but can grow with the number of
-   accounts. Validator perform a constant amount of work to process every transaction.
+   accounts. Validator perform a constant amount of work to process every transaction, independent of the number accounts.
 2. Wallets can be offline for indefinite periods of time.
    When they are back online they must be able to send/receive payments without having to
-   synchronize their state with the chain. Any work done by wallets must only depend on the transactions that they participate in.
+   synchronize their state with the chain, similar to traditional payments. Any work done by wallets must only depend on the transactions that they participate in.
 
 <!-- TODO: Add link to Bonsai paper -->
-We are excited to share Bonsai, a private payment scheme in the account model with two interfaces:
-- **send:** debits a users account and creates a receipt onchain for a designated recipient
+We are excited to share Bonsai, a private payment scheme in the account model with two operations:
+
+- **send:** debits a user's account and creates a receipt on chain
 - **receive:** claims a receipt and credits the recipient's account
-In terms of privacy, an external observer only learns that an account carried out *some* action on chain, hiding whether the operation was a send/receive, the amounts transferred and the link between sender and receiver. 
+
+**Leakage:** An external observer only learns that an account carried out *some* action on chain, hiding whether it was a send/receive, the amounts transferred and the link between sender and receiver. 
 <!-- todo: add a pointer to below discussion against zcash -->
 
 Bonsai addresses both the verification cost and the growing state:
@@ -75,19 +77,15 @@ David Chaum introduced [ecash](https://chaum.com/wp-content/uploads/2022/01/Chau
 
 Since the communication between the sender and receiver is hidden, the system hides who paid whom but the central authority/bank can still see balances and inflows/outflows of an account. However, the bank must remember a unique nullifier for every coin that was ever redeemed.
 
-Note that this construction provides a very weak form of privacy if the amounts debited/credited are different across different transactions as it's effectively a finger print for the sender-receiver pair.
-
 ### Decentralized ecash
 
-In order to provide much faster confirmations, and scale with confidence, the most natural strategy is to use a consensus algorithm that provides byzantine fault tolerance. The bank can be replaced by a committee of validators and if designed correctly (see [Multimmit](https://commonware.xyz/blogs/multimmit) for example), payments from different parts of the world can be *simultaneously* ingested into the log, providing much faster confirmations with a truly global payment network.
+In order to provide much faster confirmations, and scale with confidence, the most natural strategy is to use a consensus algorithm that provides byzantine fault tolerance. The bank can be replaced by a committee of validators and if designed correctly (see [Multimmit](https://commonware.xyz/blogs/multimmit) for example), payments from different parts of the world can be *simultaneously* ingested into the log.
 
 However this introduces additional privacy concerns: anyone reading the ledger, sees every balance and every account's inflow and outflow. Even if the committee is trusted to run the ledger, users may not want to share their balances with the world.
 
 ### Hide balances
 
-Cryptographic commitments coupled with zero-knowledge proofs allow us to both hide balances and *verifiably* (but in zero-knowledge) update them when a transfer occurs. In fact, [Zether](https://eprint.iacr.org/2019/191) follows this recipe, but a payment updates the sender and the receiver in one transaction, so the ledger still sees who paid whom. We can take this one step further by *decoupling* the updates to sender and receiver balances -- as done in ecash -- to additionally hide who paid whom.
-
-Concretely, we can prove during:
+Cryptographic commitments coupled with zero-knowledge proofs allow us to both hide balances and *verifiably* (but in zero-knowledge) update them when a transfer occurs. Concretely, we can prove during:
 
 - **send**: the new account commitment is the old one minus $v$, and the on-chain receipt (another commitment) signed by the validators opens to $(v, A \to B)$.
 - **receive**: the new account commitment is the old one plus $v$, I hold a validator signature on some receipt for $(v, \cdot \to B)$, and reveal some deterministic (yet random looking) nullifier.
@@ -96,36 +94,31 @@ Balances and amounts are now hidden from the ledger, but it still reveals which 
 
 ### Hide operations
 
-The ledger reveals the order in which accounts act. If it also reveals which actions are sends and which are receives, an observer can narrow down who might have paid whom: a receive must claim an earlier send. We hide this distinction by proving a strict disjunction of the send and receive relations.
-
-Of course this also means that every send and receive carries both a receipt and a nullifier and when naively done, the prover pays the cost of both relations. In practice, this can be optimized to reduce the redundant work being performed. The ledger now only reveals that an account came online and performed some action -- send/receive.
-
-Note the cost in the storage panel: the nullifier set grows twice as fast.
+The ledger reveals the order in which accounts act and the operation type. This allows an observer to narrow down who might have paid whom because a receive must claim an earlier send. We hide the operation type by proving a strict disjunction of the send and receive relations, which provides meaningful improvments to the privacy guarantees (see section 6.1 of the Bonsai paper for a detailed discussion).
 
 ### Scaling: prune receipts
 
-We now focus on scaling the system. First, instead of signing every single receipt, the ledger appends receipts to a Merkle Mountain Range (see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blogpost](https://commonware.xyz/blogs/mmr) for an explainer). The receive proof is modified to prove knowledge of an MMR opening under a root $\mathsf{root}_\rho$ which the receiver reveals in the clear.
+We now focus on scaling the system. First, instead of signing every single receipt, the ledger appends receipts to a Merkle Mountain Range (see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blogpost](https://commonware.xyz/blogs/mmr) for an explainer) and only signs the root. The receive proof is modified to prove knowledge of an MMR opening under a root $\mathsf{root}_\rho$ which the receiver reveals in the clear.
 
-For receipts, validators retain the MMR frontier and a bounded window of recent roots. For the concrete case of $2^{40}$ receipts, we need at most 40 frontier hashes, or 1.25 KiB with 32-byte hashes.
+Inserting an element in an MMR only requires the *frontier* -- a logarithmic number of hashes -- which allows the validators to forget old receipts. For the concrete case of $2^{40}$ receipts, we need at most 40 frontier hashes, or 1.25 KiB with 32-byte hashes.
 
 ### Scaling: delegate nullifiers
 
-Now we tackle the nullifier set. Unlike receipts where we want to prove *membership* to claim them, we want to prove *non-membership* of nullifiers to prevent double spending. MMR's do not support (efficient) non-membership proofs so we cannot simply "forget" previous nullifiers.
+Now we tackle the nullifier set. Unlike receipts where we prove *membership*, we need to prove *non-membership* of nullifiers to prevent double spending. MMR's do not support (efficient) non-membership proofs so we cannot simply "forget" previous nullifiers. 
 
-The [Tachyon project](https://tachyon.z.cash/) uses [oblivious synchronization](https://eprint.iacr.org/2025/2031) to let validators prune nullifiers. Users can obtain proofs from untrusted services that their coins remain unspent, without letting those services link them to their eventual transactions. Users can be offline, but resuming requires synchronization work by the user or a service that processes the ledger.
+One approach is to shift the burden of non-membership to the users. For every unspent coin, the user must prove, effectively against the entire history of the ledger, that their coin has not been spent. The [Tachyon project](https://tachyon.z.cash/) uses [oblivious synchronization](https://eprint.iacr.org/2025/2031) to privately delegate this non-membership proof to an untrusted service, without letting those services link them to their eventual transactions. Users can be offline, but resuming requires synchronization work by the user or a service that processes the ledger.
 
-We have the benefit of working in the account based model and albeit providing less *on-chain* privacy than Zcash, it allows us to **efficiently delegate** nullifier storage. Each user remembers the nullifiers for any transactions they received, accumulates them into a [sparse Merkle tree](https://eprint.iacr.org/2016/683) and stores the root inside their account commitment. Using zero-knowledge proofs they show that it was correctly updated whenever they receive funds.
+We have the benefit of working in the account based model and albeit providing less *on-chain* privacy than Zcash, Bonsai provides an elegant approach to **delegate** nullifier storage. Each user maintains the nullifiers for any transactions they received, accumulates them into a [sparse Merkle tree](https://eprint.iacr.org/2016/683) and stores the root inside their account commitment. Using zero-knowledge proofs they show that it was correctly updated whenever they receive funds.
 
-Since nullifiers are never published on chain, they no longer need to look random. The nullifier of a receipt can simply be its **position** $\mathsf{pid}$ in the receipt MMR.
-
-Validator storage is now one commitment per account, plus the small receipt frontier and recent-root window.
-But eventually... the nullifier set will grow too big for users to manage too? We've just delayed the problem.
+Validator storage is now one commitment per account, plus the small receipt frontier and recent-root window. But eventually... the nullifier set will grow too big for users to manage too? We've just delayed the problem.
 
 ### Scaling: prune nullifiers
 
-Users can also **prune their nullifier state**. Receipt positions increase as receipts are created, although recipients may receive or claim them out of order. For a threshold $L$, a wallet summarizes the claimed positions below $L$ with a frontier of at most $\ell$ hashes, where $\ell$ is the depth of its nullifier tree. It keeps all claimed positions at or above $L$. Together, these suffice to reconstruct insertion proofs for unclaimed positions $\mathsf{pid} \geq L$.
+Users can also **prune their nullifier state**. Since nullifiers are never published on chain, they no longer need to look random. The nullifier of a receipt can simply be its *position* $\mathsf{pid}$ in the receipt MMR. Nullifiers are now temporally ordered based on the time the receipt was created.
 
-Choosing $L$ to retain the $w$ largest claimed positions bounds this compact hot representation by $\ell$ hashes plus $w$ positions, independent of lifetime claims. Older nullifiers remain in cold storage, so a receipt below $L$ can still be claimed by retreiving the relevant path from cold storage and updating the frontier.
+For a threshold $L$, a wallet can summarize the claimed positions below $L$ with a frontier of at most $\ell$ hashes, where $\ell$ is the depth of the nullifier tree. It keeps all claimed positions at or above $L$. Together, these suffice to produce insertion proofs for unclaimed positions at any $\mathsf{pid} \geq L$.
+
+Choosing $L$ to retain the $w$ largest claimed positions bounds this wallets storage to $\ell$ hashes plus $w$ positions, independent of lifetime claims. Older nullifiers can be pushed to cold storage, so a receipt below $L$ can still be claimed by retreiving the relevant path from cold storage and updating the frontier.
 :::
 
 ## The full construction
@@ -202,9 +195,7 @@ In the example below, three wallets submit transactions through one RPC service.
 </div>
 ```
 
-These groups identify submission sources: one client may use several accounts, and a relay may submit for several users. The grouping alone does not reveal payment amounts or recipients.
-
-[Ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded-note systems still provides stronger **on-chain** privacy: it hides which account is acting. Bonsai publishes that account identifier while hiding balances, amounts, the recipient, and whether the action is a send or receive. The RPC observation is available to the service handling the submission; Bonsai's account identifier is visible to anyone reading the ledger. Both the public record and the wallet's network connection matter when evaluating privacy in practice.
+[Ledger indistinguishability](https://eprint.iacr.org/2014/349) in shielded-note systems still provides stronger **on-chain** privacy: it hides which account is acting. But both the public record and the wallet's network connection matter when evaluating privacy in practice. 
 
 ```{=html}
 <script src="private-payments.sim.js"></script>

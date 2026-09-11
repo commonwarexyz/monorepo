@@ -102,7 +102,7 @@ Vamsi Policharla</a></div>
                         <div class="date">September 11th, 2026</div>
         </div>
         <link rel="stylesheet" href="private-payments.css">
-        <p>THe commonware stack can now comfortably process payments at
+        <p>The commonware stack can now comfortably process payments at
         <a
         href="https://x.com/_patrickogrady/status/2077449338230640739">~250K
         TPS</a> with <a
@@ -135,35 +135,37 @@ Vamsi Policharla</a></div>
         </ul>
         <p>While bandwidth and compute costs can (unsatisfactorily) be
         overcome with biggers machines, it is simply impractical for
-        validator to store the nullifier sets.</p>
+        validators to store the nullifiers</p>
         <blockquote>
         <p><em>How do we process one million private transactions per
         second on commodity hardware?</em></p>
         </blockquote>
-        <p>We demand two properties from a payment system that hides
-        amounts, provides privacy for users, and is meant to run at this
-        rate indefinitely:</p>
+        <p>We demand two properties from a payment system that is meant
+        to run at this rate <strong><em>indefinitely</em></strong>:</p>
         <ol type="1">
         <li>Validator state must be succinct in the number of
         transactions but can grow with the number of accounts. Validator
-        perform a constant amount of work to process every
-        transaction.</li>
+        perform a constant amount of work to process every transaction,
+        independent of the number accounts.</li>
         <li>Wallets can be offline for indefinite periods of time. When
         they are back online they must be able to send/receive payments
-        without having to synchronize their state with the chain. Any
-        work done by wallets must only depend on the transactions that
-        they participate in.</li>
+        without having to synchronize their state with the chain,
+        similar to traditional payments. Any work done by wallets must
+        only depend on the transactions that they participate in.</li>
         </ol>
         <!-- TODO: Add link to Bonsai paper -->
         <p>We are excited to share Bonsai, a private payment scheme in
-        the account model with two interfaces: - <strong>send:</strong>
-        debits a users account and creates a receipt onchain for a
-        designated recipient - <strong>receive:</strong> claims a
-        receipt and credits the recipient’s account In terms of privacy,
-        an external observer only learns that an account carried out
-        <em>some</em> action on chain, hiding whether the operation was
-        a send/receive, the amounts transferred and the link between
-        sender and receiver.
+        the account model with two operations:</p>
+        <ul>
+        <li><strong>send:</strong> debits a user’s account and creates a
+        receipt on chain</li>
+        <li><strong>receive:</strong> claims a receipt and credits the
+        recipient’s account</li>
+        </ul>
+        <p><strong>Leakage:</strong> An external observer only learns
+        that an account carried out <em>some</em> action on chain,
+        hiding whether it was a send/receive, the amounts transferred
+        and the link between sender and receiver.
         <!-- todo: add a pointer to below discussion against zcash --></p>
         <p>Bonsai addresses both the verification cost and the growing
         state:</p>
