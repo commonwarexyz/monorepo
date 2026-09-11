@@ -1061,6 +1061,10 @@ pub struct Recovery<E: Context, V: CodecShared> {
     offsets: Box<fixed::Recovery<E, u64>>,
     bounds: Range<u64>,
     bounded: bool,
+    /// When set, `publish` parks right after deleting discarded data blobs so tests can crash
+    /// at that exact point.
+    #[cfg(test)]
+    halt_after_data_removal: bool,
 }
 
 impl<E: Context, V: CodecShared> Recovery<E, V> {
@@ -1167,6 +1171,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             offsets: Box::new(offsets),
             bounds: 0..0,
             bounded: max_size.is_some(),
+            #[cfg(test)]
+            halt_after_data_removal: false,
         }
         .inspect(max_size.unwrap_or(u64::MAX), &valid_lengths)
         .await
@@ -1365,6 +1371,10 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 self.partition.remove(blob).await?;
             }
             Inner::<E, V>::remove_blobs_after(&self.partition, &mut self.pending, tail).await?;
+            #[cfg(test)]
+            if self.halt_after_data_removal {
+                std::future::pending::<()>().await;
+            }
             for (&blob, writer) in &mut self.pending {
                 if let Some(bytes) = retained_bytes(blob)
                     && bytes < writer.size()
@@ -2754,87 +2764,43 @@ mod tests {
                 );
             });
 
-        // Second crash: a bounded publication of the empty prefix at the prune target stops at
-        // its first durability operation, and every unsynced write is lost.
-        let (parked, checkpoint) =
+        // Second crash: a bounded publication of the empty prefix at the prune target stops right
+        // after deleting the final data blob, before anything else is staged.
+        let ((), checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
-                *context.storage_fault_config().write() = deterministic::FaultConfig {
-                    write_rate: Some(deterministic::WriteConfig {
-                        failure_rate: probability!(0.0),
-                        retention_rate: probability!(0.0),
-                        mode: deterministic::PartialWriteMode::Subset,
-                    }),
-                    resize_rate: Some(deterministic::ResizeConfig {
-                        failure_rate: probability!(0.0),
-                        partial_rate: probability!(0.0),
-                    }),
-                    ..Default::default()
-                };
                 let cfg = config(&context);
-                let syncs = PendingSyncs::default();
-                syncs.unblock();
-                let mut recovery = Recovery::<_, u64>::open(
-                    DelayedSyncContext {
-                        inner: context.child("recover"),
-                        pending: syncs.clone(),
-                    },
-                    cfg.clone(),
-                    Some(10),
-                )
-                .await
-                .unwrap();
+                let mut recovery =
+                    Recovery::<_, u64>::open(context.child("recover"), cfg.clone(), Some(10))
+                        .await
+                        .unwrap();
                 assert_eq!(recovery.bounds, 10..10);
                 assert_eq!(recovery.offsets.bounds(), 0..10);
                 assert_eq!(recovery.discarded, vec![1]);
                 assert!(recovery.pending.is_empty());
                 recovery.offsets = recovery.offsets.truncate(10).await.unwrap();
-                syncs.arm();
-                let gate = next_pending_sync(&syncs);
-                let mut publish = Box::pin(recovery.publish(10));
-                let deleted = commonware_macros::select! {
-                    result = publish.as_mut() => {
-                        let journal = result.unwrap();
-                        assert_eq!(journal.bounds, 10..10);
-                        drop(journal);
-                        None
-                    },
-                    result = gate.blocked => {
-                        result.unwrap();
-                        assert_eq!(syncs.calls(), 1);
-                        Some(context.scan(&cfg.data_partition()).await.unwrap().is_empty())
-                    },
-                };
-                let parked = match deleted {
-                    // Publication needed no durability operation.
-                    None => false,
-                    // The final data blob is gone and the gated write is lost at the crash.
-                    Some(true) => true,
-                    // The offsets floor witness is made durable before the final data blob is
-                    // deleted. Let publication finish so the retry sees the deleted blob.
-                    Some(false) => {
-                        gate.release.send(Ok(())).expect("gated sync is waiting");
-                        let journal = publish.as_mut().await.unwrap();
-                        assert_eq!(journal.bounds, 10..10);
-                        drop(journal);
-                        false
-                    }
-                };
-                drop(publish);
-                parked
+                recovery.halt_after_data_removal = true;
+                {
+                    let publish = recovery.publish(10);
+                    futures::pin_mut!(publish);
+                    assert!(futures::poll!(publish.as_mut()).is_pending());
+                }
+                assert!(
+                    context
+                        .scan(&cfg.data_partition())
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
             });
 
         deterministic::Runner::from(checkpoint).start(move |context| async move {
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = config(&context);
-            if parked {
-                let metadata =
-                    Checkpoint::open(context.child("checkpoint"), &cfg.offsets_partition())
-                        .await
-                        .unwrap();
-                assert_eq!(metadata.watermark(), Some(10));
-                assert_eq!(metadata.clear_target(), None);
-                drop(metadata);
-            }
+            let metadata = Checkpoint::open(context.child("checkpoint"), &cfg.offsets_partition())
+                .await
+                .unwrap();
+            assert_eq!(metadata.watermark(), Some(10));
+            assert_eq!(metadata.clear_target(), None);
+            drop(metadata);
             let result = match cap {
                 Some(cap) => {
                     Journal::<_, u64>::init_at_most(context.child("retry"), cfg, cap).await
