@@ -290,7 +290,7 @@ impl Waker {
     /// not count as a quick notification wake for adaptive spinning. Every
     /// return clears the armed wait state, including skipped sleeps.
     pub fn park_idle(&self, processed_seq: u32, deadline: Option<Instant>) -> Option<Duration> {
-        // Arming changes only wait state; the inbox mutex owns message
+        // Arming changes only wait state, the inbox mutex owns message
         // visibility. The atomic snapshot alone decides whether to block.
         let prev = self
             .inner
@@ -327,7 +327,7 @@ impl Waker {
     /// normal idle path. A latched wake or sequence mismatch rejects sleeping
     /// and requires the owner to recheck its work.
     pub fn arm(&self, processed_seq: u32) -> ArmGuard<'_> {
-        // Arming changes only wait state; the inbox mutex owns message
+        // Arming changes only wait state, the inbox mutex owns message
         // visibility. The atomic snapshot alone decides whether to block.
         let prev = self
             .inner

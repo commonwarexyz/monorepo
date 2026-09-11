@@ -1505,7 +1505,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         tree.clone(),
                     );
                     tree.register(handle.aborter().unwrap());
-                    let task: BoxedTask = Box::pin(future);
+                    let task = Task::boxed(future);
                     if matches!(placement, Placement::Foreign) {
                         let origin = context.origin.clone();
                         thread::spawn(move || assert!(Tasks::register(&origin, task).is_ok()))

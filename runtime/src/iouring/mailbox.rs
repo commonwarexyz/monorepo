@@ -154,7 +154,7 @@ mod tests {
             mailbox: Arc::downgrade(mailbox),
             dropped: dropped.clone(),
         };
-        let task = Box::pin(async move {
+        let task = Task::boxed(async move {
             let _guard = guard;
             pending::<()>().await;
         });
@@ -172,7 +172,7 @@ mod tests {
 
         // Multiple messages share one publication and retain their send order.
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
-        assert!(mailbox.send(Message::Spawn(Box::pin(pending()))).is_ok());
+        assert!(mailbox.send(Message::Spawn(Task::boxed(pending()))).is_ok());
         assert!(mailbox.waker.pending(0));
         assert!(mailbox.take(&mut scratch));
         assert!(!mailbox.waker.pending(1));

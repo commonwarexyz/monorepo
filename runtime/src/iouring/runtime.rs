@@ -1505,6 +1505,10 @@ impl Worker {
             let mut local = self.local.borrow_mut();
 
             if local.driver.as_ref().unwrap().is_empty() {
+                assert!(
+                    local.deferred.is_empty(),
+                    "callbacks refilled deferred work after close"
+                );
                 break;
             }
 
