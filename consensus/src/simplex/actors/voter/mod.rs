@@ -83,6 +83,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_collect_traces, test_traced};
+    use commonware_utils::channel::fallible::OneshotExt;
     use commonware_p2p::{
         Receiver as _, Recipients,
         simulated::{Config as NConfig, Link, Network, Oracle},
@@ -112,6 +113,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
+    type OptimisticRequests = Arc<Mutex<Vec<(View, PublicKey)>>>;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     async fn start_test_network_with_peers<I>(
@@ -208,8 +210,12 @@ mod tests {
         certify_latency_ms: f64,
         /// Views and parents supplied to mock application proposal requests.
         propose_requests: Option<ProposeRequests>,
+        /// Views and outgoing leaders supplied with optimistic proposal requests.
+        optimistic_requests: Option<OptimisticRequests>,
         /// Whether mock application proposal requests should remain pending.
         stall_proposals: bool,
+        /// Whether the mock application accepts optimistic handoff requests.
+        propose_optimistically: bool,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         /// Whether every mock application verification should fail.
@@ -230,7 +236,9 @@ mod tests {
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
                 propose_requests: None,
+                optimistic_requests: None,
                 stall_proposals: false,
+                propose_optimistically: false,
                 verify_requests: None,
                 fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
@@ -269,6 +277,7 @@ mod tests {
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
         let propose_requests = options.propose_requests;
+        let optimistic_requests = options.optimistic_requests;
         let verify_requests = options.verify_requests;
 
         let application_cfg = mocks::application::Config::<Sha256, _> {
@@ -282,12 +291,20 @@ mod tests {
         let (mut actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
         actor.set_stall_proposals(options.stall_proposals);
+        actor.set_propose_optimistically(options.propose_optimistically);
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
                 propose_requests
                     .lock()
                     .push((context.view(), context.parent.0));
+            }));
+        }
+        if let Some(optimistic_requests) = optimistic_requests {
+            actor.set_optimistic_propose_observer(Box::new(move |context, parent_leader| {
+                optimistic_requests
+                    .lock()
+                    .push((context.view(), parent_leader));
             }));
         }
         if let Some(verify_requests) = verify_requests {
@@ -3717,9 +3734,11 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
 
-            let elector = RoundRobin::<Sha256>::default()
-                .with_term(term_length, Duration::from_secs(30), ViewDelta::new(1))
-                .with_pipelined_handoff();
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
             let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
             let outgoing_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
@@ -3744,6 +3763,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     local_index,
                     propose_latency_ms: 10.0,
+                    propose_optimistically: true,
                     ..Default::default()
                 },
             )
@@ -3804,6 +3824,116 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_pipelined_handoff_application_defers_until_parent_certifies() {
+        let n = 1;
+        let namespace = b"pipelined_handoff_application_defers".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+            let optimistic_requests = Arc::new(Mutex::new(Vec::new()));
+            let certification_requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let controlled = certification_requests.clone();
+            let certifier =
+                mocks::application::Certifier::Controlled(Box::new(move |round, _, response| {
+                    controlled.lock().push((round.view(), response));
+                }));
+
+            let (mut mailbox, mut batcher, _resolver, _relay, _reporter) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    propose_requests: Some(propose_requests.clone()),
+                    optimistic_requests: Some(optimistic_requests.clone()),
+                    certifier,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            wait_for_request(&context, &propose_requests, View::new(1), |request| {
+                request.0
+            })
+            .await;
+            wait_for_request(&context, &optimistic_requests, View::new(2), |request| {
+                request.0
+            })
+            .await;
+            assert_eq!(
+                optimistic_requests.lock().as_slice(),
+                &[(View::new(2), participants[0].clone())]
+            );
+            assert_eq!(
+                propose_requests
+                    .lock()
+                    .iter()
+                    .filter(|(view, _)| *view == View::new(2))
+                    .count(),
+                1,
+                "only the optimistic request should run before certification"
+            );
+
+            let parent = loop {
+                select! {
+                    message = batcher.recv() => {
+                        match message.unwrap() {
+                            batcher::Message::Constructed(Vote::Notarize(notarize))
+                                if notarize.view() == View::new(1) => break notarize.proposal,
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected local parent notarize vote");
+                    }
+                }
+            };
+            let (_, notarization) = build_notarization(&schemes, &parent, 1);
+            mailbox.recovered(Certificate::Notarization(notarization));
+
+            take_certification_request(&context, &certification_requests, View::new(1))
+                .await
+                .send_lossy(true);
+            let deadline = context.current() + Duration::from_secs(1);
+            while propose_requests
+                .lock()
+                .iter()
+                .filter(|(view, _)| *view == View::new(2))
+                .count()
+                < 2
+            {
+                assert!(
+                    context.current() < deadline,
+                    "ordinary proposal did not follow parent certification"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert_eq!(
+                propose_requests
+                    .lock()
+                    .iter()
+                    .filter(|(view, _)| *view == View::new(2))
+                    .count(),
+                2,
+                "ordinary proposal should follow the deferred optimistic request"
+            );
+        });
+    }
+
     /// A locally pipelined term-start vote may notarize before its parent
     /// certifies, but application certification requests remain parent-first.
     #[test_traced]
@@ -3827,7 +3957,7 @@ mod tests {
                 mocks::application::Certifier::Controlled(Box::new(move |round, _, response| {
                     requests_for_app.lock().push((round.view(), response));
                 }));
-            let elector = RoundRobin::<Sha256>::default().with_pipelined_handoff();
+            let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
                 &context,
                 &oracle,
@@ -3839,6 +3969,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     certifier,
+                    propose_optimistically: true,
                     ..Default::default()
                 },
             )
@@ -3944,9 +4075,11 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
 
-            let elector = RoundRobin::<Sha256>::default()
-                .with_term(term_length, Duration::from_secs(30), ViewDelta::new(1))
-                .with_pipelined_handoff();
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
             let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
             let local_index =
@@ -3969,6 +4102,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     stall_proposals: true,
+                    propose_optimistically: true,
                     ..Default::default()
                 },
             )
@@ -4039,9 +4173,11 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
 
-            let elector = RoundRobin::<Sha256>::default()
-                .with_term(term_length, Duration::from_secs(30), ViewDelta::new(1))
-                .with_pipelined_handoff();
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
             let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
                 elector.clone().build(schemes[0].participants());
             let outgoing_index =

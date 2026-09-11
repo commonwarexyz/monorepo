@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, OptimisticProposal, Relay as Re,
     simplex::{Plan, types::Context},
     types::{Epoch, Round},
 };
@@ -31,6 +31,11 @@ pub enum Message<D: Digest, P: PublicKey> {
     Propose {
         context: Context<D, P>,
         response: oneshot::Sender<D>,
+    },
+    ProposeOptimistic {
+        context: Context<D, P>,
+        parent_leader: P,
+        response: oneshot::Sender<OptimisticProposal<D>>,
     },
     Verify {
         context: Context<D, P>,
@@ -86,6 +91,20 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
+    async fn propose_optimistic(
+        &mut self,
+        context: Self::Context,
+        parent_leader: <Self::Context as crate::ProposalContext>::PublicKey,
+    ) -> oneshot::Receiver<OptimisticProposal<Self::Digest>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender.send_lossy(Message::ProposeOptimistic {
+            context,
+            parent_leader,
+            response,
+        });
+        receiver
+    }
+
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
@@ -122,6 +141,10 @@ type Latency = (f64, f64);
 /// Observer invoked on every `Message::Propose` request. Used by tests to
 /// detect spurious propose calls.
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
+
+/// Observer invoked on every optimistic proposal request.
+type OptimisticProposeObserver<H, P> =
+    Box<dyn Fn(Context<<H as Hasher>::Digest, P>, P) + Send + 'static>;
 
 /// Observer invoked on every `Message::Verify` request. Used by tests to
 /// detect spurious verification calls.
@@ -183,6 +206,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     drop_proposals: bool,
     stall_proposals: bool,
+    propose_optimistically: bool,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -195,6 +219,9 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// Used by tests to detect spurious local-leader propose attempts (e.g. after replay).
     propose_observer: Option<ProposeObserver<H, P>>,
 
+    /// Invoked on every optimistic proposal request received by the application.
+    optimistic_propose_observer: Option<OptimisticProposeObserver<H, P>>,
+
     /// Invoked on every `Message::Verify` request received by the application.
     /// Used by tests to detect spurious verification requests (e.g. after replay
     /// of a leader-owned proposal).
@@ -203,6 +230,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// Senders held alive to simulate proposals that hang indefinitely
     /// (used when `stall_proposals` is set).
     pending_proposes: Vec<oneshot::Sender<H::Digest>>,
+    pending_optimistic_proposes: Vec<oneshot::Sender<OptimisticProposal<H::Digest>>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -238,6 +266,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 fail_verification: false,
                 drop_proposals: false,
                 stall_proposals: false,
+                propose_optimistically: false,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -245,8 +274,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 seen: HashMap::new(),
                 verified: HashSet::new(),
                 propose_observer: None,
+                optimistic_propose_observer: None,
                 verify_observer: None,
                 pending_proposes: Vec::new(),
+                pending_optimistic_proposes: Vec::new(),
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -269,12 +300,24 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.stall_proposals = stall;
     }
 
+    /// Configures whether the mock accepts optimistic handoff proposal requests.
+    pub const fn set_propose_optimistically(&mut self, enabled: bool) {
+        self.propose_optimistically = enabled;
+    }
+
     pub const fn set_drop_verifications(&mut self, drop: bool) {
         self.drop_verifications = drop;
     }
 
     pub fn set_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
         self.propose_observer = Some(observer);
+    }
+
+    pub fn set_optimistic_propose_observer(
+        &mut self,
+        observer: OptimisticProposeObserver<H, P>,
+    ) {
+        self.optimistic_propose_observer = Some(observer);
     }
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
@@ -451,6 +494,31 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         }
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
+                    }
+                    Message::ProposeOptimistic {
+                        context,
+                        parent_leader,
+                        response,
+                    } => {
+                        if let Some(observer) = &self.propose_observer {
+                            observer(context.clone());
+                        }
+                        if let Some(observer) = &self.optimistic_propose_observer {
+                            observer(context.clone(), parent_leader);
+                        }
+                        if !self.propose_optimistically {
+                            response.send_lossy(OptimisticProposal::DeferUntilCertified);
+                            continue;
+                        }
+                        if self.stall_proposals {
+                            self.pending_optimistic_proposes.push(response);
+                            continue;
+                        }
+                        if self.drop_proposals {
+                            continue;
+                        }
+                        let digest = self.propose(context).await;
+                        response.send_lossy(OptimisticProposal::Propose(digest));
                     }
                     Message::Verify {
                         context,

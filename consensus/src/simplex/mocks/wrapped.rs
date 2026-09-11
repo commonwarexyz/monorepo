@@ -147,8 +147,8 @@ where
         self.inner.elect(round, certificate)
     }
 
-    fn elect_early(&self, round: Round) -> Option<Participant> {
-        self.inner.elect_early(round)
+    fn elect_without_certificate(&self, round: Round) -> Option<Participant> {
+        self.inner.elect_without_certificate(round)
     }
 }
 
