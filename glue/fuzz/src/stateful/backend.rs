@@ -13,7 +13,9 @@
 //! class without multiplying the search space.
 
 use super::{Ctx, Digest, IO_BUFFER_SIZE, QMDB_INIT_BUFFER, QMDB_INIT_CACHE};
-pub(super) use any_backend::{Any, AnyCommitment};
+pub(super) use any_backend::Any;
+#[cfg(any(test, feature = "stateful-probe"))]
+pub(super) use any_backend::AnyCommitment;
 use commonware_codec::{Codec, EncodeSize, Read, Write};
 use commonware_consensus::types::Height;
 use commonware_cryptography::{Hasher, Sha256};
@@ -29,8 +31,11 @@ use commonware_storage::{
     qmdb::{self, sync::Source},
 };
 use commonware_utils::NZU64;
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 pub(super) use current_backend::Current;
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 pub(super) use immutable_backend::{ImmutableCompact, ImmutableStandard};
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 pub(super) use keyless_backend::{KeylessCompact, KeylessStandard};
 use std::{fmt::Debug, future::Future, num::NonZeroU64};
 
@@ -284,6 +289,7 @@ mod any_backend {
     }
 }
 
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 mod current_backend {
     //! The `current` adapter: the keyed workload over a grafted QMDB whose
     //! canonical root is distinct from the operations root state sync uses.
@@ -417,6 +423,7 @@ mod current_backend {
     }
 }
 
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 mod immutable_backend {
     //! The immutable adapters: fresh-key inserts only, over the journaled and
     //! the compact database.
@@ -542,6 +549,7 @@ mod immutable_backend {
     }
 }
 
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 mod keyless_backend {
     //! The keyless adapters: appends only, over the journaled and the compact
     //! database.
@@ -659,7 +667,7 @@ mod keyless_backend {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stateful-cert-mock-restarts-db"))]
 mod tests {
     use super::*;
     use crate::stateful::{PAGE_CACHE_SIZE, PAGE_SIZE, PublicKey};

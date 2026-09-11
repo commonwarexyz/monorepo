@@ -95,8 +95,8 @@ produces, and on whether a block verifies.
 ## 3. Technical requirements
 
 - **R1 — Focused fuzz targets.** The feature MUST expose independently runnable libFuzzer targets
-  for Twins safety, restart recovery, database-adapter coverage of both the restart and the Twins
-  clusters, and the Stateful probe protocol.
+  for Twins safety, restart recovery, database-adapter coverage under restart recovery, and the
+  Stateful probe protocol.
   Targets MAY share library machinery, but each distinct search space MUST retain its own corpus so
   progress in one does not displace inputs for another.
 - **R2 — Thin targets.** Every fuzz-target file MUST only instantiate libFuzzer and invoke a
@@ -140,8 +140,8 @@ produces, and on whether a block verifies.
 - **R12 — Restart scope.** The restart targets, plain and database-adapter, MUST accept a
   fuzz-controlled schedule that can crash and restart correct identities while retaining their
   storage, so lazy recovery is exercised. All four identities MUST be correct in any run that
-  exercises restarts, and at most one identity may be down at a time. The Twins targets, plain and
-  database-adapter, MUST NOT restart either half of the compromised identity.
+  exercises restarts, and at most one identity may be down at a time. The Twins target MUST NOT
+  restart either half of the compromised identity.
 - **R13 — Bounded runs.** Every target MUST bound its node count, input consumption, event count,
   simulated duration, and allocated storage so execution remains suitable for continuous fuzzing
   and meets any applicable throughput floor in §10. Within a target, each bound MUST be fixed
@@ -163,15 +163,16 @@ produces, and on whether a block verifies.
 - **R17 — Non-blocking peer policy.** Simulated networks carrying adversarial traffic MUST set
   `disconnect_on_block` to `false` so blocking one peer does not prevent the harness from continuing
   to explore later faulty messages.
-- **R18 — Database-adapter matrix.** There are two database-adapter targets: one over the restart
-  cluster of §7.2 and one over the Twins cluster of §7.1. Each one's structured input MUST select
-  among `any`, `current`, immutable standard, immutable compact, keyless standard, and keyless
-  compact. Each run MUST instantiate one real database of the selected class behind `Shared` and
-  drive it through Stateful's genesis, batch creation and forking, application mutation,
-  merkleization, apply, and finalize paths under the existing safety invariants; the restart-based
-  target MUST additionally drive crash/restart recovery, and the Twins-based target MUST
-  additionally subject it to the Twins adversary of §6. Merely constructing an adapter or testing
-  the underlying storage directly does not satisfy this requirement.
+- **R18 — Database-adapter matrix.** One database-adapter target MUST exercise the restart cluster
+  of §7.2. Its structured input MUST select among `any`, `current`, immutable standard, immutable
+  compact, keyless standard, and keyless compact. Each run MUST instantiate one real database of
+  the selected class behind `Shared` and drive it through Stateful's genesis, batch creation and
+  forking, application mutation, merkleization, apply, finalize, and crash/restart recovery paths
+  under the existing safety invariants. The Twins target MUST use the representative `any` adapter;
+  adapter diversity is not crossed with the Twins adversary because restart recovery already
+  exercises the adapter lifecycle and the separate search spaces avoid redundant cost. Merely
+  constructing an adapter or testing the underlying storage directly does not satisfy this
+  requirement.
 - **R19 — Adapter-correct workload.** The fuzz application MUST respect the selected database
   model: immutable adapters receive only fresh-key inserts, keyless adapters receive appends, and
   compact adapters are not assumed to support historical reads. Every proposed or verified block
@@ -193,9 +194,9 @@ produces, and on whether a block verifies.
   raw payloads, participant or non-participant origin, retry advancement, subscription cancellation
   or repetition, and marshal attachment timing. Peer count, event count, message size, and simulated
   duration MUST remain bounded.
-- **R22 — Shared backend machinery.** The database-adapter targets MUST reuse the existing
-  deterministic restart and Twins drivers respectively, the real Stateful stack, and the safety
-  predicates through a statically dispatched, harness-local backend abstraction. Adapter-specific
+- **R22 — Shared backend machinery.** The database-adapter target MUST reuse the existing
+  deterministic restart driver, the real Stateful stack, and the safety predicates through a
+  statically dispatched, harness-local backend abstraction. Adapter-specific
   code MUST be limited to database types and configuration, valid batch operations, sync-target
   construction, and canonical-commitment extraction. The feature MUST NOT duplicate the complete
   runner or node stack for each adapter or add dynamic dispatch to the exercised path.
@@ -214,9 +215,9 @@ criteria; the checkable predicates are enumerated in §8.
   every scenario or database adapter it can select. Distinct targets may use different bounds
   because they exercise different search spaces, but no selected configuration may receive relaxed
   limits to make it pass.
-- **P3 — Adversary confinement.** In the Twins targets, plain and database-adapter,
-  application-level faults occur only on the secondary half; the primary half and every correct
-  node use the correct application. The restart targets, plain and database-adapter, use only
+- **P3 — Adversary confinement.** In the Twins target, application-level faults occur only on the
+  secondary half; the primary half and every correct node use the correct application. The restart
+  targets, plain and database-adapter, use only
   correct applications. Probe adversarial input is confined to
   the public boundaries and controls listed in R20 and R21, without altering the recorded
   source-state model.
@@ -258,7 +259,6 @@ and is not itself a requirement. The target names in §5.2 are normative (R1, R2
 - `glue/fuzz/fuzz_targets/stateful_cert_mock_twins.rs`
 - `glue/fuzz/fuzz_targets/stateful_cert_mock_restarts.rs`
 - `glue/fuzz/fuzz_targets/stateful_cert_mock_restarts_db.rs`
-- `glue/fuzz/fuzz_targets/stateful_cert_mock_twins_db.rs`
 - `glue/fuzz/fuzz_targets/stateful_probe.rs`
 - A corresponding `[[bin]]` entry for every target in `glue/fuzz/Cargo.toml`.
 - `glue/fuzz` remains a workspace member and fuzz-matrix entry; target discovery runs each target
@@ -289,8 +289,7 @@ dependencies and must be re-audited against this document.
 Each target has a confined fault model. A1–A4 define the Twins adversary: one compromised identity
 is Byzantine at the message and application layers, while correct nodes are never adversarial. The
 probe adversary is limited to R20, R21, and I8. The restart targets, plain and database-adapter,
-contain no Byzantine participants; their crash schedule is an environment fault. The Twins-based
-database-adapter target uses the Twins adversary over the backend its input selects.
+contain no Byzantine participants; their crash schedule is an environment fault.
 
 - **A1 — Message layer.** Each of the compromised identity's channels that carries
   view-addressable traffic MUST be split in two, with the twins scenario deciding, per view, which
@@ -328,9 +327,8 @@ Every target MUST use its bounded, deterministic structure below.
 
 ### 7.1 Twins
 
-1. **Setup.** Four identities and five engines are constructed per R4 and R11; the Twins-based
-   database-adapter target uses the backend selected by its structured input. The compromised
-   identity's channels are split per A1.
+1. **Setup.** Four identities and five engines are constructed per R4 and R11 using the
+   representative `any` adapter. The compromised identity's channels are split per A1.
 2. **Prefix.** The engines execute the selected bounded Twins scenario while the secondary half's
    faulty application is active.
 3. **Suffix.** After the scripted prefix, the network is whole and both compromised halves address

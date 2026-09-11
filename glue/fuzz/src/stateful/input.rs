@@ -64,7 +64,7 @@ impl fmt::Debug for StatefulTwinsFuzzInput {
     }
 }
 
-/// The twins controls, which the database-adapter twins target shares.
+/// The bounded controls decoded before the twins target's byte tape.
 struct TwinsControls {
     case_selector: u16,
     sustained: bool,
@@ -112,83 +112,6 @@ impl Arbitrary<'_> for StatefulTwinsFuzzInput {
         let raw_bytes = tape(u)?;
 
         Ok(Self {
-            case_selector,
-            sustained,
-            faults,
-            required_heights,
-            term_length,
-            raw_bytes,
-        })
-    }
-}
-
-/// One run of the database-adapter twins target: the twins target's controls
-/// over a selected adapter class.
-#[derive(Clone)]
-pub struct StatefulDbTwinsFuzzInput {
-    /// The database every engine manages.
-    pub database: DatabaseKind,
-    /// Selects one case from the sampled twins scenario set.
-    pub case_selector: u16,
-    /// Repeat one partition pattern across the adversarial prefix.
-    pub sustained: bool,
-    /// Which deviations the faulty application may take.
-    pub faults: FaultArming,
-    /// Heights past the adversarial prefix each correct node must deliver
-    /// before the run ends.
-    pub required_heights: u8,
-    /// Leader term length.
-    pub term_length: TermLength,
-    /// Byte tape seeding the deterministic runtime, the scenario sampler, and
-    /// the fault schedule.
-    pub raw_bytes: Vec<u8>,
-}
-
-impl StatefulDbTwinsFuzzInput {
-    /// Split into the selected adapter and the twins controls it runs under.
-    pub(super) fn into_controls(self) -> (DatabaseKind, StatefulTwinsFuzzInput) {
-        (
-            self.database,
-            StatefulTwinsFuzzInput {
-                case_selector: self.case_selector,
-                sustained: self.sustained,
-                faults: self.faults,
-                required_heights: self.required_heights,
-                term_length: self.term_length,
-                raw_bytes: self.raw_bytes,
-            },
-        )
-    }
-}
-
-impl fmt::Debug for StatefulDbTwinsFuzzInput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StatefulDbTwinsFuzzInput")
-            .field("database", &self.database)
-            .field("case_selector", &self.case_selector)
-            .field("sustained", &self.sustained)
-            .field("faults", &self.faults)
-            .field("required_heights", &self.required_heights)
-            .field("term_length", &self.term_length)
-            .field("raw_bytes_len", &self.raw_bytes.len())
-            .finish()
-    }
-}
-
-impl Arbitrary<'_> for StatefulDbTwinsFuzzInput {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let database = u.arbitrary()?;
-        let TwinsControls {
-            case_selector,
-            sustained,
-            faults,
-            required_heights,
-            term_length,
-        } = TwinsControls::arbitrary(u)?;
-        let raw_bytes = tape(u)?;
-
-        Ok(Self {
-            database,
             case_selector,
             sustained,
             faults,

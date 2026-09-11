@@ -47,17 +47,9 @@ pub fn run_stateful_twins(input: StatefulTwinsFuzzInput) -> RunReport {
     execute::<Any>(TARGET, input)
 }
 
-/// Run one twins scenario over the five-engine cluster, every engine managing
-/// a database of backend `B`.
-///
-/// The database-adapter twins driver shares this with the twins driver: only
-/// the backend differs, and with it the database factory, the valid workload,
-/// the faulty application's divergent workload, and the commitment conversion.
-/// A run is fully determined by its input bytes.
-pub(super) fn execute<B: Backend>(
-    target: &'static str,
-    input: StatefulTwinsFuzzInput,
-) -> RunReport {
+/// Run one twins scenario over the five-engine cluster. A run is fully
+/// determined by its input bytes.
+fn execute<B: Backend>(target: &'static str, input: StatefulTwinsFuzzInput) -> RunReport {
     let entropy = input.raw_bytes.clone();
     let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
     deterministic::Runner::new(config).start(|context| run::<B>(context, target, input, entropy))

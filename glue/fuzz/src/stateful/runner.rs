@@ -151,6 +151,11 @@ fn install_input_panic_hook() {
 pub(super) trait Reportable: fmt::Display {
     /// Whether the run's checks compared something.
     fn measured(&self) -> bool;
+
+    /// Whether the run must be reported even when nobody asked for reports.
+    fn unexpected(&self) -> bool {
+        !self.measured()
+    }
 }
 
 impl Reportable for RunReport {
@@ -166,9 +171,9 @@ pub(super) fn report<R: Reportable>(raw_bytes: &[u8], run: impl FnOnce() -> R) {
     IN_FLIGHT.lock().extend_from_slice(raw_bytes);
     let report = run();
 
-    // A run that measured nothing is always reported, so it is never silently
-    // counted as a run that found nothing.
-    if !report.measured() || std::env::var_os(REPORT_ENV).is_some() {
+    // A run that measured nothing it should have is always reported, so it is
+    // never silently counted as a run that found nothing.
+    if report.unexpected() || std::env::var_os(REPORT_ENV).is_some() {
         eprintln!("{report}");
     }
 }

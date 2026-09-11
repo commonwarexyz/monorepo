@@ -204,6 +204,12 @@ impl Reportable for ProbeReport {
     fn measured(&self) -> bool {
         Self::measured(self)
     }
+
+    /// A program is free not to resolve a floor, and most short programs do
+    /// not, so a probe run is reported only on request.
+    fn unexpected(&self) -> bool {
+        false
+    }
 }
 
 impl fmt::Display for ProbeReport {
@@ -226,8 +232,10 @@ impl fmt::Display for ProbeReport {
             self.block_calls,
             if self.measured() {
                 ""
+            } else if self.floor_expected {
+                " UNMEASURED (a sufficient sample was delivered but no floor was selected)"
             } else {
-                " UNMEASURED (no floor was selected)"
+                " UNMEASURED (no sufficient sample was delivered)"
             },
         )
     }

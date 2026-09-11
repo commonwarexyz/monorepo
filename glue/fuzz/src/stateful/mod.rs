@@ -12,8 +12,10 @@
 //! primary half runs the correct application; its secondary half runs a faulty
 //! one. Every engine runs the real stack (Simplex, marshal in the Standard
 //! `Deferred` configuration, the real `Stateful` actor, and a QMDB-backed
-//! database set). The restart targets run four correct identities instead and
-//! crash and restart them on a schedule.
+//! database set). The Twins target uses the `any` backend. The restart targets
+//! run four correct identities instead and crash and restart them on a
+//! schedule; the database-adapter restart target selects from every supported
+//! backend class.
 //!
 //! The cluster targets check safety only: the correct nodes must agree on the
 //! chain, on the database state that chain produces, and on whether a block
@@ -35,42 +37,57 @@
 //! - `restarts` is the environment driver: four correct engines, crashed and
 //!   restarted on a schedule.
 //! - `db_restarts` runs the restart driver over every database backend.
-//! - `db_twins` runs the twins driver over every database backend.
 //! - `probe` drives the real `Probe` actors through their public boundaries
 //!   under an adversarial event program and checks floor provenance.
 //! - `invariants` records what each engine delivered, committed, and verified,
 //!   and holds the checks.
 
+// A target-specific feature deliberately leaves shared generic support unused.
+#![cfg_attr(not(feature = "stateful-all"), allow(dead_code))]
+
 mod app;
 mod backend;
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 mod db_restarts;
-mod db_twins;
 mod input;
 mod invariants;
+#[cfg(feature = "stateful-cert-mock-twins")]
 mod network;
+#[cfg(feature = "stateful-probe")]
 mod probe;
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts",
+    feature = "stateful-cert-mock-restarts-db"
+))]
 mod restarts;
 mod runner;
 mod stack;
+#[cfg(feature = "stateful-cert-mock-twins")]
 mod twins;
 
 use commonware_consensus::simplex::{mocks::scheme::Scheme as MockScheme, types::Context};
 use commonware_cryptography::{ed25519, sha256};
 use commonware_utils::{NZU16, NZU64, NZUsize};
+#[cfg(feature = "stateful-cert-mock-restarts-db")]
 pub use db_restarts::{fuzz_stateful_cert_mock_restarts_db, run_stateful_db_restarts};
-pub use db_twins::{fuzz_stateful_cert_mock_twins_db, run_stateful_db_twins};
 pub use input::{
-    DatabaseKind, ProbeEvent, StatefulDbRestartsFuzzInput, StatefulDbTwinsFuzzInput,
-    StatefulProbeFuzzInput, StatefulRestartsFuzzInput, StatefulTwinsFuzzInput,
+    DatabaseKind, ProbeEvent, StatefulDbRestartsFuzzInput, StatefulProbeFuzzInput,
+    StatefulRestartsFuzzInput, StatefulTwinsFuzzInput,
 };
 pub use invariants::Counts;
+#[cfg(feature = "stateful-probe")]
 pub use probe::{ProbeReport, fuzz_stateful_probe, run_stateful_probe};
+#[cfg(any(
+    feature = "stateful-cert-mock-restarts",
+    feature = "stateful-cert-mock-restarts-db"
+))]
 pub use restarts::{fuzz_stateful_cert_mock_restarts, run_stateful_restarts};
 pub use runner::{Outcome, RunReport};
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Duration,
 };
+#[cfg(feature = "stateful-cert-mock-twins")]
 pub use twins::{fuzz_stateful_cert_mock_twins, run_stateful_twins};
 
 /// Identity key type.
