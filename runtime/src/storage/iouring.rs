@@ -1425,7 +1425,9 @@ mod tests {
             Layout::V0.data_offset(),
             Arc::new(Pending::default()).attach("partition", b"blob").0,
         );
-        // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
+        // A clean open skips the sync, so record an uncovered mutation first. The sync should
+        // then fail through the blob-specific wrapper before any kernel work is attempted.
+        blob.shared.tracker.write();
         let err = blob
             .sync()
             .await
@@ -1463,6 +1465,8 @@ mod tests {
             Layout::V0.data_offset(),
             Arc::new(Pending::default()).attach("partition", b"blob").0,
         );
+        // A clean open skips the sync, so record an uncovered mutation first.
+        blob.shared.tracker.write();
         let err = blob
             .start_sync()
             .await
@@ -1542,7 +1546,9 @@ mod tests {
             Layout::V0.data_offset(),
             Arc::new(Pending::default()).attach("partition", b"blob").0,
         );
-        // The request should reach the kernel and come back as a wrapped sync failure.
+        // A clean open skips the sync, so record an uncovered mutation first. The request
+        // should then reach the kernel and come back as a wrapped sync failure.
+        blob.shared.tracker.write();
         let err = blob
             .sync()
             .await
