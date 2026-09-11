@@ -612,6 +612,16 @@ impl<B: Blob> Writer<B> {
         self.view().try_read_ranges_sync_into(buf, ranges)
     }
 
+    /// Read sorted, non-overlapping `(offset, len)` ranges into one owned buffer, in range order.
+    /// All ranges must be within bounds. Missing pages are coalesced across ranges.
+    ///
+    /// # Panics
+    ///
+    /// Panics if ranges are not sorted and non-overlapping.
+    pub async fn read_ranges(&self, ranges: &[(u64, usize)]) -> Result<IoBufs, Error> {
+        self.view().read_ranges(ranges).await
+    }
+
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         self.view().read_into(buf, offset).await

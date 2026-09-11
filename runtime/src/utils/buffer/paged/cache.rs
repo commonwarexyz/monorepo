@@ -1,11 +1,15 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{CHECKSUM_SIZE, STORAGE_PAGE_SIZE, get_page_from_blob};
+use super::{CHECKSUM_SIZE, Checksum, STORAGE_PAGE_SIZE, get_page_from_blob};
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::AHashMap;
 use commonware_utils::{Widen, cache::Clock, sync::RwLock};
-use futures::{FutureExt, future::Shared};
+use futures::{
+    FutureExt,
+    future::Shared,
+    stream::{self, StreamExt},
+};
 use std::{
     collections::hash_map::Entry,
     future::Future,
@@ -17,6 +21,25 @@ use std::{
     },
 };
 use tracing::{debug, error, trace};
+
+/// Maximum consecutive pages fetched per blob read by [`CacheRef::read_many_after_faults`]. At
+/// the common 4KiB page size a full run is a ~256KiB read, which already sits on the flat region of
+/// NVMe sequential-read efficiency: larger reads grow the per-run scratch buffer (pages are copied
+/// into pooled cache buffers on admission) without materially improving throughput, and smaller
+/// ones pay more dispatches per byte. Throughput is insensitive to this value near that plateau, so
+/// it is a constant rather than configuration.
+const MAX_FAULT_RUN_PAGES: usize = 64;
+
+/// Maximum concurrent runs in a bulk read. Bounds scratch memory (about 2MiB at 4KiB
+/// pages). A completed run frees a slot immediately, without waiting for its peers.
+const MAX_CONCURRENT_FAULT_RUNS: usize = 8;
+
+/// The part of one output range that falls within a missing page.
+struct ReadTarget<'a> {
+    page: u64,
+    offset: usize,
+    buf: &'a mut [u8],
+}
 
 /// Shared future for one logical page fetch. The output uses `Arc<Error>` because `Shared`
 /// requires cloneable results. The `IoBuf` contains only the logical, validated page bytes.
@@ -426,6 +449,115 @@ impl CacheRef {
             .copy_from_slice(&page_buf.as_ref()[offset_in_page..offset_in_page + bytes_to_copy]);
 
         Ok(bytes_to_copy)
+    }
+
+    /// Fill sorted, non-overlapping ranges from cached bytes and coalesced page faults.
+    /// Every range must lie below the view's in-memory tail, in full immutable pages.
+    /// Fetched bytes go directly to their output slots before the source buffer is released,
+    /// so cache eviction cannot force those pages to be read again.
+    pub(super) async fn read_many_after_faults<B: Blob>(
+        &self,
+        blob: &B,
+        blob_id: u64,
+        ranges: Vec<(&mut [u8], u64)>,
+    ) -> Result<(), Error> {
+        let mut targets = Vec::new();
+        {
+            let cache = self.cache.read();
+            for (mut buf, mut offset) in ranges {
+                while !buf.is_empty() {
+                    let (page, in_page, remaining) = Cache::locate(self.page_size, offset);
+                    let len = remaining.min(buf.len());
+                    let (target, rest) = buf.split_at_mut(len);
+                    if let Some(cached) = cache.get_page(blob_id, page) {
+                        target.copy_from_slice(&cached.as_ref()[in_page..in_page + len]);
+                    } else {
+                        targets.push(ReadTarget {
+                            page,
+                            offset: in_page,
+                            buf: target,
+                        });
+                    }
+                    offset += len as u64;
+                    buf = rest;
+                }
+            }
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+
+        // Each run records its first page, page count, and number of destination fragments.
+        // Multiple items on one page share a single physical read.
+        let mut runs: Vec<(u64, usize, usize)> = Vec::new();
+        for target in &targets {
+            match runs.last_mut() {
+                Some((start, pages, count))
+                    if target.page - *start <= *pages as u64
+                        && target.page - *start < MAX_FAULT_RUN_PAGES as u64 =>
+                {
+                    *pages = (target.page - *start) as usize + 1;
+                    *count += 1;
+                }
+                _ => runs.push((target.page, 1, 1)),
+            }
+        }
+        trace!(runs = runs.len(), blob_id, "bulk page fault");
+        let page_size: usize = self.page_size.widen();
+        let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+        let mut remaining = targets.as_mut_slice();
+        let mut reads = stream::iter(runs)
+            .map(move |(start, len, count)| {
+                let (targets, rest) = std::mem::take(&mut remaining).split_at_mut(count);
+                remaining = rest;
+                async move {
+                    let offset = start
+                        .checked_mul(physical_page_size as u64)
+                        .ok_or(Error::OffsetOverflow)?;
+                    let read_len = len
+                        .checked_mul(physical_page_size)
+                        .ok_or(Error::OffsetOverflow)?;
+                    let bytes = blob
+                        .read_at(offset, read_len, ReadOptions::DONT_CACHE)
+                        .await?
+                        .coalesce();
+                    for (i, page) in bytes.as_ref().chunks_exact(physical_page_size).enumerate() {
+                        let Some(checksum) = Checksum::validate_page(page) else {
+                            error!(page_num = start + i as u64, "page fetch failed checksum");
+                            return Err(Error::InvalidChecksum);
+                        };
+                        if usize::from(checksum.len) != page_size {
+                            error!(
+                                page_num = start + i as u64,
+                                expected = page_size,
+                                actual = checksum.len,
+                                "attempted to fetch partial page from blob"
+                            );
+                            return Err(Error::InvalidChecksum);
+                        }
+                    }
+
+                    // Consume the validated source directly, including when this run alone is
+                    // larger than the cache. No cache lookup is needed after admission.
+                    for target in targets {
+                        let begin =
+                            (target.page - start) as usize * physical_page_size + target.offset;
+                        target
+                            .buf
+                            .copy_from_slice(&bytes.as_ref()[begin..begin + target.buf.len()]);
+                    }
+                    let mut cache = self.cache.write();
+                    for (i, page) in bytes.as_ref().chunks_exact(physical_page_size).enumerate() {
+                        cache.cache(blob_id, &page[..page_size], start + i as u64);
+                    }
+                    Ok(())
+                }
+            })
+            .buffer_unordered(MAX_CONCURRENT_FAULT_RUNS);
+        while let Some(result) = reads.next().await {
+            result?;
+        }
+        Ok(())
     }
 
     /// Cache the provided pages of data in the page cache, returning the remaining bytes that

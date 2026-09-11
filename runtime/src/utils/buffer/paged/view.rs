@@ -8,7 +8,6 @@
 
 use super::CacheRef;
 use crate::{Blob, Error, IoBufMut, IoBufs};
-use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
 /// A borrowed view over a paged blob.
@@ -179,16 +178,43 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| self.cache_ref.read(self.blob, self.id, item_buf, *offset))
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
-        }
+        // Keep the bulk-read state out of cache-hit futures. Only misses allocate it.
+        Box::pin(
+            self.cache_ref
+                .read_many_after_faults(self.blob, self.id, cache_ranges),
+        )
+        .await?;
 
         Ok(offsets.len() - blob_reads)
+    }
+
+    /// Read sorted, non-overlapping `(offset, len)` ranges into one owned buffer, in range order.
+    /// All ranges must be within bounds. Missing pages are coalesced across ranges.
+    ///
+    /// # Panics
+    ///
+    /// Panics if ranges are not sorted and non-overlapping.
+    pub async fn read_ranges(&self, ranges: &[(u64, usize)]) -> Result<IoBufs, Error> {
+        let len = ranges.iter().try_fold(0usize, |total, &(_, len)| {
+            total.checked_add(len).ok_or(Error::OffsetOverflow)
+        })?;
+        super::validate_read_ranges(len, ranges.iter().copied(), self.size)?;
+        // SAFETY: the tail/cache copies and read_many_after_faults fill every byte before the
+        // buffer is returned. Any failed read drops the buffer without exposing its contents.
+        let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
+        let mut cache_ranges = super::split_read_ranges(
+            buf.as_mut(),
+            ranges.iter().copied(),
+            self.tail_offset,
+            self.tail,
+        );
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        if !cache_ranges.is_empty() {
+            self.cache_ref
+                .read_many_after_faults(self.blob, self.id, cache_ranges)
+                .await?;
+        }
+        Ok(buf.into())
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
@@ -264,42 +290,4 @@ fn map_misses(
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
-    use commonware_utils::{NZU16, NZUsize};
-    use std::num::NonZeroU16;
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(103);
-    const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
-
-    /// A read straddling the persisted prefix and the in-memory tail is served synchronously once
-    /// the prefix page is cached (the unified `View` serves the prefix from the cache and the
-    /// suffix from the tail in one call).
-    #[test]
-    fn test_view_try_read_sync_straddles_cache_and_tail() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let (blob, blob_size) = context
-                .open("test_partition", b"view_straddle")
-                .await
-                .unwrap();
-            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-
-            // A full page (flushed to the blob) followed by a partial tail kept in the tip buffer.
-            let page_size = PAGE_SIZE.get() as usize;
-            writer.append(&vec![0xAA; page_size]).await.unwrap();
-            writer.append(b"TAIL").await.unwrap();
-            writer.sync().await.unwrap();
-
-            // Warm the cache for the first page, then read across the page/tail boundary.
-            writer.read_at(0, page_size).await.unwrap();
-            let mut buf = [0u8; 4];
-            assert!(writer.try_read_sync_into(&mut buf, page_size as u64 - 2));
-            assert_eq!(&buf, &[0xAA, 0xAA, b'T', b'A']);
-        });
-    }
-}
+mod tests;
