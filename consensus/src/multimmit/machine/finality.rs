@@ -1990,9 +1990,6 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
             let mut candidate = pending
                 .pop_candidate(signer, id)
                 .expect("the candidate was checked above");
-            if candidate.artifact.is_none() {
-                candidate.artifact = pending.witness(signer, &candidate.body);
-            }
             let signer_index = usize::from(signer);
             let selected = self
                 .direct_pool(key)
@@ -2009,6 +2006,15 @@ impl<V: Variant, D: Digest> FinalityState<V, D> {
                 if selected.body != candidate.body {
                     continue;
                 }
+            }
+            if candidate.artifact.is_none() {
+                candidate.artifact = self
+                    .pending_finality
+                    .get(&key)
+                    .expect("pending pool exists")
+                    .witness(signer, &candidate.body);
+            }
+            if selected.is_some() {
                 if let Some(witness) = candidate.artifact {
                     self.direct_pool_mut(key)
                         .expect("the pool was checked above")
