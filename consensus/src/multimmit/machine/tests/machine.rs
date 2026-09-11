@@ -265,7 +265,11 @@ fn profile(role: Role) -> Profile<Sha256, MinPk> {
     profile_for(role, 1, 2)
 }
 
-fn profile_for(role: Role, participants: usize, pipeline_depth: u32) -> Profile<Sha256, MinPk> {
+pub(super) fn profile_for(
+    role: Role,
+    participants: usize,
+    pipeline_depth: u32,
+) -> Profile<Sha256, MinPk> {
     profile_with_resources(role, participants, pipeline_depth, resources())
 }
 
@@ -533,7 +537,7 @@ fn symbolic_threshold_certificate(marker: u64) -> ThresholdCertificate<MinPk> {
     ))
 }
 
-fn leader(machine: &TestMachine, view: u64) -> LeaderBlock<MinPk, Digest> {
+pub(super) fn leader(machine: &TestMachine, view: u64) -> LeaderBlock<MinPk, Digest> {
     let protocol = machine.profile().protocol().clone();
     let proposals = protocol
         .genesis()
@@ -609,7 +613,7 @@ fn vote_artifact(
     Artifact::Vote(Vote::new(body, attestation(0)))
 }
 
-fn view_vote(
+pub(super) fn view_vote(
     machine: &TestMachine,
     leader: &LeaderBlock<MinPk, Digest>,
     signer: u32,
@@ -871,7 +875,7 @@ fn leader_extending_view_one_vqc(
     (leader, history)
 }
 
-fn start_profile(profile: Profile<Sha256, MinPk>) -> (TestMachine, Step<MinPk, Digest>) {
+pub(super) fn start_profile(profile: Profile<Sha256, MinPk>) -> (TestMachine, Step<MinPk, Digest>) {
     let mut machine = Machine::new(profile);
     let start = machine.step(Input::Start).unwrap();
     let job = persist_job(&start);
@@ -5651,6 +5655,33 @@ fn parent_retirement_preserves_history_for_a_retained_leader() {
             .unwrap()
             .commitment::<Sha256>(),
         history
+    );
+
+    let parent_id = parent.id::<Sha256>();
+    machine.views.retire_transitions_through(View::new(2));
+    assert!(
+        machine
+            .views
+            .retire_parents_through(View::new(1), None)
+            .is_empty()
+    );
+    assert!(
+        machine
+            .views
+            .retire_parents_through(View::new(2), Some(parent_id))
+            .is_empty()
+    );
+    assert_eq!(
+        machine.views.retire_parents_through(View::new(2), None),
+        [parent_id]
+    );
+    assert!(machine.views.leader_history::<Sha256>(&leader).is_err());
+    assert_eq!(machine.views.retained_parents(), 1);
+    assert!(
+        machine
+            .views
+            .retire_parents_through(View::zero(), None)
+            .is_empty()
     );
 }
 

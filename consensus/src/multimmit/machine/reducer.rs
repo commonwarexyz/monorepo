@@ -18,7 +18,7 @@ use super::{
         CertificateDerivations, FinalityEffect, FinalityError, FinalityOutput, FinalityUpdate,
         PreparedLqc,
     },
-    view::{ViewEffect, ViewError},
+    view::{ViewEffect, ViewError, drain_prefix},
 };
 use crate::{
     Epochable, Viewable,
@@ -4285,21 +4285,17 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             self.release_durable_artifact(id)?;
         }
 
-        let forwarded = self
-            .durable
-            .forwarded_vqcs
-            .range(..=floor)
-            .chain(self.durable.forwarded_nullifications.range(..=floor))
+        let forwarded = drain_prefix(&mut self.durable.forwarded_vqcs, |view| *view <= floor)
+            .chain(drain_prefix(
+                &mut self.durable.forwarded_nullifications,
+                |view| *view <= floor,
+            ))
             .map(|(_, artifact)| artifact.id::<H>())
             .collect::<Vec<_>>();
-        self.durable.forwarded_vqcs.retain(|view, _| *view > floor);
-        self.durable
-            .forwarded_nullifications
-            .retain(|view, _| *view > floor);
         for id in forwarded {
             self.release_durable_artifact(id)?;
         }
-        self.durable.exits.retain(|view, _| *view > floor);
+        drain_prefix(&mut self.durable.exits, |view| *view <= floor).for_each(drop);
 
         self.retire_view_history()?;
         self.forget_retired_artifacts()

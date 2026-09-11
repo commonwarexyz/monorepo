@@ -25,6 +25,24 @@ use std::{
     sync::Arc,
 };
 
+/// Removes the ordered prefix selected by `retired`, stopping at the first retained key.
+/// The predicate must select a contiguous prefix of the map's key order.
+pub(super) fn drain_prefix<K: Ord, V>(
+    entries: &mut BTreeMap<K, V>,
+    mut retired: impl FnMut(&K) -> bool,
+) -> impl Iterator<Item = (K, V)> {
+    std::iter::from_fn(move || {
+        if entries
+            .first_key_value()
+            .is_some_and(|(key, _)| retired(key))
+        {
+            entries.pop_first()
+        } else {
+            None
+        }
+    })
+}
+
 #[derive(Clone, Debug)]
 struct ProposalRecord<V: Variant, D: Digest> {
     observation: Observation,
@@ -857,24 +875,45 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         self.retired_transitions = floor;
         let retained = |view: &View| *view > floor;
 
-        self.leaders.retain(|(view, _), _| retained(view));
-        self.proposals.retain(|view, _| retained(view));
-        self.messages.retain(|view, _| retained(view));
-        self.message_locations
-            .retain(|_, (view, _, _)| retained(view));
-        self.sticky_messages.retain(|view, _| retained(view));
-        self.nullify_shares.retain(|view, _| retained(view));
-        self.nullifications.retain(|view, _| retained(view));
-        self.vqcs.retain(|view, _| retained(view));
-        self.claims
-            .retain(|claim, _| retained(&claim.certificate_view()));
-        self.claim_cohorts
-            .retain(|claim, _| retained(&claim.certificate_view()));
-        self.message_claim_cohorts.retain(|view, _| retained(view));
-        self.nullify_claim_cohorts.retain(|view, _| retained(view));
-        self.slots.retain(|view, _| retained(view));
-        self.post_vote_evidence.retain(|view, _| retained(view));
-        self.timeout_cutoffs.retain(|view, _| retained(view));
+        drain_prefix(&mut self.leaders, |(view, _)| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.proposals, |view| !retained(view)).for_each(drop);
+        for (_, messages) in drain_prefix(&mut self.messages, |view| !retained(view)) {
+            for records in messages.values() {
+                for record in records {
+                    self.message_locations.remove(&record.id);
+                }
+            }
+        }
+        drain_prefix(&mut self.sticky_messages, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.nullify_shares, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.nullifications, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.vqcs, |view| !retained(view)).for_each(drop);
+        // Claim ordering groups variants before views, so each variant has its own prefix.
+        for (first, last) in [
+            (Claim::Proposal(View::zero()), Claim::Proposal(floor)),
+            (
+                Claim::ViewMessage(View::zero(), Participant::new(0)),
+                Claim::ViewMessage(floor, Participant::new(u32::MAX)),
+            ),
+            (
+                Claim::Nullify(View::zero(), Participant::new(0)),
+                Claim::Nullify(floor, Participant::new(u32::MAX)),
+            ),
+            (
+                Claim::Nullification(View::zero()),
+                Claim::Nullification(floor),
+            ),
+            (Claim::Vqc(View::zero()), Claim::Vqc(floor)),
+        ] {
+            for (claim, _) in self.claims.extract_if(first..=last, |_, _| true) {
+                self.claim_cohorts.remove(&claim);
+            }
+        }
+        drain_prefix(&mut self.message_claim_cohorts, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.nullify_claim_cohorts, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.slots, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.post_vote_evidence, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.timeout_cutoffs, |view| !retained(view)).for_each(drop);
         self.certificate_jobs.retain(|_, job| match job {
             ViewCertificateJob::Nullification { job, .. } => job
                 .shares()
@@ -882,13 +921,17 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
                 .is_some_and(|share| retained(&share.view())),
             ViewCertificateJob::Vqc { job, .. } => retained(&job.leader().view()),
         });
-        self.pending_nullifications.retain(|view, _| retained(view));
-        self.pending_vqcs.retain(|view, _| retained(view));
-        self.assembled_nullifications.retain(retained);
-        self.assembled_vqcs.retain(|(view, _), _| retained(view));
-        self.forwardable_nullifications.retain(retained);
-        self.forwardable_vqcs.retain(retained);
-        self.ready_certificate_views.retain(retained);
+        drain_prefix(&mut self.pending_nullifications, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.pending_vqcs, |view| !retained(view)).for_each(drop);
+        drain_prefix(&mut self.assembled_vqcs, |(view, _)| !retained(view)).for_each(drop);
+        for views in [
+            &mut self.assembled_nullifications,
+            &mut self.forwardable_nullifications,
+            &mut self.forwardable_vqcs,
+            &mut self.ready_certificate_views,
+        ] {
+            views.extract_if(..=floor, |_| true).for_each(drop);
+        }
         if self
             .certificate_scan
             .as_ref()
@@ -911,8 +954,11 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     /// Retire parents first so facts below the floor remain bounded by retained parents.
     pub(crate) fn retire_forwarded_through(&mut self, floor: View) {
         self.forwarded_vqcs
-            .retain(|view, id| *view > floor || self.parents.contains_key(id));
-        self.forwarded_nullifications.retain(|view| *view > floor);
+            .extract_if(..=floor, |_, id| !self.parents.contains_key(id))
+            .for_each(drop);
+        self.forwarded_nullifications
+            .extract_if(..=floor, |_| true)
+            .for_each(drop);
     }
 
     pub(crate) fn retire_parents_through(
@@ -920,28 +966,29 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         floor: View,
         anchor: Option<CertificateId<D>>,
     ) -> Vec<CertificateId<D>> {
+        if floor.is_zero() {
+            return Vec::new();
+        }
         let live_leader_parents = self
             .leaders
             .values()
             .map(|leader| leader.block().parent())
             .collect::<BTreeSet<_>>();
-        let retained = |id: &CertificateId<D>, parent: &ParentRecord<V, D>| {
-            parent.view.is_zero()
-                || parent.view >= floor
-                || Some(*id) == anchor
-                || live_leader_parents.contains(id)
-        };
-        let removed = self
-            .parents
-            .iter()
-            .filter_map(|(id, parent)| (!retained(id, parent)).then_some(*id))
-            .collect::<Vec<_>>();
-        self.parents.retain(|id, parent| retained(id, parent));
-        let parents = &self.parents;
-        self.parents_by_view.retain(|view, ids| {
-            ids.retain(|id| parents.contains_key(id));
-            view.is_zero() || *view >= floor || !ids.is_empty()
-        });
+        let mut removed = Vec::new();
+        self.parents_by_view
+            .extract_if((Excluded(View::zero()), Excluded(floor)), |_, ids| {
+                ids.retain(|id| {
+                    if Some(*id) == anchor || live_leader_parents.contains(id) {
+                        return true;
+                    }
+                    self.parents.remove(id);
+                    removed.push(*id);
+                    false
+                });
+                ids.is_empty()
+            })
+            .for_each(drop);
+        removed.sort_unstable();
         removed
     }
 
@@ -3369,9 +3416,130 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        NullificationState, StanceState, TransitionState, ViewProductState, ViewSlotInput,
-        ViewSlotOutput,
+        Artifact, ArtifactId, Claim, NullificationState, Observation, Participant, Role,
+        StanceState, TransitionState, View, ViewProductState, ViewSlotInput, ViewSlotOutput,
+        ViewState, drain_prefix,
     };
+    use crate::multimmit::machine::tests::{leader, profile_for, start_profile, view_vote};
+    use commonware_cryptography::{Hasher, Sha256};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    #[test]
+    fn retirement_prefix_skips_the_live_suffix() {
+        for live in [8, 16_384] {
+            let mut entries = (0..live).map(|key| (key, key)).collect::<BTreeMap<_, _>>();
+            let mut expected = entries.clone();
+            let mut full_checks = 0;
+            expected.retain(|key, _| {
+                full_checks += 1;
+                *key > 3
+            });
+            let mut prefix_checks = 0;
+            let removed = drain_prefix(&mut entries, |key| {
+                prefix_checks += 1;
+                *key <= 3
+            })
+            .collect::<Vec<_>>();
+            assert_eq!(entries, expected);
+            assert_eq!(removed, [(0, 0), (1, 1), (2, 2), (3, 3)]);
+            assert_eq!(prefix_checks, 5);
+            assert_eq!(full_checks, live);
+            assert!(prefix_checks < full_checks);
+        }
+    }
+
+    #[test]
+    fn retirement_prefix_handles_boundaries_and_compound_keys() {
+        let mut entries = BTreeMap::from([
+            ((View::zero(), 0), 0),
+            ((View::new(1), 0), 1),
+            ((View::new(1), 1), 2),
+            ((View::new(u64::MAX), 0), 3),
+        ]);
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::zero()).count(),
+            1
+        );
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::zero()).count(),
+            0
+        );
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::new(1)).count(),
+            2
+        );
+        assert_eq!(
+            drain_prefix(&mut entries, |(view, _)| *view <= View::new(u64::MAX)).count(),
+            1
+        );
+        assert_eq!(drain_prefix(&mut entries, |_| true).count(), 0);
+    }
+
+    #[test]
+    fn retirement_preserves_message_and_claim_indices() {
+        let (machine, _) = start_profile(profile_for(Role::Observer, 6, 2));
+        let mut views = ViewState::new(machine.profile());
+        for view in [1, 2, 3] {
+            let block = leader(&machine, view);
+            for signer in [0, 1] {
+                let artifact = Arc::new(Artifact::Vote(view_vote(&machine, &block, signer)));
+                let id = artifact.id::<Sha256>();
+                views.observe_message(id, Observation::new(9, signer), Arc::clone(&artifact));
+                views.observe_message(id, Observation::new(7, signer), artifact);
+            }
+            let view = View::new(view);
+            for claim in [
+                Claim::Proposal(view),
+                Claim::ViewMessage(view, Participant::new(0)),
+                Claim::ViewMessage(view, Participant::new(u32::MAX)),
+                Claim::Nullify(view, Participant::new(0)),
+                Claim::Nullify(view, Participant::new(u32::MAX)),
+                Claim::Nullification(view),
+                Claim::Vqc(view),
+            ] {
+                for cohort in [7u64, 9] {
+                    let id = ArtifactId::new(Sha256::hash(&[&cohort.to_le_bytes()]));
+                    views
+                        .claims
+                        .entry(claim)
+                        .or_default()
+                        .insert(id, Observation::new(cohort, 0));
+                    views.insert_claim_cohort(claim, cohort);
+                }
+            }
+        }
+        let mut expected_messages = views.message_locations.clone();
+        let mut expected_claims = views.claims.clone();
+        let mut expected_cohorts = views.claim_cohorts.clone();
+        let mut expected_message_cohorts = views.message_claim_cohorts.clone();
+        let mut expected_nullify_cohorts = views.nullify_claim_cohorts.clone();
+        for floor in [0, 1, 1, 0, 2, u64::MAX] {
+            let floor = View::new(floor);
+            views.retire_transitions_through(floor);
+            expected_messages.retain(|_, (view, _, _)| *view > floor);
+            expected_claims.retain(|claim, _| claim.certificate_view() > floor);
+            expected_cohorts.retain(|claim, _| claim.certificate_view() > floor);
+            expected_message_cohorts.retain(|view, _| *view > floor);
+            expected_nullify_cohorts.retain(|view, _| *view > floor);
+            assert_eq!(views.message_locations, expected_messages);
+            assert_eq!(views.claims, expected_claims);
+            assert_eq!(views.claim_cohorts, expected_cohorts);
+            assert_eq!(views.message_claim_cohorts, expected_message_cohorts);
+            assert_eq!(views.nullify_claim_cohorts, expected_nullify_cohorts);
+            let locations = views
+                .messages
+                .iter()
+                .flat_map(|(view, signers)| {
+                    signers.iter().flat_map(move |(signer, records)| {
+                        records
+                            .iter()
+                            .map(move |record| (record.id, (*view, *signer, record.observation)))
+                    })
+                })
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(locations, expected_messages);
+        }
+    }
 
     #[test]
     fn product_state_table_is_exhaustive() {
