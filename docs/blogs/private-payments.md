@@ -64,7 +64,7 @@ A payment of $v$ from $\mathsf{Sen}$ to $\mathsf{Rec}$ is recorded on chain as a
 $$
 \rho = \mathsf{Com}_{\mathsf{rec}}\big(v,\ \mathsf{Sen},\ \mathsf{Rec}\big),
 $$
-in a Merkle Mountain Range (MMR; see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blog post](https://commonware.xyz/blogs/mmr)).
+in a Merkle Mountain Range (see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blog post](https://commonware.xyz/blogs/mmr)).
 
 The sender $\mathsf{Sen}$ additionally proves that:
 
