@@ -21,7 +21,7 @@ If we can't use blockspace to scale to a billion TPS (or at least don't want to 
 
 **Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that existing chains can verify. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
 
-A bajillion payments reduces to only a handful of offchain settlement records.
+One payment or a bajillion, it all reduces to a handful of offchain settlement records.
 
 ## Payments as Fast as Browsing the Web
 
