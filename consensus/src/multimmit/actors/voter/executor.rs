@@ -542,18 +542,20 @@ where
                 let scheme = Arc::clone(&self.scheme);
                 let critical = self.critical_strategy.clone();
                 let view = job.leader().view();
-                let (id, generation) = (job.id(), job.generation());
                 let operation = move |strategy: C| {
                     let votes = job.votes().cloned().collect::<Vec<_>>();
                     scheme
                         .assemble_lqc_preverified::<H, _>(job.leader().clone(), &votes, &strategy)
-                        .map(|certificate| CryptoOutcome::LqcAggregated {
-                            view,
-                            completion: Box::new(LqcAggregateCompletion::new(
-                                id,
-                                generation,
+                        .and_then(|certificate| {
+                            LqcAggregateCompletion::prepare::<H>(
+                                &job,
                                 certificate,
-                            )),
+                                scheme.codec_config(),
+                            )
+                        })
+                        .map(|completion| CryptoOutcome::LqcAggregated {
+                            view,
+                            completion: Box::new(completion),
                         })
                 };
                 self.spawn_crypto(

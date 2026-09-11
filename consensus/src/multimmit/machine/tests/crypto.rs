@@ -900,11 +900,10 @@ fn execute_lqc_trace<V: Variant>(fixture: &Fixture<V>) {
     let artifact_id = artifact.id::<Sha256>();
 
     let aggregated = machine
-        .step(Input::LqcAggregated(Box::new(LqcAggregateCompletion::new(
-            aggregate.id(),
-            aggregate.generation(),
-            sequential,
-        ))))
+        .step(Input::LqcAggregated(Box::new(
+            LqcAggregateCompletion::prepare::<Sha256>(&aggregate, sequential, fixture.codec)
+                .unwrap(),
+        )))
         .unwrap();
     // Aggregation completions always park; settling drains the completion into its staging
     // barrier, and the self-admission the old status reported shows up in the artifact cache.
@@ -973,6 +972,9 @@ fn assert_reused_application_digest_is_accepted(
     );
     assert_eq!(completion.validated_vqc(0).is_some(), is_vqc);
     assert_eq!(completion.validated_lqc(0).is_some(), !is_vqc);
+    let projection = completion
+        .validated_lqc(0)
+        .map(|validated| Arc::clone(&validated.derived().artifact));
     // Both certificate kinds carry compute-pool derivations beyond their verdicts.
     let verdict_bytes = size_of_val(&completion) + size_of_val(completion.verdicts());
     assert!(completion.resident_bytes().unwrap() > verdict_bytes);
@@ -984,8 +986,21 @@ fn assert_reused_application_digest_is_accepted(
             invalid: 0
         }
     ));
+    if let Some(projection) = &projection {
+        let proof = &machine.artifacts[&id].artifact;
+        let retained = machine.views.finality_anchor(proof).unwrap();
+        assert!(Arc::ptr_eq(&retained.artifact, projection));
+        let copy = Arc::new(proof.as_ref().clone());
+        assert!(machine.views.finality_anchor(&copy).is_none());
+    }
     settle(&mut machine, accepted);
     assert!(machine.artifacts.contains_key(&id));
+    if let Some(projection) = projection {
+        assert!(Arc::ptr_eq(
+            machine.durable.proposal_anchor.as_ref().unwrap(),
+            &projection
+        ));
+    }
 }
 
 #[test]

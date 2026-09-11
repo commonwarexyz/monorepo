@@ -25,7 +25,7 @@ use std::sync::Arc;
 const ARTIFACT_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_ARTIFACT";
 
 type ValidatedVqcs<D> = Vec<(usize, ValidatedVqc<D>)>;
-type ValidatedLqcs<D> = Vec<(usize, ValidatedLqc<D>)>;
+type ValidatedLqcs<V, D> = Vec<(usize, ValidatedLqc<V, D>)>;
 
 /// The decoded Multimmit wire objects accepted by the local machine.
 ///
@@ -684,7 +684,7 @@ impl<V: Variant, D: Digest> VerifyJob<V, D> {
         rng: &mut R,
         scheme: &Scheme<P, V>,
         strategy: &impl Strategy,
-    ) -> VerificationCompletion<D>
+    ) -> VerificationCompletion<V, D>
     where
         R: CryptoRng,
         P: PublicKey,
@@ -805,15 +805,15 @@ impl<D: Digest> Verdict<D> {
 
 /// Completion of one exact verification job.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VerificationCompletion<D: Digest> {
+pub struct VerificationCompletion<V: Variant, D: Digest> {
     job: JobId,
     generation: u64,
     verdicts: Vec<Verdict<D>>,
     validated_vqcs: ValidatedVqcs<D>,
-    validated_lqcs: ValidatedLqcs<D>,
+    validated_lqcs: ValidatedLqcs<V, D>,
 }
 
-impl<D: Digest> VerificationCompletion<D> {
+impl<V: Variant, D: Digest> VerificationCompletion<V, D> {
     /// Creates a completion for a machine-issued verification request.
     ///
     /// Production completions are built by [`VerifyJob::verify`], which attaches reusable
@@ -837,7 +837,7 @@ impl<D: Digest> VerificationCompletion<D> {
         generation: u64,
         verdicts: Vec<Verdict<D>>,
         validated_vqcs: ValidatedVqcs<D>,
-        validated_lqcs: ValidatedLqcs<D>,
+        validated_lqcs: ValidatedLqcs<V, D>,
     ) -> Self {
         debug_assert!(
             validated_vqcs
@@ -883,7 +883,7 @@ impl<D: Digest> VerificationCompletion<D> {
     }
 
     #[cfg(test)]
-    pub(crate) fn validated_lqc(&self, index: usize) -> Option<&ValidatedLqc<D>> {
+    pub(crate) fn validated_lqc(&self, index: usize) -> Option<&ValidatedLqc<V, D>> {
         self.validated_lqcs
             .iter()
             .find_map(|(candidate, validated)| (*candidate == index).then_some(validated))
@@ -897,7 +897,7 @@ impl<D: Digest> VerificationCompletion<D> {
         Some(self.validated_vqcs.swap_remove(position).1)
     }
 
-    pub(crate) fn take_validated_lqc(&mut self, index: usize) -> Option<ValidatedLqc<D>> {
+    pub(crate) fn take_validated_lqc(&mut self, index: usize) -> Option<ValidatedLqc<V, D>> {
         let position = self
             .validated_lqcs
             .iter()
@@ -917,7 +917,7 @@ impl<D: Digest> VerificationCompletion<D> {
             .checked_add(
                 self.validated_lqcs
                     .capacity()
-                    .checked_mul(size_of::<(usize, ValidatedLqc<D>)>())?,
+                    .checked_mul(size_of::<(usize, ValidatedLqc<V, D>)>())?,
             )?;
         let total = self.validated_vqcs.iter().try_fold(
             size_of_val(self)

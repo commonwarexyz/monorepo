@@ -7,6 +7,7 @@
 mod path;
 mod tips;
 
+use super::{Artifact, ArtifactId};
 use crate::multimmit::{
     config::CodecConfig,
     scheme::bls12381_threshold::CertificateVotes,
@@ -16,7 +17,9 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
 use commonware_utils::Participant;
+use core::mem::{size_of, size_of_val};
 pub(crate) use path::{ProposalPaths, VotePaths};
+use std::sync::Arc;
 pub(crate) use tips::{FinalTips, PoolExtractor, Tips, VqcExtraction};
 
 /// Namespace of the digest by which the finality pool identifies one signer's vote body.
@@ -59,7 +62,7 @@ pub(crate) struct ValidatedVqc<D: Digest> {
     id: CertificateId<D>,
     leader: D,
     canonical: Bytes,
-    tips: Tips<D>,
+    tips: Arc<Tips<D>>,
     votes: Vec<VerifiedVote<D>>,
 }
 
@@ -72,7 +75,7 @@ impl<D: Digest> ValidatedVqc<D> {
         self.leader
     }
 
-    pub(crate) fn into_parts(self) -> (CertificateId<D>, Bytes, Tips<D>) {
+    pub(crate) fn into_parts(self) -> (CertificateId<D>, Bytes, Arc<Tips<D>>) {
         (self.id, self.canonical, self.tips)
     }
 
@@ -84,27 +87,95 @@ impl<D: Digest> ValidatedVqc<D> {
     /// Bytes charged against the completion lane. The attested votes are excluded: the finality
     /// pool allocates them either way, and they are bounded by the certificate's own encoding.
     pub(crate) fn owned_bytes(&self) -> Option<usize> {
-        self.canonical.len().checked_add(self.tips.owned_bytes()?)
+        self.canonical
+            .len()
+            .checked_add(self.tips.owned_bytes()?)?
+            .checked_add(size_of::<Tips<D>>() + 2 * size_of::<usize>())
+    }
+}
+
+/// One immutable V-QC and the derivations established for that exact allocation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DerivedVqc<V: Variant, D: Digest> {
+    pub(crate) artifact: Arc<Artifact<V, D>>,
+    pub(crate) artifact_id: ArtifactId<D>,
+    pub(crate) validated: ValidatedVqc<D>,
+    byte_charge: usize,
+}
+
+impl<V: Variant, D: Digest> DerivedVqc<V, D> {
+    pub(crate) fn from_lqc<H: Hasher<Digest = D>>(
+        certificate: &Lqc<V, D>,
+        config: CodecConfig,
+    ) -> Result<Self, Error> {
+        let certificate = certificate.derive_vqc(config).map_err(|_| Error::Vote)?;
+        let validated = validate_vqc::<H, V, D>(&certificate, config)?;
+        Self::new::<H>(certificate, validated)
+    }
+
+    fn new<H: Hasher<Digest = D>>(
+        certificate: Vqc<V, D>,
+        validated: ValidatedVqc<D>,
+    ) -> Result<Self, Error> {
+        // The encoding bounds payload storage; vector elements and the Arc allocation account
+        // for resident transcript structure. This charge conservatively includes shared bytes.
+        let tally = certificate.tally();
+        let mut bytes = size_of::<Artifact<V, D>>()
+            .checked_add(2 * size_of::<usize>())
+            .and_then(|bytes| bytes.checked_add(validated.canonical.len()))
+            .and_then(|bytes| bytes.checked_add(size_of_val(certificate.leader().proposals())))
+            .and_then(|bytes| bytes.checked_add(size_of_val(tally.reference_extensions())))
+            .and_then(|bytes| bytes.checked_add(size_of_val(tally.deviations())))
+            .ok_or(Error::Vote)?;
+        for deviation in tally.deviations() {
+            bytes = bytes
+                .checked_add(size_of_val(deviation.positions()))
+                .and_then(|bytes| bytes.checked_add(size_of_val(deviation.extensions())))
+                .ok_or(Error::Vote)?;
+        }
+        bytes = bytes
+            .checked_add(validated.owned_bytes().ok_or(Error::Vote)?)
+            .ok_or(Error::Vote)?;
+        let artifact = Arc::new(Artifact::Vqc(certificate));
+        let artifact_id = artifact.id_from_canonical_encoding::<H>(&validated.canonical);
+        Ok(Self {
+            artifact,
+            artifact_id,
+            validated,
+            byte_charge: bytes,
+        })
+    }
+
+    pub(crate) const fn owned_bytes(&self) -> usize {
+        self.byte_charge
     }
 }
 
 /// Expensive deterministic outputs derived while validating one exact L-QC.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedLqc<D: Digest> {
+pub(crate) struct ValidatedLqc<V: Variant, D: Digest> {
     leader: D,
     tips: FinalTips<D>,
     votes: Vec<VerifiedVote<D>>,
+    derived: DerivedVqc<V, D>,
 }
 
-impl<D: Digest> ValidatedLqc<D> {
-    pub(crate) fn into_parts(self) -> (D, FinalTips<D>, Vec<VerifiedVote<D>>) {
-        (self.leader, self.tips, self.votes)
+impl<V: Variant, D: Digest> ValidatedLqc<V, D> {
+    pub(crate) fn into_parts(self) -> (D, FinalTips<D>, Vec<VerifiedVote<D>>, DerivedVqc<V, D>) {
+        (self.leader, self.tips, self.votes, self.derived)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn derived(&self) -> &DerivedVqc<V, D> {
+        &self.derived
     }
 
     /// Bytes charged against the completion lane; the attested votes are excluded as for
     /// [`ValidatedVqc::owned_bytes`].
     pub(crate) fn owned_bytes(&self) -> Option<usize> {
-        self.tips.owned_bytes()
+        self.tips
+            .owned_bytes()?
+            .checked_add(self.derived.owned_bytes())
     }
 }
 
@@ -193,7 +264,7 @@ where
         id,
         leader,
         canonical,
-        tips,
+        tips: Arc::new(tips),
         votes,
     })
 }
@@ -202,7 +273,7 @@ pub(crate) fn validate_lqc<H, V, D>(
     certificate: &Lqc<V, D>,
     config: CodecConfig,
     votes: CertificateVotes<D>,
-) -> Result<ValidatedLqc<D>, Error>
+) -> Result<ValidatedLqc<V, D>, Error>
 where
     H: Hasher<Digest = D>,
     V: Variant,
@@ -222,7 +293,23 @@ where
         .into_iter()
         .map(|(signer, body)| VerifiedVote::new::<H>(signer, body))
         .collect();
+    prepared.ancestry()?;
+    let safe_tips = Tips::from_prepared(&prepared, config)?;
+    let vqc = certificate.derive_vqc(config).map_err(|_| Error::Vote)?;
+    let canonical = vqc.encode();
+    let id = CertificateId::new(H::hash(&[canonical.as_ref()]));
+    let derived = DerivedVqc::new::<H>(
+        vqc,
+        ValidatedVqc {
+            id,
+            leader: leader_digest,
+            canonical,
+            tips: Arc::new(safe_tips),
+            votes: Vec::new(),
+        },
+    )?;
     Ok(ValidatedLqc {
+        derived,
         leader: leader_digest,
         tips,
         votes,

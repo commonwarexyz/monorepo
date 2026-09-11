@@ -172,14 +172,14 @@ impl<P: PublicKey, V: Variant, D: Digest> UnreliablePolicy for Observed<P, V, D>
 }
 
 /// One exact verification completion for the voter's accounted control path.
-pub struct Completed<D: Digest> {
+pub struct Completed<V: Variant, D: Digest> {
     /// The issuing job's tracing span.
     pub span: Span,
     /// The exact per-item verdicts.
-    pub completion: VerificationCompletion<D>,
+    pub completion: VerificationCompletion<V, D>,
 }
 
-impl<D: Digest> Policy for Completed<D> {
+impl<V: Variant, D: Digest> Policy for Completed<V, D> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {

@@ -4,7 +4,7 @@ use super::{
     Artifact, ArtifactId, ChainState, Observation, Profile, ProposalRequest, Role, SignRequest,
     ViewNullification, ViewSnapshot, ViewStance, ViewTransition, VoteBodyPass, VoteBodyProgress,
     VoteRequest,
-    algebra::{Tips, ValidatedVqc, validate_vqc, validate_vqc_votes},
+    algebra::{DerivedVqc, Tips, ValidatedVqc, validate_vqc, validate_vqc_votes},
 };
 use crate::{
     Epochable, Viewable,
@@ -64,7 +64,7 @@ struct ParentRecord<V: Variant, D: Digest> {
     history: D,
     canonical: Bytes,
     certificate: Option<Arc<Artifact<V, D>>>,
-    tips: Tips<D>,
+    tips: Arc<Tips<D>>,
     /// Each chain's proposed tip height in the view this record's V-QC certified.
     proposed: Vec<Height>,
     messages: usize,
@@ -559,7 +559,13 @@ pub(crate) struct ViewState<V: Variant, D: Digest> {
     ///
     /// Finality evidence owns its proof because it can outlive its general ready-artifact cache
     /// entry. Equal-view arrivals retain the first proof.
-    finality_proof: Option<(View, Arc<Artifact<V, D>>)>,
+    finality_proof: Option<FinalityProof<V, D>>,
+}
+
+struct FinalityProof<V: Variant, D: Digest> {
+    view: View,
+    artifact: Arc<Artifact<V, D>>,
+    derived: DerivedVqc<V, D>,
 }
 
 #[derive(Clone, Debug)]
@@ -686,7 +692,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
             canonical: Bytes::new(),
             certificate: None,
             proposed: genesis.tips().iter().map(|tip| tip.height()).collect(),
-            tips,
+            tips: Arc::new(tips),
             messages: 0,
         };
         Self {
@@ -733,9 +739,10 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     }
 
     /// Applies E3 after Finality admits a full L-QC.
-    pub(crate) fn observe_finality(
+    pub(crate) fn observe_finality<H: Hasher<Digest = D>>(
         &mut self,
         artifact: &Arc<Artifact<V, D>>,
+        derived: Option<DerivedVqc<V, D>>,
     ) -> Result<bool, ViewError> {
         let Artifact::Lqc(certificate) = artifact.as_ref() else {
             return Err(ViewError::Certificate);
@@ -743,11 +750,20 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         if self
             .finality_proof
             .as_ref()
-            .is_some_and(|(view, _)| *view >= certificate.view())
+            .is_some_and(|proof| proof.view >= certificate.view())
         {
             return Ok(false);
         }
-        self.finality_proof = Some((certificate.view(), Arc::clone(artifact)));
+        let derived = match derived {
+            Some(derived) => derived,
+            None => DerivedVqc::from_lqc::<H>(certificate, self.config)
+                .map_err(|_| ViewError::Certificate)?,
+        };
+        self.finality_proof = Some(FinalityProof {
+            view: certificate.view(),
+            artifact: Arc::clone(artifact),
+            derived,
+        });
         Ok(true)
     }
 
@@ -761,7 +777,17 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
     pub(crate) fn signing_floor_candidate(&self, floor: View) -> Option<Arc<Artifact<V, D>>> {
         self.finality_proof
             .as_ref()
-            .and_then(|(view, proof)| (*view > floor).then(|| Arc::clone(proof)))
+            .and_then(|proof| (proof.view > floor).then(|| Arc::clone(&proof.artifact)))
+    }
+
+    /// Reuses the projection only for the immutable proof that owns it.
+    pub(crate) fn finality_anchor(
+        &self,
+        artifact: &Arc<Artifact<V, D>>,
+    ) -> Option<&DerivedVqc<V, D>> {
+        self.finality_proof
+            .as_ref()
+            .and_then(|proof| Arc::ptr_eq(&proof.artifact, artifact).then_some(&proof.derived))
     }
 
     /// Reconstructs the exact safe-tip opening committed by a leader from its retained parent.
@@ -790,7 +816,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         if self
             .finality_proof
             .as_ref()
-            .is_some_and(|(view, _)| *view <= floor)
+            .is_some_and(|proof| proof.view <= floor)
         {
             self.finality_proof = None;
         }
@@ -2753,7 +2779,7 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         self.retain_validated_vqc_parent(artifact, validated)
     }
 
-    fn retain_validated_vqc_parent(
+    pub(crate) fn retain_validated_vqc_parent(
         &mut self,
         artifact: &Arc<Artifact<V, D>>,
         validated: ValidatedVqc<D>,

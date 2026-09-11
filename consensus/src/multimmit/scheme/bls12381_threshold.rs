@@ -2468,13 +2468,17 @@ mod tests {
                     assert!(expansion.conflicting.is_empty());
                     let baseline =
                         FinalTips::from_lqc::<Sha256, _>(certificate, verifier.codec).unwrap();
-                    let (digest, tips, votes) =
+                    let (digest, tips, votes, derived) =
                         validate_lqc::<Sha256, _, _>(certificate, verifier.codec, expansion)
                             .unwrap()
                             .into_parts();
                     assert_eq!(digest, leader.digest::<Sha256>());
                     assert_eq!(tips, baseline);
                     assert_eq!(votes, expected_votes);
+                    let vqc = certificate.derive_vqc(verifier.codec).unwrap();
+                    let baseline = validate_vqc::<Sha256, _, _>(&vqc, verifier.codec).unwrap();
+                    assert_eq!(derived.validated.into_parts(), baseline.into_parts());
+                    assert_eq!(derived.artifact_id, derived.artifact.id::<Sha256>());
                 }
                 _ => unreachable!(),
             }

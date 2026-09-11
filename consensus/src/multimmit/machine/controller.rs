@@ -242,7 +242,7 @@ enum QueuedPayload<V: Variant, D: Digest> {
     Input(Input<V, D>),
     /// Reversed once at admission so prefixes pop from the tail in original order.
     Observe(Vec<super::IdentifiedArtifact<V, D>>),
-    Verified(VerificationPass<D>),
+    Verified(VerificationPass<V, D>),
     SignedBatch(SigningBatchPass<V, D>),
 }
 
@@ -384,7 +384,7 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
 
     pub(crate) fn verification_completed(
         &mut self,
-        completion: VerificationCompletion<H::Digest>,
+        completion: VerificationCompletion<V, H::Digest>,
     ) -> Result<InputTicket, CoreError> {
         self.enqueue(Input::Verified(completion), 1)
     }

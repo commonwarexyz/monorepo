@@ -11,7 +11,7 @@ use super::{
     ReplayError, Replayed, ResolutionCompletion, ResolutionJob, Role, SelfAdmission, SendRequest,
     SignRequest, Timer, Verdict, VerificationCompletion, VerificationItem, VerificationTicket,
     VerifyJob, VqcAggregateCompletion, VqcAggregateJob, WorkKey,
-    algebra::{ValidatedLqc, ValidatedVqc},
+    algebra::{DerivedVqc, ValidatedLqc, ValidatedVqc},
     contracts::{DA_VOTE_RUN, Lane, ServiceCycle, ServiceError, TransitionCost},
     emission::ViewProof,
     finality::{
@@ -67,7 +67,7 @@ pub(super) enum Input<V: Variant, D: Digest> {
     /// rather than re-hashing multi-kilobyte certificates on the voter loop.
     Observe(Vec<IdentifiedArtifact<V, D>>),
     /// Complete one exact machine-issued verification job.
-    Verified(VerificationCompletion<D>),
+    Verified(VerificationCompletion<V, D>),
     /// Complete one exact safety-journal barrier.
     Persisted(BarrierAck),
     /// Complete one stable durable outbox action.
@@ -113,14 +113,14 @@ enum VerificationPassPhase {
 }
 
 /// Owned verification input and exact item cursor retained across core cycles.
-pub(crate) struct VerificationPass<D: Digest> {
-    completion: VerificationCompletion<D>,
+pub(crate) struct VerificationPass<V: Variant, D: Digest> {
+    completion: VerificationCompletion<V, D>,
     phase: VerificationPassPhase,
     position: usize,
 }
 
-impl<D: Digest> VerificationPass<D> {
-    pub(crate) const fn new(completion: VerificationCompletion<D>) -> Self {
+impl<V: Variant, D: Digest> VerificationPass<V, D> {
+    pub(crate) const fn new(completion: VerificationCompletion<V, D>) -> Self {
         Self {
             completion,
             phase: VerificationPassPhase::Start,
@@ -1048,7 +1048,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// Applies at most `budget` real verification items and retains the exact suffix cursor.
     pub(crate) fn advance_verification_pass(
         &mut self,
-        pass: &mut VerificationPass<H::Digest>,
+        pass: &mut VerificationPass<V, H::Digest>,
         budget: usize,
     ) -> Result<InputPass<V, H::Digest>, StepError> {
         self.ensure_live()?;
@@ -1446,7 +1446,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         artifact_id: ArtifactId<H::Digest>,
         observation: Observation,
         artifact: &Arc<Artifact<V, H::Digest>>,
-        prepared: Option<CertificateDerivations<H::Digest>>,
+        prepared: Option<CertificateDerivations<V, H::Digest>>,
     ) -> Result<(), StepError> {
         let outputs = self.finality.validate_finality_claim::<H>(
             artifact_id,
@@ -1456,8 +1456,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             prepared,
         )?;
         for output in outputs {
-            let FinalityOutput::Finality(observation, certificate) = output;
-            self.apply_finality(observation, certificate)?;
+            let FinalityOutput::Finality(observation, certificate, derived) = output;
+            self.apply_finality(observation, certificate, derived)?;
         }
         Ok(())
     }
@@ -1475,8 +1475,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             &self.profile,
         )?;
         for output in outputs {
-            let FinalityOutput::Finality(observation, certificate) = output;
-            self.apply_finality(observation, certificate)?;
+            let FinalityOutput::Finality(observation, certificate, derived) = output;
+            self.apply_finality(observation, certificate, derived)?;
         }
         Ok(())
     }
@@ -1484,8 +1484,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     fn retire_finality_through(&mut self, floor: View) -> Result<(), StepError> {
         let outputs = self.finality.retire_through::<H>(&self.profile, floor)?;
         for output in outputs {
-            let FinalityOutput::Finality(observation, certificate) = output;
-            self.apply_finality(observation, certificate)?;
+            let FinalityOutput::Finality(observation, certificate, derived) = output;
+            self.apply_finality(observation, certificate, derived)?;
         }
         Ok(())
     }
@@ -1494,6 +1494,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         observation: Observation,
         certificate: Arc<Artifact<V, H::Digest>>,
+        derived: Option<DerivedVqc<V, H::Digest>>,
     ) -> Result<(), StepError> {
         let Artifact::Lqc(lqc) = certificate.as_ref() else {
             return Err(StepError::ViewInvariant);
@@ -1503,12 +1504,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         }
         let selected = self
             .views
-            .observe_finality(&certificate)
+            .observe_finality::<H>(&certificate, derived)
             .map_err(|_| StepError::ViewInvariant)?;
         if !selected || lqc.view() < self.durable.view {
             return Ok(());
         }
-        self.observe_derived_vqc(lqc, observation)
+        self.observe_derived_vqc(&certificate, observation)
     }
 
     fn sync_signing_completions(&mut self) {
@@ -2222,23 +2223,19 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// cryptographic job.
     fn observe_derived_vqc(
         &mut self,
-        certificate: &Lqc<V, H::Digest>,
+        certificate: &Arc<Artifact<V, H::Digest>>,
         observation: Observation,
     ) -> Result<(), StepError> {
-        let certificate = certificate
-            .derive_vqc(self.profile.protocol().codec_config())
+        let derived = self
+            .views
+            .finality_anchor(certificate)
+            .ok_or(StepError::ViewInvariant)?;
+        let artifact = Arc::clone(&derived.artifact);
+        let id = derived.artifact_id;
+        let validated = derived.validated.clone();
+        self.views
+            .observe::<H>(id, observation, &artifact, Some(validated), &self.profile)
             .map_err(|_| StepError::ViewInvariant)?;
-        let artifact = Arc::new(Artifact::Vqc(certificate));
-        let id = artifact.id::<H>();
-        if artifact.view().is_some_and(|view| view < self.durable.view) {
-            self.views
-                .retain_vqc_parent::<H>(&artifact, &self.profile)
-                .map_err(|_| StepError::ViewInvariant)?;
-        } else {
-            self.views
-                .observe::<H>(id, observation, &artifact, None, &self.profile)
-                .map_err(|_| StepError::ViewInvariant)?;
-        }
         Ok(())
     }
 
@@ -2727,6 +2724,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             Arc::clone(&prepared.artifact),
             id,
             prepared.observation,
+            None,
         )?;
         self.views.finish_nullification(completion.id());
         step.status = StepStatus::NullificationRecovered {
@@ -2756,6 +2754,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             Arc::clone(&prepared.artifact),
             id,
             prepared.observation,
+            None,
         )?;
         self.views.finish_vqc(completion.id());
         step.status = StepStatus::VqcAggregated {
@@ -2766,7 +2765,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn complete_lqc_aggregation(
         &mut self,
-        prepared: &PreparedLqc<V, H::Digest>,
+        prepared: &mut PreparedLqc<V, H::Digest>,
     ) -> Result<Step<V, H::Digest>, StepError> {
         self.validate_self_admission_with_metadata(
             &prepared.artifact,
@@ -2785,6 +2784,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             Arc::clone(&prepared.artifact),
             prepared.artifact_id,
             prepared.observation,
+            prepared.validated.take(),
         )?;
         self.finality.finish_lqc(prepared.aggregate);
         step.status = StepStatus::LqcAggregated {
@@ -2798,11 +2798,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         artifact: Arc<Artifact<V, H::Digest>>,
         id: ArtifactId<H::Digest>,
         observation: Observation,
+        validated: Option<ValidatedLqc<V, H::Digest>>,
     ) -> Result<Step<V, H::Digest>, StepError> {
         let step = self.reserve_change(Change::ViewCertificateCreated {
             artifact: Arc::clone(&artifact),
         })?;
-        self.self_admit_at(artifact, id, observation)?;
+        self.self_admit_at(artifact, id, observation, validated)?;
         Ok(step)
     }
 
@@ -3179,7 +3180,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         &mut self,
         verdict: Verdict<H::Digest>,
         mut validated_vqc: Option<ValidatedVqc<H::Digest>>,
-        validated_lqc: Option<ValidatedLqc<H::Digest>>,
+        validated_lqc: Option<ValidatedLqc<V, H::Digest>>,
     ) -> Result<Option<bool>, StepError> {
         let ticket = verdict.ticket();
         let current = matches!(
@@ -3202,8 +3203,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     votes: vqc.take_votes(),
                 }),
                 (None, Some(lqc)) => {
-                    let (leader, tips, votes) = lqc.into_parts();
+                    let (leader, tips, votes, derived) = lqc.into_parts();
                     Some(CertificateDerivations::Lqc {
+                        derived: Some(derived),
                         leader,
                         tips,
                         votes,
@@ -4059,11 +4061,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let Artifact::Lqc(certificate) = proof.as_ref() else {
             return Err(StepError::ViewInvariant);
         };
-        let anchor = certificate
-            .derive_vqc(self.profile.protocol().codec_config())
-            .map_err(|_| StepError::ViewInvariant)?;
-        let proposal_anchor = (certificate.view() >= self.proposal_anchor().0)
-            .then(|| Artifact::Vqc(anchor).id::<H>());
+        let anchor = self
+            .views
+            .finality_anchor(proof)
+            .ok_or(StepError::ViewInvariant)?;
+        let proposal_anchor =
+            (certificate.view() >= self.proposal_anchor().0).then_some(anchor.artifact_id);
         let occupancy = self
             .finality_floor_occupancy(retired, proof.id::<H>(), proposal_anchor)
             .and_then(|occupancy| occupancy.checked_add(self.pending_artifact_reservations()));
@@ -4208,13 +4211,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Ok(());
         }
 
-        self.set_proposal_anchor(artifact)
+        self.set_proposal_anchor(artifact, None)
     }
 
     /// Installs an exact proposal parent, including a finality-backed same-view replacement.
     fn set_proposal_anchor(
         &mut self,
         artifact: &Arc<Artifact<V, H::Digest>>,
+        validated: Option<ValidatedVqc<H::Digest>>,
     ) -> Result<(), ReplayError> {
         let Artifact::Vqc(certificate) = artifact.as_ref() else {
             return Err(ReplayError::Transition);
@@ -4223,9 +4227,11 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return Err(ReplayError::Transition);
         }
 
-        self.views
-            .retain_vqc_parent::<H>(artifact, &self.profile)
-            .map_err(|_| ReplayError::Transition)?;
+        match validated {
+            Some(validated) => self.views.retain_validated_vqc_parent(artifact, validated),
+            None => self.views.retain_vqc_parent::<H>(artifact, &self.profile),
+        }
+        .map_err(|_| ReplayError::Transition)?;
 
         let id = artifact.id::<H>();
         self.retain_durable_artifact(id)?;
@@ -5130,13 +5136,22 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 let Some(next) = certificate.view().get().checked_add(1) else {
                     return Err(ReplayError::Transition);
                 };
-                let anchor = Arc::new(Artifact::Vqc(
-                    certificate
-                        .derive_vqc(self.profile.protocol().codec_config())
-                        .map_err(|_| ReplayError::Transition)?,
-                ));
+                let (anchor, anchor_id, validated) = match self.views.finality_anchor(proof) {
+                    Some(derived) => (
+                        Arc::clone(&derived.artifact),
+                        derived.artifact_id,
+                        derived.validated.clone(),
+                    ),
+                    None => {
+                        let derived = DerivedVqc::from_lqc::<H>(
+                            certificate,
+                            self.profile.protocol().codec_config(),
+                        )
+                        .map_err(|_| ReplayError::Transition)?;
+                        (derived.artifact, derived.artifact_id, derived.validated)
+                    }
+                };
                 let proof_id = proof.id::<H>();
-                let anchor_id = anchor.id::<H>();
                 let anchor_installs = certificate.view() >= self.proposal_anchor().0;
                 if (late && certificate.view() <= self.signing_floor_view())
                     || (!late && !self.durable.vqc_forwarded(certificate.view()))
@@ -5176,7 +5191,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                     self.durable.view = View::new(next);
                 }
                 if anchor_installs {
-                    self.set_proposal_anchor(&anchor)?;
+                    self.set_proposal_anchor(&anchor, Some(validated))?;
                 }
                 self.durable.retired_view = self.durable.retired_view.max(certificate.view());
                 let current = self.durable.view;
@@ -5420,7 +5435,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     fn drive_prepared_lqc(
         &mut self,
-        prepared: PreparedLqc<V, H::Digest>,
+        mut prepared: PreparedLqc<V, H::Digest>,
     ) -> WorkResult<V, H::Digest> {
         if !self
             .finality
@@ -5455,7 +5470,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             Err(error) => return Err(error),
         }
 
-        let step = match self.complete_lqc_aggregation(&prepared) {
+        let step = match self.complete_lqc_aggregation(&mut prepared) {
             Ok(step) => step,
             Err(StepError::OutboxFull | StepError::LocalArtifactReservation) => {
                 self.prepared_lqc = Some(prepared);
@@ -5651,7 +5666,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         id: ArtifactId<H::Digest>,
     ) -> Result<(), StepError> {
         if let Some(existing) = self.artifacts.get(&id) {
-            return self.self_admit_at(artifact, id, existing.observation);
+            return self.self_admit_at(artifact, id, existing.observation, None);
         }
         let cohort = self.next_cohort;
         self.next_cohort = self
@@ -5659,7 +5674,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .checked_add(1)
             .expect("local admission identifier was prevalidated");
         let observation = Observation::new(cohort, 0);
-        self.self_admit_at(artifact, id, observation)
+        self.self_admit_at(artifact, id, observation, None)
     }
 
     fn self_admit_at(
@@ -5667,7 +5682,17 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         artifact: Arc<Artifact<V, H::Digest>>,
         id: ArtifactId<H::Digest>,
         observation: Observation,
+        validated: Option<ValidatedLqc<V, H::Digest>>,
     ) -> Result<(), StepError> {
+        let derivations = validated.map(|validated| {
+            let (leader, tips, votes, derived) = validated.into_parts();
+            CertificateDerivations::Lqc {
+                leader,
+                tips,
+                votes,
+                derived: Some(derived),
+            }
+        });
         if let Some(existing) = self.artifacts.get(&id) {
             debug_assert!(
                 existing.artifact.as_ref() == artifact.as_ref(),
@@ -5695,7 +5720,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 self.dependency_slots -= 1;
             }
             let observation = self.artifacts[&id].observation;
-            self.validate_finality(id, observation, &artifact, None)?;
+            self.validate_finality(id, observation, &artifact, derivations)?;
             if matches!(state, ArtifactState::Ready | ArtifactState::Waiting(_)) {
                 return Ok(());
             }
@@ -5704,7 +5729,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let future_view = artifact.view().filter(|view| *view > self.durable.view);
         let future = future_view.is_some();
         self.claim_finality(id, observation, Arc::clone(&artifact))?;
-        self.validate_finality(id, observation, &artifact, None)?;
+        self.validate_finality(id, observation, &artifact, derivations)?;
         let provisions = Arc::<[_]>::from(artifact.provisions::<H>());
         self.retain_provider_index(id, &provisions);
         self.index_artifact(id, &artifact);

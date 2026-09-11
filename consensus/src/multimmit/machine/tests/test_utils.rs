@@ -101,7 +101,7 @@ impl<D: Digest> SymbolicVerifier<D> {
     }
 
     /// Builds an exact completion without bypassing production tickets.
-    pub fn complete<V: Variant>(&self, job: &VerifyJob<V, D>) -> VerificationCompletion<D> {
+    pub fn complete<V: Variant>(&self, job: &VerifyJob<V, D>) -> VerificationCompletion<V, D> {
         let verdicts = job
             .items()
             .iter()

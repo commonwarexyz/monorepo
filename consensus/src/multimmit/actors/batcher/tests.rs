@@ -143,7 +143,7 @@ impl Receiver for ReadyReceiver {
 struct ReadyHarness {
     mailbox: mailbox::Sender<Message<Ed25519PublicKey, MinPk, Sha256Digest>>,
     observations: mailbox::UnreliableReceiver<Observed<Ed25519PublicKey, MinPk, Sha256Digest>>,
-    _completions: mailbox::Receiver<Completed<Sha256Digest>>,
+    _completions: mailbox::Receiver<Completed<MinPk, Sha256Digest>>,
 }
 
 impl ReadyHarness {
@@ -438,7 +438,7 @@ struct Harness {
     blocker: RecordingBlocker,
     mailbox: mailbox::Sender<Message<Ed25519PublicKey, MinPk, Sha256Digest>>,
     observations: mailbox::UnreliableReceiver<Observed<Ed25519PublicKey, MinPk, Sha256Digest>>,
-    completions: mailbox::Receiver<Completed<Sha256Digest>>,
+    completions: mailbox::Receiver<Completed<MinPk, Sha256Digest>>,
     peers: Vec<Ed25519PublicKey>,
     oracle: Oracle<Ed25519PublicKey, DeterministicContext>,
     me: Ed25519PublicKey,

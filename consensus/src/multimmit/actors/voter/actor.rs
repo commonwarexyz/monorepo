@@ -600,7 +600,7 @@ enum RuntimeEvent<P: PublicKey, V: Variant, D: Digest> {
     ProductionTimer,
     Publication,
     Heartbeat,
-    Verification(Completed<D>),
+    Verification(Completed<V, D>),
     Resolution(Message<V, D>),
     Inspection(Query<D>),
     Observation(ObservedBatch<P, V, D>),
@@ -831,7 +831,7 @@ where
         ready: oneshot::Sender<()>,
         batcher: mailbox::Sender<batcher::Message<P, V, H::Digest>>,
         observations: mailbox::UnreliableReceiver<Observed<P, V, H::Digest>>,
-        completions: mailbox::Receiver<Completed<H::Digest>>,
+        completions: mailbox::Receiver<Completed<V, H::Digest>>,
         resolver: mailbox::Sender<resolver::Message<V, H::Digest>>,
         data: impl Sender<PublicKey = P>,
         consensus: impl Sender<PublicKey = P>,
@@ -859,7 +859,7 @@ where
         ready: oneshot::Sender<()>,
         batcher: mailbox::Sender<batcher::Message<P, V, H::Digest>>,
         mut observations: mailbox::UnreliableReceiver<Observed<P, V, H::Digest>>,
-        mut completions: mailbox::Receiver<Completed<H::Digest>>,
+        mut completions: mailbox::Receiver<Completed<V, H::Digest>>,
         resolver: mailbox::Sender<resolver::Message<V, H::Digest>>,
         data: impl Sender<PublicKey = P>,
         consensus: impl Sender<PublicKey = P>,
@@ -1417,7 +1417,7 @@ where
     async fn next_runtime_event(
         &mut self,
         readiness: &mut ReadinessCursor,
-        completions: &mut mailbox::Receiver<Completed<H::Digest>>,
+        completions: &mut mailbox::Receiver<Completed<V, H::Digest>>,
         mailbox: &mut mailbox::Receiver<Message<V, H::Digest>>,
         observations: &mut mailbox::UnreliableReceiver<Observed<P, V, H::Digest>>,
         queries: &mut mailbox::UnreliableReceiver<Query<H::Digest>>,
@@ -1577,7 +1577,7 @@ where
     fn try_ready_event(
         &mut self,
         readiness: &mut ReadinessCursor,
-        completions: &mut mailbox::Receiver<Completed<H::Digest>>,
+        completions: &mut mailbox::Receiver<Completed<V, H::Digest>>,
         mailbox: &mut mailbox::Receiver<Message<V, H::Digest>>,
         observations: &mut mailbox::UnreliableReceiver<Observed<P, V, H::Digest>>,
         queries: &mut mailbox::UnreliableReceiver<Query<H::Digest>>,
@@ -1829,7 +1829,7 @@ where
         &mut self,
         first: RuntimeEvent<P, V, H::Digest>,
         readiness: &mut ReadinessCursor,
-        completions: &mut mailbox::Receiver<Completed<H::Digest>>,
+        completions: &mut mailbox::Receiver<Completed<V, H::Digest>>,
         mailbox: &mut mailbox::Receiver<Message<V, H::Digest>>,
         observations: &mut mailbox::UnreliableReceiver<Observed<P, V, H::Digest>>,
         queries: &mut mailbox::UnreliableReceiver<Query<H::Digest>>,
@@ -2728,7 +2728,7 @@ where
     }
 
     /// Ingests one authenticated verification cohort from the batcher.
-    fn ingest_completed(&mut self, completed: Completed<H::Digest>) -> Result<(), Fatal> {
+    fn ingest_completed(&mut self, completed: Completed<V, H::Digest>) -> Result<(), Fatal> {
         let Completed { span, completion } = completed;
         let _process = info_span!(parent: &span, "multimmit.voter.verify.process").entered();
         if completion.generation() != self.core().task_generation() {

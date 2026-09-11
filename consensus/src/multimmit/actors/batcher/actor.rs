@@ -43,11 +43,11 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, debug_span, error, info_span};
 
-type VerifyResult<P, D> = (
+type VerifyResult<P, V, D> = (
     Span,
-    Result<(VerificationCompletion<D>, Vec<P>), VerificationTaskPanicked>,
+    Result<(VerificationCompletion<V, D>, Vec<P>), VerificationTaskPanicked>,
 );
-type VerifyResults<P, D> = Pool<'static, VerifyResult<P, D>>;
+type VerifyResults<P, V, D> = Pool<'static, VerifyResult<P, V, D>>;
 
 #[derive(Debug)]
 struct VerificationTaskPanicked;
@@ -401,7 +401,7 @@ where
     pub fn start(
         mut self,
         observations: mailbox::UnreliableSender<Observed<P, V, H::Digest>>,
-        completions: mailbox::Sender<Completed<H::Digest>>,
+        completions: mailbox::Sender<Completed<V, H::Digest>>,
         data: impl Receiver<PublicKey = P>,
         consensus: impl Receiver<PublicKey = P>,
         certificates: impl Receiver<PublicKey = P>,
@@ -424,7 +424,7 @@ where
         round: Round,
         job: VerifyJob<V, H::Digest>,
         sources: Vec<Option<P>>,
-    ) -> impl Future<Output = VerifyResult<P, H::Digest>> + Send + 'static {
+    ) -> impl Future<Output = VerifyResult<P, V, H::Digest>> + Send + 'static {
         let scheme = Arc::clone(&self.scheme);
         let latency = self.metrics.verify_latency.clone();
         let verified_vote_lag = self.metrics.verified_vote_lag.clone();
@@ -486,7 +486,7 @@ where
     async fn run(
         mut self,
         observations: mailbox::UnreliableSender<Observed<P, V, H::Digest>>,
-        completions: mailbox::Sender<Completed<H::Digest>>,
+        completions: mailbox::Sender<Completed<V, H::Digest>>,
         data: impl Receiver<PublicKey = P>,
         consensus: impl Receiver<PublicKey = P>,
         certificates: impl Receiver<PublicKey = P>,
@@ -511,7 +511,7 @@ where
         let mut lanes: Lanes<P, V, H::Digest> =
             Lanes::new(self.codec.chains(), self.codec.participants(), self.limits);
         let ingress_budget = self.strategy.manual().parallelism();
-        let mut jobs: VerifyResults<P, H::Digest> = Pool::default();
+        let mut jobs: VerifyResults<P, V, H::Digest> = Pool::default();
         let mut observations_inflight = 0usize;
         let mut next_network = NetworkPlane::Consensus;
 
@@ -711,8 +711,8 @@ where
     /// Returns `false` when the worker failed or the voter is gone; both are fatal for the epoch.
     fn deliver(
         &mut self,
-        completions: &mailbox::Sender<Completed<H::Digest>>,
-        completion: VerifyResult<P, H::Digest>,
+        completions: &mailbox::Sender<Completed<V, H::Digest>>,
+        completion: VerifyResult<P, V, H::Digest>,
     ) -> bool {
         let (span, outcome) = completion;
         let (completion, invalid_sources) = match outcome {
@@ -736,7 +736,7 @@ where
     /// paying one series per validator: a peer that stops keeping up widens the upper tail.
     fn record_verified_votes(
         job: &VerifyJob<V, H::Digest>,
-        completion: &VerificationCompletion<H::Digest>,
+        completion: &VerificationCompletion<V, H::Digest>,
         round: Round,
         lag: &Histogram,
     ) {

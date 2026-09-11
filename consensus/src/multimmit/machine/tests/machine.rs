@@ -2308,6 +2308,7 @@ fn lqc_output_waits_for_earlier_owner_claim() {
         [super::finality::FinalityOutput::Finality(
             observation,
             certificate,
+            _,
         )] if certificate.id::<Sha256>() == later_id
             && *observation == later_observation
             && certificate.as_ref() == later.as_ref()
@@ -2397,6 +2398,7 @@ fn later_duplicate_completion_preserves_an_earlier_finality_observation() {
         [super::finality::FinalityOutput::Finality(
             observation,
             artifact,
+            _,
         )] if artifact.id::<Sha256>() == certificate_id
             && *observation == first_observation
             && artifact.as_ref() == certificate.as_ref()
@@ -2449,6 +2451,7 @@ fn retiring_pending_finality_claim_releases_later_certificate() {
         [super::finality::FinalityOutput::Finality(
             observation,
             certificate,
+            _,
         )] if certificate.id::<Sha256>() == later_id
             && *observation == later_observation
             && certificate.as_ref() == later.as_ref()
@@ -2663,11 +2666,14 @@ fn lqc_completion_must_match_the_selected_vote_transcript() {
         .collect::<Vec<_>>();
     let wrong = lqc(&machine, proposed.clone(), &wrong_votes);
     let parked = machine
-        .step(Input::LqcAggregated(Box::new(LqcAggregateCompletion::new(
-            aggregate.id(),
-            aggregate.generation(),
-            wrong,
-        ))))
+        .step(Input::LqcAggregated(Box::new(
+            LqcAggregateCompletion::prepare::<Sha256>(
+                &aggregate,
+                wrong,
+                machine.profile.protocol().codec_config(),
+            )
+            .unwrap(),
+        )))
         .unwrap();
     assert_eq!(parked.status(), &StepStatus::CompletionDeferred);
     // The mismatch surfaces exactly once when the parked completion drains; the aggregation
@@ -2698,11 +2704,14 @@ fn lqc_completion_must_match_the_selected_vote_transcript() {
     let selected = aggregate.votes().cloned().collect::<Vec<_>>();
     let certificate = lqc(&machine, proposed, &selected);
     let completed = machine
-        .step(Input::LqcAggregated(Box::new(LqcAggregateCompletion::new(
-            aggregate.id(),
-            aggregate.generation(),
-            certificate,
-        ))))
+        .step(Input::LqcAggregated(Box::new(
+            LqcAggregateCompletion::prepare::<Sha256>(
+                &aggregate,
+                certificate,
+                machine.profile.protocol().codec_config(),
+            )
+            .unwrap(),
+        )))
         .unwrap();
     assert_eq!(completed.status(), &StepStatus::CompletionDeferred);
     let completed = settle(&mut machine, completed);
@@ -5601,7 +5610,7 @@ fn late_finality_admissions_retain_only_the_highest_proof_without_parents() {
             .collect::<Vec<_>>();
         let proof = Arc::new(Artifact::Lqc(lqc(&machine, finalized, &votes)));
         machine
-            .apply_finality(Observation::new(view, 0), proof)
+            .apply_finality(Observation::new(view, 0), proof, None)
             .unwrap();
     }
 
@@ -6744,7 +6753,7 @@ fn finality_state_retains_its_lqc_after_artifact_cache_compaction() {
     assert!(!machine.artifacts.contains_key(&proof_id));
     machine
         .views
-        .observe_finality(&proof)
+        .observe_finality::<Sha256>(&proof, None)
         .expect("finality admits only authenticated L-QCs to the view state");
 
     let change = machine
@@ -6777,7 +6786,7 @@ fn covered_finality_update_does_not_retain_its_lqc() {
     let retained_parents = machine.views.retained_parents();
 
     machine
-        .apply_finality(Observation::new(2, 0), proof)
+        .apply_finality(Observation::new(2, 0), proof, None)
         .expect("the covered L-QC remains valid finality evidence");
 
     assert_eq!(machine.views.retained_finality_proofs(), 0);
@@ -9751,6 +9760,47 @@ fn vqc_parent_hashes_each_large_value_once() {
 }
 
 #[test]
+fn verified_lqc_reuses_its_exact_parent_projection() {
+    let _guard = HASH_TEST_LOCK.lock();
+    let source = Machine::new(profile_for(Role::Observer, 6, 4));
+    let block = leader(&source, 1);
+    let votes = (0..5)
+        .map(|signer| view_vote(&source, &block, signer))
+        .collect::<Vec<_>>();
+    let certificate = lqc(&source, block, &votes);
+    let projection = super::algebra::DerivedVqc::from_lqc::<CountingHasher>(
+        &certificate,
+        source.profile.protocol().codec_config(),
+    )
+    .unwrap();
+    let expected = Arc::clone(&projection.artifact);
+    let proof = Arc::new(Artifact::Lqc(certificate));
+    let profile = Profile::<CountingHasher, MinPk>::new(
+        config_for(Epoch::new(7), 6, 4),
+        Role::Observer,
+        Tuning::default(),
+    )
+    .unwrap();
+    let mut machine = Machine::new(profile);
+
+    HASH_CALLS.store(0, Ordering::Relaxed);
+    machine
+        .apply_finality(Observation::new(1, 0), Arc::clone(&proof), Some(projection))
+        .unwrap();
+    assert_eq!(HASH_CALLS.load(Ordering::Relaxed), 0);
+    let projection = machine.views.finality_anchor(&proof).unwrap();
+    assert!(Arc::ptr_eq(&projection.artifact, &expected));
+    assert!(
+        machine
+            .views
+            .finality_anchor(&Arc::new(proof.as_ref().clone()))
+            .is_none()
+    );
+    let forwarded = machine.views.next_forward().unwrap();
+    assert!(Arc::ptr_eq(&forwarded, &expected));
+}
+
+#[test]
 fn verified_vqc_reuses_validation_derivations() {
     let _guard = HASH_TEST_LOCK.lock();
     let machine = Machine::new(profile_for(Role::Observer, 6, 4));
@@ -9904,7 +9954,12 @@ fn stale_lqc_completion_returns_the_pool_to_the_ready_set() {
     let votes = aggregate.votes().cloned().collect::<Vec<_>>();
     let assembled = lqc(&machine, aggregate.leader().clone(), &votes);
     let profile = machine.profile().clone();
-    let completion = LqcAggregateCompletion::new(aggregate.id(), aggregate.generation(), assembled);
+    let completion = LqcAggregateCompletion::prepare::<Sha256>(
+        &aggregate,
+        assembled,
+        profile.protocol().codec_config(),
+    )
+    .unwrap();
     let released = machine
         .finality
         .prepare_lqc::<Sha256>(&profile, completion, aggregate.generation() + 1)
@@ -10251,7 +10306,10 @@ fn finality_floor_preserves_an_lqc_aggregation_reservation() {
         .map(|signer| view_vote(&machine, &competing, signer))
         .collect::<Vec<_>>();
     let competing = Arc::new(Artifact::Lqc(lqc(&machine, competing, &votes)));
-    machine.views.observe_finality(&competing).unwrap();
+    machine
+        .views
+        .observe_finality::<Sha256>(&competing, None)
+        .unwrap();
     let Artifact::Lqc(certificate) = competing.as_ref() else {
         unreachable!()
     };

@@ -325,7 +325,10 @@ impl<D: Digest> Tips<D> {
         Self::from_prepared(&prepared, config)
     }
 
-    fn from_prepared(prepared: &PreparedVotes<D>, config: CodecConfig) -> Result<Self, Error> {
+    pub(super) fn from_prepared(
+        prepared: &PreparedVotes<D>,
+        config: CodecConfig,
+    ) -> Result<Self, Error> {
         let rank = N5f1::f_plus_one(config.participants()) as usize;
         let mut blocks = Vec::with_capacity(config.chains());
         for index in 0..config.chains() {
