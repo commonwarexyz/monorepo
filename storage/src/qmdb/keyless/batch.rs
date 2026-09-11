@@ -67,21 +67,6 @@ where
     pub(super) bounds: batch_chain::Bounds<F, D>,
 }
 
-impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
-where
-    Operation<F, V>: EncodeShared,
-{
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
-    }
-
-    /// The [`Commitment`] this batch commits to.
-    pub(super) const fn commitment(&self) -> Commitment<F, D> {
-        self.bounds.tip
-    }
-}
-
 /// Read a single operation from the parent chain at the given location.
 ///
 /// Returns `None` if the location cannot be found in the live parent chain (e.g. the
@@ -324,6 +309,16 @@ impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, 
 where
     Operation<F, V>: EncodeShared,
 {
+    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
+        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+    }
+
+    /// The [`Commitment`] this batch commits to.
+    pub(super) const fn commitment(&self) -> Commitment<F, D> {
+        self.bounds.tip
+    }
+
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.bounds.tip.root

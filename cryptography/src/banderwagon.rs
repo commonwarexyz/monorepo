@@ -646,6 +646,99 @@ impl G {
         let t = x.clone() * &y;
         Some(Self { x, y, t, z: one })
     }
+
+    /// In-circuit scalar multiplication, returning the point `[scalar] * self`.
+    ///
+    /// `self` is an out-of-circuit (public) point. Taking it by value here, and
+    /// folding its canonical affine coordinates in as constants, pins its
+    /// representative; that is what makes a coordinate of the result well-defined
+    /// (a Banderwagon element has two affine representatives `(x, y)` and
+    /// `(-x, -y)`, so a coordinate of a *witnessed* point would be ambiguous).
+    ///
+    /// `scalar` may be a witness; it is canonically decomposed (see
+    /// `to_canonical_bits_le`) and the bits drive a double-and-add. Soundness
+    /// additionally assumes `self` is a valid prime-order subgroup element, as
+    /// produced by this module's constructors.
+    ///
+    /// Use [`GVar::assert_eq`] to bind the result against a known point (e.g. a
+    /// public key); use [`scalar_mul_x_squared`](Self::scalar_mul_x_squared) when
+    /// only a (representative-independent) abscissa is needed.
+    pub(crate) fn scalar_mul<'ctx>(
+        &self,
+        ctx: Context<'ctx, Scalar>,
+        scalar: &Var<'ctx, Scalar>,
+    ) -> GVar<'ctx> {
+        let bits = scalar_bits_le(ctx, scalar);
+        GVar::constant(self).mul_bits(&bits)
+    }
+
+    /// In-circuit fixed-base scalar multiplication for several public bases
+    /// sharing one scalar bit decomposition.
+    ///
+    /// `WINDOW` controls how many bits are selected at a time. Selector
+    /// monomials are built once per window and reused across every base.
+    pub fn scalar_mul_many_in_circuit<'ctx, const WINDOW: usize>(
+        bases: &[Self],
+        bits: &[BoolVar<'ctx, Scalar>],
+    ) -> Vec<GVar<'ctx>> {
+        const {
+            assert!(WINDOW >= 1 && WINDOW <= 8, "window size must be in 1..=8");
+        }
+
+        let mut accs = vec![GVar::identity(); bases.len()];
+        let mut shifted = bases.to_vec();
+        for window in bits.chunks(WINDOW) {
+            let selector = Selector::new(window);
+            for (acc, base) in accs.iter_mut().zip(&shifted) {
+                let (xs, ys): (Vec<_>, Vec<_>) = (0..(1usize << window.len()))
+                    .scan(Self::zero(), |p, _| {
+                        let (x, y) = p.canonicalize().affine();
+                        *p += base;
+                        Some((x, y))
+                    })
+                    .unzip();
+                *acc += &GVar {
+                    x: selector.select_constant(&xs),
+                    y: selector.select_constant(&ys),
+                }
+            }
+            for base in &mut shifted {
+                for _ in 0..window.len() {
+                    base.double();
+                }
+            }
+        }
+        accs
+    }
+
+    /// In-circuit squared affine x-coordinate of `[scalar] * self`.
+    ///
+    /// We expose the *squared* abscissa rather than the bare one because the
+    /// quotient identifies `(x, y)` with `(-x, -y)`: a plain x-coordinate flips
+    /// sign between the two representatives, whereas its square is a well-defined
+    /// function of the group element, so the read agrees regardless of which
+    /// representative a point happens to hold. The in-circuit counterpart of
+    /// [`scalar_mul_x_squared_base`](Self::scalar_mul_x_squared_base).
+    pub fn scalar_mul_x_squared<'ctx>(
+        &self,
+        ctx: Context<'ctx, Scalar>,
+        scalar: &Var<'ctx, Scalar>,
+    ) -> Var<'ctx, Scalar> {
+        let x = self.scalar_mul(ctx, scalar).x;
+        x.clone() * &x
+    }
+
+    /// In-circuit `[scalar] * self` where the scalar is given *directly* as its
+    /// little-endian bits, rather than as a [`Var`] to be decomposed.
+    ///
+    /// This is the path for an [`F`] exponent (e.g. the eVRF secret): the bits
+    /// are the witness, so unlike `scalar_mul` there is no
+    /// recomposition or canonicity constraint — see [`F`] for why that is sound
+    /// at `F::BITS` width. The caller must allocate the bits once and reuse the
+    /// same slice across operations, so a single exponent is bound everywhere.
+    pub fn scalar_mul_bits<'ctx>(&self, bits: &[BoolVar<'ctx, Scalar>]) -> GVar<'ctx> {
+        GVar::constant(self).mul_bits(bits)
+    }
 }
 
 impl HashToGroup for G {
@@ -919,101 +1012,6 @@ pub fn scalar_bits_le<'ctx>(
     }
 
     bits
-}
-
-impl G {
-    /// In-circuit scalar multiplication, returning the point `[scalar] * self`.
-    ///
-    /// `self` is an out-of-circuit (public) point. Taking it by value here, and
-    /// folding its canonical affine coordinates in as constants, pins its
-    /// representative; that is what makes a coordinate of the result well-defined
-    /// (a Banderwagon element has two affine representatives `(x, y)` and
-    /// `(-x, -y)`, so a coordinate of a *witnessed* point would be ambiguous).
-    ///
-    /// `scalar` may be a witness; it is canonically decomposed (see
-    /// `to_canonical_bits_le`) and the bits drive a double-and-add. Soundness
-    /// additionally assumes `self` is a valid prime-order subgroup element, as
-    /// produced by this module's constructors.
-    ///
-    /// Use [`GVar::assert_eq`] to bind the result against a known point (e.g. a
-    /// public key); use [`scalar_mul_x_squared`](Self::scalar_mul_x_squared) when
-    /// only a (representative-independent) abscissa is needed.
-    pub(crate) fn scalar_mul<'ctx>(
-        &self,
-        ctx: Context<'ctx, Scalar>,
-        scalar: &Var<'ctx, Scalar>,
-    ) -> GVar<'ctx> {
-        let bits = scalar_bits_le(ctx, scalar);
-        GVar::constant(self).mul_bits(&bits)
-    }
-
-    /// In-circuit fixed-base scalar multiplication for several public bases
-    /// sharing one scalar bit decomposition.
-    ///
-    /// `WINDOW` controls how many bits are selected at a time. Selector
-    /// monomials are built once per window and reused across every base.
-    pub fn scalar_mul_many_in_circuit<'ctx, const WINDOW: usize>(
-        bases: &[Self],
-        bits: &[BoolVar<'ctx, Scalar>],
-    ) -> Vec<GVar<'ctx>> {
-        const {
-            assert!(WINDOW >= 1 && WINDOW <= 8, "window size must be in 1..=8");
-        }
-
-        let mut accs = vec![GVar::identity(); bases.len()];
-        let mut shifted = bases.to_vec();
-        for window in bits.chunks(WINDOW) {
-            let selector = Selector::new(window);
-            for (acc, base) in accs.iter_mut().zip(&shifted) {
-                let (xs, ys): (Vec<_>, Vec<_>) = (0..(1usize << window.len()))
-                    .scan(Self::zero(), |p, _| {
-                        let (x, y) = p.canonicalize().affine();
-                        *p += base;
-                        Some((x, y))
-                    })
-                    .unzip();
-                *acc += &GVar {
-                    x: selector.select_constant(&xs),
-                    y: selector.select_constant(&ys),
-                }
-            }
-            for base in &mut shifted {
-                for _ in 0..window.len() {
-                    base.double();
-                }
-            }
-        }
-        accs
-    }
-
-    /// In-circuit squared affine x-coordinate of `[scalar] * self`.
-    ///
-    /// We expose the *squared* abscissa rather than the bare one because the
-    /// quotient identifies `(x, y)` with `(-x, -y)`: a plain x-coordinate flips
-    /// sign between the two representatives, whereas its square is a well-defined
-    /// function of the group element, so the read agrees regardless of which
-    /// representative a point happens to hold. The in-circuit counterpart of
-    /// [`scalar_mul_x_squared_base`](Self::scalar_mul_x_squared_base).
-    pub fn scalar_mul_x_squared<'ctx>(
-        &self,
-        ctx: Context<'ctx, Scalar>,
-        scalar: &Var<'ctx, Scalar>,
-    ) -> Var<'ctx, Scalar> {
-        let x = self.scalar_mul(ctx, scalar).x;
-        x.clone() * &x
-    }
-
-    /// In-circuit `[scalar] * self` where the scalar is given *directly* as its
-    /// little-endian bits, rather than as a [`Var`] to be decomposed.
-    ///
-    /// This is the path for an [`F`] exponent (e.g. the eVRF secret): the bits
-    /// are the witness, so unlike `scalar_mul` there is no
-    /// recomposition or canonicity constraint — see [`F`] for why that is sound
-    /// at `F::BITS` width. The caller must allocate the bits once and reuse the
-    /// same slice across operations, so a single exponent is bound everywhere.
-    pub fn scalar_mul_bits<'ctx>(&self, bits: &[BoolVar<'ctx, Scalar>]) -> GVar<'ctx> {
-        GVar::constant(self).mul_bits(bits)
-    }
 }
 
 #[cfg(test)]

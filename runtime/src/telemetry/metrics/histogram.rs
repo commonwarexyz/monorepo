@@ -93,6 +93,14 @@ impl Timed {
         }
         result
     }
+
+    /// Start a timer guard that observes the elapsed duration when dropped.
+    pub fn scoped<C: Clock>(&self, clock: &Arc<C>) -> ScopedTimer<C> {
+        ScopedTimer {
+            timer: Some(self.timer(clock.as_ref())),
+            clock: clock.clone(),
+        }
+    }
 }
 
 /// A timer that records a duration when explicitly observed.
@@ -133,16 +141,6 @@ impl<C: Clock> Drop for ScopedTimer<C> {
     fn drop(&mut self) {
         if let Some(timer) = self.timer.take() {
             timer.observe(self.clock.as_ref());
-        }
-    }
-}
-
-impl Timed {
-    /// Start a timer guard that observes the elapsed duration when dropped.
-    pub fn scoped<C: Clock>(&self, clock: &Arc<C>) -> ScopedTimer<C> {
-        ScopedTimer {
-            timer: Some(self.timer(clock.as_ref())),
-            clock: clock.clone(),
         }
     }
 }
