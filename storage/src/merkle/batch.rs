@@ -87,7 +87,7 @@
 //! ```
 
 use crate::merkle::{
-    Error, Family, Location, Position, Readable, hasher::Hasher, mem::Mem, path, proof::Proof,
+    Error, Family, Location, Position, Readable, hasher::Hasher, mem::Mem, proof::Proof,
 };
 use ahash::RandomState;
 use alloc::{
@@ -98,7 +98,7 @@ use alloc::{
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
-use core::ops::Range;
+use core::{iter::Peekable, ops::Range};
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
@@ -112,6 +112,31 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
     buckets[h].push(pos);
 }
 
+/// Mark the union of paths to sorted changed leaves within this subtree. The next leaf must
+/// belong to the subtree; traversal consumes its leaves before returning to the caller.
+fn mark_dirty_subtree<F: Family>(
+    buckets: &mut Vec<Vec<Position<F>>>,
+    pos: Position<F>,
+    height: u32,
+    first_leaf: Location<F>,
+    leaves: &mut Peekable<impl Iterator<Item = Location<F>>>,
+) {
+    if height == 0 {
+        leaves.next();
+        return;
+    }
+    push_dirty(buckets, height, pos);
+    let (left, right) = F::children(pos, height);
+    let mid = first_leaf + (1u64 << (height - 1));
+    let end = first_leaf + (1u64 << height);
+    if leaves.peek().is_some_and(|loc| *loc < mid) {
+        mark_dirty_subtree(buckets, left, height - 1, first_leaf, leaves);
+    }
+    if leaves.peek().is_some_and(|loc| *loc < end) {
+        mark_dirty_subtree(buckets, right, height - 1, mid, leaves);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UnmerkleizedBatch
 // ---------------------------------------------------------------------------
@@ -122,10 +147,10 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
     appended: Vec<D>,
     overwrites: Overwrites<F, D>,
-    /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
-    /// holds positions at that height in push order (monotonically increasing for
-    /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
-    /// in `merkleize`). Avoids the BTreeSet insert cost and a final global sort.
+    /// Dirty node positions bucketed by height. Height zero records distinct overwritten leaves
+    /// from the parent batch, whose ancestor paths are expanded together at merkleize. Higher
+    /// buckets also contain internal nodes created by appends; their positions are sorted and
+    /// deduplicated before hashing.
     dirty_nodes: Vec<Vec<Position<F>>>,
 }
 
@@ -188,52 +213,46 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base.get_node(pos)
     }
 
-    /// Store a digest at the given position.
-    fn store_node(&mut self, pos: Position<F>, digest: D) {
+    /// Store a digest, returning whether a new overwrite was inserted.
+    fn store_node(&mut self, pos: Position<F>, digest: D) -> bool {
         let parent_size = self.parent.size();
         if pos >= parent_size {
             let index = (*pos - *parent_size) as usize;
             self.appended[index] = digest;
+            // Appended nodes already have dirty ancestors.
+            false
         } else {
-            self.overwrites.insert(pos, digest);
+            self.overwrites.insert(pos, digest).is_none()
         }
     }
 
-    /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
-    ///
-    /// Walks from peak to leaf (top-down) using [`path::Iterator`], then inserts dirty markers
-    /// bottom-up. Bottom-up ordering enables a best-effort early exit: if the node at a given
-    /// height matches the most recently pushed entry for that bucket, we stop walking since
-    /// the walk that pushed it already marked everything above. This catches consecutive
-    /// shared-path walks in O(1); non-consecutive duplicates (a prior walk for a different
-    /// subtree landed in the bucket after the shared ancestors) are not detected here and are
-    /// collapsed by the per-bucket sort+dedup in `merkleize`.
-    fn mark_dirty(&mut self, loc: Location<F>) {
-        let mut first_leaf = Location::new(0);
-        for (peak_pos, height) in F::peaks(self.size()) {
-            let leaves_in_peak = 1u64 << height;
-            if loc >= first_leaf + leaves_in_peak {
-                first_leaf += leaves_in_peak;
-                continue;
-            }
-
-            let mut buf = [(Position::new(0), Position::new(0), 0u32); path::MAX_PATH_LEN];
-            let mut len = 0;
-            for item in path::Iterator::new(peak_pos, height, first_leaf, loc) {
-                buf[len] = item;
-                len += 1;
-            }
-            for &(parent_pos, _, h) in buf[..len].iter().rev() {
-                let h_idx = h as usize;
-                if self.dirty_nodes.get(h_idx).and_then(|b| b.last()) == Some(&parent_pos) {
-                    break;
-                }
-                push_dirty(&mut self.dirty_nodes, h, parent_pos);
-            }
+    /// Expand overwritten leaves against the final peak forest. Newly appended ancestors may
+    /// already be dirty, so the height buckets are still deduplicated before hashing.
+    fn expand_dirty_leaves(&mut self) {
+        let Some(leaves) = self.dirty_nodes.first_mut() else {
+            return;
+        };
+        if leaves.is_empty() {
             return;
         }
-
-        panic!("leaf {loc} not found (size: {})", self.size());
+        let mut leaves = core::mem::take(leaves);
+        leaves.sort_unstable();
+        let mut leaves = leaves
+            .into_iter()
+            .map(|pos| Location::try_from(pos).expect("validated leaf position"))
+            .peekable();
+        let mut first_leaf = Location::new(0);
+        for (pos, height) in F::peaks(self.size()) {
+            let end = first_leaf + (1u64 << height);
+            if leaves.peek().is_some_and(|loc| *loc < end) {
+                mark_dirty_subtree(&mut self.dirty_nodes, pos, height, first_leaf, &mut leaves);
+            }
+            if leaves.peek().is_none() {
+                break;
+            }
+            first_leaf = end;
+        }
+        assert!(leaves.next().is_none(), "updated leaf outside peak forest");
     }
 
     /// Add a pre-computed leaf digest.
@@ -340,8 +359,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
         let digest = hasher.leaf_digest(pos, element);
-        self.store_node(pos, digest);
-        self.mark_dirty(loc);
+        if self.store_node(pos, digest) {
+            push_dirty(&mut self.dirty_nodes, 0, pos);
+        }
         Ok(self)
     }
 
@@ -349,8 +369,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_digest(mut self, loc: Location<F>, digest: D) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
-        self.store_node(pos, digest);
-        self.mark_dirty(loc);
+        if self.store_node(pos, digest) {
+            push_dirty(&mut self.dirty_nodes, 0, pos);
+        }
         Ok(self)
     }
 
@@ -363,8 +384,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
         for (loc, digest) in updates {
             let pos = Position::try_from(*loc).expect("validated above");
-            self.store_node(pos, *digest);
-            self.mark_dirty(*loc);
+            if self.store_node(pos, *digest) {
+                push_dirty(&mut self.dirty_nodes, 0, pos);
+            }
         }
         Ok(self)
     }
@@ -376,9 +398,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
-        // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
-        // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
-        // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
+        self.expand_dirty_leaves();
+
+        // Appends and overwritten leaves can dirty the same ancestors. Sort and deduplicate
+        // each height before hashing; append-only buckets are already ascending.
         let mut buckets = core::mem::take(&mut self.dirty_nodes);
         for bucket in &mut buckets {
             bucket.sort();
@@ -1260,6 +1283,82 @@ mod tests {
             let r2 = base.new_batch().update_leaf_batched(&updates);
             assert!(matches!(r2, Err(Error::LeafOutOfBounds(_))));
         });
+    }
+
+    /// Rebuilding solely by appending is independent of deferred dirty-path expansion.
+    fn deferred_updates_match_rebuild<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        for initial_len in 1..=9 {
+            let initial: Vec<_> = (0..initial_len).map(|i| Sha256::fill(i as u8)).collect();
+            let mut base = Mem::<F, D>::new();
+            let mut batch = base.new_batch();
+            for &digest in &initial {
+                batch = batch.add_leaf_digest(digest);
+            }
+            let batch = batch.merkleize(&base, &hasher);
+            base.apply_batch(&batch).unwrap();
+
+            for mask in 0..1usize << initial_len {
+                let mut expected = initial.clone();
+                let mut batch = base.new_batch();
+                for i in (0..initial_len).rev() {
+                    if mask & (1 << i) == 0 {
+                        continue;
+                    }
+                    let loc = Location::new(i as u64);
+                    let digest = Sha256::fill(32 + i as u8);
+                    batch = batch
+                        .update_leaf(&hasher, loc, b"temporary")
+                        .unwrap()
+                        .update_leaf_digest(loc, Sha256::fill(254))
+                        .unwrap()
+                        .update_leaf_batched(&[(loc, Sha256::fill(255)), (loc, digest)])
+                        .unwrap();
+                    expected[i] = digest;
+                    if i % 2 == 0 {
+                        let appended = Sha256::fill(expected.len() as u8);
+                        batch = batch.add_leaf_digest(appended);
+                        expected.push(appended);
+                    }
+                }
+                // Update an appended leaf, then append again so the peak forest can change.
+                batch = batch.add_leaf_digest(Sha256::fill(254));
+                batch = batch
+                    .update_leaf_digest(Location::new(expected.len() as u64), Sha256::fill(253))
+                    .unwrap();
+                expected.push(Sha256::fill(253));
+                batch = batch.add_leaf_digest(Sha256::fill(252));
+                expected.push(Sha256::fill(252));
+                // Repeated writes share one marker; appends already mark their ancestors.
+                assert_eq!(
+                    batch.dirty_nodes.first().map_or(0, Vec::len),
+                    mask.count_ones() as usize
+                );
+                let batch = batch.merkleize(&base, &hasher);
+
+                let empty = Mem::<F, D>::new();
+                let mut reference = empty.new_batch();
+                for digest in expected {
+                    reference = reference.add_leaf_digest(digest);
+                }
+                let reference = reference.merkleize(&empty, &hasher);
+                assert_eq!(
+                    batch_root(&base, &batch, &hasher),
+                    batch_root(&empty, &reference, &hasher),
+                    "initial_len={initial_len} mask={mask}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mmr_deferred_updates_match_rebuild() {
+        deferred_updates_match_rebuild::<crate::mmr::Family>();
+    }
+
+    #[test]
+    fn mmb_deferred_updates_match_rebuild() {
+        deferred_updates_match_rebuild::<crate::mmb::Family>();
     }
 
     // --- MMR tests ---
