@@ -926,6 +926,9 @@ stability_scope!(BETA {
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Ensure all pending data is durably persisted.
+        ///
+        /// A runtime may return at once when no mutation issued through this blob's clones
+        /// remains uncovered by a completed sync, so callers may sync freely.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Request that all pending data is durably persisted.
