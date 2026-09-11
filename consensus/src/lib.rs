@@ -174,12 +174,52 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
+    /// Context metadata required to request a pipelined handoff proposal.
+    pub trait HandoffContext {
+        /// Identity key of a proposal's leader.
+        type PublicKey: PublicKey;
+    }
+
+    /// An application's response to a pipelined handoff proposal request.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum HandoffProposal<D> {
+        /// Use the supplied payload for the handoff.
+        Proposed(D),
+        /// Wait until the parent has been certified before requesting a proposal again.
+        WaitForParentCertification,
+    }
+
     /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
     ///
     /// This trait is required by consensus implementations (like Simplex) that support a certification
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
+        /// Generate a payload for a pipelined term handoff whose parent has not yet been certified.
+        ///
+        /// Returning [`HandoffProposal::Proposed`] has the same verification and
+        /// certification commitments as returning a payload from [`Automaton::propose`].
+        /// Returning [`HandoffProposal::WaitForParentCertification`] explicitly declines
+        /// speculative construction while allowing consensus to retry through the ordinary
+        /// proposal path once the parent is certified. Keep the response pending while the
+        /// decision or construction is still in progress. Closing the response is terminal
+        /// for this request and should be reserved for cases such as shutdown.
+        fn propose_handoff(
+            &mut self,
+            _context: Self::Context,
+            _outgoing_leader: <Self::Context as HandoffContext>::PublicKey,
+        ) -> impl Future<Output = oneshot::Receiver<HandoffProposal<Self::Digest>>> + Send
+        where
+            Self::Context: HandoffContext,
+        {
+            #[allow(clippy::async_yields_async)]
+            async move {
+                let (sender, receiver) = oneshot::channel();
+                sender.send_lossy(HandoffProposal::WaitForParentCertification);
+                receiver
+            }
+        }
+
         /// Determine whether a verified payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
@@ -279,9 +319,18 @@ stability_scope!(ALPHA {
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;
-    use commonware_cryptography::certificate::Scheme;
+    use commonware_cryptography::certificate::{Scheme, Verifier};
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
+
+    /// An application's policy for a pipelined term handoff.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum HandoffPolicy {
+        /// Proceed through the ordinary proposal path without waiting for parent certification.
+        Pipeline,
+        /// Wait for the parent to certify before proposing.
+        WaitForParentCertification,
+    }
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
@@ -317,6 +366,26 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
+
+        /// Decide whether to build on a parent that has not yet been certified.
+        ///
+        /// `outgoing_leader` identifies the leader that proposed the uncertified parent.
+        /// Returning [`HandoffPolicy::Pipeline`] allows the marshal to continue through its
+        /// ordinary proposal path, including automatic epoch-boundary and recovery behavior.
+        /// That path may reuse an existing block without invoking [`Self::propose`]. Returning
+        /// [`HandoffPolicy::WaitForParentCertification`] waits until the parent certifies before
+        /// requesting that ordinary path again. The parent is necessarily uncertified when this
+        /// hook is called, so certification status is implicit rather than duplicated in the
+        /// arguments.
+        ///
+        /// This future may be cancelled before it completes and must be cancellation-safe.
+        fn handoff_policy(
+            &mut self,
+            _context: (E, Self::Context),
+            _outgoing_leader: <Self::SigningScheme as Verifier>::PublicKey,
+        ) -> impl Future<Output = HandoffPolicy> + Send {
+            async move { HandoffPolicy::WaitForParentCertification }
+        }
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         ///

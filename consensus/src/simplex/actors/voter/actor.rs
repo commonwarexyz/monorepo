@@ -4,7 +4,7 @@ use super::{
     state::{CertificateFetch, Config as StateConfig, State, Verify},
 };
 use crate::{
-    CertifiableAutomaton, LATENCY, Relay, Reporter, Viewable,
+    CertifiableAutomaton, HandoffProposal, LATENCY, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
         actors::{Kind, batcher, resolver},
@@ -74,26 +74,26 @@ struct Staged<S: Scheme<D>, D: Digest> {
 }
 
 /// An outstanding request to the automaton.
-struct Request<V: Viewable, R>(
+struct Request<V: Viewable, F>(
     /// Attached context for the pending item. Must yield a view.
     V,
     /// Span tracking the request from issuance to processed response.
     Span,
     /// Oneshot receiver that the automaton is expected to respond over.
-    oneshot::Receiver<R>,
+    F,
 );
 
-impl<V: Viewable, R> Viewable for Request<V, R> {
+impl<V: Viewable, F> Viewable for Request<V, F> {
     fn view(&self) -> View {
         self.0.view()
     }
 }
 
 /// Adapter that polls an [Option<Request<V, R>>] in place.
-struct Waiter<'a, V: Viewable, R>(&'a mut Option<Request<V, R>>);
+struct Waiter<'a, V: Viewable, F>(&'a mut Option<Request<V, F>>);
 
-impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
-    type Output = (V, Span, Result<R, oneshot::error::RecvError>);
+impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
+    type Output = (V, Span, F::Output);
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         let Waiter(slot) = self.get_mut();
@@ -106,6 +106,45 @@ impl<'a, V: Viewable, R> Future for Waiter<'a, V, R> {
         };
         let Request(v, span, _) = slot.take().expect("request must exist");
         Poll::Ready((v, span, res))
+    }
+}
+
+enum ProposalResponse<D> {
+    Proposed(D),
+    WaitForParentCertification,
+}
+
+enum ProposalReceiver<D> {
+    Ready(oneshot::Receiver<D>),
+    Handoff(oneshot::Receiver<HandoffProposal<D>>),
+}
+
+impl<D> ProposalReceiver<D> {
+    const fn is_handoff(&self) -> bool {
+        matches!(self, Self::Handoff(_))
+    }
+}
+
+type PendingProposal<D, P> = Option<Request<Context<D, P>, ProposalReceiver<D>>>;
+type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
+
+impl<D> Future for ProposalReceiver<D> {
+    type Output = Result<ProposalResponse<D>, oneshot::error::RecvError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            Self::Ready(receiver) => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.map(ProposalResponse::Proposed)),
+            Self::Handoff(receiver) => Pin::new(receiver).poll(cx).map(|result| {
+                result.map(|proposal| match proposal {
+                    HandoffProposal::Proposed(payload) => ProposalResponse::Proposed(payload),
+                    HandoffProposal::WaitForParentCertification => {
+                        ProposalResponse::WaitForParentCertification
+                    }
+                })
+            }),
+        }
     }
 }
 
@@ -358,9 +397,11 @@ impl<
 
     /// Attempt to propose a new block.
     #[allow(clippy::async_yields_async)]
-    async fn try_propose(&mut self) -> Option<Request<Context<D, S::PublicKey>, D>> {
+    async fn try_propose(
+        &mut self,
+    ) -> Option<Request<Context<D, S::PublicKey>, ProposalReceiver<D>>> {
         // Check if we are ready to propose
-        let context = self.state.try_propose()?;
+        let (context, outgoing_leader) = self.state.try_propose()?.into_parts();
 
         // Request proposal from application
         let span = info_span!(
@@ -369,12 +410,25 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let receiver = async {
-            debug!(round = ?context.round, "requested proposal from automaton");
-            self.automaton.propose(context.clone()).await
-        }
-        .instrument(span.clone())
-        .await;
+        let receiver = if let Some(outgoing_leader) = outgoing_leader {
+            let receiver = async {
+                debug!(round = ?context.round, "requested handoff proposal from automaton");
+                self.automaton
+                    .propose_handoff(context.clone(), outgoing_leader)
+                    .await
+            }
+            .instrument(span.clone())
+            .await;
+            ProposalReceiver::Handoff(receiver)
+        } else {
+            let receiver = async {
+                debug!(round = ?context.round, "requested proposal from automaton");
+                self.automaton.propose(context.clone()).await
+            }
+            .instrument(span.clone())
+            .await;
+            ProposalReceiver::Ready(receiver)
+        };
         Some(Request(context, span, receiver))
     }
 
@@ -383,7 +437,7 @@ impl<
     async fn try_verify(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<Request<Context<D, S::PublicKey>, bool>> {
+    ) -> Option<Request<Context<D, S::PublicKey>, oneshot::Receiver<bool>>> {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
@@ -421,16 +475,19 @@ impl<
     async fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-        pending_propose: &mut Option<Request<Context<D, S::PublicKey>, D>>,
-        pending_verify: &mut Option<Request<Context<D, S::PublicKey>, bool>>,
+        pending_propose: &mut PendingProposal<D, S::PublicKey>,
+        pending_verify: &mut PendingVerification<D, S::PublicKey>,
     ) {
         // Keep requests for optimistic future views unless their captured proposal
-        // ancestry has been superseded, and clear requests for exited views.
+        // ancestry has been superseded, and clear requests for exited views. A
+        // pending handoff becomes an ordinary request as soon as its parent certifies.
         // Certification for an exited view can continue after its verification
         // receiver is dropped.
         let current_view = self.state.current_view();
         if pending_propose.as_ref().is_some_and(|request| {
-            request.view() < current_view || self.state.supersede_proposal_request(&request.0)
+            request.view() < current_view
+                || self.state.supersede_proposal_request(&request.0)
+                || (request.2.is_handoff() && self.state.release_certified_handoff(&request.0))
         }) {
             *pending_propose = None;
         }
@@ -660,11 +717,15 @@ impl<
     fn process_proposed(
         &mut self,
         context: Context<D, S::PublicKey>,
-        proposed: Result<D, oneshot::error::RecvError>,
+        proposed: Result<ProposalResponse<D>, oneshot::error::RecvError>,
     ) -> Option<View> {
         // Try to use result
         let proposed = match proposed {
-            Ok(proposed) => proposed,
+            Ok(ProposalResponse::Proposed(proposed)) => proposed,
+            Ok(ProposalResponse::WaitForParentCertification) => {
+                self.state.defer_handoff(&context);
+                return None;
+            }
             Err(err) => {
                 debug!(?err, round = ?context.round, "failed to propose container");
                 self.state
@@ -1098,8 +1159,8 @@ impl<
         batcher.update(span, observed_view, leader, finalized, None);
 
         // Process messages
-        let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
-        let mut pending_verify: Option<Request<Context<D, S::PublicKey>, bool>> = None;
+        let mut pending_propose: PendingProposal<D, S::PublicKey> = None;
+        let mut pending_verify: PendingVerification<D, S::PublicKey> = None;
         let mut certify_pool = AbortablePool::default();
         select_loop! {
             self.context,

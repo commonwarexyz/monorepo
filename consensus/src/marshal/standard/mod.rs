@@ -43,7 +43,7 @@ pub use variant::Standard;
 mod tests {
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
+        Automaton, CertifiableAutomaton, HandoffProposal, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -1983,6 +1983,19 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
+        async fn propose_handoff(
+            &mut self,
+            context: Self::Context,
+            outgoing_leader: PublicKey,
+        ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
+            match self {
+                Self::Inline(inline) => inline.propose_handoff(context, outgoing_leader).await,
+                Self::Deferred(deferred) => {
+                    deferred.propose_handoff(context, outgoing_leader).await
+                }
+            }
+        }
+
         async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest).await
         }
@@ -3254,6 +3267,15 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
+                let optimistic_rx = wrapper
+                    .propose_handoff(reproposal_context.clone(), default_leader())
+                    .await;
+                assert_eq!(
+                    optimistic_rx.await.expect("optimistic decision missing"),
+                    HandoffProposal::WaitForParentCertification,
+                    "{kind:?}: application deferral must precede automatic boundary reproposal"
+                );
+
                 let reproposal_rx = wrapper.propose(reproposal_context).await;
                 assert_eq!(
                     reproposal_rx.await.expect("reproposal result missing"),

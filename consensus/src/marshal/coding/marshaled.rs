@@ -80,8 +80,8 @@
 //! ```
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
-    Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable,
+    HandoffPolicy, HandoffProposal, Heightable, Relay, Reporter,
     marshal::{
         Update,
         application::{
@@ -1129,6 +1129,50 @@ where
     S: Strategy,
     ES: Epocher,
 {
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.coding.propose_handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn propose_handoff(
+        &mut self,
+        consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
+        outgoing_leader: <Self::Context as crate::HandoffContext>::PublicKey,
+    ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
+        let mut handoff = self.clone();
+        let (mut tx, rx) = oneshot::channel();
+        let context = self
+            .context
+            .lock()
+            .await
+            .child("propose_handoff")
+            .with_attribute("round", consensus_context.round);
+        context.spawn(move |runtime_context| async move {
+            let decision = handoff.application.handoff_policy(
+                (
+                    runtime_context.child("app_handoff_policy"),
+                    consensus_context.clone(),
+                ),
+                outgoing_leader,
+            );
+            let decision = select! {
+                _ = tx.closed() => return,
+                decision = decision => decision,
+            };
+            if decision == HandoffPolicy::WaitForParentCertification {
+                tx.send_lossy(HandoffProposal::WaitForParentCertification);
+                return;
+            }
+            let proposal = Automaton::propose(&mut handoff, consensus_context).await;
+            select! {
+                _ = tx.closed() => {},
+                result = proposal => {
+                    if let Ok(commitment) = result {
+                        tx.send_lossy(HandoffProposal::Proposed(commitment));
+                    }
+                },
+            }
+        });
+        rx
+    }
+
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
