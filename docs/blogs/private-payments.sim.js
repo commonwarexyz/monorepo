@@ -12,7 +12,6 @@
 
 (function () {
     const MOUNT_ID = 'sim';
-    const SOURCE_ID = 'sim-source';
     const SVG_NS = 'http://www.w3.org/2000/svg';
     const W = 800, H = 620;
 
@@ -245,26 +244,24 @@
     // Init
     // -----------------------------------------------------------------------
 
-    // The step text is written in the page as a flat run of <h3> headings, each
-    // followed by its paragraphs. Every heading starts a step; the nodes up to
-    // the next heading are that step's body.
-    function readSource() {
-        const src = document.getElementById(SOURCE_ID);
-        if (!src) return [];
-        const steps = [];
-        for (const node of src.children) {
-            if (node.tagName === 'H3') steps.push({ title: node.textContent.replace(/\s+/g, ' ').trim(), nodes: [] });
-            else if (steps.length) steps[steps.length - 1].nodes.push(node);
-        }
-        return steps;
-    }
+    // The simulation has eight fixed designs, in the same order as the rules
+    // above. Keep their titles local so article headings and paragraphs can
+    // change independently of the interactive.
+    const STEPS = [
+        'A Bank',
+        'ecash',
+        'Decentralized ecash',
+        'Hide balances',
+        'Hide operations',
+        'Scaling: prune receipts',
+        'Scaling: delegate nullifiers',
+        'Scaling: prune nullifiers',
+    ];
 
     function init() {
         const mount = document.getElementById(MOUNT_ID);
         if (!mount) return;
-        const steps = readSource();
-        const N = steps.length;
-        if (N === 0) return;
+        const N = STEPS.length;
         let step = 0;
 
         // Stepper.
@@ -272,9 +269,9 @@
         const prev = h('button', '', bar); prev.textContent = '\u2039 prev';
         const title = h('div', 'sim-title', bar);
         const dots = h('div', 'sim-dots', bar);
-        const dotEls = steps.map((s, i) => {
+        const dotEls = STEPS.map((s, i) => {
             const d = h('span', 'sim-dot', dots);
-            d.title = s.title;
+            d.title = s;
             d.addEventListener('click', () => setStep(i));
             return d;
         });
@@ -282,15 +279,14 @@
         prev.addEventListener('click', () => setStep(step - 1));
         next.addEventListener('click', () => setStep(step + 1));
 
-        const copy = h('div', 'sim-copy', mount);
-        const boxes = h('div', 'sim-counters', mount);
-        const boxEls = ['storage', 'validator work', 'validators learn'].map(k => {
-            const b = h('div', 'sim-counter', boxes);
-            const key = h('span', 'k', b); key.textContent = k;
-            const v = h('div', 'v', b);
-            const n = h('div', 'n', b);
-            return { b, v, n };
-        });
+        // const boxes = h('div', 'sim-counters', mount);
+        // const boxEls = ['storage', 'validator work', 'validators learn'].map(k => {
+        //     const b = h('div', 'sim-counter', boxes);
+        //     const key = h('span', 'k', b); key.textContent = k;
+        //     const v = h('div', 'v', b);
+        //     const n = h('div', 'n', b);
+        //     return { b, v, n };
+        // });
 
         // Stage.
         const stage = h('div', 'sim-stage', mount);
@@ -404,20 +400,16 @@
 
         function setStep(i) {
             step = clamp(i, 0, N - 1);
-            title.textContent = `${step}. ${steps[step].title}`;
+            title.textContent = `${step}. ${STEPS[step]}`;
             dotEls.forEach((d, j) => d.classList.toggle('on', j === step));
             prev.disabled = step === 0;
             next.disabled = step === N - 1;
-            copy.classList.remove('changed');
-            void copy.offsetWidth;
-            copy.replaceChildren(...steps[step].nodes.map(n => n.cloneNode(true)));
-            copy.classList.add('changed');
-            const spec = BOXES[Math.min(step, BOXES.length - 1)];
-            [spec.store, spec.work, spec.learn].forEach((s, j) => {
-                boxEls[j].v.textContent = s.v;
-                boxEls[j].n.textContent = s.n || '';
-                boxEls[j].b.classList.toggle('hl', !!s.hl);
-            });
+            // const spec = BOXES[Math.min(step, BOXES.length - 1)];
+            // [spec.store, spec.work, spec.learn].forEach((s, j) => {
+            //     boxEls[j].v.textContent = s.v;
+            //     boxEls[j].n.textContent = s.n || '';
+            //     boxEls[j].b.classList.toggle('hl', !!s.hl);
+            // });
             bankRect.style.opacity = step <= 1 ? 1 : 0;
             bankLabel.style.opacity = step <= 1 ? 1 : 0;
             committee.style.opacity = step <= 1 ? 0 : 1;

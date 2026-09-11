@@ -61,10 +61,6 @@
 
 /* --- Simulation: ecash to our construction -------------------------------- */
 
-#sim-source {
-    display: none;
-}
-
 .sim-stepper {
     align-items: center;
     display: flex;
@@ -404,44 +400,6 @@
 
 .sim-counter .n:empty {
     display: none;
-}
-
-.sim-copy {
-    background: #fff;
-    border: 1px solid #b8b8e6;
-    border-left: 5px solid #0000ee;
-    line-height: 1.45;
-    padding: 14px 18px 14px 16px;
-}
-
-.sim-copy.changed {
-    animation: sim-copy-in 0.4s ease;
-}
-
-@keyframes sim-copy-in {
-    from { background: #eef; }
-    to { background: #fff; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .sim-copy.changed { animation: none; }
-}
-
-.sim-copy > :first-child {
-    margin-top: 0;
-}
-
-.sim-copy > :last-child {
-    margin-bottom: 0;
-}
-
-.sim-copy p {
-    line-height: 1.45;
-}
-
-.sim-copy ul {
-    margin: 6px 0;
-    padding-left: 24px;
 }
 
 @media (max-width: 600px) {
