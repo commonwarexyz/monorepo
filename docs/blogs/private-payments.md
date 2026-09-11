@@ -23,7 +23,7 @@ Our goal is to support private payments at over a million transactions per secon
 - **compute:** every validator needs the equivalent of <u>500-1000 dedicated CPU cores</u>
 - **storage:** since you opened this page, the nullifier set (to prevent double spending) would have grown by <span class="live" id="live-bytes">0 MB</span> across <span class="live" id="live-txs">0</span> transactions, amounting to <u>a petabyte every year</u>
 
-While bandwidth and compute costs can be overcome with bigger machines, it is simply impractical for validators to store the nullifiers.
+While bandwidth and compute costs could be overcome with bigger machines, it is simply impractical for validators to store the nullifiers.
 
 > *How do we process one million private transactions per second on commodity hardware?*
 
