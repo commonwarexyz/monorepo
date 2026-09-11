@@ -243,6 +243,8 @@ Recovery needs a correct, live settlement chain and available claim openings eve
 
 ## Streamlined Epoch Transitions
 
+A payment reaches finality through an admitted close, after the challenge deadline fixed at epoch registration. Shorter epochs can reduce that wait, but mean preparing and certifying closes more often.
+
 Payments need not wait for earlier closes to finalize. Once epoch $e$'s close is admitted, the operator can register epoch $e+1$ onchain against the resulting $\mathsf{StateRoot}$. Registration fixes deposits and signed withdrawal authorizations before the new epoch's first payment is acknowledged.
 
 Importing predecessor credits into each account's live balance can also overlap new payments.
