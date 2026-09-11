@@ -21,17 +21,29 @@ use std::{
 const PAGE: usize = 101;
 const PHYSICAL: usize = PAGE + CHECKSUM_SIZE as usize;
 
+/// Read-only test blob with deterministic page contents and valid checksums.
+///
+/// Records physical reads to check coalescing and cache behavior. Blocking and failure controls
+/// exercise the concurrency limit, error propagation, and cancellation cleanup. Clones share
+/// the data, read log, first-read latch, and active-read count.
 #[derive(Clone)]
 struct ProbeBlob {
     bytes: Arc<Vec<u8>>,
+    /// Physical `(offset, len)` requests, recorded when each read is first polled.
     reads: Arc<Mutex<Vec<(u64, usize)>>>,
+    /// Keep the first read pending forever while allowing subsequent reads to proceed.
     block_first: bool,
+    /// Keep every read pending so tests can inspect the concurrency limit and cancel the batch.
     block_all: bool,
+    /// Shared latch so only one read across all clones is blocked by `block_first`.
     first_started: Arc<AtomicBool>,
+    /// Fail reads starting at this physical offset, unless they are blocked first.
     fail_offset: Option<u64>,
+    /// Reads that have started but have not completed or been cancelled.
     active: Arc<AtomicUsize>,
 }
 
+/// Decrement the active-read count on success, failure, or cancellation of the read future.
 struct Active(Arc<AtomicUsize>);
 impl Drop for Active {
     fn drop(&mut self) {
@@ -40,6 +52,7 @@ impl Drop for Active {
 }
 
 impl ProbeBlob {
+    /// Build full pages with position-dependent payloads to detect incorrect offsets or ordering.
     fn new(pages: usize) -> Self {
         let mut bytes = Vec::new();
         for page in 0..pages {
