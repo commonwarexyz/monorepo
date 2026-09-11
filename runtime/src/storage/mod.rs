@@ -268,8 +268,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Run a deferred sync for a blob whose last handle dropped dirty.
     ///
-    /// The sync runs on the blocking pool when a runtime is available and inline otherwise, as
-    /// during teardown. `sync` must own everything the sync needs, including the directory hold.
+    /// The sync runs on the blocking pool when a runtime is available and inline otherwise. A
+    /// pool that is shutting down may discard queued work, so a blob dropped dirty during runtime
+    /// teardown relies on the next start's flush. `sync` must own everything the sync needs,
+    /// including the directory hold.
     pub(crate) fn defer_sync(
         generation: Arc<Generation>,
         sync: impl FnOnce() -> Result<(), Error> + Send + 'static,

@@ -880,8 +880,9 @@ stability_scope!(BETA {
     ///
     /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
-    /// unchanged. A blob reopened within a run after every clone was dropped reads
-    /// only bytes a sync covered, see the `Storage` durability notes.
+    /// unchanged. A blob reopened within a run after every clone was dropped and every
+    /// operation issued through them completed reads only bytes a sync covered, see the
+    /// `Storage` durability notes.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
