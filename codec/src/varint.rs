@@ -376,6 +376,7 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
         return;
     }
 
+    // Stage the encoded bytes on the stack so the buffer receives a single bulk write.
     let mut bytes = [0u8; MAX_U128_VARINT_SIZE];
     let mut len = 0;
     let mut val = value;
@@ -400,6 +401,8 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
         return Ok(T::from(byte));
     }
 
+    // The decoder enforces canonical encodings and rejects overflow for multi-byte values,
+    // starting with the byte already read.
     let mut decoder = Decoder::<T>::new();
     loop {
         if let Some(value) = decoder.feed(byte)? {
