@@ -896,7 +896,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, IoBufMut, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, IoBufMut, Runner, Spawner, Storage as _,
         mocks::RecordingContext,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
@@ -904,6 +904,7 @@ mod tests {
     use commonware_utils::ScriptedRng;
     use futures::task::noop_waker;
     use rand::{SeedableRng, rngs::StdRng};
+    use rstest::rstest;
     use std::{
         future::Future,
         pin::Pin,
@@ -943,16 +944,31 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct OperationGate<B> {
+    struct OperationGate<B, C> {
         inner: B,
+        context: Arc<C>,
         pause_after_write: bool,
         armed: Arc<AtomicBool>,
         started: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
+        completed: Arc<tokio::sync::Notify>,
     }
 
-    impl<B> OperationGate<B> {
+    impl<B: Clone, C> Clone for OperationGate<B, C> {
+        fn clone(&self) -> Self {
+            Self {
+                inner: self.inner.clone(),
+                context: self.context.clone(),
+                pause_after_write: self.pause_after_write,
+                armed: self.armed.clone(),
+                started: self.started.clone(),
+                release: self.release.clone(),
+                completed: self.completed.clone(),
+            }
+        }
+    }
+
+    impl<B, C> OperationGate<B, C> {
         async fn pause(&self, after_write: bool) {
             if self.pause_after_write == after_write && self.armed.swap(false, Ordering::Relaxed) {
                 self.started.notify_one();
@@ -961,7 +977,7 @@ mod tests {
         }
     }
 
-    impl<B: crate::Blob> crate::Blob for OperationGate<B> {
+    impl<B: crate::Blob, C: Spawner> crate::Blob for OperationGate<B, C> {
         async fn read_at_buf(
             &self,
             offset: u64,
@@ -1005,8 +1021,9 @@ mod tests {
         async fn start_sync(&self) -> Handle<()> {
             let gate = self.clone();
             let (sender, receiver) = tokio::sync::oneshot::channel();
-            drop(tokio::spawn(async move {
+            drop(self.context.child("sync").spawn(move |_| async move {
                 let _ = sender.send(gate.sync().await);
+                gate.completed.notify_one();
             }));
             Handle::from_receiver(receiver)
         }
@@ -1051,48 +1068,60 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_start_sync_returns_before_backing_completion() {
-        let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: probability!(0.0),
-            retention_rate: probability!(1.0),
-            mode: PartialWriteMode::Prefix,
-        }));
-        let (inner, _) = h.inner.open("partition", b"start-sync").await.unwrap();
-        inner
-            .write_at(0, b"data", WriteOptions::SYNC)
-            .await
-            .unwrap();
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_start_sync_returns_before_backing_completion<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let h = Harness::new(Config::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }));
+            let (inner, _) = h.inner.open("partition", b"start-sync").await.unwrap();
+            inner
+                .write_at(0, b"data", WriteOptions::SYNC)
+                .await
+                .unwrap();
 
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let gated = OperationGate {
-            inner,
-            pause_after_write: false,
-            armed: Arc::new(AtomicBool::new(true)),
-            started: started.clone(),
-            release: release.clone(),
-        };
-        let pending = Arc::new(Mutex::new(Vec::new()));
-        let blob = Blob::new(
-            h.storage.ctx.clone(),
-            pending,
-            Arc::new(FileGeneration::new()),
-            gated,
-            4,
-        );
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let gated = OperationGate {
+                inner,
+                context: Arc::new(context),
+                pause_after_write: false,
+                armed: Arc::new(AtomicBool::new(true)),
+                started: started.clone(),
+                release: release.clone(),
+                completed: Arc::new(tokio::sync::Notify::new()),
+            };
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let blob = Blob::new(
+                h.storage.ctx.clone(),
+                pending,
+                Arc::new(FileGeneration::new()),
+                gated,
+                4,
+            );
 
-        let mut start = Box::pin(blob.start_sync());
-        let Poll::Ready(mut completion) = poll_once(start.as_mut()) else {
-            panic!("start_sync waited for backing durability");
-        };
-        started.notified().await;
-        assert!(poll_once(Pin::new(&mut completion)).is_pending());
-        release.notify_one();
-        completion.await.unwrap();
+            let mut start = Box::pin(blob.start_sync());
+            let Poll::Ready(mut completion) = poll_once(start.as_mut()) else {
+                panic!("start_sync waited for backing durability");
+            };
+            started.notified().await;
+            assert!(poll_once(Pin::new(&mut completion)).is_pending());
+            release.notify_one();
+            completion.await.unwrap();
+        });
     }
 
-    async fn run_overlapping_barrier(start: bool) {
+    async fn run_overlapping_barrier(context: impl Spawner, start: bool) {
         let h = Harness::new(Config::default().write(WriteConfig {
             failure_rate: probability!(0.0),
             retention_rate: probability!(1.0),
@@ -1106,12 +1135,15 @@ mod tests {
 
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(tokio::sync::Notify::new());
         let gated = OperationGate {
             inner,
+            context: Arc::new(context.child("gate")),
             pause_after_write: false,
             armed: Arc::new(AtomicBool::new(true)),
             started: started.clone(),
             release: release.clone(),
+            completed: completed.clone(),
         };
         let pending = Arc::new(Mutex::new(Vec::new()));
         let blob = Blob::new(
@@ -1123,7 +1155,7 @@ mod tests {
         );
 
         let barrier_blob = blob.clone();
-        let barrier = tokio::spawn(async move {
+        let barrier = context.child("barrier").spawn(move |_| async move {
             if start {
                 drop(barrier_blob.start_sync().await);
             } else {
@@ -1140,7 +1172,8 @@ mod tests {
             result.unwrap();
             release.notify_one();
             barrier.await.unwrap();
-            tokio::task::yield_now().await;
+            // Wait for backing durability after dropping its completion handle.
+            completed.notified().await;
         } else {
             assert!(poll_once(late.as_mut()).is_pending());
             release.notify_one();
@@ -1181,84 +1214,88 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_completed_backing_write_cannot_record_after_later_full_sync() {
-        let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: probability!(0.0),
-            retention_rate: probability!(1.0),
-            mode: PartialWriteMode::Prefix,
-        }));
-        let (inner, _) = h.inner.open("partition", b"late-record").await.unwrap();
-        inner
-            .write_at(0, b"base!", WriteOptions::SYNC)
-            .await
-            .unwrap();
-
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let gated = OperationGate {
-            inner,
-            pause_after_write: true,
-            armed: Arc::new(AtomicBool::new(true)),
-            started: started.clone(),
-            release: release.clone(),
-        };
-        let pending = Arc::new(Mutex::new(Vec::new()));
-        let blob = Blob::new(
-            h.storage.ctx.clone(),
-            pending.clone(),
-            Arc::new(FileGeneration::new()),
-            gated,
-            5,
-        );
-
-        let mut stale = Box::pin(blob.write_at(0, b"stale", WriteOptions::default()));
-        assert!(poll_once(stale.as_mut()).is_pending());
-        started.notified().await;
-
-        *h.config.write() = Config::default();
-        let fresh_blob = blob.clone();
-        let mut fresh = Box::pin(async move {
-            fresh_blob
-                .write_at(0, b"fresh", WriteOptions::default())
-                .await?;
-            fresh_blob.sync().await
-        });
-        assert!(poll_once(fresh.as_mut()).is_pending());
-
-        release.notify_one();
-        stale.await.unwrap();
-        fresh.await.unwrap();
-
-        for mutation in std::mem::take(&mut *pending.lock()) {
-            let PendingMutation::Write {
-                blob,
-                offset,
-                bufs,
-                retention,
-                ..
-            } = mutation
-            else {
-                panic!("write test recorded a resize");
-            };
-            assert_eq!(
-                retention.policy,
-                (PartialWriteMode::Prefix, probability!(1.0))
-            );
-            blob.inner
-                .retain_crash_write(offset, bufs, || true)
-                .unwrap();
-        }
-        let (durable, len) = h.inner.open("partition", b"late-record").await.unwrap();
-        assert_eq!(len, 5);
-        assert_eq!(
-            durable
-                .read_at(0, 5, ReadOptions::default())
+    #[test]
+    fn test_completed_backing_write_cannot_record_after_later_full_sync() {
+        crate::tokio::Runner::default().start(|context| async move {
+            let h = Harness::new(Config::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }));
+            let (inner, _) = h.inner.open("partition", b"late-record").await.unwrap();
+            inner
+                .write_at(0, b"base!", WriteOptions::SYNC)
                 .await
-                .unwrap()
-                .coalesce(),
-            b"fresh"
-        );
+                .unwrap();
+
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let gated = OperationGate {
+                inner,
+                context: Arc::new(context),
+                pause_after_write: true,
+                armed: Arc::new(AtomicBool::new(true)),
+                started: started.clone(),
+                release: release.clone(),
+                completed: Arc::new(tokio::sync::Notify::new()),
+            };
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let blob = Blob::new(
+                h.storage.ctx.clone(),
+                pending.clone(),
+                Arc::new(FileGeneration::new()),
+                gated,
+                5,
+            );
+
+            let mut stale = Box::pin(blob.write_at(0, b"stale", WriteOptions::default()));
+            assert!(poll_once(stale.as_mut()).is_pending());
+            started.notified().await;
+
+            *h.config.write() = Config::default();
+            let fresh_blob = blob.clone();
+            let mut fresh = Box::pin(async move {
+                fresh_blob
+                    .write_at(0, b"fresh", WriteOptions::default())
+                    .await?;
+                fresh_blob.sync().await
+            });
+            assert!(poll_once(fresh.as_mut()).is_pending());
+
+            release.notify_one();
+            stale.await.unwrap();
+            fresh.await.unwrap();
+
+            for mutation in std::mem::take(&mut *pending.lock()) {
+                let PendingMutation::Write {
+                    blob,
+                    offset,
+                    bufs,
+                    retention,
+                    ..
+                } = mutation
+                else {
+                    panic!("write test recorded a resize");
+                };
+                assert_eq!(
+                    retention.policy,
+                    (PartialWriteMode::Prefix, probability!(1.0))
+                );
+                blob.inner
+                    .retain_crash_write(offset, bufs, || true)
+                    .unwrap();
+            }
+            let (durable, len) = h.inner.open("partition", b"late-record").await.unwrap();
+            assert_eq!(len, 5);
+            assert_eq!(
+                durable
+                    .read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"fresh"
+            );
+        });
     }
 
     async fn run_subset_overwrite(seed: u64, original: &[u8], replacement: &[u8]) -> Vec<u8> {
@@ -1744,20 +1781,51 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_full_sync_epoch_is_linearized_with_overlapping_write() {
-        run_overlapping_barrier(false).await;
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_full_sync_epoch_is_linearized_with_overlapping_write<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            run_overlapping_barrier(context, false).await;
+        });
     }
 
-    #[tokio::test]
-    async fn test_dropped_start_sync_epoch_is_linearized_with_overlapping_write() {
-        run_overlapping_barrier(true).await;
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_dropped_start_sync_epoch_is_linearized_with_overlapping_write<R: Runner>(
+        #[case] runner: R,
+    ) where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            run_overlapping_barrier(context, true).await;
+        });
     }
 
-    #[tokio::test]
-    async fn test_faulty_storage_no_faults() {
-        let h = Harness::new(Config::default());
-        run_storage_tests(h.storage).await;
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_faulty_storage_no_faults<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let h = Harness::new(Config::default());
+            run_storage_tests(context, h.storage).await;
+        });
     }
 
     #[test]

@@ -616,7 +616,7 @@ mod tests {
             marshal::Config {
                 provider: mocks::TestProvider::new(schemes[index].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: Start::Genesis(mocks::genesis_block(public_key)),
+                start: Start::Genesis(mocks::genesis_block(public_key).into()),
                 partition_prefix,
                 mailbox_size: NZUsize!(16),
                 view_retention: ViewDelta::new(8),
@@ -1032,7 +1032,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone(),
+                    block: harness.boundary.clone().into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1099,7 +1099,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone(),
+                    block: harness.boundary.clone().into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1170,7 +1170,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: wrong_block,
+                    block: wrong_block.into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1190,7 +1190,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone(),
+                    block: harness.boundary.clone().into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1264,10 +1264,9 @@ mod tests {
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryResponse(
                     terminal_finalization,
                 )
-                .encode()
-                .to_vec();
+                .encode();
             let decoded = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
-                message.as_slice(),
+                message.clone(),
                 &harness.schemes[2].certificate_codec_config(),
             )
             .expect("terminal response decoded")

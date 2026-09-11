@@ -173,20 +173,19 @@ where
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
     {
-        let message =
-            match Message::<V, C::PublicKey>::decode_cfg(bytes.as_ref(), &self.max_participants) {
-                Ok(message) => message,
-                Err(error) => {
-                    commonware_p2p::block!(
-                        self.blocker,
-                        from,
-                        ?epoch,
-                        ?error,
-                        "failed to decode dealing message"
-                    );
-                    return;
-                }
-            };
+        let message = match Message::<V, C::PublicKey>::decode_cfg(bytes, &self.max_participants) {
+            Ok(message) => message,
+            Err(error) => {
+                commonware_p2p::block!(
+                    self.blocker,
+                    from,
+                    ?epoch,
+                    ?error,
+                    "failed to decode dealing message"
+                );
+                return;
+            }
+        };
 
         match message {
             Message::Dealer(public, private) => {

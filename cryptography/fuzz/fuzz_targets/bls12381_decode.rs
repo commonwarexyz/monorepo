@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use blst::min_pk::{PublicKey as RefPublicKey, Signature as RefSignature};
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Copying, DecodeExt, Encode};
 use commonware_cryptography::bls12381::{PublicKey, Signature};
 use libfuzzer_sys::fuzz_target;
 
@@ -21,7 +21,7 @@ pub struct FuzzInput {
 
 fn test_pubkey_diff_validate(data: &[u8]) {
     let ref_result = RefPublicKey::key_validate(data);
-    let our_result = PublicKey::decode(data);
+    let our_result = PublicKey::decode(Copying(data));
 
     // Both should agree on validity
     assert_eq!(ref_result.is_err(), our_result.is_err());
@@ -36,7 +36,7 @@ fn test_pubkey_diff_validate(data: &[u8]) {
 
 fn test_signature_diff_validate(data: &[u8]) {
     let ref_result = RefSignature::sig_validate(data, true);
-    let our_result = Signature::decode(data);
+    let our_result = Signature::decode(Copying(data));
 
     // Both should agree on validity
     assert_eq!(ref_result.is_err(), our_result.is_err());
@@ -49,14 +49,14 @@ fn test_signature_diff_validate(data: &[u8]) {
     }
 }
 fn test_pubkey_decode_encode(data: &[u8]) {
-    if let Ok(pk) = PublicKey::decode(data) {
+    if let Ok(pk) = PublicKey::decode(Copying(data)) {
         let data_round_trip = pk.encode().to_vec();
         assert_eq!(data.to_vec(), data_round_trip.to_vec());
     }
 }
 
 fn test_signature_decode_encode(data: &[u8]) {
-    if let Ok(sig) = Signature::decode(data) {
+    if let Ok(sig) = Signature::decode(Copying(data)) {
         let data_round_trip = sig.encode().to_vec();
         assert_eq!(data.to_vec(), data_round_trip.to_vec());
     }

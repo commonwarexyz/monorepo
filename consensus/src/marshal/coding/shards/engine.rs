@@ -815,7 +815,7 @@ where
 
         // Attempt to decode the block from the encoded blob
         let (inner, config): (B, CodingConfig) =
-            Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
+            Decode::decode_cfg(blob, &(self.block_codec_cfg.clone(), ()))?;
 
         match validate_reconstruction(&inner, config, commitment) {
             Ok(()) => {}

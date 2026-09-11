@@ -7,10 +7,10 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Buf, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::Array;
 
 /// `max(a, b)` in a const context.
@@ -121,7 +121,7 @@ mod tests {
     fn test_invalid_context() {
         let mut invalid = vec![0xFF];
         invalid.resize(FixedOp::SIZE, 0);
-        let decoded = FixedOp::decode(invalid.as_ref());
+        let decoded = FixedOp::decode(invalid);
         assert!(matches!(
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn test_insufficient_buffer() {
         let invalid = vec![SET_CONTEXT];
-        let decoded = FixedOp::decode(invalid.as_ref());
+        let decoded = FixedOp::decode(invalid);
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }
 
@@ -143,7 +143,7 @@ mod tests {
         if set_op_size::<U64, U64>() < total_op_size::<U64, U64>() {
             let last = encoded.len() - 1;
             encoded[last] = 0xFF;
-            let decoded = FixedOp::decode(encoded.as_ref());
+            let decoded = FixedOp::decode(encoded);
             assert!(decoded.is_err());
         }
     }

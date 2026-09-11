@@ -5,9 +5,8 @@
 //! in an ad hoc way.
 use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
-use bytes::Buf;
 use commonware_codec::{
-    EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
+    Buf, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
     varint::{MAX_U64_VARINT_SIZE, UInt},
 };
 use commonware_math::algebra::Random;
@@ -310,7 +309,7 @@ impl Transcript {
     /// ```
     ///
     /// If you want to provide data incrementally, use [Self::append].
-    pub fn commit(&mut self, data: impl Buf) -> &mut Self {
+    pub fn commit(&mut self, data: impl bytes::Buf) -> &mut Self {
         self.append(data);
         self.flush();
         self
@@ -331,7 +330,7 @@ impl Transcript {
     /// let s2 = Transcript::new(b"test", Version::V1).commit(b"AB".as_slice()).summarize();
     /// assert_eq!(s1, s2);
     /// ```
-    pub fn append(&mut self, mut data: impl Buf) -> &mut Self {
+    pub fn append(&mut self, mut data: impl bytes::Buf) -> &mut Self {
         let length =
             u64::try_from(data.remaining()).expect("transcript packet length does not fit in u64");
         let pending = self
@@ -604,6 +603,7 @@ impl arbitrary::Arbitrary<'_> for Summary {
 mod test {
     use super::*;
     use crate::ed25519;
+    use bytes::Buf as _;
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;

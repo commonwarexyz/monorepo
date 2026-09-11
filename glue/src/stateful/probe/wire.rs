@@ -1,5 +1,5 @@
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{marshal::core::Variant, simplex::types::Finalization};
 use commonware_cryptography::certificate::Scheme;
 

@@ -110,7 +110,7 @@ fn fuzz(input: FuzzInput) {
             }
             Op::DecodeCfg(data, hashers, bits) => {
                 let cfg = (hashers, bits.into());
-                _ = BloomFilter::<Sha256>::decode_cfg(&data[..], &cfg);
+                _ = BloomFilter::<Sha256>::decode_cfg(data, &cfg);
             }
             Op::Encode(_item) => {
                 let encoded = bf.encode();

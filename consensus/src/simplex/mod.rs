@@ -8089,7 +8089,7 @@ mod tests {
                         let scenario = scenario.clone();
                         move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                             let msg: Certificate<S, D> =
-                                Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                                Certificate::decode_cfg(message.clone(), &codec).unwrap();
                             let (primary, secondary) =
                                 scenario.partitions(msg.view(), term_length, participants.as_ref());
                             match origin {
@@ -8112,7 +8112,7 @@ mod tests {
                         let scenario = scenario.clone();
                         move |(sender, message): &(_, IoBuf)| {
                             let msg: Certificate<S, D> =
-                                Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
+                                Certificate::decode_cfg(message.clone(), &codec).unwrap();
                             scenario.route(msg.view(), term_length, sender, participants.as_ref())
                         }
                     };

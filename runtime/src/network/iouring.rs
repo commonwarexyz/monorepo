@@ -3,9 +3,12 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are submitted through an io_uring [Handle][crate::iouring::Handle] to a
-//! dedicated event loop running in a separate thread. This implementation uses two separate
-//! io_uring instances: one for send operations and one for receive operations.
+//! Every ring-backed operation binds to the current worker on its first poll.
+//! Connected socket halves and listeners retain descriptors and buffering policy,
+//! so they can move between workers between operations. No resource owns a ring.
+//!
+//! Accept first tries a nonblocking syscall. Only an empty accept queue registers
+//! a single-shot readiness request, and cancellation cannot consume a connection.
 //!
 //! ## Memory Safety
 //!
@@ -14,7 +17,7 @@
 //!
 //! ## Feature Flag
 //!
-//! This implementation is enabled by using the `iouring-network` feature.
+//! This implementation is enabled by using the `iouring` feature.
 //!
 //! ## Linux Only
 //!
@@ -23,19 +26,17 @@
 
 use crate::{
     Buf, BufferPool, Error, IoBufMut, IoBufs,
-    iouring::{self},
-    telemetry::metrics::Register,
-    utils,
+    iouring::{
+        operation::Operation,
+        request::{ConnectRequest, PollRequest, RecvRequest, Request, RequestOutput, SendRequest},
+        sockaddr::SockAddr,
+    },
 };
 use std::{
-    net::SocketAddr,
-    os::fd::{AsRawFd, OwnedFd},
+    net::{SocketAddr, TcpListener},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::Arc,
     time::{Duration, Instant},
-};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    time::timeout,
 };
 use tracing::warn;
 
@@ -61,32 +62,25 @@ pub struct Config {
     pub connect_timeout: Duration,
     /// Timeout budget applied to each top-level send/recv call.
     ///
-    /// This is a network-level policy and is independent from io_uring loop
-    /// tuning. At startup, the loop timeout horizon is raised as needed so this
-    /// value is never clamped by `iouring_config.max_request_timeout`.
+    /// The owning runner validates its timeout wheel against this policy.
+    /// Moving a resource to a runner with a smaller horizon can reject an
+    /// operation whose deadline cannot be represented.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     pub read_buffer_size: usize,
-    /// Configuration for the iouring instance.
-    pub iouring_config: iouring::Config,
-    /// Stack size for the dedicated send and receive io_uring threads.
-    pub thread_stack_size: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let iouring_config = iouring::Config::default();
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
             connect_timeout: Duration::from_secs(10),
-            read_write_timeout: iouring_config.max_request_timeout,
-            iouring_config,
+            read_write_timeout: Duration::from_secs(60),
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
-            thread_stack_size: utils::thread::system_thread_stack_size(),
         }
     }
 }
@@ -99,10 +93,6 @@ pub struct Network {
     tcp_nodelay: Option<bool>,
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
-    /// Used to submit send operations to the send io_uring event loop.
-    send_handle: iouring::Handle,
-    /// Used to submit recv operations to the recv io_uring event loop.
-    recv_handle: iouring::Handle,
     /// Timeout for establishing an outbound TCP connection.
     connect_timeout: Duration,
     /// Timeout budget applied to each send/recv call.
@@ -114,51 +104,59 @@ pub struct Network {
 }
 
 impl Network {
-    /// Returns a new [Network] instance.
-    /// This function creates two io_uring instances, one for sending and one for receiving.
-    /// This function spawns two threads to run the io_uring event loops.
-    /// The threads run until the work submission channel is closed or an error occurs.
-    /// The caller should take special care to ensure the io_uring `size` given in `cfg` is
-    /// large enough, given the number of connections that will be maintained.
-    /// Each ongoing send/recv to/from each connection will consume a slot in the io_uring.
-    /// The io_uring `size` should be a multiple of the number of expected connections.
-    pub(crate) fn start(
-        mut cfg: Config,
-        registry: &mut impl Register,
-        pool: BufferPool,
-    ) -> Result<Self, Error> {
-        // Optimize performance by hinting the kernel that a single task will
-        // submit requests. This is safe because each iouring instance runs in a
-        // dedicated thread, which guarantees that the same thread that creates
-        // the ring is the only thread submitting work to it.
-        cfg.iouring_config.single_issuer = true;
-        cfg.iouring_config.max_request_timeout = cfg
-            .iouring_config
-            .max_request_timeout
-            .max(cfg.read_write_timeout);
-
-        // Create an io_uring instance to handle send operations.
-        let mut sender_registry = registry.sub_registry("iouring_sender");
-        let (send_handle, send_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config.clone(), &mut sender_registry);
-        utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
-
-        // Create an io_uring instance to handle receive operations.
-        let mut receiver_registry = registry.sub_registry("iouring_receiver");
-        let (recv_handle, recv_loop) =
-            iouring::IoUringLoop::new(cfg.iouring_config, &mut receiver_registry);
-        utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
-
-        Ok(Self {
+    /// Create a network with the given socket policy and receive buffer pool.
+    pub(crate) const fn new(cfg: Config, pool: BufferPool) -> Self {
+        Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
-            send_handle,
-            recv_handle,
             connect_timeout: cfg.connect_timeout,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
             pool,
-        })
+        }
+    }
+}
+
+/// Apply best-effort TCP policy to a socket without transferring ownership.
+fn configure_socket(fd: &OwnedFd, tcp_nodelay: Option<bool>, zero_linger: bool) {
+    if let Some(enabled) = tcp_nodelay {
+        let value: libc::c_int = enabled.into();
+
+        // SAFETY: `fd` owns the live socket throughout this call. The kernel reads
+        // exactly one initialized integer from `value` before setsockopt returns.
+        if unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_NODELAY,
+                std::ptr::from_ref(&value).cast(),
+                size_of_val(&value) as libc::socklen_t,
+            )
+        } == -1
+        {
+            warn!(err = ?std::io::Error::last_os_error(), "failed to set TCP_NODELAY");
+        }
+    }
+
+    if zero_linger {
+        let value = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: `fd` remains owned and `value` is initialized, correctly aligned
+        // linger storage. setsockopt copies its bytes synchronously.
+        if unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                std::ptr::from_ref(&value).cast(),
+                size_of_val(&value) as libc::socklen_t,
+            )
+        } == -1
+        {
+            warn!(err = ?std::io::Error::last_os_error(), "failed to set SO_LINGER");
+        }
     }
 }
 
@@ -166,15 +164,15 @@ impl crate::Network for Network {
     type Listener = Listener;
 
     async fn bind(&self, socket: SocketAddr) -> Result<Self::Listener, Error> {
-        let listener = TcpListener::bind(socket)
-            .await
+        let listener = TcpListener::bind(socket).map_err(|_| Error::BindFailed)?;
+        listener
+            .set_nonblocking(true)
             .map_err(|_| Error::BindFailed)?;
+
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
             zero_linger: self.zero_linger,
-            inner: listener,
-            send_handle: self.send_handle.clone(),
-            recv_handle: self.recv_handle.clone(),
+            inner: Arc::new(listener),
             read_write_timeout: self.read_write_timeout,
             read_buffer_size: self.read_buffer_size,
             pool: self.pool.clone(),
@@ -185,43 +183,52 @@ impl crate::Network for Network {
         &self,
         socket: SocketAddr,
     ) -> Result<(crate::SinkOf<Self>, crate::StreamOf<Self>), Error> {
-        let stream = timeout(self.connect_timeout, TcpStream::connect(socket))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::ConnectionFailed)?;
+        // Include socket creation and time waiting for staging in the timeout.
+        let deadline = Instant::now() + self.connect_timeout;
+        let family = if socket.is_ipv4() {
+            libc::AF_INET
+        } else {
+            libc::AF_INET6
+        };
 
-        // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay
-            && let Err(err) = stream.set_nodelay(tcp_nodelay)
-        {
-            warn!(?err, "failed to set TCP_NODELAY");
+        // SAFETY: socket takes only integer flags and returns a fresh descriptor
+        // or -1. The successful descriptor is immediately placed in one owner.
+        let raw = unsafe {
+            libc::socket(
+                family,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
+            )
+        };
+        if raw < 0 {
+            return Err(Error::ConnectionFailed);
         }
 
-        // Set SO_LINGER to zero if configured
-        if self.zero_linger
-            && let Err(err) = stream.set_zero_linger()
-        {
-            warn!(?err, "failed to set SO_LINGER");
-        }
+        // SAFETY: `raw` is the unique successful result of socket above and has
+        // not been closed or placed in another owning descriptor.
+        let fd = Arc::new(unsafe { OwnedFd::from_raw_fd(raw) });
+        let output = Operation::register(Request::Connect(ConnectRequest {
+            fd: fd.clone(),
+            address: Box::new(SockAddr::from(socket)),
+            deadline: Some(deadline),
+        }))
+        .await
+        .map_err(|_| Error::ConnectionFailed)?;
 
-        // Convert the stream to a std::net::TcpStream
-        let stream = stream.into_std().map_err(|_| Error::ConnectionFailed)?;
+        let RequestOutput::Connect(result) = output else {
+            unreachable!("connect request returned another output kind");
+        };
+        result.map_err(|error| match error {
+            Error::Timeout => Error::Timeout,
+            _ => Error::ConnectionFailed,
+        })?;
 
-        // Explicitly set non-blocking mode to true
-        stream
-            .set_nonblocking(true)
-            .map_err(|_| Error::ConnectionFailed)?;
+        configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
 
-        let fd = Arc::new(OwnedFd::from(stream));
         Ok((
-            Sink::new(
-                fd.clone(),
-                self.send_handle.clone(),
-                self.read_write_timeout,
-            ),
+            Sink::new(fd.clone(), self.read_write_timeout),
             Stream::new(
                 fd,
-                self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
@@ -237,11 +244,8 @@ pub struct Listener {
     tcp_nodelay: Option<bool>,
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
-    inner: TcpListener,
-    /// Used to submit send operations to the send io_uring event loop.
-    send_handle: iouring::Handle,
-    /// Used to submit recv operations to the recv io_uring event loop.
-    recv_handle: iouring::Handle,
+    /// Shared listener retained by every outstanding readiness observation.
+    inner: Arc<TcpListener>,
     /// Timeout budget applied to each send/recv call.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -255,46 +259,48 @@ impl crate::Listener for Listener {
     type Sink = Sink;
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
-        let (stream, remote_addr) = self
-            .inner
-            .accept()
+        let (stream, remote_addr) = loop {
+            // Accept only while this future is being polled. A readiness
+            // request left behind by cancellation cannot consume a connection.
+            match self.inner.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return Err(Error::ConnectionFailed),
+            }
+
+            let output = Operation::register(Request::Poll(PollRequest {
+                fd: self.inner.clone(),
+                deadline: Some(Instant::now() + self.read_write_timeout),
+            }))
             .await
             .map_err(|_| Error::ConnectionFailed)?;
 
-        // Set TCP_NODELAY if configured
-        if let Some(tcp_nodelay) = self.tcp_nodelay
-            && let Err(err) = stream.set_nodelay(tcp_nodelay)
-        {
-            warn!(?err, "failed to set TCP_NODELAY");
-        }
+            let RequestOutput::Poll(result) = output else {
+                unreachable!("readiness request returned another output kind");
+            };
 
-        // Set SO_LINGER to zero if configured
-        if self.zero_linger
-            && let Err(err) = stream.set_zero_linger()
-        {
-            warn!(?err, "failed to set SO_LINGER");
-        }
+            match result {
+                // Readiness may be stale, and an idle listener has no public
+                // timeout. Both outcomes retry the nonblocking accept syscall.
+                Ok(()) | Err(Error::Timeout) => {}
+                Err(_) => return Err(Error::ConnectionFailed),
+            }
+        };
 
-        // Convert the stream to a std::net::TcpStream
-        let stream = stream.into_std().map_err(|_| Error::ConnectionFailed)?;
-
-        // Explicitly set non-blocking mode to true
+        // Accepted sockets do not inherit the listener's nonblocking flag.
         stream
             .set_nonblocking(true)
             .map_err(|_| Error::ConnectionFailed)?;
 
         let fd = Arc::new(OwnedFd::from(stream));
+        configure_socket(&fd, self.tcp_nodelay, self.zero_linger);
 
         Ok((
             remote_addr,
-            Sink::new(
-                fd.clone(),
-                self.send_handle.clone(),
-                self.read_write_timeout,
-            ),
+            Sink::new(fd.clone(), self.read_write_timeout),
             Stream::new(
                 fd,
-                self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
@@ -311,8 +317,6 @@ impl crate::Listener for Listener {
 pub struct Sink {
     /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
-    /// Used to submit send operations to the io_uring event loop.
-    handle: iouring::Handle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
     /// Tracks this sink's lifecycle.
@@ -330,11 +334,10 @@ enum SinkState {
 }
 
 impl Sink {
-    /// Construct a sink that submits logical send requests through one io_uring loop.
-    const fn new(fd: Arc<OwnedFd>, handle: iouring::Handle, timeout: Duration) -> Self {
+    /// Construct a sink whose sends bind to their current worker.
+    const fn new(fd: Arc<OwnedFd>, timeout: Duration) -> Self {
         Self {
             fd,
-            handle,
             timeout,
             state: SinkState::Open,
         }
@@ -353,6 +356,7 @@ impl Sink {
         unsafe {
             libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_WR);
         }
+
         self.state = SinkState::Closed;
     }
 }
@@ -383,10 +387,17 @@ impl crate::Sink for Sink {
         // detected by the next send.
         self.state = SinkState::Sending;
 
-        let result = self
-            .handle
-            .send(self.fd.clone(), bufs, Instant::now() + self.timeout)
-            .await;
+        let result = match Operation::register(Request::Send(SendRequest {
+            fd: self.fd.clone(),
+            write: bufs.into(),
+            deadline: Some(Instant::now() + self.timeout),
+        }))
+        .await
+        {
+            Ok(RequestOutput::Send(result)) => result,
+            Ok(_) => unreachable!("send request returned another output kind"),
+            Err(_) => Err(Error::SendFailed),
+        };
 
         // A failed send leaves the write-half unusable.
         if result.is_err() {
@@ -407,8 +418,6 @@ impl crate::Sink for Sink {
 pub struct Stream {
     /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
-    /// Used to submit recv operations to the io_uring event loop.
-    handle: iouring::Handle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Tracks whether a previous recv failure has made this stream unusable.
@@ -417,29 +426,19 @@ pub struct Stream {
     buffer: IoBufMut,
     /// Current read position in the buffer.
     buffer_pos: usize,
-    /// Number of valid bytes in the buffer.
-    buffer_len: usize,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
 
 impl Stream {
     /// Construct a stream with an optional internal read buffer.
-    fn new(
-        fd: Arc<OwnedFd>,
-        handle: iouring::Handle,
-        timeout: Duration,
-        buffer_capacity: usize,
-        pool: BufferPool,
-    ) -> Self {
+    fn new(fd: Arc<OwnedFd>, timeout: Duration, buffer_capacity: usize, pool: BufferPool) -> Self {
         Self {
             fd,
-            handle,
             timeout,
             poisoned: false,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
-            buffer_len: 0,
             pool,
         }
     }
@@ -449,8 +448,8 @@ impl Stream {
     /// `offset` is the byte offset into `buffer` where received data should
     /// start. `len` is the number of bytes to read starting at that offset.
     ///
-    /// Returns the buffer and either the number of bytes read for this
-    /// invocation or an error.
+    /// Returns the buffer and the number of bytes read by this invocation.
+    /// Failed requests discard their buffers because the stream is poisoned.
     async fn submit_recv(
         &self,
         buffer: IoBufMut,
@@ -458,44 +457,42 @@ impl Stream {
         len: usize,
         exact: bool,
         deadline: Instant,
-    ) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
-        self.handle
-            .recv(
-                self.fd.clone(),
-                buffer,
-                offset,
-                offset + len,
-                exact,
-                deadline,
-            )
-            .await
-            .map(|(buf, total)| {
-                // Translate the total-bytes-received into bytes-read-in-this-call.
-                (buf, total - offset)
-            })
+    ) -> Result<(IoBufMut, usize), Error> {
+        let output = Operation::register(Request::Recv(RecvRequest {
+            fd: self.fd.clone(),
+            buf: buffer,
+            offset,
+            len: offset + len,
+            exact,
+            deadline: Some(deadline),
+        }))
+        .await
+        .map_err(|_| Error::RecvFailed)?;
+
+        let RequestOutput::Recv(result) = output else {
+            unreachable!("recv request returned another output kind");
+        };
+
+        // Request progress includes the bytes filled by earlier calls.
+        result
+            .map(|(buf, total)| (buf, total - offset))
+            .map_err(|(_, error)| error)
     }
 
     /// Fills the internal buffer by reading from the socket via io_uring.
-    async fn fill_buffer(&mut self, deadline: Instant) -> Result<usize, Error> {
+    async fn fill_buffer(&mut self, deadline: Instant) -> Result<(), Error> {
         self.buffer_pos = 0;
-        self.buffer_len = 0;
 
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
-        self.buffer_len = match self.submit_recv(buffer, 0, len, false, deadline).await {
-            Ok((buffer, read)) => {
-                self.buffer = buffer;
-                read
-            }
-            Err((buffer, err)) => {
-                self.buffer = buffer;
-                return Err(err);
-            }
-        };
-        // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
-        unsafe { self.buffer.set_len(self.buffer_len) };
-        Ok(self.buffer_len)
+        let (buffer, read) = self.submit_recv(buffer, 0, len, false, deadline).await?;
+        self.buffer = buffer;
+
+        // SAFETY: The successful receive initialized the first `read` bytes.
+        unsafe { self.buffer.set_len(read) };
+
+        Ok(())
     }
 }
 
@@ -517,7 +514,7 @@ impl crate::Stream for Stream {
 
             while bytes_received < len {
                 // First drain any buffered data
-                let buffered = self.buffer_len - self.buffer_pos;
+                let buffered = self.buffer.len() - self.buffer_pos;
                 if buffered > 0 {
                     let to_copy = std::cmp::min(buffered, len - bytes_received);
                     owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
@@ -534,16 +531,11 @@ impl crate::Stream for Stream {
                 // to fill the buffer and immediately drain it
                 let buffer_capacity = self.buffer.capacity();
                 if buffer_capacity == 0 || remaining >= buffer_capacity {
-                    match self
+                    let (buf, read) = self
                         .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
-                        .await
-                    {
-                        Ok((buf, read)) => {
-                            owned_buf = buf;
-                            bytes_received += read;
-                        }
-                        Err((_, err)) => return Err(err),
-                    }
+                        .await?;
+                    owned_buf = buf;
+                    bytes_received += read;
                 } else {
                     // Fill internal buffer, then loop will copy
                     self.fill_buffer(deadline).await?;
@@ -563,7 +555,7 @@ impl crate::Stream for Stream {
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
-        let buffered = self.buffer_len - self.buffer_pos;
+        let buffered = self.buffer.len() - self.buffer_pos;
         let len = std::cmp::min(buffered, max_len);
         &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]
     }
@@ -571,485 +563,490 @@ impl crate::Stream for Stream {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sink, Stream};
+    use super::{Config, Network, Sink, Stream};
     use crate::{
-        BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
-        Sink as _, Stream as _, iouring,
-        network::{
-            iouring::{Config, Network},
-            tests,
-        },
+        BufferPool, BufferPoolConfig, Clock as _, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
+        Network as _, Runner as _, Sink as _, Spawner as _, Stream as _, Supervisor as _, iouring,
+        network::tests,
         telemetry::metrics::{Register, Registry},
-        thread,
     };
     use commonware_macros::{select, test_group};
+    use futures::FutureExt as _;
     use std::{
         io::{Read, Write},
-        os::unix::net::UnixStream,
-        sync::Arc,
+        net::TcpStream,
+        os::{
+            fd::{AsRawFd, OwnedFd},
+            unix::net::UnixStream,
+        },
+        pin::pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll, Wake, Waker},
         time::{Duration, Instant},
     };
 
+    #[derive(Default)]
+    struct Notify(AtomicBool);
+
+    impl Wake for Notify {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Allocate receive buffers with the network pool configuration.
     fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), scope)
     }
 
-    /// Start a test network with a single shared registry scoped into
-    /// `pool` and `network` sub-prefixes so both components register into
-    /// the same registry.
-    fn test_network(cfg: Config) -> Result<Network, Error> {
+    /// Construct socket policy with a metered receive buffer pool.
+    fn test_network(cfg: Config) -> Network {
         let mut registry = Registry::default();
         let pool = test_pool(&mut registry.sub_registry("pool"));
-        Network::start(cfg, &mut registry.sub_registry("network"), pool)
+        Network::new(cfg, pool)
+    }
+
+    /// Read the TCP_NODELAY and SO_LINGER settings from a connected socket.
+    fn socket_options(fd: &OwnedFd) -> (bool, Option<Duration>) {
+        let stream = TcpStream::from(fd.try_clone().unwrap());
+        let nodelay = stream.nodelay().unwrap();
+        let mut linger = libc::linger {
+            l_onoff: 0,
+            l_linger: 0,
+        };
+        let mut len = size_of_val(&linger) as libc::socklen_t;
+
+        // SAFETY: `fd` owns the socket and both output pointers refer to writable
+        // storage. `len` gives the full size of the initialized linger value.
+        let result = unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                std::ptr::from_mut(&mut linger).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(result, 0);
+        assert_eq!(len as usize, size_of_val(&linger));
+
+        let linger =
+            (linger.l_onoff != 0).then(|| Duration::from_secs(linger.l_linger.try_into().unwrap()));
+        (nodelay, linger)
     }
 
     #[test]
-    fn test_default_thread_stack_size_uses_system_default() {
-        assert_eq!(
-            Config::default().thread_stack_size,
-            thread::system_thread_stack_size()
+    fn test_queued_accept_and_empty_operations_without_worker() {
+        let network = test_network(Config::default());
+        let mut listener =
+            futures::executor::block_on(network.bind("127.0.0.1:0".parse().unwrap())).unwrap();
+        let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+
+        // A completed handshake is already in the accept queue. No current
+        // worker exists, so success also proves no readiness request was polled.
+        let (_, mut sink, mut stream) = futures::executor::block_on(listener.accept()).unwrap();
+        assert!(stream.peek(1).is_empty());
+
+        futures::executor::block_on(sink.send(IoBufs::default())).unwrap();
+        futures::executor::block_on(sink.send(IoBuf::default())).unwrap();
+        futures::executor::block_on(sink.send(Vec::<u8>::new())).unwrap();
+        assert!(
+            futures::executor::block_on(stream.recv(0))
+                .unwrap()
+                .is_empty()
         );
+        drop(peer);
     }
 
-    #[tokio::test]
-    async fn test_trait() {
-        // Verify the io_uring backend satisfies the shared network trait suite.
-        tests::test_network_trait(|| {
-            test_network(Config {
-                read_write_timeout: Duration::from_secs(15),
+    #[test]
+    fn test_cancel_accept_before_service_preserves_next_connection() {
+        iouring::Runner::new(
+            iouring::Config::default().with_ring_config(iouring::RingConfig {
+                size: 1,
                 ..Default::default()
-            })
-            .expect("Failed to start io_uring")
-        })
-        .await;
+            }),
+        )
+        .start(|_| async {
+            let network = test_network(Config::default());
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let address = listener.local_addr().unwrap();
+
+            // Cancel readiness before driver service. Its stale queue entry
+            // must not interfere with the connect that reuses the waiter slot.
+            assert!(futures::FutureExt::now_or_never(listener.accept()).is_none());
+            let (mut sender, _receiver) = network.dial(address).await.unwrap();
+            let (_, _sender, mut receiver) = listener.accept().await.unwrap();
+            sender.send(b"kept").await.unwrap();
+            assert_eq!(receiver.recv(4).await.unwrap().coalesce(), b"kept"[..]);
+        });
     }
 
-    #[tokio::test]
-    async fn test_connect_timeout() {
-        let connect_timeout = Duration::from_millis(100);
-        let network = test_network(Config {
-            connect_timeout,
-            ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+    #[test]
+    fn test_pending_network_operations_observe_worker_closure() {
+        let (send, recv, peer) = iouring::Runner::default().start(|_| async {
+            let (socket, peer) = UnixStream::pair().unwrap();
+            let fd: Arc<OwnedFd> = Arc::new(socket.into());
+            let mut registry = Registry::default();
+            let mut sink = Sink::new(fd.clone(), Duration::from_secs(1));
+            let mut stream = Stream::new(fd, Duration::from_secs(1), 0, test_pool(&mut registry));
+            let mut send = Box::pin(async move { sink.send(b"x").await });
+            let mut recv = Box::pin(async move { stream.recv(1).await });
 
-        tests::test_network_connect_timeout(network, connect_timeout).await;
+            // Retain registered futures across shutdown, including their
+            // resources, before polling their original worker's closed state.
+            assert!(futures::poll!(send.as_mut()).is_pending());
+            assert!(futures::poll!(recv.as_mut()).is_pending());
+
+            (send, recv, peer)
+        });
+
+        assert!(matches!(
+            futures::executor::block_on(send),
+            Err(Error::SendFailed)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(recv),
+            Err(Error::RecvFailed)
+        ));
+        drop(peer);
+    }
+
+    #[test]
+    fn test_trait() {
+        iouring::Runner::default().start(|context| async move {
+            // Verify the io_uring backend satisfies the shared network trait suite.
+            tests::test_network_trait(context, || {
+                test_network(Config {
+                    read_write_timeout: Duration::from_secs(15),
+                    ..Default::default()
+                })
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn test_connect_timeout() {
+        iouring::Runner::default().start(|context| async move {
+            let connect_timeout = Duration::from_millis(100);
+            let network = test_network(Config {
+                connect_timeout,
+                ..Default::default()
+            });
+
+            tests::test_network_connect_timeout(context, network, connect_timeout).await;
+        });
     }
 
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        // Exercise the io_uring backend under the shared stress suite.
-        tests::stress_test_network_trait(|| {
-            test_network(Config {
-                iouring_config: iouring::Config {
-                    size: 256,
-                    ..Default::default()
-                },
+    #[test]
+    fn test_stress_trait() {
+        iouring::Runner::new(
+            iouring::Config::default().with_ring_config(iouring::RingConfig {
+                size: 256,
                 ..Default::default()
-            })
-            .expect("Failed to start io_uring")
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_small_send_read_quickly() {
-        // Verify a small message is delivered promptly through the buffered recv path.
-        let network = test_network(Config::default()).expect("Failed to start io_uring");
-
-        // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        // Spawn a task to accept and read
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
-
-            // Read a small message (much smaller than the 64KB buffer)
-            stream.recv(10).await.unwrap()
+            }),
+        )
+        .start(|context| async move {
+            tests::stress_test_network_trait(context, || test_network(Config::default())).await;
         });
-
-        // Connect and send a small message
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        let msg = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        sink.send(msg.clone()).await.unwrap();
-
-        // Wait for the reader to complete
-        let received = reader.await.unwrap();
-
-        // Verify we got the right data
-        assert_eq!(received.coalesce(), msg.as_slice());
     }
 
-    #[tokio::test]
-    async fn test_read_timeout_with_partial_data() {
-        // Verify a top-level recv returns timeout after partial progress stalls.
-        // Use a short timeout to make the test fast
-        let op_timeout = Duration::from_millis(100);
-        let network = test_network(Config {
-            read_write_timeout: op_timeout,
-            ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+    #[test]
+    fn test_read_timeout_with_partial_data() {
+        iouring::Runner::default().start(|context| async move {
+            let op_timeout = Duration::from_millis(100);
+            let network = test_network(Config {
+                read_write_timeout: op_timeout,
+                ..Default::default()
+            });
 
-        // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let reader = context.child("reader").spawn(move |_| async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-            // Try to read 100 bytes, but only 5 will be sent
-            let start = Instant::now();
-            let result = stream.recv(100).await;
-            let elapsed = start.elapsed();
+                // Keep the call pending after a short read so expiry must
+                // return an error instead of exposing a partial result.
+                let start = Instant::now();
+                let result = stream.recv(100).await;
+                let elapsed = start.elapsed();
 
-            (result, elapsed)
+                // Failed buffered reads expose no partial data and cannot resume.
+                assert!(stream.peek(100).is_empty());
+                assert!(matches!(stream.recv(1).await, Err(Error::Closed)));
+
+                (result, elapsed)
+            });
+
+            let (mut sink, _stream) = network.dial(addr).await.unwrap();
+            sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+
+            let (result, elapsed) = reader.await.unwrap();
+            assert!(matches!(result, Err(Error::Timeout)));
+            assert!(elapsed >= op_timeout);
+
+            // Allow some margin for scheduling and timer precision.
+            assert!(elapsed < op_timeout * 3);
         });
-
-        // Connect and send only partial data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
-
-        // Wait for the reader to complete
-        let (result, elapsed) = reader.await.unwrap();
-        assert!(matches!(result, Err(Error::Timeout)));
-
-        // Verify the timeout occurred around the expected time
-        assert!(elapsed >= op_timeout);
-        // Allow some margin for timing variance
-        assert!(elapsed < op_timeout * 3);
     }
 
-    #[tokio::test]
-    async fn test_unbuffered_mode() {
-        // Verify disabling the internal read buffer preserves direct recv behavior.
-        // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
-        let network = test_network(Config {
-            read_buffer_size: 0,
-            ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+    #[test]
+    fn test_carried_receive_deadline_completes_without_rescheduling() {
+        iouring::Runner::default().start(|context| async move {
+            let timeout = Duration::from_secs(1);
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let mut observer = socket.try_clone().unwrap();
+            let mut registry = Registry::default();
+            let mut stream = Stream::new(
+                Arc::new(socket.into()),
+                timeout,
+                8,
+                test_pool(&mut registry),
+            );
+            let notified = Arc::new(Notify::default());
+            let waker = Waker::from(notified.clone());
+            let mut cx = Context::from_waker(&waker);
 
-        // Bind a listener
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            peer.write_all(b"x").unwrap();
+            {
+                let deadline = Instant::now() + timeout;
+                let mut receive = pin!(stream.recv(2));
+                assert!(receive.poll_unpin(&mut cx).is_pending());
 
-        // Accept one connection and verify that peeking never observes buffered
-        // bytes because the wrapper should not retain any internal read state.
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+                // Let the first refill complete without observing its result.
+                while !notified.0.load(Ordering::Relaxed) {
+                    assert!(Instant::now() < deadline, "first refill did not complete");
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                assert!(Instant::now() < deadline);
+                assert_eq!(
+                    observer.read(&mut [0]).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
 
-            // In unbuffered mode, peek should always return empty
-            assert!(stream.peek(100).is_empty());
+                // The next refill carries the first call's deadline. A timer
+                // wake proves the worker's cached time has passed that deadline.
+                context.sleep(timeout).await;
+                peer.write_all(b"y").unwrap();
+                assert!(matches!(
+                    receive.poll_unpin(&mut cx),
+                    Poll::Ready(Err(Error::Timeout))
+                ));
+            }
 
-            // Read messages without buffering
-            let buf1 = stream.recv(5).await.unwrap();
-
-            // Even after recv, peek should be empty in unbuffered mode
-            assert!(stream.peek(100).is_empty());
-
-            let buf2 = stream.recv(5).await.unwrap();
-            assert!(stream.peek(100).is_empty());
-
-            (buf1, buf2)
+            context.sleep(Duration::from_millis(1)).await;
+            let mut remaining = [0];
+            assert_eq!(observer.read(&mut remaining).unwrap(), 1);
+            assert_eq!(&remaining, b"y");
         });
-
-        // Send two independent messages so the reader exercises repeated direct recvs.
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
-        sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
-
-        // Both messages should arrive exactly as sent, with no extra bytes hidden in `peek`.
-        let (buf1, buf2) = reader.await.unwrap();
-
-        assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
-        assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
     }
 
-    #[tokio::test]
-    async fn test_op_fd_keeps_descriptor_alive() {
-        // Verify queued recv requests keep their socket fd alive after caller cancellation.
-        // When a recv future is cancelled (e.g. via select!) after the Request has
-        // been sent to the io_uring channel, the Stream can be dropped while
-        // the request is still queued. The request's fd field keeps the socket alive
-        // so the OS cannot reuse the FD number.
-        let op_timeout = Duration::from_millis(200);
-        let network = test_network(Config {
-            read_write_timeout: op_timeout,
-            ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+    #[test]
+    fn test_unbuffered_mode() {
+        iouring::Runner::default().start(|context| async move {
+            let network = test_network(Config {
+                read_buffer_size: 0,
+                ..Default::default()
+            });
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        let (client_sink, mut client_stream) = network.dial(addr).await.unwrap();
-        let (_addr, _server_sink, _server_stream) = listener.accept().await.unwrap();
+            let reader = context.child("reader").spawn(move |_| async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
-        // Sink + stream + our clone.
-        let fd = client_stream.fd.clone();
-        assert_eq!(Arc::strong_count(&fd), 3);
+                // Direct receives must leave no unread bytes in the stream buffer.
+                assert!(stream.peek(100).is_empty());
+                let buf1 = stream.recv(5).await.unwrap();
+                assert!(stream.peek(100).is_empty());
 
-        // Cancel a recv mid-flight (blocks because no data arrives).
-        select! {
-            _ = client_stream.recv(1) => unreachable!("no data was sent"),
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-        }
+                let buf2 = stream.recv(5).await.unwrap();
+                assert!(stream.peek(100).is_empty());
 
-        // The queued request holds an additional clone.
-        assert_eq!(Arc::strong_count(&fd), 4);
+                (buf1, buf2)
+            });
 
-        // Drop all handles. The queued request still retains the fd.
-        drop(client_sink);
-        drop(client_stream);
-        assert_eq!(Arc::strong_count(&fd), 2); // our clone + request
+            let (mut sink, _stream) = network.dial(addr).await.unwrap();
+            sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+            sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
-        // After op_timeout, the request completes and releases its fd clone.
-        tokio::time::sleep(op_timeout).await;
-        assert_eq!(Arc::strong_count(&fd), 1);
+            let (buf1, buf2) = reader.await.unwrap();
+            assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
+            assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
+        });
     }
 
-    #[tokio::test]
-    async fn test_peek_with_buffered_data() {
-        // Verify buffered recv calls leave unread bytes visible via peek().
-        // Use default buffer size to enable buffering
-        let network = test_network(Config::default()).expect("Failed to start io_uring");
+    #[test]
+    fn test_cancelled_recv_retains_descriptor_until_completion() {
+        iouring::Runner::default().start(|context| async move {
+            let op_timeout = Duration::from_millis(200);
+            let network = test_network(Config {
+                read_write_timeout: op_timeout,
+                ..Default::default()
+            });
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let (client_sink, mut client_stream) = network.dial(addr).await.unwrap();
+            let (_addr, _server_sink, _server_stream) = listener.accept().await.unwrap();
 
-            // Initially peek should be empty (no data received yet)
-            assert!(stream.peek(100).is_empty());
+            // Sink + stream + our clone.
+            let fd = client_stream.fd.clone();
+            assert_eq!(Arc::strong_count(&fd), 3);
 
-            // Receive partial data - this should buffer more than requested
+            // Cancel a recv mid-flight (blocks because no data arrives).
+            select! {
+                _ = client_stream.recv(1) => unreachable!("no data was sent"),
+                _ = context.sleep(Duration::from_millis(50)) => {},
+            }
+
+            // Cancellation cannot release the descriptor before the receive CQE.
+            assert_eq!(Arc::strong_count(&fd), 4);
+
+            // Only this test and the in-flight request retain the descriptor.
+            drop(client_sink);
+            drop(client_stream);
+            assert_eq!(Arc::strong_count(&fd), 2);
+
+            // Allow the worker to process cancellation and retire the request.
+            context.sleep(op_timeout).await;
+            assert_eq!(Arc::strong_count(&fd), 1);
+        });
+    }
+
+    #[test]
+    fn test_peek_with_buffered_data() {
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut registry = Registry::default();
+        let mut stream = Stream::new(
+            Arc::new(socket.into()),
+            Duration::from_secs(1),
+            64,
+            test_pool(&mut registry),
+        );
+        assert!(stream.peek(100).is_empty());
+
+        // Queue the full payload before receiving so the fill can read ahead.
+        peer.write_all(b"hello world").unwrap();
+        let mut stream = iouring::Runner::default().start(|_| async move {
             let first = stream.recv(5).await.unwrap();
             assert_eq!(first.coalesce(), b"hello");
-
-            // Peek should show remaining buffered data
-            let peeked = stream.peek(100);
-            assert!(!peeked.is_empty());
-            assert_eq!(peeked, b" world");
-
-            // Peek again should return the same (non-consuming)
             assert_eq!(stream.peek(100), b" world");
 
-            // Peek with max_len should truncate
+            // Peeking does not consume bytes and respects the requested limit.
+            assert_eq!(stream.peek(100), b" world");
             assert_eq!(stream.peek(3), b" wo");
+            assert!(stream.peek(0).is_empty());
 
-            // Receive the rest
-            let rest = stream.recv(6).await.unwrap();
-            assert_eq!(rest.coalesce(), b" world");
+            // A shorter refill must replace the previous readable extent.
+            peer.write_all(b"xy").unwrap();
+            assert_eq!(stream.recv(7).await.unwrap().coalesce(), b" worldx");
+            assert_eq!(stream.peek(100), b"y");
 
-            // Peek should be empty after consuming all buffered data
+            // Buffered prefixes and later refills must survive the direct path.
+            let direct = [b'z'; 64];
+            peer.write_all(&direct).unwrap();
+            let received = stream.recv(65).await.unwrap().coalesce();
+            assert_eq!(&received.as_ref()[..1], b"y");
+            assert_eq!(&received.as_ref()[1..], &direct);
             assert!(stream.peek(100).is_empty());
+
+            peer.write_all(b"next").unwrap();
+            assert_eq!(stream.recv(2).await.unwrap().coalesce(), b"ne");
+            assert_eq!(stream.peek(100), b"xt");
+            stream
         });
 
-        // Connect and send data
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(b"hello world").await.unwrap();
-
-        reader.await.unwrap();
+        // Buffered bytes remain readable after the worker has shut down.
+        let rest = futures::executor::block_on(stream.recv(2)).unwrap();
+        assert_eq!(rest.coalesce(), b"xt");
+        assert!(stream.peek(100).is_empty());
     }
 
-    #[tokio::test]
-    async fn test_submit_recv_returns_bytes_for_this_call() {
-        // Verify `submit_recv` translates the request state's cumulative total
-        // back into the per-call byte count expected by the higher-level recv loop.
-        let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry("pool"));
-        let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
-            &mut registry.sub_registry("iouring"),
-        );
-        let handle = std::thread::spawn(move || io_loop.run());
+    #[test]
+    fn test_submit_recv_returns_bytes_for_this_call() {
+        iouring::Runner::default().start(|_| async {
+            let mut registry = Registry::default();
+            let pool = test_pool(&mut registry.sub_registry("pool"));
+            let (left, mut right) = UnixStream::pair().unwrap();
+            let stream = Stream::new(Arc::new(left.into()), Duration::from_secs(1), 0, pool);
 
-        // Build the wrapper directly so the test exercises `submit_recv`
-        // without involving the higher-level buffered recv machinery.
-        let (left, mut right) = UnixStream::pair().unwrap();
-        let stream = Stream::new(
-            Arc::new(left.into()),
-            submitter,
-            Duration::from_secs(1),
-            0,
-            pool,
-        );
+            // Preserve an existing two-byte prefix while receiving three more bytes.
+            right.write_all(b"abc").unwrap();
+            let buffer = IoBufMut::from(b"xy___");
+            let result = stream
+                .submit_recv(buffer, 2, 3, true, Instant::now() + Duration::from_secs(1))
+                .await;
 
-        // Pretend the caller already filled two bytes, then complete exactly
-        // three more bytes from the socket.
-        let writer = tokio::task::spawn_blocking(move || right.write_all(b"abc"));
-        let buffer = IoBufMut::with_capacity(5);
-        let result = stream
-            .submit_recv(buffer, 2, 3, true, Instant::now() + Duration::from_secs(1))
-            .await;
-
-        // The wrapper should report only the bytes read by this invocation,
-        // not the cumulative total tracked inside the request state.
-        writer.await.unwrap().unwrap();
-        let (_buffer, read) = result.expect("submit_recv should succeed");
-        assert_eq!(read, 3);
-
-        drop(stream);
-        handle.join().unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_vectored_send_path() {
-        // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
-        let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
-        let handle = std::thread::spawn(move || io_loop.run());
-
-        let (left, mut right) = UnixStream::pair().unwrap();
-        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
-
-        // Queue two buffers so the wrapper must preserve vectored ordering.
-        let mut bufs = IoBufs::default();
-        bufs.append(IoBuf::from(b"ab"));
-        bufs.append(IoBuf::from(b"cd"));
-
-        // Read from the peer in one shot so the final payload ordering is unambiguous.
-        let reader = tokio::task::spawn_blocking(move || {
-            let mut buf = [0u8; 4];
-            right.read_exact(&mut buf).unwrap();
-            buf
+            // Report this call's progress while returning the whole buffer.
+            let (buffer, read) = result.expect("submit_recv should succeed");
+            assert_eq!(read, 3);
+            assert_eq!(buffer.as_ref(), b"xyabc");
         });
-
-        // The peer should observe the concatenated payload in-order.
-        sink.send(bufs).await.unwrap();
-        assert_eq!(&reader.await.unwrap(), b"abcd");
-
-        drop(sink);
-        handle.join().unwrap();
     }
 
-    #[tokio::test]
-    async fn test_zero_length_send_short_circuits_before_submit() {
-        // Verify empty sends return locally without depending on a live io_uring loop.
-        let mut registry = Registry::default();
-        let (submitter, io_loop) =
-            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
-        drop(io_loop);
+    #[test]
+    fn test_large_recv_skips_internal_buffer() {
+        iouring::Runner::default().start(|context| async move {
+            let network = test_network(Config {
+                read_buffer_size: 8,
+                ..Default::default()
+            });
 
-        // Construct a sink whose handle would fail immediately if the wrapper
-        // tried to hand work to the loop.
-        let (left, _right) = UnixStream::pair().unwrap();
-        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let expected = b"abcdefgh";
 
-        sink.send(IoBufs::default()).await.unwrap();
-        sink.send(IoBuf::default()).await.unwrap();
-        sink.send(Vec::<u8>::new()).await.unwrap();
-    }
+            // Accept one connection and issue a recv that exactly matches the
+            // internal buffer size, forcing the direct-recv branch.
+            let reader = context.child("reader").spawn(move |_| async move {
+                let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+                let received = stream.recv(expected.len()).await.unwrap();
+                assert!(stream.peek(1).is_empty());
+                received
+            });
 
-    #[tokio::test]
-    async fn test_large_recv_skips_internal_buffer() {
-        // Verify reads that are at least as large as the internal buffer go
-        // straight into the caller-owned output buffer.
-        let network = test_network(Config {
-            read_buffer_size: 8,
-            ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+            let (mut sink, _stream) = network.dial(addr).await.unwrap();
+            sink.send(expected).await.unwrap();
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let expected = *b"abcdefgh";
-
-        // Accept one connection and issue a recv that exactly matches the
-        // internal buffer size, forcing the direct-recv branch.
-        let reader = tokio::spawn(async move {
-            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
-            let received = stream.recv(expected.len()).await.unwrap();
-            assert!(stream.peek(1).is_empty());
-            received
+            assert_eq!(reader.await.unwrap().coalesce(), expected);
         });
-
-        let (mut sink, _stream) = network.dial(addr).await.unwrap();
-        sink.send(expected.to_vec()).await.unwrap();
-
-        assert_eq!(reader.await.unwrap().coalesce(), expected);
     }
 
-    #[tokio::test]
-    async fn test_configured_socket_options_cover_accept_and_dial_paths() {
-        // Verify both dial and accept exercise the configured socket-option branches.
-        let network = test_network(Config {
-            tcp_nodelay: Some(true),
-            zero_linger: true,
-            ..Default::default()
-        })
-        .expect("Failed to start io_uring");
+    #[test]
+    fn test_socket_options_on_accept_and_dial() {
+        iouring::Runner::default().start(|_| async {
+            for (tcp_nodelay, zero_linger) in
+                [(Some(true), true), (Some(false), false), (None, false)]
+            {
+                let network = test_network(Config {
+                    tcp_nodelay,
+                    zero_linger,
+                    ..Default::default()
+                });
+                let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+                let address = listener.local_addr().unwrap();
 
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
+                let (client_sink, _client_stream) = network.dial(address).await.unwrap();
+                let (_, server_sink, _server_stream) = listener.accept().await.unwrap();
 
-        // Accepting the connection covers the listener-side option setters.
-        let accepter = tokio::spawn(async move {
-            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+                // Both connection paths must apply the policy. Unconfigured
+                // sockets retain the default Nagle and disabled-linger settings.
+                let expected = (
+                    tcp_nodelay.unwrap_or(false),
+                    zero_linger.then_some(Duration::ZERO),
+                );
+                for fd in [&client_sink.fd, &server_sink.fd] {
+                    assert_eq!(socket_options(fd), expected);
+                }
+            }
         });
-
-        // Dialing the listener covers the client-side option setters.
-        let (_sink, _stream) = network.dial(addr).await.unwrap();
-        accepter.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_disabled_socket_options_cover_accept_and_dial_paths() {
-        // Verify both dial and accept also cover the "do not touch socket options" branches.
-        let network = test_network(Config {
-            tcp_nodelay: None,
-            zero_linger: false,
-            ..Default::default()
-        })
-        .expect("Failed to start io_uring");
-
-        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let accepter = tokio::spawn(async move {
-            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
-        });
-
-        let (_sink, _stream) = network.dial(addr).await.unwrap();
-        accepter.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_channel_close_fallbacks() {
-        // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
-        let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry("pool"));
-        let (submitter, io_loop) = iouring::IoUringLoop::new(
-            iouring::Config::default(),
-            &mut registry.sub_registry("iouring"),
-        );
-        let recv_handle = submitter.clone();
-        drop(io_loop);
-
-        // Send should fail locally once the submission channel has been
-        // disconnected and no loop remains to accept work.
-        let (send_left, _send_right) = UnixStream::pair().unwrap();
-        let mut sink = Sink::new(
-            Arc::new(send_left.into()),
-            submitter,
-            Duration::from_secs(1),
-        );
-        assert!(matches!(sink.send(b"hello").await, Err(Error::SendFailed)));
-
-        // Recv should surface the symmetric wrapper-specific failure.
-        let (recv_left, _recv_right) = UnixStream::pair().unwrap();
-        let mut stream = Stream::new(
-            Arc::new(recv_left.into()),
-            recv_handle,
-            Duration::from_secs(1),
-            0,
-            pool,
-        );
-        assert!(matches!(stream.recv(1).await, Err(Error::RecvFailed)));
     }
 }

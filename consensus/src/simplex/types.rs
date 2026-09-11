@@ -5,8 +5,8 @@ use crate::{
     simplex::scheme::{self, CertificateVerifier},
     types::{Epoch, Participant, Round, View},
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
     Digest, PublicKey,
     certificate::{AssemblyError, Attestation, Scheme},
@@ -3035,7 +3035,6 @@ mod tests {
             ed25519, secp256r1,
         },
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -4075,7 +4074,7 @@ mod tests {
         notarize.write(&mut buf);
 
         // Decoding should fail
-        let result = ConflictingNotarize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        let result = ConflictingNotarize::<ed25519::Scheme, Sha256>::decode(buf);
         assert!(result.is_err());
     }
 
@@ -4110,7 +4109,7 @@ mod tests {
         finalize.write(&mut buf);
 
         // Decoding should fail
-        let result = ConflictingFinalize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        let result = ConflictingFinalize::<ed25519::Scheme, Sha256>::decode(buf);
         assert!(result.is_err());
     }
 

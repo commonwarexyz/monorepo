@@ -355,7 +355,7 @@ use crate::{
     transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{
-    Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
+    Buf, Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
@@ -633,7 +633,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl Buf,
         (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let max_participants_usize = max_participants.get() as usize;
@@ -1019,7 +1019,7 @@ impl<V: Variant> Read for DealerPubMsg<V> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl Buf,
         &max_size: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
@@ -1068,10 +1068,7 @@ impl Write for DealerPrivMsg {
 impl Read for DealerPrivMsg {
     type Cfg = ();
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self::new(Scalar::read_cfg(
             buf,
             &ScalarReadCfg::RejectZero,
@@ -1112,10 +1109,7 @@ impl<P: PublicKey> Write for PlayerAck<P> {
 impl<P: PublicKey> Read for PlayerAck<P> {
     type Cfg = ();
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             sig: ReadExt::read(buf)?,
         })
@@ -1181,10 +1175,7 @@ impl<P: PublicKey> Write for AckOrReveal<P> {
 impl<P: PublicKey> Read for AckOrReveal<P> {
     type Cfg = ();
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
             0 => Ok(Self::Ack(ReadExt::read(buf)?)),
@@ -1259,7 +1250,7 @@ impl<P: PublicKey> Read for DealerResult<P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl Buf,
         &max_players: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
@@ -1327,10 +1318,7 @@ impl<V: Variant, P: PublicKey> Write for DealerLog<V, P> {
 impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             pub_msg: Read::read_cfg(buf, cfg)?,
             results: Read::read_cfg(buf, cfg)?,
@@ -1492,10 +1480,7 @@ impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
 impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
     type Cfg = NonZeroU32;
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             dealer: ReadExt::read(buf)?,
             log: Read::read_cfg(buf, cfg)?,
