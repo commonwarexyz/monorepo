@@ -75,6 +75,56 @@ where
     }
 }
 
+/// Closes supervision and finishes metrics when a task exits or is discarded.
+struct TaskGuard {
+    /// Supervision subtree owned by the task.
+    tree: Arc<Tree>,
+    /// Running-task metric, finished once even if cancellation already updated it.
+    metric: MetricHandle,
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.tree.abort();
+        self.metric.finish();
+    }
+}
+
+/// Closes supervision and finishes metrics if task construction unwinds.
+///
+/// A spawn holds this guard while running the user's task factory, then
+/// disarms it by transferring the metric to the execution wrapper.
+pub(crate) struct FactoryGuard<'a> {
+    /// Supervision node closed if construction fails.
+    tree: &'a Arc<Tree>,
+    /// Metric transferred to the execution wrapper after construction succeeds.
+    metric: Option<MetricHandle>,
+}
+
+impl<'a> FactoryGuard<'a> {
+    /// Arm the guard around a task factory call.
+    pub(crate) const fn new(tree: &'a Arc<Tree>, metric: MetricHandle) -> Self {
+        Self {
+            tree,
+            metric: Some(metric),
+        }
+    }
+
+    /// Hand the metric to the execution wrapper once construction has succeeded.
+    pub(crate) fn disarm(mut self) -> MetricHandle {
+        self.metric.take().expect("factory guard disarmed twice")
+    }
+}
+
+impl Drop for FactoryGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(metric) = &self.metric {
+            metric.finish();
+            self.tree.abort();
+        }
+    }
+}
+
 /// Normalizes receiver-backed and future-backed completions behind one abortable future.
 enum Completion<T>
 where
@@ -120,13 +170,23 @@ where
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
+        // Install cleanup before the first poll so rejected tasks also close
+        // supervision and finish their metrics when the future is dropped.
+        let guard = TaskGuard {
+            tree,
+            metric: metric.clone(),
+        };
+
         // Wrap the future with panic catching, abort support, and cleanup.
         //
         // Everything is done in a single async block (and the function is marked
         // #[inline(always)]) so that stack usage is `size_of(F) + constant` rather than
         // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
-        let metric_handle = metric.clone();
         let task = async move {
+            // Cancellation can destroy the user future during this poll. Close
+            // its supervision subtree even if that destruction unwinds.
+            let _guard = guard;
+
             // Run future with panic catching and abort support
             let result =
                 Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
@@ -142,12 +202,6 @@ where
                 }
                 Err(Aborted) => {}
             }
-
-            // Mark the task as aborted and abort all descendants.
-            tree.abort();
-
-            // Finish the metric.
-            metric_handle.finish();
         };
 
         (

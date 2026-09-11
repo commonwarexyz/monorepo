@@ -502,7 +502,7 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Storage as _,
+        Blob, BufferPoolConfig, Runner, Spawner, Storage as _,
         deterministic::BoxDynRng,
         storage::{
             Layout,
@@ -514,16 +514,27 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_utils::{ScriptedRng, probability};
+    use rstest::rstest;
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
-    #[tokio::test]
-    async fn test_memory_storage() {
-        let storage = Storage::new(test_pool());
-        run_storage_tests(storage).await;
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_memory_storage<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let storage = Storage::new(test_pool());
+            run_storage_tests(context, storage).await;
+        });
     }
 
     #[tokio::test]
