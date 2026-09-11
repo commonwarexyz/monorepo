@@ -206,17 +206,17 @@ pub(crate) mod tests {
     pub struct TrackingReadBuf {
         inner: Bytes,
         /// Number of bulk reads.
-        pub bulk_read_calls: usize,
+        pub bulk_reads: usize,
         /// Number of single-byte reads.
-        pub byte_read_calls: usize,
+        pub byte_reads: usize,
     }
 
     impl TrackingReadBuf {
         pub fn new(bytes: &'static [u8]) -> Self {
             Self {
                 inner: Bytes::from_static(bytes),
-                bulk_read_calls: 0,
-                byte_read_calls: 0,
+                bulk_reads: 0,
+                byte_reads: 0,
             }
         }
     }
@@ -233,22 +233,22 @@ pub(crate) mod tests {
         }
 
         fn advance(&mut self, cnt: usize) {
-            self.bulk_read_calls += 1;
+            self.bulk_reads += 1;
             self.inner.advance(cnt)
         }
 
         fn get_u8(&mut self) -> u8 {
-            self.byte_read_calls += 1;
+            self.byte_reads += 1;
             self.inner.get_u8()
+        }
+
+        fn try_get_u8(&mut self) -> Result<u8, TryGetError> {
+            self.byte_reads += 1;
+            self.inner.try_get_u8()
         }
 
         fn copy_to_bytes(&mut self, len: usize) -> Bytes {
             self.inner.copy_to_bytes(len)
-        }
-
-        fn try_get_u8(&mut self) -> Result<u8, TryGetError> {
-            self.byte_read_calls += 1;
-            self.inner.try_get_u8()
         }
     }
 }

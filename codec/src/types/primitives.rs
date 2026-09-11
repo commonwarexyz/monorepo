@@ -109,6 +109,7 @@ impl Read for u8 {
         buf.try_get_u8().map_err(|_| Error::EndOfBuffer)
     }
 
+    // The upfront check bounds the allocation and guarantees `take` yields exactly `len` bytes.
     #[inline]
     fn read_vec(buf: &mut impl Buf, len: usize, _: &()) -> Result<Vec<Self>, Error> {
         at_least(buf, len)?;
@@ -576,15 +577,15 @@ mod tests {
         let mut buf = TrackingReadBuf::new(&[0x01, 0x02, 0x03]);
         let value = <[u8; 3]>::read_cfg(&mut buf, &()).unwrap();
         assert_eq!(value, [1, 2, 3]);
-        assert_eq!(buf.bulk_read_calls, 1);
-        assert_eq!(buf.byte_read_calls, 0);
+        assert_eq!(buf.bulk_reads, 1);
+        assert_eq!(buf.byte_reads, 0);
 
         // Other array element types still read one element at a time.
         let mut buf = TrackingReadBuf::new(&[0x01, 0x02, 0x03]);
         let value = <[Byte; 3]>::read_cfg(&mut buf, &()).unwrap();
         assert_eq!(value, [Byte(1), Byte(2), Byte(3)]);
-        assert_eq!(buf.bulk_read_calls, 0);
-        assert_eq!(buf.byte_read_calls, 3);
+        assert_eq!(buf.bulk_reads, 0);
+        assert_eq!(buf.byte_reads, 3);
     }
 
     #[test]
