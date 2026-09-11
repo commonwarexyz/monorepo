@@ -1,29 +1,24 @@
 #[cfg(feature = "external")]
 use crate::Pacer;
-#[cfg(not(feature = "iouring-network"))]
-use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
-#[cfg(feature = "iouring-storage")]
-use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-#[cfg(not(feature = "iouring-storage"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 use crate::{
     BlobLayout, BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
     METRICS_PREFIX, Name, SinkOf, StreamOf, child_label,
-    network::metered::Network as MeteredNetwork,
+    network::{
+        metered::Network as MeteredNetwork,
+        tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
+    },
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
-    storage::metered::Storage as MeteredStorage,
+    storage::{
+        metered::Storage as MeteredStorage,
+        tokio::{Config as TokioStorageConfig, Storage as TokioStorage},
+    },
     telemetry::metrics::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
         task::Label, validate_label,
     },
-    utils::{self, Panicker, signal::Stopper, supervision::Tree},
-};
-#[cfg(feature = "iouring-network")]
-use crate::{
-    iouring,
-    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
+    utils::{self, FactoryGuard, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -49,17 +44,6 @@ use tokio::{
     runtime::{Builder, Handle as RuntimeHandle},
     sync::Notify,
 };
-
-#[cfg(feature = "iouring-network")]
-cfg_if::cfg_if! {
-    if #[cfg(test)] {
-        // Use a smaller ring in tests to reduce `io_uring_setup` failures
-        // under parallel test load due to mlock/resource limits.
-        const IOURING_NETWORK_SIZE: u32 = 128;
-    } else {
-        const IOURING_NETWORK_SIZE: u32 = 1024;
-    }
-}
 
 #[derive(Debug)]
 struct Metrics {
@@ -478,35 +462,16 @@ impl crate::Runner for Runner {
         );
 
         // Initialize storage
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "iouring-storage")] {
-                let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
-                let storage = MeteredStorage::new(
-                    IoUringStorage::start(
-                        IoUringConfig {
-                            storage_directory: self.cfg.storage_directory.clone(),
-                            blob_layouts: self.cfg.storage_blob_layouts.clone(),
-                            iouring_config: Default::default(),
-                            thread_stack_size: self.cfg.thread_stack_size,
-                        },
-                        &mut iouring_registry,
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
-                );
-            } else {
-                let storage = MeteredStorage::new(
-                    TokioStorage::new(
-                        TokioStorageConfig::new(
-                            self.cfg.storage_directory.clone(),
-                            self.cfg.storage_blob_layouts.clone(),
-                        ),
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
-                );
-            }
-        }
+        let storage = MeteredStorage::new(
+            TokioStorage::new(
+                TokioStorageConfig::new(
+                    self.cfg.storage_directory.clone(),
+                    self.cfg.storage_blob_layouts.clone(),
+                ),
+                storage_buffer_pool.clone(),
+            ),
+            &mut runtime_registry,
+        );
 
         // Make any storage a prior process left in the page cache crash-durable before we open it,
         // so the data read during init is durable. This runs under the hold, after any straggling
@@ -519,46 +484,16 @@ impl crate::Runner for Runner {
         }
 
         // Initialize network
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "iouring-network")] {
-                let mut iouring_registry = runtime_registry.sub_registry("iouring_network");
-                let config = IoUringNetworkConfig {
-                    tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                    zero_linger: self.cfg.network_cfg.zero_linger,
-                    connect_timeout: self.cfg.network_cfg.connect_timeout,
-                    read_write_timeout: self.cfg.network_cfg.read_write_timeout,
-                    iouring_config: iouring::Config {
-                        // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
-                        size: IOURING_NETWORK_SIZE,
-                        max_request_timeout: self.cfg.network_cfg.read_write_timeout,
-                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
-                        ..Default::default()
-                    },
-                    thread_stack_size: self.cfg.thread_stack_size,
-                    ..Default::default()
-                };
-                let network = MeteredNetwork::new(
-                    IoUringNetwork::start(
-                        config,
-                        &mut iouring_registry,
-                        network_buffer_pool.clone(),
-                    )
-                    .unwrap(),
-                    &mut runtime_registry,
-                );
-            } else {
-                let config = TokioNetworkConfig::default()
-                    .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
-                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
-                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-                    .with_zero_linger(self.cfg.network_cfg.zero_linger);
-                let network = MeteredNetwork::new(
-                    TokioNetwork::new(config, network_buffer_pool.clone()),
-                    &mut runtime_registry,
-                );
-            }
-        }
+        let config = TokioNetworkConfig::default()
+            .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
+            .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+            .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+            .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
+            .with_zero_linger(self.cfg.network_cfg.zero_linger);
+        let network = MeteredNetwork::new(
+            TokioNetwork::new(config, network_buffer_pool.clone()),
+            &mut runtime_registry,
+        );
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -604,21 +539,8 @@ impl crate::Runner for Runner {
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "iouring-storage")] {
-        type Storage = MeteredStorage<IoUringStorage>;
-    } else {
-        type Storage = MeteredStorage<TokioStorage>;
-    }
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "iouring-network")] {
-        type Network = MeteredNetwork<IoUringNetwork>;
-    } else {
-        type Network = MeteredNetwork<TokioNetwork>;
-    }
-}
+type Storage = MeteredStorage<TokioStorage>;
+type Network = MeteredNetwork<TokioNetwork>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
@@ -677,10 +599,14 @@ impl crate::Spawner for Context {
         let Some(task_guard) = executor.tasks.admit() else {
             return Handle::closed(metric);
         };
+
+        // The factory runs user code. If it unwinds, the guard finishes the
+        // running gauge and closes the supervision node the wrapper never received.
+        let guard = FactoryGuard::new(&parent, metric);
         let future = f(self);
         let (f, handle) = Handle::init(
             future,
-            metric,
+            guard.disarm(),
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
@@ -932,8 +858,8 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _, Storage as _,
-        Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
+        AbortOnDrop, Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _,
+        Storage as _, Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
         tokio::telemetry,
     };
     use bytes::Bytes;
@@ -963,6 +889,13 @@ mod tests {
         Return,
         FuturePanic,
         ConstructorPanic,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum JoinRelease {
+        Task,
+        Completion,
+        Output,
     }
 
     fn spawn_drop_gated_task(
@@ -1200,6 +1133,98 @@ mod tests {
                 assert_runner_drains_spawned_task(execution, root_exit);
             }
         }
+    }
+
+    fn assert_join_all_releases_pending_work(release_owner: JoinRelease) {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (started, started_rx) = commonware_utils::channel::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let (joining, joining_rx) = std::sync::mpsc::channel();
+        let (done, done_rx) = std::sync::mpsc::channel();
+        let (exited, exited_rx) = std::sync::mpsc::channel();
+        let (drop_release, drop_release_rx) = std::sync::mpsc::channel();
+        drop(drop_release);
+        let release_on_drop = TaskDropGate {
+            entered: release.clone(),
+            release: drop_release_rx,
+        };
+
+        let runner = std::thread::spawn(move || {
+            Runner::new(cfg).start(move |context| async move {
+                let blocked = context
+                    .child("blocked")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        started.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        exited.send(()).unwrap();
+                        Ok::<_, Error>(None::<TaskDropGate>)
+                    })
+                    .abort_on_drop();
+                let failed = Handle::ready(Ok(Err(Error::Closed))).abort_on_drop();
+                let mut guards = vec![failed, blocked];
+                if matches!(release_owner, JoinRelease::Output) {
+                    guards.insert(
+                        0,
+                        Handle::ready(Ok(Ok(Some(release_on_drop)))).abort_on_drop(),
+                    );
+                } else {
+                    let pending = async move {
+                        let _release_on_drop = release_on_drop;
+                        futures::future::pending::<Result<Option<TaskDropGate>, Error>>().await
+                    };
+                    let pending = if matches!(release_owner, JoinRelease::Task) {
+                        context.child("pending").spawn(move |_| pending)
+                    } else {
+                        Handle::from_future(async move { Ok(pending.await) })
+                    };
+                    guards.push(pending.abort_on_drop());
+                }
+
+                started_rx.await.unwrap();
+                joining.send(()).unwrap();
+                let result = AbortOnDrop::join_all::<Error>(guards).await;
+                assert!(done.send((result, exited_rx.try_recv().is_ok())).is_ok());
+            });
+        });
+
+        joining_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("blocking task did not start");
+        let early = done_rx.recv_timeout(Duration::from_secs(5));
+        let completed = early.is_ok();
+
+        // Release the blocking poll even when cancellation stalls, so the runner can shut down.
+        let _ = release.send(());
+        let (result, exited) = early.unwrap_or_else(|_| {
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("joining did not finish after releasing the blocking task")
+        });
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            completed,
+            "joining stalled with release owned by {release_owner:?}"
+        );
+        assert!(exited, "joining returned before the blocking task exited");
+        assert!(matches!(result, Err(Error::Closed)));
+    }
+
+    #[test]
+    fn test_join_all_aborts_all_tasks_before_waiting() {
+        assert_join_all_releases_pending_work(JoinRelease::Task);
+    }
+
+    #[test]
+    fn test_join_all_drains_completions_concurrently() {
+        assert_join_all_releases_pending_work(JoinRelease::Completion);
+    }
+
+    #[test]
+    fn test_join_all_drops_outputs_before_waiting() {
+        assert_join_all_releases_pending_work(JoinRelease::Output);
     }
 
     #[test]
