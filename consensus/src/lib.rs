@@ -14,6 +14,7 @@ use commonware_macros::stability_scope;
 stability_scope!(BETA {
     use commonware_codec::{Codec, Encode};
     use commonware_cryptography::Digestible;
+    use std::sync::Arc;
 
     pub mod simplex;
 
@@ -32,6 +33,12 @@ stability_scope!(BETA {
     pub trait Heightable {
         /// Returns the height associated with this object.
         fn height(&self) -> Height;
+    }
+
+    impl<T: Heightable + ?Sized> Heightable for Arc<T> {
+        fn height(&self) -> Height {
+            self.as_ref().height()
+        }
     }
 
     /// Viewable is a trait that provides access to the view (round) number.
@@ -55,10 +62,18 @@ stability_scope!(BETA {
 
     /// Block is the interface for a block in the blockchain.
     ///
-    /// Blocks are used to track the progress of the consensus engine.
+    /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
+    /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
+    /// the same block.
     pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
+    }
+
+    impl<B: Block> Block for Arc<B> {
+        fn parent(&self) -> Self::Digest {
+            self.as_ref().parent()
+        }
     }
 
     /// CertifiableBlock extends [Block] with consensus context information.

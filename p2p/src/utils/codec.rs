@@ -121,7 +121,7 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Receive a message from an arbitrary recipient.
     pub async fn recv(&mut self) -> Result<WrappedMessage<R::PublicKey, V>, R::Error> {
         let (pk, bytes) = self.receiver.recv().await?;
-        let decoded = match V::decode_cfg(bytes.as_ref(), &self.config) {
+        let decoded = match V::decode_cfg(bytes, &self.config) {
             Ok(decoded) => decoded,
             Err(e) => {
                 return Ok((pk, Err(e)));
@@ -260,7 +260,7 @@ where
             } => {
                 let config = self.codec_config.clone();
                 let handle = self.strategy.spawn(bytes.len(), move |_| {
-                    let result = V::decode_cfg(bytes.as_ref(), &config);
+                    let result = V::decode_cfg(bytes, &config);
                     (peer, result)
                 });
                 decode_pool.push(handle);
@@ -293,7 +293,7 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
     };
     use commonware_actor::Feedback;
-    use commonware_codec::Encode;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         Signer,
         ed25519::{PrivateKey, PublicKey},
@@ -301,7 +301,12 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, channel::mpsc, ordered::Set, probability};
+    use commonware_utils::{
+        NZUsize,
+        channel::{mpsc, ring},
+        ordered::Set,
+        probability,
+    };
     use std::{
         io,
         num::NonZeroU32,
@@ -398,6 +403,11 @@ mod tests {
 
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> crate::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) = ring::channel(NZUsize!(1));
+            receiver
         }
     }
 
@@ -742,6 +752,76 @@ mod tests {
             values.sort_unstable();
 
             assert_eq!(values, (0..count).collect::<Vec<u32>>());
+        });
+    }
+
+    #[test_traced]
+    fn test_recv_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let sender = pk(0);
+            let value: Vec<IoBuf> = (0..8).map(|_| IoBuf::from(vec![1u8; 17])).collect();
+            let frame = value.encode();
+            let cfg = ((..).into(), (..).into());
+            let range = frame.as_ptr_range();
+
+            // Decoding the received frame by value hands out views of it
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send((sender.clone(), IoBuf::from(frame.clone())))
+                .expect("mock receiver should be open");
+            let mut receiver =
+                WrappedReceiver::<_, Vec<IoBuf>>::new(cfg, MockReceiver { receiver: rx });
+            let (from, decoded) = receiver.recv().await.unwrap();
+            let decoded = decoded.unwrap();
+            assert_eq!(from, sender);
+            assert_eq!(decoded, value);
+            assert!(decoded.iter().all(|b| range.contains(&b.as_ref().as_ptr())));
+
+            // Decoding a slice of the frame copies every field
+            let copied = Vec::<IoBuf>::decode_cfg(commonware_codec::Copying(&frame), &cfg).unwrap();
+            assert_eq!(copied, value);
+            assert!(copied.iter().all(|b| !range.contains(&b.as_ref().as_ptr())));
+        });
+    }
+
+    #[test_traced]
+    fn test_background_recv_view() {
+        deterministic::Runner::default().start(|context| async move {
+            let sender = pk(0);
+            let value: Vec<IoBuf> = (0..8).map(|_| IoBuf::from(vec![1u8; 17])).collect();
+            let encoded = value.encode();
+            let frames = [
+                ("external", IoBuf::from(encoded.clone())),
+                ("native", IoBuf::copy_from_slice(&encoded)),
+            ];
+            drop(encoded);
+
+            for (label, frame) in frames {
+                let range = frame.as_ref().as_ptr_range();
+                let (tx, receiver) = mpsc::unbounded_channel();
+                tx.send((sender.clone(), frame.clone())).unwrap();
+                drop(tx);
+                let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, Vec<IoBuf>, _>::new(
+                    context.child(label),
+                    MockReceiver { receiver },
+                    ((..).into(), (..).into()),
+                    NoopBlocker,
+                    NZUsize!(1),
+                    mocks::inline(NZUsize!(2)),
+                );
+                bg.start().await.unwrap();
+
+                let (from, decoded) = rx.recv().await.unwrap();
+                assert_eq!(from, sender);
+                assert!(
+                    decoded
+                        .iter()
+                        .all(|field| range.contains(&field.as_ref().as_ptr()))
+                );
+                drop(frame);
+                assert_eq!(decoded, value);
+                assert!(rx.recv().await.is_none());
+            }
         });
     }
 }

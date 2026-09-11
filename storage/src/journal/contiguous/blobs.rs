@@ -2,11 +2,16 @@
 
 use crate::{
     Context, SyncCompletion,
-    journal::{Error, frame::FrameReader},
+    journal::{
+        Error,
+        frame::{FrameReader, decode_item, decode_length_prefix},
+    },
 };
+use bytes::Bytes;
+use commonware_codec::{Buf, Codec, Error as CodecError, ReadExt};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
+    Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -633,6 +638,10 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
 }
 
 /// Sequential replay over either a sealed paged blob or a live writer view.
+///
+/// Decoding methods select a concrete backing buffer before reading fields so the
+/// compiler can specialize length checks and field-copy loops. Only the concrete
+/// buffers implement [`Buf`], keeping codec readers behind this dispatch.
 pub(super) struct Replay<'a, B: RBlob> {
     inner: ReplayInner<'a, B>,
 }
@@ -646,6 +655,36 @@ enum ReplayInner<'a, B: RBlob> {
 }
 
 impl<'a, B: RBlob> Replay<'a, B> {
+    /// Decode an item through its concrete backing buffer.
+    pub(super) fn read<A: ReadExt>(&mut self) -> Result<A, CodecError> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => A::read(replay),
+            ReplayInner::View(replay) => A::read(replay),
+        }
+    }
+
+    /// Decode a frame length through its concrete backing buffer.
+    #[inline]
+    pub(super) fn read_length(&mut self) -> Result<(usize, usize), Error> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => decode_length_prefix(replay),
+            ReplayInner::View(replay) => decode_length_prefix(replay),
+        }
+    }
+
+    /// Decode a frame payload bounded to `len` bytes through its concrete backing buffer.
+    pub(super) fn decode<V: Codec>(
+        &mut self,
+        len: usize,
+        cfg: &V::Cfg,
+        compressed: bool,
+    ) -> Result<V, Error> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
+            ReplayInner::View(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
+        }
+    }
+
     /// Wrap a paged replay handle.
     const fn paged(replay: PagedReplay<B>) -> Self {
         Self {
@@ -679,7 +718,14 @@ impl<'a, B: RBlob> Replay<'a, B> {
     }
 }
 
-impl<B: RBlob> Buf for Replay<'_, B> {
+impl<B: RBlob> bytes::Buf for Replay<'_, B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.copy_to_bytes(len),
+            ReplayInner::View(replay) => replay.copy_to_bytes(len),
+        }
+    }
+
     fn remaining(&self) -> usize {
         match &self.inner {
             ReplayInner::Paged(replay) => replay.remaining(),
@@ -711,9 +757,7 @@ struct ViewReplay<'a, B: RBlob> {
     /// Minimum read size when more bytes are needed.
     buffer_size: NonZeroUsize,
     /// Buffered logical bytes.
-    buf: Vec<u8>,
-    /// Offset of the next unread byte in `buf`.
-    cursor: usize,
+    buf: IoBufs,
     /// Whether `offset` has reached the source blob's logical size.
     exhausted: bool,
 }
@@ -729,8 +773,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
             blob,
             offset,
             buffer_size,
-            buf: Vec::new(),
-            cursor: 0,
+            buf: IoBufs::default(),
             exhausted: false,
         })
     }
@@ -740,11 +783,9 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
         self.exhausted
     }
 
-    /// Ensure at least `n` bytes are available through the [`Buf`] implementation.
+    /// Ensure at least `n` bytes are available through the [`bytes::Buf`] implementation.
     async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.remaining() < n && !self.exhausted {
-            self.compact();
-
             let blob_size = self.blob.size();
             let remaining = blob_size.saturating_sub(self.offset);
             if remaining == 0 {
@@ -768,7 +809,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .offset
                 .checked_add(read as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            self.buf.extend_from_slice(&buf.chunk()[..read]);
+            self.buf.append(IoBuf::from(Bytes::from(buf.freeze())));
             if self.offset == blob_size {
                 self.exhausted = true;
             }
@@ -776,38 +817,25 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
 
         Ok(self.remaining() >= n)
     }
-
-    /// Discard bytes already consumed through [`Buf::advance`].
-    fn compact(&mut self) {
-        match self.cursor {
-            0 => {}
-            cursor if cursor == self.buf.len() => {
-                self.buf.clear();
-                self.cursor = 0;
-            }
-            cursor => {
-                self.buf.drain(..cursor);
-                self.cursor = 0;
-            }
-        }
-    }
 }
 
-impl<B: RBlob> Buf for ViewReplay<'_, B> {
+impl<B: RBlob> Buf for ViewReplay<'_, B> {}
+
+impl<B: RBlob> bytes::Buf for ViewReplay<'_, B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        self.buf.copy_to_bytes(len)
+    }
+
     fn remaining(&self) -> usize {
-        self.buf.len() - self.cursor
+        self.buf.remaining()
     }
 
     fn chunk(&self) -> &[u8] {
-        &self.buf[self.cursor..]
+        self.buf.chunk()
     }
 
     fn advance(&mut self, cnt: usize) {
-        self.cursor = self
-            .cursor
-            .checked_add(cnt)
-            .expect("advance overflowed replay cursor");
-        assert!(self.cursor <= self.buf.len(), "advanced past replay buffer");
+        self.buf.advance(cnt);
     }
 }
 
@@ -833,6 +861,7 @@ impl<'a, B: RBlob> Blobs<'a, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{journal::frame::encode_frame_into, utils::codec::View};
     use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
     use commonware_utils::{NZU16, NZUsize};
 
@@ -866,6 +895,126 @@ mod tests {
             self.partition.open(blob).await?.sync().await?;
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_replay_preserves_byte_views_across_fills() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
+            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            let snapshot = writer.snapshot().await.unwrap();
+
+            for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
+                let paged = matches!(source, Blob::Sealed(_));
+                let mut replay = source
+                    .replay_from(0, NZUsize!(12), ReadOptions::default())
+                    .unwrap();
+                assert!(replay.ensure(12).await.unwrap());
+                let first_range = replay.chunk().as_ptr_range();
+                let first = replay.read::<View>().unwrap().bytes;
+                assert!(first_range.contains(&first.as_ptr()));
+
+                assert!(replay.ensure(16).await.unwrap());
+                let middle = replay.read::<View>().unwrap().bytes;
+                assert_eq!(first_range.contains(&middle.as_ptr()), paged);
+
+                let last_range = replay.chunk().as_ptr_range();
+                let last = replay.copy_to_bytes(8);
+                assert!(last_range.contains(&last.as_ptr()));
+                assert_eq!(replay.remaining(), 0);
+                assert!(!replay.ensure(1).await.unwrap());
+                assert!(replay.is_exhausted());
+                drop(replay);
+                assert_eq!(first.as_ref(), b"abcdefgh");
+                assert_eq!(middle.as_ref(), b"ijklmnop");
+                assert_eq!(last.as_ref(), b"qrstuvwx");
+            }
+        });
+    }
+
+    #[test]
+    fn test_replay_decodes_bounded_frames() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items = [
+                Bytes::from_static(b"abcdefgh"),
+                Bytes::from_static(b"ijklmnop"),
+                Bytes::from_static(b"qrstuvwx"),
+            ];
+            for compression in [None, Some(1)] {
+                let mut encoded = Vec::new();
+                for item in &items {
+                    encode_frame_into(compression, item, &mut encoded).unwrap();
+                }
+                let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+                let (blob, size) = context
+                    .open("replay-frames", &[compression.unwrap_or(0)])
+                    .await
+                    .unwrap();
+                let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+                writer.append(&encoded).await.unwrap();
+                let snapshot = writer.snapshot().await.unwrap();
+
+                for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
+                    let mut replay = source
+                        .clone()
+                        .replay_from(0, NZUsize!(12), ReadOptions::default())
+                        .unwrap();
+                    let mut retained = Vec::new();
+                    for _ in &items {
+                        assert!(replay.ensure(1).await.unwrap());
+                        let (len, prefix_len) = replay.read_length().unwrap();
+                        assert_eq!(prefix_len, 1);
+                        assert!(replay.ensure(len).await.unwrap());
+                        let contiguous = replay.chunk().len() >= len;
+                        let range = replay.chunk().as_ptr_range();
+                        let item = replay
+                            .decode::<Bytes>(len, &(8..=8).into(), compression.is_some())
+                            .unwrap();
+                        if compression.is_none() && contiguous {
+                            assert!(range.contains(&item.as_ptr()));
+                        }
+                        retained.push(item);
+                    }
+                    assert!(!replay.ensure(1).await.unwrap());
+                    assert_eq!(replay.remaining(), 0);
+                    drop(replay);
+                    assert_eq!(retained, items);
+
+                    if compression.is_none() {
+                        for case in 0..3 {
+                            let mut replay = source
+                                .clone()
+                                .replay_from(0, NZUsize!(12), ReadOptions::default())
+                                .unwrap();
+                            assert!(replay.ensure(12).await.unwrap());
+                            let (len, _) = replay.read_length().unwrap();
+                            match case {
+                                0 => assert!(matches!(
+                                    replay.decode::<Bytes>(len, &(..=7).into(), false),
+                                    Err(Error::Codec(CodecError::InvalidLength(8)))
+                                )),
+                                1 => {
+                                    let remaining = replay.remaining();
+                                    assert!(matches!(
+                                        replay.decode::<u64>(1, &(), false),
+                                        Err(Error::Codec(CodecError::EndOfBuffer))
+                                    ));
+                                    assert_eq!(replay.remaining(), remaining);
+                                }
+                                _ => assert!(matches!(
+                                    replay.decode::<u8>(len, &(), false),
+                                    Err(Error::Codec(CodecError::ExtraData(8)))
+                                )),
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     #[test]

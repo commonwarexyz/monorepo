@@ -377,7 +377,8 @@ impl<
         });
     }
 
-    /// Fetches missing proposal ancestry, preferring `target` when provided.
+    /// Fetches missing proposal ancestry. If `target` is provided, the resolver
+    /// queries only that peer.
     fn resolve<R>(
         &self,
         resolver: &mut R,
@@ -635,14 +636,18 @@ mod tests {
     use super::{super::test_helpers::*, *};
     use crate::{
         simplex::{
+            elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             scheme::ed25519,
             types::{Notarization, Notarize},
         },
-        types::TermLength,
+        types::{Round, TermLength, ViewDelta},
     };
     use commonware_actor::Feedback;
     use commonware_cryptography::{
-        certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+        Sha256,
+        certificate::{Scheme as _, mocks::Fixture},
+        ed25519::PublicKey,
+        sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_async};
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
@@ -669,6 +674,12 @@ mod tests {
 
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) =
+                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
+            receiver
         }
     }
 
@@ -973,6 +984,144 @@ mod tests {
         assert_targeted_fetch_does_not_restrict_existing_backfill(0);
     }
 
+    /// Certification recovery fetches a missing mid-term parent from an
+    /// available holder when the term leader is unavailable.
+    #[test_async]
+    async fn untargeted_parent_fetch_uses_available_holder() {
+        let runtime = deterministic::Runner::timed(Duration::from_secs(10));
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let elector: RoundRobinElector<TestScheme> = RoundRobin::<Sha256>::default()
+                .with_term(TERM_LENGTH, Duration::from_secs(1), ViewDelta::new(0))
+                .build(schemes[0].participants());
+            let leader = usize::from(elector.elect(Round::new(EPOCH, View::new(1)), None));
+            assert_eq!(
+                leader, 2,
+                "fixture must leave the stable leader unavailable"
+            );
+
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+
+            let mut connections = Vec::new();
+            for participant in &participants {
+                connections.push(
+                    oracle
+                        .control(participant.clone())
+                        .register(2, Quota::per_second(NZU32!(1_000)))
+                        .await
+                        .unwrap(),
+                );
+            }
+            let mut connections = connections.into_iter();
+            let requester_connection = connections.next().unwrap();
+            let first_holder_connection = connections.next().unwrap();
+            let _unavailable_leader_connection = connections.next().unwrap();
+            let second_holder_connection = connections.next().unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: probability!(1.0),
+            };
+            for holder in [&participants[1], &participants[3]] {
+                oracle
+                    .add_link(participants[0].clone(), holder.clone(), link.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(holder.clone(), participants[0].clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+
+            let (requester_voter_sender, mut requester_voter_receiver) =
+                mailbox::new(context.child("requester_voter"), NZUsize!(8));
+            let (requester, mut requester_mailbox) = TestActor::new(
+                context.child("requester"),
+                Config {
+                    scheme: schemes[0].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TERM_LENGTH,
+                },
+            );
+            let _requester = requester.start(
+                voter::Mailbox::new(requester_voter_sender),
+                requester_connection.0,
+                requester_connection.1,
+            );
+
+            let parent = build_notarization(&schemes, &verifier, EPOCH, View::new(2));
+            let mut holders = Vec::new();
+            for (index, connection) in [(1, first_holder_connection), (3, second_holder_connection)]
+            {
+                let (voter_sender, voter_receiver) =
+                    mailbox::new(context.child("holder_voter"), NZUsize!(8));
+                let (holder, mut holder_mailbox) = TestActor::new(
+                    context.child("holder"),
+                    Config {
+                        scheme: schemes[index].clone(),
+                        blocker: NoopBlocker,
+                        strategy: Sequential,
+                        epoch: EPOCH,
+                        mailbox_size: NZUsize!(8),
+                        fetch_timeout: Duration::from_millis(200),
+                        term_length: TERM_LENGTH,
+                    },
+                );
+                let handle = holder.start(
+                    voter::Mailbox::new(voter_sender),
+                    connection.0,
+                    connection.1,
+                );
+                holder_mailbox.updated(Certificate::Notarization(parent.clone()));
+                holder_mailbox.certified(parent.view(), true);
+                // Keep the holder and its mailboxes alive until the fetch completes.
+                holders.push((handle, holder_mailbox, voter_receiver));
+            }
+
+            // Request the parent from any peer. The voter test covers the child
+            // that triggers this request.
+            context.sleep(Duration::from_millis(10)).await;
+            requester_mailbox.resolve(View::new(3), View::new(2), Kind::Notarization, None);
+
+            let recovered = select! {
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox closed")
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("missing parent was not fetched from an available validator");
+                },
+            };
+            assert!(matches!(
+                recovered,
+                voter::Message::Verified {
+                    certificate: Certificate::Notarization(fetched),
+                    ..
+                } if fetched == parent
+            ));
+        });
+    }
+
     /// A valid notarization that does not settle the ask does not prevent a
     /// different peer from supplying the requested nullification.
     #[test_async]
@@ -1228,8 +1377,8 @@ mod tests {
         });
     }
 
-    /// A resolve without a target (no tracked round in the term knows the
-    /// leader) must fall back to an untargeted fetch, not be dropped.
+    /// A resolve without a target must open an untargeted fetch, not be
+    /// dropped.
     #[test_async]
     async fn resolve_without_target_falls_back_to_untargeted_fetch() {
         let runtime = deterministic::Runner::default();

@@ -1,15 +1,15 @@
+use self::msm::Backend as MBackend;
 use core::array;
 use subtle::{Choice, ConditionallySelectable};
 
-/// How many parallel operations we try and do via SIMD.
+/// Number of independent field or group elements carried by a vector for SIMD operations.
 ///
-/// This is set to the highest realistic number, targeting AVX-512.
-/// On other backends, this is larger than necessary.
+/// This targets AVX-512's eight 64-bit lanes, the widest native vector used by these backends.
+/// Backends with narrower registers emulate this lane count by processing smaller native tiles,
+/// such as NEON's two-lane tiles.
 ///
-/// This should not be harmful to performance, because a larger lane count
-/// can be emulated with a smaller lane count.
-/// An exception to this would be if the memory pressure were particularly bad,
-/// but given how small this value is, this shouldn't be an issue.
+/// A larger logical lane count can increase memory pressure, so operations that do not need
+/// all lanes can use smaller tiles directly.
 pub const LANES: usize = 8;
 
 /// The low 51 bits: what a limb holds once carries have been propagated out of it.
@@ -99,12 +99,18 @@ impl F {
             l[i + 1] += l[i] >> 51;
             l[i] &= MASK_51;
         }
+
+        // The carry out of limb 4 has at most 13 bits, so the fold stays below the `2^52` limb
+        // bound for every input and the compiler drops the multiply's overflow check.
+        const _: () = assert!(MASK_51 + (u64::MAX >> 51) * 19 < 1 << 52);
         l[0] += (l[4] >> 51) * 19;
         l[4] &= MASK_51;
         Self(l)
     }
 
     /// Carry-propagates the limbs for canonical serialization.
+    ///
+    /// The returned limbs are below `2^51`, except limb 1, which may equal `2^51`.
     fn carry(&self) -> Self {
         let mut l = Self::reduce(self.0).0;
         l[1] += l[0] >> 51;
@@ -148,11 +154,15 @@ impl F {
     }
 
     /// Returns whether two canonical representatives are equal.
+    ///
+    /// Variable-time, so use only with public field elements.
     pub fn eq(&self, other: &Self) -> bool {
         self.to_bytes() == other.to_bytes()
     }
 
     /// Returns whether the canonical representative is zero.
+    ///
+    /// Variable-time, so use only with public field elements.
     pub fn is_zero(&self) -> bool {
         self.eq(&Self::ZERO)
     }
@@ -188,6 +198,11 @@ impl F {
             c[i + 1] += c[i] >> 51;
             c[i] &= MASK;
         }
+
+        // The carry out of column 4 has at most 77 bits, so the fold stays below `2^102` for
+        // every input, the final carry keeps limb 1 below the `2^52` limb bound, and the compiler
+        // drops the multiply's overflow check.
+        const _: () = assert!(MASK + (u128::MAX >> 51) * 19 < 1 << 102);
         c[0] += 19 * (c[4] >> 51);
         c[4] &= MASK;
         c[1] += c[0] >> 51;
@@ -209,7 +224,11 @@ impl F {
         }
         let (low, high) = c.split_at_mut(5);
         for (low, high) in low.iter_mut().zip(high) {
-            *low += 19 * *high;
+            // On AArch64, a checked u128 multiply lowers to a branch on the operand's magnitude.
+            // Every column stays below `2^107` at the input bound, so assert that bound and
+            // multiply without a check.
+            assert!(*high < 1 << 107);
+            *low += high.wrapping_mul(19);
         }
         Self::from_wide([c[0], c[1], c[2], c[3], c[4]])
     }
@@ -334,6 +353,8 @@ impl FVec {
     }
 
     /// Selects `other` in lanes whose corresponding mask is true.
+    ///
+    /// Variable-time, so the mask must be public.
     fn select_lanes(self, other: Self, select_other: &[bool; LANES]) -> Self {
         let masks = select_other.map(|select| 0u64.wrapping_sub(select as u64));
         Self {
@@ -349,6 +370,14 @@ impl FVec {
 
 /// Abstracts over base field operations.
 pub trait FBackend: Copy {
+    /// Negates the selected lanes and preserves the other lanes' limb representations.
+    ///
+    /// Variable-time, so the mask must be public.
+    #[inline(always)]
+    fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        value.select_lanes(self.neg(value), negative)
+    }
+
     /// a + b.
     fn add(self, a: FVec, b: FVec) -> FVec;
 
@@ -361,6 +390,15 @@ pub trait FBackend: Copy {
     /// a * a.
     fn square(self, a: FVec) -> FVec {
         self.mul(a, a)
+    }
+
+    /// Squares every lane `k` times, returning `a` unchanged when `k` is zero.
+    #[inline(always)]
+    fn pow2k(self, mut a: FVec, k: u32) -> FVec {
+        for _ in 0..k {
+            a = self.square(a);
+        }
+        a
     }
 
     /// a - b.
@@ -432,8 +470,8 @@ impl G {
         //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
         //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
         //
-        // The formula is complete because d is non-square. The extended-coordinate invariant
-        // holds identically: (E*H)*(F*G) = (E*F)*(G*H).
+        // The formula is complete because a = -1 is a square and d is non-square. The
+        // extended-coordinate invariant holds identically: (E*H)*(F*G) = (E*F)*(G*H).
         let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
         let b = self.y.add(self.x).mul(rhs.y.add(rhs.x));
         let c = self.t.mul(rhs.t).mul(F::EDWARDS_D2);
@@ -573,7 +611,8 @@ impl GAffine {
         ]),
     };
 
-    /// Decompresses a point encoding, accepting non-canonical `y` values per ZIP215.
+    /// Decompresses a point encoding, accepting non-canonical `y` values and negative zero
+    /// (`x = 0` with the sign bit set) per ZIP215.
     pub fn decompress(bytes: &[u8; 32]) -> Option<Self> {
         let sign = bytes[31] >> 7;
         let y = F::from_bytes(bytes);
@@ -777,20 +816,9 @@ impl GAffineVec {
         }
     }
 
-    /// Untransposes backend lanes into scalar affine points.
-    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
-    pub fn untranspose(self) -> [GAffine; LANES] {
-        let x = self.x.untranspose();
-        let y = self.y.untranspose();
-        let t2d = self.t2d.untranspose();
-        array::from_fn(|i| GAffine {
-            x: x[i],
-            y: y[i],
-            t2d: t2d[i],
-        })
-    }
-
     /// Packs affine points, negating the selected lanes.
+    ///
+    /// Variable-time, so the lane signs must be public.
     pub fn from_signed_lanes<B: FBackend>(
         backend: B,
         lanes: &[GAffine; LANES],
@@ -802,19 +830,11 @@ impl GAffineVec {
         }
 
         Self {
-            x: packed.x.select_lanes(backend.neg(packed.x), negative),
+            x: backend.conditional_neg(packed.x, negative),
             y: packed.y,
-            t2d: packed.t2d.select_lanes(backend.neg(packed.t2d), negative),
+            t2d: backend.conditional_neg(packed.t2d, negative),
         }
     }
-}
-
-/// Squares `value` `k` times.
-fn pow2k<B: FBackend>(backend: B, mut value: FVec, k: u32) -> FVec {
-    for _ in 0..k {
-        value = backend.square(value);
-    }
-    value
 }
 
 /// Raises every lane to `2^250 - 1` using the standard addition chain.
@@ -825,18 +845,18 @@ fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
     let c = backend.mul(a, b);
     let d = backend.square(c);
     let e = backend.mul(b, d);
-    let f = backend.mul(pow2k(backend, e, 5), e);
-    let g = backend.mul(pow2k(backend, f, 10), f);
-    let h = backend.mul(pow2k(backend, g, 20), g);
-    let i = backend.mul(pow2k(backend, h, 10), f);
-    let j = backend.mul(pow2k(backend, i, 50), i);
-    let k = backend.mul(pow2k(backend, j, 100), j);
-    backend.mul(pow2k(backend, k, 50), i)
+    let f = backend.mul(backend.pow2k(e, 5), e);
+    let g = backend.mul(backend.pow2k(f, 10), f);
+    let h = backend.mul(backend.pow2k(g, 20), g);
+    let i = backend.mul(backend.pow2k(h, 10), f);
+    let j = backend.mul(backend.pow2k(i, 50), i);
+    let k = backend.mul(backend.pow2k(j, 100), j);
+    backend.mul(backend.pow2k(k, 50), i)
 }
 
 /// Raises every lane to `(p - 5) / 8 = 2^252 - 3` for point decompression.
 fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
-    backend.mul(value, pow2k(backend, pow_2_250_minus_1(backend, value), 2))
+    backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
 }
 
 /// Abstracts over group operations.
@@ -860,7 +880,7 @@ pub trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: FBackend + GBackend + Send + Sync + 'static {}
+pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
@@ -880,6 +900,9 @@ pub trait WithBackend {
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;
 
+// Backend bucket kernels for MSM. Signing owns digit recoding and scheduling.
+pub mod msm;
+
 // Now, a module for each backend.
 #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
 mod avx512;
@@ -898,9 +921,9 @@ pub fn test_backend() -> impl Backend {
 
 /// Run a computation with the best [`Backend`] this CPU supports.
 ///
-/// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection;
-/// AArch64 includes NEON in its baseline ISA. Every use is forced through this single gate so an
-/// accelerated backend is only constructed where its instructions are guaranteed to be available.
+/// This is the only way to gain access to a backend. AVX-512 requires runtime feature detection.
+/// Every use is forced through this single gate so an accelerated backend is only constructed
+/// where its instructions are guaranteed to be available.
 pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
     #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
     {
@@ -912,7 +935,6 @@ pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        // NEON is part of the AArch64 baseline, so no runtime feature check is needed.
         f.call(neon::Backend::new())
     }
     #[cfg(not(target_arch = "aarch64"))]

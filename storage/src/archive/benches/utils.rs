@@ -110,7 +110,7 @@ impl ArchiveTrait for Archive {
         self,
         index: u64,
         key: Key,
-        value: Val,
+        value: &Val,
     ) -> Result<Self, commonware_storage::archive::Error> {
         match self {
             Self::Immutable(a) => a.put(index, key, value).await.map(Self::Immutable),
@@ -208,7 +208,7 @@ pub async fn append_random(mut archive: Archive, count: u64) -> (Archive, Vec<Ke
 
         let mut val_buf = vec![0u8; VALUE_SIZE];
         rng.fill_bytes(&mut val_buf);
-        archive = archive.put(i, key, val_buf).await.unwrap();
+        archive = archive.put(i, key, &val_buf).await.unwrap();
     }
     archive = archive.sync().await.unwrap();
     (archive, keys)

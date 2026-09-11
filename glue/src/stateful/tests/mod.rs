@@ -952,6 +952,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
     type Context = <MultiApp as Application<deterministic::Context>>::Context;
     type Block = MultiBlock;
     type Databases = MultiDatabaseSet<deterministic::Context>;
+    type Captured = <MultiApp as Application<deterministic::Context>>::Captured;
     type Provider = ();
     type Input = ();
 
@@ -1005,7 +1006,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         <MultiApp as Application<deterministic::Context>>::apply(
             &mut self.inner,
             context,
@@ -1015,16 +1016,35 @@ impl Application<deterministic::Context> for GatedMultiApp {
         .await
     }
 
+    async fn capture(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        block: &Self::Block,
+        batches: &<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized,
+        readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
+    ) -> Self::Captured {
+        <MultiApp as Application<deterministic::Context>>::capture(
+            &mut self.inner,
+            context,
+            block,
+            batches,
+            readers,
+        )
+        .await
+    }
+
     async fn finalized(
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: &Self::Block,
+        captured: Self::Captured,
         readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
     ) {
         <MultiApp as Application<deterministic::Context>>::finalized(
             &mut self.inner,
             context,
             block,
+            captured,
             readers,
         )
         .await;
@@ -1181,7 +1201,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),
@@ -1313,7 +1333,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "stable-leader-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(64),
                     view_retention: ViewDelta::new(BLOCKS),
@@ -1504,7 +1524,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-multi-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),
@@ -1758,7 +1778,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone()),
+                    start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "prune-overlap-multi-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),

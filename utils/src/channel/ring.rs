@@ -70,6 +70,7 @@ struct Shared<T: Send + Sync> {
 ///
 /// This type can be cloned to create multiple producers for the same channel.
 /// The channel remains open until all senders are dropped.
+#[derive(Debug)]
 pub struct Sender<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
 }
@@ -81,6 +82,41 @@ impl<T: Send + Sync> Sender<T> {
     pub fn is_closed(&self) -> bool {
         let shared = self.shared.lock();
         shared.receiver_dropped
+    }
+
+    /// Sends an item, dropping the oldest buffered item if the channel is full.
+    ///
+    /// Returns `false` once the receiver has been dropped.
+    pub fn send_lossy(&self, item: T) -> bool {
+        let mut shared = self.shared.lock();
+
+        // Nothing will ever read a buffered item once the receiver is gone.
+        if shared.receiver_dropped {
+            return false;
+        }
+
+        // Make room by evicting the oldest item rather than blocking the sender.
+        let old_item = if shared.buffer.len() >= shared.capacity {
+            shared.buffer.pop_front()
+        } else {
+            None
+        };
+
+        // Buffer the item and take the receiver's waker so it can be woken
+        // once the lock is released.
+        shared.buffer.push_back(item);
+        let waker = shared.receiver_waker.take();
+        drop(shared);
+
+        // Drop the old item after the lock is released to avoid potential mutex poisoning
+        drop(old_item);
+
+        // Wake a receiver parked on an empty buffer.
+        if let Some(w) = waker {
+            w.wake();
+        }
+
+        true
     }
 }
 
@@ -126,30 +162,7 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        let mut shared = self.shared.lock();
-
-        if shared.receiver_dropped {
-            return Err(ChannelClosed);
-        }
-
-        let old_item = if shared.buffer.len() >= shared.capacity {
-            shared.buffer.pop_front()
-        } else {
-            None
-        };
-
-        shared.buffer.push_back(item);
-        let waker = shared.receiver_waker.take();
-        drop(shared);
-
-        // Drop the old item after the lock is released to avoid potential mutex poisoning
-        drop(old_item);
-
-        if let Some(w) = waker {
-            w.wake();
-        }
-
-        Ok(())
+        self.send_lossy(item).then_some(()).ok_or(ChannelClosed)
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

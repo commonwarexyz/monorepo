@@ -268,7 +268,8 @@ where
     }
 
     async fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
-        let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.as_slice()) else {
+        let msg = IoBuf::from(msg);
+        let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.clone()) else {
             return;
         };
 
@@ -284,7 +285,7 @@ where
 
         // Optionally send mutated vote
         if self.context.random_bool(0.5) {
-            let mutated = self.mutate_bytes(&msg);
+            let mutated = self.mutate_bytes(msg.as_ref());
             let _ = sender.send(Recipients::All, mutated, true);
         }
         match vote {
@@ -334,8 +335,9 @@ where
     }
 
     async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+        let msg = IoBuf::from(msg);
         let cfg = self.scheme.certificate_codec_config();
-        let Ok(cert) = Certificate::<S, Sha256Digest>::read_cfg(&mut msg.as_slice(), &cfg) else {
+        let Ok(cert) = Certificate::<S, Sha256Digest>::read_cfg(&mut msg.clone(), &cfg) else {
             return;
         };
 
@@ -365,7 +367,7 @@ where
         if self.context.random_bool(0.5) {
             let cert = self
                 .strategy
-                .mutate_certificate_bytes(self.context.as_mut(), &msg);
+                .mutate_certificate_bytes(self.context.as_mut(), msg.as_ref());
             let _ = sender.send(Recipients::All, cert, true);
         }
     }
