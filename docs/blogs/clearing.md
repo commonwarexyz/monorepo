@@ -21,13 +21,13 @@ If we can't use blockspace to scale to a billion TPS (or at least don't want to 
 
 **Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that most chains can process. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
 
-One payment or a bajillion, offchain settlement records scale with active accounts and payment pairs.
+One payment or a bajillion, each account settles once.
 
 ## Payments as Fast as Browsing the Web
 
 If an API responds in milliseconds, no one will wait seconds to pay for it.
 
-Suppose $a$ has 100 and wants to pay 20 to $b$, who has 40. With Bajillion, $a$ sends its chosen operator a signed request $S$ advancing its running total for $b$. The operator checks the signature and funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of $b$'s entry. In one round trip, $a$ has a receipt to forward to $b$, who can verify it locally and retain it as evidence; the operator can also send it directly to $b$, saving a hop. Settlement comes later, netting payments across all accounts using that operator without separate channels or funded routes.
+Suppose $a$ has 100 and wants to pay 20 to $b$, who has 40. With Bajillion, $a$ sends its chosen operator a signed request $S$ advancing its running total for $b$. The operator checks the signature and funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of $b$'s entry. In one round trip, $a$ has a receipt to forward to $b$, who can verify it locally and retain it as evidence. The operator can save a hop by sending the receipt directly to $b$. Settlement comes later, netting payments across all accounts using that operator without separate channels or funded routes.
 
 ```{=html}
 <style>

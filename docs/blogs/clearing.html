@@ -135,8 +135,7 @@ O’Grady</a></div>
         recipients alike can force recovery through the settlement chain
         alone. And the protocol requires only signatures and Merkle
         openings.</p>
-        <p>One payment or a bajillion, offchain settlement records scale
-        with active accounts and payment pairs.</p>
+        <p>One payment or a bajillion, each account settles once.</p>
         <h2 id="payments-as-fast-as-browsing-the-web">Payments as Fast
         as Browsing the Web</h2>
         <p>If an API responds in milliseconds, no one will wait seconds
@@ -152,11 +151,11 @@ O’Grady</a></div>
         of <span class="math inline">b</span>’s entry. In one round
         trip, <span class="math inline">a</span> has a receipt to
         forward to <span class="math inline">b</span>, who can verify it
-        locally and retain it as evidence; the operator can also send it
-        directly to <span class="math inline">b</span>, saving a hop.
-        Settlement comes later, netting payments across all accounts
-        using that operator without separate channels or funded
-        routes.</p>
+        locally and retain it as evidence. The operator can save a hop
+        by sending the receipt directly to <span
+        class="math inline">b</span>. Settlement comes later, netting
+        payments across all accounts using that operator without
+        separate channels or funded routes.</p>
         <style>
           .clearing-loop {
             aspect-ratio: 1024 / 576;
