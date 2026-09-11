@@ -64,7 +64,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, OptimisticProposal,
+        Relay, Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -5041,6 +5042,15 @@ mod tests {
                 strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let optimistic_rx = marshaled
+                .propose_optimistic(ctx.clone(), default_leader())
+                .await;
+            assert_eq!(
+                optimistic_rx.await.expect("optimistic decision missing"),
+                OptimisticProposal::DeferUntilCertified,
+                "application deferral must precede cached proposal reuse"
+            );
 
             let commitment = marshaled
                 .propose(ctx)

@@ -158,6 +158,11 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     /// this set.
     failed_certifications: BTreeSet<View>,
 
+    /// Optimistic handoff requests that the application chose to defer, keyed
+    /// by child view and the captured parent. These local decisions are not
+    /// persisted, so the application is consulted again after restart.
+    deferred_proposals: BTreeMap<View, (View, D)>,
+
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
@@ -244,6 +249,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
             failed_certifications: BTreeSet::new(),
+            deferred_proposals: BTreeMap::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -927,6 +933,20 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     continue;
                 }
             };
+            let optimistic = view.is_term_start(self.term_length())
+                && view.previous() == Some(parent_view)
+                && self.explicit_ancestry_payload(parent_view).is_none();
+            if self
+                .deferred_proposals
+                .get(&view)
+                .is_some_and(|(view, payload)| {
+                    optimistic && *view == parent_view && payload == &parent_payload
+                })
+            {
+                continue;
+            }
+            self.deferred_proposals.remove(&view);
+
             let Some(leader) = self
                 .views
                 .get_mut(&view)
@@ -941,6 +961,45 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             });
         }
         None
+    }
+
+    /// Returns the outgoing leader for an uncertified handoff proposal.
+    pub fn optimistic_parent_leader(
+        &self,
+        context: &Context<D, S::PublicKey>,
+    ) -> Option<S::PublicKey> {
+        let view = context.view();
+        (view.is_term_start(self.term_length())
+            && view.previous() == Some(context.parent.0)
+            && self.explicit_ancestry_payload(context.parent.0).is_none())
+        .then(|| {
+            self.views
+                .get(&context.parent.0)
+                .and_then(Round::leader)
+                .expect("optimistic handoff parent must have a leader")
+                .key
+        })
+    }
+
+    /// Records that the application declined an optimistic handoff request.
+    ///
+    /// The ordinary proposal path becomes eligible when the captured parent
+    /// certifies or when different fallback ancestry replaces it.
+    pub fn defer_proposal(&mut self, context: &Context<D, S::PublicKey>) {
+        let view = context.view();
+        if let Some(round) = self.views.get_mut(&view) {
+            round.clear_proposal_request();
+        }
+
+        let still_optimistic = self
+            .find_parent(view)
+            .is_ok_and(|parent| parent == context.parent)
+            && view.is_term_start(self.term_length())
+            && view.previous() == Some(context.parent.0)
+            && self.explicit_ancestry_payload(context.parent.0).is_none();
+        if still_optimistic {
+            self.deferred_proposals.insert(view, context.parent);
+        }
     }
 
     /// Records a proposal built by the automaton if its captured parent remains
@@ -1340,6 +1399,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let removed = replace(&mut self.views, kept).into_keys().collect();
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
+        self.deferred_proposals = self.deferred_proposals.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -1415,12 +1475,13 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// before the certificate that unlocks the view exists.
     ///
     /// `None` when `view` does not start a term or the elector does not elect
-    /// early (see [`Elector::elect_early`]).
+    /// early (see [`Elector::elect_without_certificate`]).
     fn handoff_leader(&self, view: View) -> Option<Participant> {
         if !view.is_term_start(self.term_length()) {
             return None;
         }
-        self.elector.elect_early(Rnd::new(self.epoch, view))
+        self.elector
+            .elect_without_certificate(Rnd::new(self.epoch, view))
     }
 
     /// Returns true when a pipelined handoff may build on `parent`: `parent`
@@ -1713,8 +1774,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// gate, but a locally endorsed pipelined handoff links directly to the
     /// outgoing term's tip before it certifies and must retain that barrier.
     /// The barrier keys on round state (an own notarize vote on a tip-linked
-    /// proposal), not the elector opt-in, so replay preserves it across a
-    /// restart that removes the opt-in. It also matches non-endorsement
+    /// proposal), not the transient application decision, so replay preserves
+    /// it across a restart. It also matches non-endorsement
     /// term-start votes: those are cast only on explicitly certified
     /// ancestry, and append-ordered journal replay restores the parent's
     /// certification before the vote, so the barrier is already satisfied
@@ -2048,8 +2109,8 @@ mod tests {
         )
     }
 
-    /// Like [setup_state_from_config], but opts `config` into pipelined
-    /// handoffs and fixes `view_retention` at 10.
+    /// Like [setup_state_from_config], but fixes `view_retention` at 10 for
+    /// pipelined-handoff tests.
     fn setup_state_with_handoff(
         context: &mut deterministic::Context,
         validators: usize,
@@ -2063,7 +2124,7 @@ mod tests {
             signer,
             epoch,
             10,
-            config.with_pipelined_handoff(),
+            config,
             4,
         )
     }
@@ -2113,7 +2174,7 @@ mod tests {
             Participant::new(0)
         }
 
-        fn elect_early(&self, _round: Rnd) -> Option<Participant> {
+        fn elect_without_certificate(&self, _round: Rnd) -> Option<Participant> {
             None
         }
     }
@@ -7109,11 +7170,10 @@ mod tests {
     }
 
     #[test]
-    fn pipelined_handoff_certification_barrier_survives_optout_restart() {
+    fn pipelined_handoff_certification_barrier_survives_restart() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            // The elector no longer opts into pipelined handoffs, but the
-            // journal holds an early vote issued under the opt-in.
+            // The journal holds an early vote issued before the restart.
             let (
                 Fixture {
                     schemes, verifier, ..
@@ -7234,18 +7294,31 @@ mod tests {
     }
 
     #[test]
-    fn pipelined_handoff_requires_optin() {
+    fn pipelined_handoff_application_can_defer() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
                 Fixture {
-                    schemes, verifier, ..
+                    participants,
+                    schemes,
+                    verifier,
+                    ..
                 },
                 mut state,
             ) = setup_state_from_config(&mut context, 4, 3, 9, 10, handoff_terms(), 0);
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
-            // Without the opt-in, the term start waits for certified ancestry.
+            let optimistic = state
+                .try_propose()
+                .expect("application should receive the optimistic opportunity");
+            assert_eq!(optimistic.parent, (View::new(5), tip.payload));
+            assert_eq!(
+                state.optimistic_parent_leader(&optimistic),
+                Some(participants[2].clone())
+            );
+            state.defer_proposal(&optimistic);
+
+            // Deferral suppresses repeated optimistic requests for this parent.
             assert!(state.try_propose().is_none());
 
             let tip_notarization = build_notarization(&verifier, &schemes, &tip);
@@ -7258,6 +7331,7 @@ mod tests {
             assert_eq!(ctx.round.view(), View::new(6));
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
             assert_eq!(state.current_view(), View::new(6));
+            assert!(state.optimistic_parent_leader(&ctx).is_none());
         });
     }
 

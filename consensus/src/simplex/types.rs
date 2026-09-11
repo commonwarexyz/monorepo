@@ -36,6 +36,10 @@ pub struct Context<D: Digest, P: PublicKey> {
     pub parent: (View, D),
 }
 
+impl<D: Digest, P: PublicKey> crate::ProposalContext for Context<D, P> {
+    type PublicKey = P;
+}
+
 impl<D: Digest, P: PublicKey> Epochable for Context<D, P> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()

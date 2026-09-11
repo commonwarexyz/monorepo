@@ -248,10 +248,10 @@
 //! A term's first proposal waits for certified ancestry from the prior term. This delays proposal
 //! distribution by one network trip at every term boundary. An elector that can name a term's
 //! leader before the term starts (see
-//! [`elector::Elector::elect_early`]) can opt into pipelining the handoff. The incoming leader
-//! then proposes on the outgoing term's final view as soon as it holds a valid proposal for that
-//! view. It does not wait for the view to certify. If no such proposal arrives, the leader
-//! proposes on entering the term as usual. Non-leader validators keep the same behavior: they
+//! [`elector::Elector::elect_without_certificate`]) can offer a pipelined handoff to the
+//! application. The incoming leader's application may then propose on the outgoing term's final
+//! view as soon as it holds a valid proposal for that view, or defer until the view certifies. If
+//! no such proposal arrives, the leader proposes on entering the term as usual. Non-leader validators keep the same behavior: they
 //! buffer votes for the next term start and verify the early proposal against explicitly
 //! certified ancestry once the outgoing view certifies.
 //!
@@ -263,9 +263,8 @@
 //!
 //! Pipelining the handoff trusts the outgoing leader not to equivocate. If the outgoing tip never
 //! notarizes, validators cannot use the pipelined proposal built on it. The usual timeout path
-//! then nullifies the incoming term. The feature is therefore opt-in (see
-//! [`elector::RoundRobin::with_pipelined_handoff`]) and only electors whose leaders are
-//! derivable without a certificate can support it.
+//! then nullifies the incoming term. Only electors whose leaders are derivable without a
+//! certificate can offer the optimization, and the application chooses whether to accept it.
 //!
 //! ### Optimistic Finality
 //!
@@ -1765,6 +1764,7 @@ mod tests {
         link: Link,
         elector: RoundRobin<Sha256>,
         propose_latency: (f64, f64),
+        propose_optimistically: bool,
     ) -> (
         Vec<RoundRobinReporter>,
         usize,
@@ -1806,8 +1806,9 @@ mod tests {
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 mocks::application::Application::new(context.child("application"), application_cfg);
+            actor.set_propose_optimistically(propose_optimistically);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -1873,6 +1874,7 @@ mod tests {
                     ViewDelta::new(128),
                 ),
                 /* propose_latency */ (10.0, 0.0),
+                /* propose_optimistically */ false,
             )
             .await;
 
@@ -1931,9 +1933,9 @@ mod tests {
                         term_length,
                         /* stall_timeout */ Duration::from_secs(20),
                         ViewDelta::new(4),
-                    )
-                    .with_pipelined_handoff(),
+                ),
                 /* propose_latency */ (10.0, 0.0),
+                /* propose_optimistically */ true,
             )
             .await;
 
@@ -1990,8 +1992,9 @@ mod tests {
                     jitter: Duration::from_millis(0),
                     success_rate: probability!(1.0),
                 },
-                RoundRobin::<Sha256>::default().with_pipelined_handoff(),
+                RoundRobin::<Sha256>::default(),
                 /* propose_latency */ (10.0, 0.0),
+                /* propose_optimistically */ true,
             )
             .await;
 
@@ -2048,6 +2051,7 @@ mod tests {
                     ViewDelta::new(100),
                 ),
                 /* propose_latency */ (1.0, 0.0),
+                /* propose_optimistically */ false,
             )
             .await;
 

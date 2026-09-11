@@ -71,7 +71,8 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
+    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, OptimisticDecision,
+    OptimisticProposal, Relay, Reporter,
     marshal::{
         Update,
         application::{
@@ -861,6 +862,50 @@ where
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     ES: Epocher,
 {
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.deferred.propose_optimistic", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn propose_optimistic(
+        &mut self,
+        consensus_context: Context<Self::Digest, S::PublicKey>,
+        parent_leader: <Self::Context as crate::ProposalContext>::PublicKey,
+    ) -> oneshot::Receiver<OptimisticProposal<Self::Digest>> {
+        let mut optimistic = self.clone();
+        let (mut tx, rx) = oneshot::channel();
+        let context = self
+            .context
+            .lock()
+            .await
+            .child("propose_optimistic")
+            .with_attribute("round", consensus_context.round);
+        context.spawn(move |runtime_context| async move {
+            let decision = optimistic.application.propose_optimistic(
+                (
+                    runtime_context.child("app_propose_optimistic"),
+                    consensus_context.clone(),
+                ),
+                parent_leader,
+            );
+            let decision = select! {
+                _ = tx.closed() => return,
+                decision = decision => decision,
+            };
+            if decision == OptimisticDecision::DeferUntilCertified {
+                tx.send_lossy(OptimisticProposal::DeferUntilCertified);
+                return;
+            }
+            let proposal = Automaton::propose(&mut optimistic, consensus_context).await;
+            select! {
+                _ = tx.closed() => {},
+                result = proposal => {
+                    if let Ok(digest) = result {
+                        tx.send_lossy(OptimisticProposal::Propose(digest));
+                    }
+                },
+            }
+        });
+        rx
+    }
+
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
