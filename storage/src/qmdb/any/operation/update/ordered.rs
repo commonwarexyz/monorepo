@@ -7,10 +7,10 @@ use crate::qmdb::{
     operation::Key,
 };
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Buf, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_formatting::hex;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::Array;
 use std::fmt;
 
@@ -62,6 +62,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 
     fn value(&self) -> &V::Value {
         &self.value
+    }
+
+    fn into_value(self) -> V::Value {
+        self.value
     }
 
     fn cached(&self) -> K {

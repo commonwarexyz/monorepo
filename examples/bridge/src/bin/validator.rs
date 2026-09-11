@@ -126,7 +126,7 @@ fn main() {
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Sharing<MinSig> = Sharing::decode_cfg(
-        identity.as_ref(),
+        identity,
         &(NZU32!(validators.len() as u32), ModeVersion::v0()),
     )
     .expect("Identity not well-formed");
@@ -134,7 +134,7 @@ fn main() {
         .get_one::<String>("share")
         .expect("Please provide share");
     let share = from_hex(share).expect("Share not well-formed");
-    let share = group::Share::decode(share.as_ref()).expect("Share not well-formed");
+    let share = group::Share::decode(share).expect("Share not well-formed");
 
     // Configure indexer
     let indexer = matches
@@ -152,8 +152,8 @@ fn main() {
         .get_one::<String>("other-public")
         .expect("Please provide other public");
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
-    let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
-        .expect("Other identity not well-formed");
+    let other_public =
+        <MinSig as Variant>::Public::decode(other_public).expect("Other identity not well-formed");
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);

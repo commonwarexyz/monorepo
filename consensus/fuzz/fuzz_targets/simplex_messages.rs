@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_consensus::simplex::{
     scheme::{
         Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
@@ -45,7 +45,7 @@ enum FuzzInput {
 }
 
 fn roundtrip_vote<S: Scheme<sha256::Digest>>(data: &[u8]) {
-    if let Ok(vote) = Vote::<S, sha256::Digest>::decode(data) {
+    if let Ok(vote) = Vote::<S, sha256::Digest>::decode(Copying(data)) {
         let encoded = vote.encode();
         assert_eq!(data, encoded.as_ref());
     }
@@ -57,7 +57,7 @@ fn roundtrip_certificate<S: Scheme<sha256::Digest>>(
 ) where
     S::Certificate: Read,
 {
-    if let Ok(cert) = Certificate::<S, sha256::Digest>::decode_cfg(data, cfg) {
+    if let Ok(cert) = Certificate::<S, sha256::Digest>::decode_cfg(Copying(data), cfg) {
         let encoded = cert.encode();
         assert_eq!(data, encoded.as_ref());
     }

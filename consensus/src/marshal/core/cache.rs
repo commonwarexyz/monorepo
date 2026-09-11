@@ -51,6 +51,8 @@ where
     notarized_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Certified blocks indexed by height and keyed by digest.
+    ///
+    /// Also includes uncertified ancestors fetched during optimistic verification.
     certified_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view
@@ -331,7 +333,7 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        block: V::StoredBlock,
+        block: &V::Block,
     ) -> (Self, Handle<()>) {
         let view = round.view().get();
         let handle;
@@ -352,9 +354,10 @@ where
                         "verified",
                     );
                 } else {
+                    let stored: V::StoredBlock = block.clone().into();
                     let result = cache
                         .verified_blocks
-                        .put_multi_start_sync(view, digest, block)
+                        .put_multi_start_sync(view, digest, &stored)
                         .await;
                     (cache.verified_blocks, handle) =
                         Self::handle_start_result(result, round, "verified");
@@ -365,13 +368,13 @@ where
         (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
-    /// Add a certified block to the height-indexed archive.
+    /// Add a block to the height-indexed certified archive.
     pub(crate) async fn put_certified(
         mut self,
         epoch: Epoch,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
-        block: V::StoredBlock,
+        block: &V::Block,
     ) -> Self {
         (self, _) = self
             .with_epoch(epoch, |mut cache| async move {
@@ -382,9 +385,10 @@ where
                     Err(e) => panic!("failed to check certified block: {e}"),
                 };
                 if !exists {
+                    let stored: V::StoredBlock = block.clone().into();
                     cache.certified_blocks = cache
                         .certified_blocks
-                        .put_multi_sync(height.get(), digest, block)
+                        .put_multi_sync(height.get(), digest, &stored)
                         .await
                         .unwrap_or_else(|e| panic!("failed to insert certified block: {e}"));
                     debug!(%height, "cached certified block");
@@ -400,15 +404,16 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        block: V::StoredBlock,
+        block: &V::Block,
     ) -> (Self, Handle<()>) {
         let view = round.view().get();
         let handle;
         (self, handle) = self
             .with_epoch(round.epoch(), |mut cache| async move {
+                let stored: V::StoredBlock = block.clone().into();
                 let result = cache
                     .notarized_blocks
-                    .put_start_sync(view, digest, block)
+                    .put_start_sync(view, digest, &stored)
                     .await;
                 let handle;
                 (cache.notarized_blocks, handle) =
@@ -461,7 +466,7 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        notarization: Notarization<S, V::Commitment>,
+        notarization: &Notarization<S, V::Commitment>,
     ) -> (Self, Handle<()>) {
         let view = round.view().get();
         let handle;
@@ -490,7 +495,7 @@ where
         mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
-        finalization: Finalization<S, V::Commitment>,
+        finalization: &Finalization<S, V::Commitment>,
     ) -> Self {
         let view = round.view().get();
         (self, _) = self
@@ -588,7 +593,7 @@ where
         None
     }
 
-    /// Looks for a block (certified by height, verified, or notarized) that matches `predicate`.
+    /// Looks for a block in the verified, notarized, or certified archives that matches `predicate`.
     pub(crate) async fn find_block_matching(
         &self,
         digest: <V::Block as Digestible>::Digest,

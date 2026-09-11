@@ -3,8 +3,8 @@
 //! For portability and consistency between architectures,
 //! the length of the [Bytes] must fit within a [u32].
 
-use crate::{BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
-use bytes::{Buf, BufMut, Bytes};
+use crate::{Buf, BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
+use bytes::{BufMut, Bytes};
 
 impl Write for Bytes {
     #[inline]
@@ -46,7 +46,7 @@ impl Read for Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Decode, Encode};
+    use crate::{Copying, Decode, Encode};
     use bytes::Bytes;
 
     #[test]
@@ -89,6 +89,24 @@ mod tests {
         let mut expected = vec![0x96, 0x01]; // Varint for 150
         expected.extend_from_slice(&[0xAA; 150]);
         assert_eq!(long_bytes.encode(), expected.as_slice());
+    }
+
+    #[test]
+    fn test_view() {
+        let value: Vec<Bytes> = (0..64).map(|_| Bytes::from(vec![7u8; 17])).collect();
+        let source = value.encode();
+        let cfg = ((..).into(), (..).into());
+        let range = source.as_ptr_range();
+
+        // Decoding from the owned buffer hands out views of it
+        let decoded = Vec::<Bytes>::decode_cfg(source.clone(), &cfg).unwrap();
+        assert_eq!(decoded, value);
+        assert!(decoded.iter().all(|b| range.contains(&b.as_ptr())));
+
+        // Decoding from a slice of it copies every field
+        let copied = Vec::<Bytes>::decode_cfg(Copying(&source), &cfg).unwrap();
+        assert_eq!(copied, value);
+        assert!(copied.iter().all(|b| !range.contains(&b.as_ptr())));
     }
 
     #[cfg(feature = "arbitrary")]

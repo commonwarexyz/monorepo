@@ -44,6 +44,9 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// The updated value.
     fn value(&self) -> &Self::Value;
 
+    /// Consumes the update and returns its owned value.
+    fn into_value(self) -> Self::Value;
+
     /// Build the cached payload from a resolved update.
     fn cached(&self) -> Self::Cached;
 

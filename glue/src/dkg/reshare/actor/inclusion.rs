@@ -1046,9 +1046,9 @@ where
 
     /// Persist a finalized dealer log from an included block.
     ///
-    /// Invalid logs are ignored because the block has already passed
-    /// application verification. The finalized reporter path is the only place
-    /// where observed dealer logs become durable state.
+    /// Dealer logs are not part of block validity, so a finalized block may
+    /// carry an invalid one. Invalid logs are ignored. The finalized reporter
+    /// path is the only place where observed dealer logs become durable state.
     pub(super) async fn observe_dealer_log(
         public_key: &C::PublicKey,
         info: &Info<V, C::PublicKey>,

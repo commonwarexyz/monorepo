@@ -5,9 +5,9 @@ use crate::{
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
 };
-use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut,
+    BufMut,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
@@ -234,7 +234,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
 impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// See [crate::archive::Archive::put].
-    async fn put(mut self: Box<Self>, index: u64, key: K, data: V) -> Result<Box<Self>, Error> {
+    async fn put(mut self: Box<Self>, index: u64, key: K, data: &V) -> Result<Box<Self>, Error> {
         // Ignore duplicates
         if self.ordinal.has(index) {
             return Ok(self);
@@ -383,7 +383,7 @@ impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E
     type Key = K;
     type Value = V;
 
-    async fn put(mut self, index: u64, key: K, data: V) -> Result<Self, Error> {
+    async fn put(mut self, index: u64, key: K, data: &V) -> Result<Self, Error> {
         self.0 = self.0.put(index, key, data).await?;
         Ok(self)
     }

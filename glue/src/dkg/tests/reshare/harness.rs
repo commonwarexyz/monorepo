@@ -30,7 +30,7 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
@@ -64,7 +64,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{Address, Provider, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -375,6 +375,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ReshareInput<(), MinPk, ed25519::PrivateKey, TestDirectory>;
 
@@ -424,14 +425,24 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(Self::execute(block.height(), batches).await)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
     }
 
     async fn finalized(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
+        _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
@@ -976,7 +987,7 @@ impl EngineDefinition for ReshareEngine {
                     *self.initial.info.output.public().public(),
                 )),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone()),
+                start: plan.marshal_start(genesis.clone().into()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),

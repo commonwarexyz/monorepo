@@ -21,6 +21,17 @@ pub mod variable;
 
 pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as Update};
 
+/// Whether the cyclic span from `span_start` (inclusive) to `span_end` (exclusive) contains `key`.
+///
+/// Equal endpoints define a span containing every key.
+pub fn span_contains<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
+    if span_start >= span_end {
+        key >= span_start || key < span_end
+    } else {
+        key >= span_start && key < span_end
+    }
+}
+
 /// Type alias for a location and its associated key data.
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
@@ -48,23 +59,6 @@ where
         }
     }
 
-    /// Whether the span defined by `span_start` and `span_end` contains `key`.
-    pub fn span_contains(span_start: &K, span_end: &K, key: &K) -> bool {
-        if span_start >= span_end {
-            // cyclic span case
-            if key >= span_start || key < span_end {
-                return true;
-            }
-        } else {
-            // normal span case
-            if key >= span_start && key < span_end {
-                return true;
-            }
-        }
-
-        false
-    }
-
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
@@ -74,7 +68,7 @@ where
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
             let data = Self::get_update_op(&self.log, loc).await?;
-            if Self::span_contains(&data.key, &data.next_key, key) {
+            if span_contains(&data.key, &data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
         }
@@ -256,22 +250,23 @@ pub(crate) fn find_next_key_ascending<K: Ord + Clone>(
         .clone()
 }
 
-/// Returns the previous key to `key` within `possible_previous` (sorted by `.0`, deduplicated).
+/// Returns the previous key to `key` and its mutable value within `possible_previous`
+/// (sorted by `.0`, deduplicated).
 /// The result will "cycle around" to the last entry if `key` is the first key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
-pub(crate) fn find_prev_key<'a, K: Ord, V>(
+pub(crate) fn find_prev_key_mut<'a, K: Ord, V>(
     key: &K,
-    possible_previous: &'a [(K, V)],
-) -> (&'a K, &'a V) {
+    possible_previous: &'a mut [(K, V)],
+) -> (&'a K, &'a mut V) {
     let idx = possible_previous.partition_point(|(k, _)| k < key);
     let (k, v) = if idx > 0 {
-        &possible_previous[idx - 1]
+        &mut possible_previous[idx - 1]
     } else {
         possible_previous
-            .last()
+            .last_mut()
             .expect("possible_previous should not be empty")
     };
     (k, v)
@@ -326,6 +321,24 @@ mod test {
     use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
     use rand::RngExt as _;
+
+    #[test]
+    fn span_contains_boundaries() {
+        assert!(!span_contains(&2, &6, &1));
+        assert!(span_contains(&2, &6, &2));
+        assert!(span_contains(&2, &6, &5));
+        assert!(!span_contains(&2, &6, &6));
+
+        assert!(span_contains(&6, &2, &1));
+        assert!(!span_contains(&6, &2, &2));
+        assert!(!span_contains(&6, &2, &5));
+        assert!(span_contains(&6, &2, &6));
+        assert!(span_contains(&6, &2, &7));
+
+        assert!(span_contains(&3, &3, &2));
+        assert!(span_contains(&3, &3, &3));
+        assert!(span_contains(&3, &3, &4));
+    }
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
     /// ascending query sequence, including queries past the last candidate (cyclic wrap).

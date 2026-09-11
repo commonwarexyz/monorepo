@@ -2,8 +2,8 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
 use core::{
     fmt,
     hash::Hash,
@@ -897,7 +897,8 @@ mod test {
         let mut buf = Vec::with_capacity(sorted.encode_size());
         sorted.write(&mut buf);
         let decoded =
-            Set::<u8>::read_cfg(&mut buf.as_slice(), &(RangeCfg::from(0..=9), ())).unwrap();
+            Set::<u8>::read_cfg(&mut bytes::Bytes::from(buf), &(RangeCfg::from(0..=9), ()))
+                .unwrap();
 
         assert_eq!(sorted, decoded);
     }
@@ -1076,7 +1077,7 @@ mod test {
         map.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), (), ());
-        let result = BiMap::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = BiMap::<u8, u8>::read_cfg(&mut bytes::Bytes::from(buf), &cfg);
         assert!(result.is_err());
     }
 
@@ -1087,7 +1088,7 @@ mod test {
         items.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), ());
-        let result = Set::<u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = Set::<u8>::read_cfg(&mut bytes::Bytes::from(buf), &cfg);
         assert!(result.is_err());
     }
 
@@ -1098,7 +1099,7 @@ mod test {
         items.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), ());
-        let result = Set::<u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = Set::<u8>::read_cfg(&mut bytes::Bytes::from(buf), &cfg);
         assert!(result.is_err());
     }
 
@@ -1109,7 +1110,7 @@ mod test {
         items.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), ());
-        let result = Set::<u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = Set::<u8>::read_cfg(&mut bytes::Bytes::from(buf), &cfg);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().iter().copied().collect::<Vec<_>>(), items);
     }
@@ -1123,7 +1124,7 @@ mod test {
         values.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), (), ());
-        let result = Map::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = Map::<u8, u8>::read_cfg(&mut bytes::Bytes::from(buf), &cfg);
         assert!(result.is_err());
     }
 
@@ -1136,7 +1137,7 @@ mod test {
         values.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), (), ());
-        let result = Map::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = Map::<u8, u8>::read_cfg(&mut bytes::Bytes::from(buf), &cfg);
         assert!(result.is_err());
     }
 
@@ -1149,7 +1150,7 @@ mod test {
         values.write(&mut buf);
 
         let cfg = (RangeCfg::from(0..=10), (), ());
-        let result = Map::<u8, u8>::read_cfg(&mut buf.as_slice(), &cfg);
+        let result = Map::<u8, u8>::read_cfg(&mut bytes::Bytes::from(buf), &cfg);
         assert!(result.is_ok());
         let map = result.unwrap();
         assert_eq!(map.keys().iter().copied().collect::<Vec<_>>(), keys);

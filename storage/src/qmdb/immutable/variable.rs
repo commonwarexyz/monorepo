@@ -57,14 +57,7 @@ impl<F: Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, 
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(
-            journal,
-            context,
-            cfg.translator,
-            cfg.init_buffer,
-            cfg.init_cache_size,
-        )
-        .await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
     }
 }
 
@@ -137,7 +130,6 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -295,11 +287,14 @@ mod tests {
         test_variable_partial_ancestor_commit => run_partial_ancestor_commit, open;
         test_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
         test_variable_get_many => run_get_many, open;
+        test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
         test_variable_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
         test_variable_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
         test_variable_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
+        test_variable_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
+        test_variable_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
     }
 
     #[boxed]

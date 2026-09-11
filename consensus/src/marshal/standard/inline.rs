@@ -122,7 +122,8 @@ where
 /// - Parent digest matches consensus context's expected parent
 /// - Child height is exactly parent height plus one
 ///
-/// This is sufficient because the parent must have already been accepted by consensus.
+/// This is sufficient because the parent was either notarized by consensus or verified locally
+/// before this participant voted for it, so its own linkage was already checked.
 ///
 /// # Certifiability
 ///
@@ -484,7 +485,8 @@ where
                 //   not a valid boundary re-proposal.
                 // - Re-proposals are detected when `digest == context.parent.1`.
                 // - Re-proposals skip normal parent/height checks because:
-                //   1) the block was already verified when originally proposed
+                //   1) consensus settles their validity when certifying the view that
+                //      first carried the block
                 //   2) parent-child checks would fail by construction when parent == block
                 let Some(decision) =
                     precheck_epoch_and_reproposal(&epocher, &marshal, &context, digest, block)

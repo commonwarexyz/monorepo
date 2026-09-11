@@ -81,7 +81,11 @@
 //! to the nearest known ancestor or the finalized tip,
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
-//! partial progress survives timeouts.
+//! partial progress survives timeouts. Consensus may build on a block before
+//! it is certified (for example, with stable leaders), so a replayed ancestor
+//! is not guaranteed to be valid.
+//! Replayed state is reusable as parent state but is never a verification
+//! verdict: verifying a replayed block still runs [`Application::verify`].
 //!
 //! # Compatibility
 //!
@@ -174,6 +178,11 @@ where
     /// The set of databases managed on behalf of this application.
     type Databases: DatabaseSet<E>;
 
+    /// Owned data captured from winning batches before they are applied.
+    ///
+    /// Applications with nothing to capture use `()`.
+    type Captured: Send;
+
     /// The stateful-owned provider, supplied through
     /// [`Config::provider`](crate::stateful::Config::provider).
     ///
@@ -230,8 +239,9 @@ where
 
     /// Verify a block received from a peer, relative to its ancestry.
     ///
-    /// Called before voting. The implementation should execute the block
-    /// against the provided batches and merkleize them.
+    /// Called before the node votes to finalize the block (the notarize vote
+    /// may already have been cast). The implementation should execute the
+    /// block against the provided batches and merkleize them.
     ///
     /// This future should not resolve until the implementation can produce a
     /// stable verdict. Return [`None`] only when the block is permanently
@@ -278,17 +288,26 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
-    /// Apply a previously certified block to reconstruct its merkleized state.
+    /// Apply a block to reconstruct its merkleized state.
     ///
-    /// Called by the wrapper during lazy recovery when pending state for
-    /// an ancestor block is missing (e.g. after a restart). The block is
-    /// known-good (it was previously certified), so the implementation
-    /// should unconditionally execute the block's state transitions.
+    /// Called when the wrapper lacks state for `block`: during lazy recovery
+    /// for a missing ancestor (e.g. after a restart), or during finalization
+    /// for an uncached winner. The implementation should execute the block's
+    /// state transitions.
     ///
     /// The returned merkleized state must match what
-    /// [`verify`](Self::verify) accepted for `block`. The wrapper commits this
+    /// [`verify`](Self::verify) accepts for `block`. The wrapper checks it
+    /// against the block's commitments before caching it and reuses it as
+    /// parent state, but never as a verdict: a request to verify the replayed
+    /// block still runs [`verify`](Self::verify). The wrapper commits this
     /// replay result during finalization and cannot re-check block-specific
     /// commitments generically.
+    ///
+    /// Return [`None`] if the block cannot be executed. Consensus may ask the
+    /// wrapper to verify or build on a block before its ancestors are certified,
+    /// so a replayed ancestor is not guaranteed to have passed
+    /// [`verify`](Self::verify) anywhere. The wrapper then rejects the ancestry
+    /// that depends on it. A finalized block always executes.
     ///
     /// This future may be cancelled if its originating request is dropped, or
     /// cancelled and retried before finalization or pruning. Cancellation and
@@ -296,51 +315,77 @@ where
     ///
     /// # Panics
     ///
-    /// Implementations should panic if execution fails, as this indicates
-    /// data corruption or non-determinism.
+    /// Implementations should panic if executing a valid block fails.
     fn apply(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
-    /// Observe a finalized block after it is reflected in the database set.
+    /// Capture data from winning batches before they are applied.
     ///
-    /// Once the database set is ready, the wrapper calls this for every
-    /// finalized block it receives from marshal before releasing that block's
-    /// marshal acknowledgement. Blocks applied through normal processing are
-    /// reported after [`DatabaseSet::apply`] succeeds: the block's state is
-    /// readable from the databases, but durability through that block may still
-    /// be pending. When an earlier database sync is active, the sync covering
-    /// this block may not have started yet. Blocks already reflected by startup
-    /// reconciliation or completed state sync are reported without reapplying
-    /// them.
+    /// The wrapper calls this immediately before applying each block's winning
+    /// batches. It does not call this for blocks already reflected in the
+    /// database set: the genesis block on a fresh boot, blocks reconciled at
+    /// startup, and blocks covered by state sync.
     ///
-    /// During peer state sync, a finalized block may be absorbed into a recorded sync target and
-    /// acknowledged without invoking this hook. Blocks still pending when sync completes are
-    /// reported or applied during handoff. Applications must derive synchronized state from the
-    /// database set rather than rely on receiving every peer-state-sync finalization here.
+    /// Only reads completed through `readers` during this call are guaranteed
+    /// to observe database state before `batches`. Retain owned values instead
+    /// of reader handles when the pre-apply state is required later. The
+    /// returned value is passed unchanged to [`finalized`](Self::finalized)
+    /// after the batches are applied.
+    ///
+    /// This future and [`finalized`](Self::finalized) are awaited on the
+    /// stateful actor's serial mailbox path. The actor cannot process other
+    /// mailbox messages while either is pending. Keep this capture cheap and
+    /// spawn expensive follow-on work from [`finalized`](Self::finalized)
+    /// instead of awaiting it on this path. Applications with nothing to
+    /// capture return `()`.
+    ///
+    /// # Panics
+    ///
+    /// Implementations should panic if capturing pre-apply state fails.
+    fn capture(
+        &mut self,
+        context: (E, Self::Context),
+        block: &Self::Block,
+        batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) -> impl Future<Output = Self::Captured> + Send;
+
+    /// Observe a finalized block after its winning batches are applied.
+    ///
+    /// The wrapper calls this after every [`DatabaseSet::apply`] in application
+    /// order. `captured` is the value returned by [`capture`](Self::capture)
+    /// for the exact applied batches. The block's state is readable from the
+    /// databases, but durability through that block may still be pending. A
+    /// database barrier may run concurrently with this future. The wrapper
+    /// releases the block's marshal acknowledgement only after this future
+    /// resolves and a barrier covering the block completes.
+    ///
+    /// Blocks already reflected in the database set invoke neither this hook
+    /// nor [`capture`](Self::capture): the genesis block on a fresh boot,
+    /// blocks reconciled at startup, and blocks covered by state sync.
+    /// Consecutive hook calls may therefore skip heights after state sync.
     ///
     /// This hook receives read-only database handles and may overlap verification
     /// of blocks built on the newly finalized block or one of its retained
     /// descendants. Result-affecting mutations must be made through normal block
     /// execution, not from this observer.
     ///
-    /// For blocks that are reported, this is an at-least-once notification inherited from
-    /// marshal's reporter stream: a crash after this hook runs but before a database sync covering
-    /// the block and marshal's processed position are durable may cause the same block to be
-    /// reported again.
+    /// A crash after this hook runs but before a database sync covering the
+    /// block and marshal's processed position are durable may cause the block's
+    /// batches to be captured, applied, and observed again after restart.
     ///
     /// # Panics
     ///
     /// Implementations should panic if observing finalized state fails.
     fn finalized(
         &mut self,
-        _context: (E, Self::Context),
-        _block: &Self::Block,
-        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
-    ) -> impl Future<Output = ()> + Send {
-        async {}
-    }
+        context: (E, Self::Context),
+        block: &Self::Block,
+        captured: Self::Captured,
+        readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) -> impl Future<Output = ()> + Send;
 }
