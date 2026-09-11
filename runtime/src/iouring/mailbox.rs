@@ -118,7 +118,7 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::waker::tests::eventfd_count;
+    use crate::iouring::{task::Task, waker::tests::eventfd_count};
     use std::{
         future::pending,
         sync::{
