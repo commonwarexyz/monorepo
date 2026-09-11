@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -130,7 +130,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         _context: E,
         _config: Self::Config,
         _expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Self::Error> {
+    ) -> Result<Self, InitError<Self::Error>> {
         Ok(Self::default())
     }
 
