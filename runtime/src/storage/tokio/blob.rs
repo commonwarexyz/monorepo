@@ -1,6 +1,9 @@
 use crate::{
     Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
-    storage::{Generation, Pending, Sender, Tracker, defer_sync, hold::Hold},
+    storage::{
+        Generation, Pending, Sender, Tracker, defer_sync,
+        hold::{Held, Hold},
+    },
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
@@ -49,25 +52,24 @@ impl Cache {
     }
 }
 
-/// A blob's file bundled with the hold on its storage directory.
+/// A blob's file with the writes no completed sync covers.
 ///
-/// An operation must capture the file to touch it, so it carries the hold
-/// into the blocking pool without having to remember to, and keeps the open's
-/// obligation pending until it has finished. Dropping the last reference
-/// resolves that obligation: at once when a completed sync covers every
-/// mutation, and otherwise through a deferred sync that the next open of the
-/// blob waits for.
-struct Held {
-    file: Arc<File>,
+/// An operation must capture the file to touch it, so it carries the
+/// directory hold into the blocking pool without having to remember to, and
+/// keeps the open's obligation pending until it has finished. Dropping the
+/// last reference resolves that obligation: at once when a completed sync
+/// covers every mutation, and otherwise through a deferred sync that the next
+/// open of the blob waits for.
+struct Shared {
+    file: Arc<Held>,
     tracker: Tracker,
-    hold: Arc<Hold>,
     pending: Arc<Pending>,
     key: (String, Vec<u8>),
     /// Resolves the obligation the open registered when its last handle dropped.
     promise: Mutex<Option<Sender>>,
 }
 
-impl Deref for Held {
+impl Deref for Shared {
     type Target = File;
 
     fn deref(&self) -> &File {
@@ -75,7 +77,7 @@ impl Deref for Held {
     }
 }
 
-impl Drop for Held {
+impl Drop for Shared {
     fn drop(&mut self) {
         let Some(sender) = self.promise.lock().take() else {
             return;
@@ -85,10 +87,8 @@ impl Drop for Held {
             return;
         }
         let file = self.file.clone();
-        let hold = self.hold.clone();
         let key = self.key.clone();
         defer_sync(self.pending.clone(), self.key.clone(), sender, move || {
-            let _hold = hold;
             Blob::sync_inner(&file, &key.0, &key.1)
         });
     }
@@ -97,25 +97,25 @@ impl Drop for Held {
 /// One open of a blob, shared by its clones.
 ///
 /// Dropping the last clone releases the name and registers the obligation a
-/// later open waits for, which [Held] resolves once every operation issued
+/// later open waits for, which [Shared] resolves once every operation issued
 /// through this open has finished.
 struct Open {
-    held: Arc<Held>,
+    shared: Arc<Shared>,
     generation: Arc<Generation>,
 }
 
 impl Deref for Open {
-    type Target = Held;
+    type Target = Shared;
 
-    fn deref(&self) -> &Held {
-        &self.held
+    fn deref(&self) -> &Shared {
+        &self.shared
     }
 }
 
 impl Drop for Open {
     fn drop(&mut self) {
         if let Some(sender) = self.generation.release() {
-            *self.held.promise.lock() = Some(sender);
+            *self.shared.promise.lock() = Some(sender);
         }
     }
 }
@@ -141,16 +141,15 @@ impl Blob {
         hold: Arc<Hold>,
         generation: Arc<Generation>,
     ) -> Self {
-        let held = Arc::new(Held {
-            file: Arc::new(file),
+        let shared = Arc::new(Shared {
+            file: Held::new(file, hold),
             tracker: Tracker::default(),
-            hold,
             pending: generation.pending.clone(),
             key: generation.key.clone(),
             promise: Mutex::new(None),
         });
         Self {
-            open: Arc::new(Open { held, generation }),
+            open: Arc::new(Open { shared, generation }),
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
@@ -357,7 +356,7 @@ impl crate::Blob for Blob {
         if len == 0 {
             return Ok(bufs);
         }
-        let file = self.open.held.clone();
+        let file = self.open.shared.clone();
         let pool = self.pool.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled(self.dont_cache_supported.clone())
@@ -388,7 +387,7 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let file = self.open.held.clone();
+        let file = self.open.shared.clone();
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
@@ -453,7 +452,7 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let file = self.open.held.clone();
+        let file = self.open.shared.clone();
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
@@ -479,7 +478,7 @@ impl crate::Blob for Blob {
             self.open.tracker.skip_sync();
             return Ok(());
         }
-        let file = self.open.held.clone();
+        let file = self.open.shared.clone();
         let seen = self.open.tracker.begin_sync();
         task::spawn_blocking(move || {
             let (partition, name) = &file.key;
@@ -502,7 +501,7 @@ impl crate::Blob for Blob {
             return Handle::ready(Ok(()));
         }
         let (tx, rx) = oneshot::channel();
-        let file = self.open.held.clone();
+        let file = self.open.shared.clone();
         let seen = self.open.tracker.begin_sync();
         #[cfg(test)]
         let after_start_sync = self.after_start_sync.clone();

@@ -64,7 +64,7 @@ use crate::{
         raw, task::Label, validate_label,
     },
     utils::{
-        Panicker,
+        FactoryGuard, Panicker,
         signal::{Signal, Stopper},
         supervision::Tree,
     },
@@ -1274,11 +1274,12 @@ impl crate::Spawner for Context {
         self.tree = child;
 
         // Spawn the task (we don't care about Model)
+        let guard = FactoryGuard::new(&parent, metric);
         let executor = self.executor();
         let future = f(self);
         let (f, handle) = Handle::init(
             future,
-            metric,
+            guard.disarm(),
             executor.panicker.clone(),
             Arc::clone(&parent),
         );

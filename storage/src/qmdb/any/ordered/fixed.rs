@@ -794,11 +794,8 @@ pub(crate) mod test {
                 OneCap,
             );
 
-            // Every read now fails, and the failure necessarily surfaces through the replay
-            // stream: the reopened journal's page cache is fresh (only the buffer pool is shared
-            // across configs, never cached pages), so replay's first item forces a storage read,
-            // and with far fewer ops than the routing batch size no batch reaches a worker, so
-            // workers never read the log themselves.
+            // The reopened journal has a fresh page cache, so replay's first item requires a read.
+            // Failing that read leaves workers idle because no batches have been routed.
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
                 .build_snapshot(
