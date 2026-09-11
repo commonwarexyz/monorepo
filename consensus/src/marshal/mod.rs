@@ -58,6 +58,16 @@
 //! feature is only recommended for applications that support state sync (i.e., those that don't require full
 //! block history to participate in consensus)._
 //!
+//! ## Application History
+//!
+//! Simplex supplies commitments on the selected parent branch separately from its
+//! encoded context. Applications receive the parent and candidate explicitly and
+//! use [`blocks::Blocks`] to select the history they need. Selected ranges load
+//! bodies in increasing height order, including canonical finalized history below
+//! the consensus suffix. Range handles share commitment metadata without holding
+//! block bodies. Active ranges bound body retention and release unused demand
+//! when dropped.
+//!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
@@ -77,7 +87,7 @@ use std::sync::Arc;
 mod config;
 pub use config::{Config, Start};
 
-pub mod ancestry;
+pub mod blocks;
 pub mod core;
 pub mod resolver;
 pub mod standard;

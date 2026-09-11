@@ -6,18 +6,14 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
-    marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter, Viewable,
+    marshal::{Update, blocks::Blocks},
 };
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
-    sync::Mutex,
 };
 use rand_core::Rng;
 use std::{
@@ -29,29 +25,6 @@ use tracing::{Span, info_span};
 /// Re-enqueues live verification requests after finalization or pruning stops
 /// their active attempt.
 type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
-
-/// A non-owning reference to ancestry owned by the verification caller.
-///
-/// Queued and deferred requests carry this handle so caller cancellation
-/// releases the ancestry's backing blocks. Each active attempt clones an
-/// independent cursor from the same caller-owned ancestry.
-pub(in crate::stateful::actor) struct WeakAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
-
-impl<B: Block> WeakAncestry<B> {
-    /// Returns the caller-owned ancestry and a non-owning request handle.
-    fn new(ancestry: impl Ancestry<B>) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
-        let owner = Arc::new(Mutex::new(BoxedAncestry::new(ancestry)));
-        let reference = Self(Arc::downgrade(&owner));
-        (owner, reference)
-    }
-
-    /// Upgrades to an independent cursor while the caller still owns the ancestry.
-    ///
-    /// Returns `None` once caller cancellation releases the strong owner.
-    pub(in crate::stateful::actor) fn upgrade(&self) -> Option<BoxedAncestry<B>> {
-        self.0.upgrade().map(|ancestry| ancestry.lock().clone())
-    }
-}
 
 /// A verification is scoped to its caller.
 pub(in crate::stateful::actor) struct Verification {
@@ -82,7 +55,8 @@ where
     Propose {
         span: Span,
         context: (E, A::Context),
-        ancestry: BoxedAncestry<A::Block>,
+        parent: Weak<A::Block>,
+        blocks: Blocks<A::Block>,
         upstream: A::Input,
         response: oneshot::Sender<Option<A::Block>>,
     },
@@ -91,7 +65,9 @@ where
     Verify {
         span: Span,
         context: (E, A::Context),
-        ancestry: WeakAncestry<A::Block>,
+        block: Weak<A::Block>,
+        parent: Weak<A::Block>,
+        blocks: Blocks<A::Block>,
         verification: Verification,
     },
 
@@ -273,7 +249,8 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         upstream: Self::Input,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
@@ -285,22 +262,24 @@ where
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
-            ancestry: BoxedAncestry::new(ancestry),
+            parent: Arc::downgrade(&parent),
+            blocks,
             upstream,
             response,
         });
-        receiver.await.ok().flatten()
+        let result = receiver.await.ok().flatten();
+        drop(parent);
+        result
     }
 
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Arc<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
     ) -> bool {
-        // Scope the strong ancestry owner to this caller. Queued work receives only a weak
-        // handle, so cancellation releases backing blocks before the actor drains the request.
         let (response, receiver) = oneshot::channel();
-        let (ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(
             "stateful.mailbox.verify",
             epoch = context.1.epoch().traced(),
@@ -309,15 +288,17 @@ where
         let _ = self.sender.enqueue(Message::Verify {
             span,
             context,
-            ancestry,
+            block: Arc::downgrade(&block),
+            parent: Arc::downgrade(&parent),
+            blocks,
             verification: Verification { response },
         });
 
-        // Retain ancestry through the application verdict. Actor shutdown remains an error.
+        // The caller owns the bodies until its verdict or cancellation.
         let result = receiver
             .await
             .expect("stateful actor dropped during verify");
-        drop(ancestry_owner);
+        drop((block, parent));
         result
     }
 }

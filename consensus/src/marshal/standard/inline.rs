@@ -47,7 +47,7 @@ use crate::{
     marshal::{
         Update,
         application::gates::{GateOutcome, Gates},
-        core::{CommitmentFallback, DigestFallback, Mailbox},
+        core::Mailbox,
         standard::{
             Standard, relay,
             validation::{
@@ -146,7 +146,6 @@ where
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
-    ancestor_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
@@ -166,7 +165,6 @@ where
             gates: self.gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
-            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
         }
     }
 }
@@ -201,12 +199,6 @@ where
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
-        let ancestor_fetch_histogram = context.histogram(
-            "ancestor_fetch_duration",
-            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::LOCAL,
-        );
-        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
             context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
@@ -216,7 +208,6 @@ where
             gates: Gates::new(),
             build_duration,
             proposal_parent_fetch_duration,
-            ancestor_fetch_duration,
         }
     }
 }
@@ -251,6 +242,7 @@ where
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -258,7 +250,6 @@ where
         let gates = self.gates.clone();
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -296,21 +287,9 @@ where
                     return;
                 }
 
-                // The parent for any consensus context is in the same epoch: the
-                // boundary block of the previous epoch is the genesis block of the
-                // current epoch.
-                //
-                // Proposal context carries the certified parent view/commitment but
-                // not the parent height. The parent may be certified above the
-                // finalized tip, so this must stay round-bound until the block is
-                // returned.
+                // Consensus supplies the exact parent commitment.
                 let (parent_view, parent_commitment) = consensus_context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
+                let parent_request = marshal.acquire(parent_commitment);
 
                 let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
                 let parent = select! {
@@ -350,18 +329,15 @@ where
                     return;
                 }
 
-                let ancestor_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
-                    ancestor_fetch_duration,
-                );
+                let blocks = marshal.blocks(parent.height(), ancestry);
                 let build_request = application
                     .propose(
                         (
                             runtime_context.child("app_propose"),
                             consensus_context.clone(),
                         ),
-                        ancestor_stream,
+                        parent,
+                        blocks,
                         (),
                     )
                     .instrument(info_span!(
@@ -410,10 +386,10 @@ where
     /// Performs complete verification inline.
     ///
     /// This method:
-    /// 1. Waits for the block by digest
+    /// 1. Acquires the candidate block
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
-    /// 4. Runs application verification over ancestry
+    /// 4. Runs application verification with the candidate, parent, and block range
     ///
     /// The notarize vote is cast as soon as application verification completes. The block's
     /// durable sync is deferred (it runs concurrently with consensus voting) and its
@@ -425,24 +401,18 @@ where
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
 
-        // Verification needs the full block but waits only for local delivery. Certification starts
-        // recovery only when the block is not buffered. If a buffered block is evicted before
-        // verification registers its wait, verification is left with neither the block nor an
-        // active fetch. Register the wait before publishing the gate so it receives the buffered
-        // block or is waiting when recovery delivers it.
-        let block_request = self
-            .marshal
-            .subscribe_by_digest(digest, DigestFallback::Wait);
+        // Register acquisition before publishing the gate so certification shares its work.
+        let block_request = self.marshal.acquire(digest);
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
 
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
@@ -458,20 +428,10 @@ where
         );
         runtime_context.spawn(move |runtime_context| {
             async move {
-                // Start the parent fetch immediately: its commitment and certified
-                // round are known from the consensus context, so it can proceed in
-                // parallel with broadcast delivery of the candidate block.
-                // Reproposals (digest == context.parent.1) skip parent validation
-                // entirely, so they must not fetch: the "parent" is the candidate
-                // itself, and candidate acquisition is deliberately local-only.
+                // Acquire the parent concurrently with the candidate, except when they coincide.
                 let parent_request = (digest != context.parent.1).then(|| {
-                    let (parent_view, parent_commitment) = context.parent;
-                    marshal.subscribe_by_commitment(
-                        parent_commitment,
-                        CommitmentFallback::FetchByRound {
-                            round: Round::new(context.epoch(), parent_view),
-                        },
-                    )
+                    let (_, parent_commitment) = context.parent;
+                    marshal.acquire(parent_commitment)
                 });
 
                 let Some(block) =
@@ -563,7 +523,7 @@ where
                         &mut application,
                         &marshal,
                         &mut tx,
-                        ancestor_fetch_duration,
+                        ancestry,
                     )
                     .await;
                     if let Some(valid) = valid {
@@ -580,7 +540,7 @@ where
 }
 
 /// Inline certification consumes a registered certification gate when present, and
-/// falls back to a round-bound fetch/persist path when the gate is missing (after
+/// falls back to an exact-commitment fetch/persist path when the gate is missing (after
 /// an unclean restart) or cannot speak for the notarized proposal.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
@@ -598,7 +558,12 @@ where
 {
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
-    async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        digest: Self::Digest,
+        _ancestry: Arc<[Self::Digest]>,
+    ) -> oneshot::Receiver<bool> {
         self.gates.flush_unrelayed(&self.marshal, round, digest);
 
         // `propose`/`verify` register an in-flight certification gate whose result resolves
@@ -607,13 +572,6 @@ where
         // instead of freezing certify with a fresh fsync.
         let task = self.gates.take(round, digest);
 
-        // `verify()` waits only on local broadcast delivery, so nudge a
-        // round-bound notarized fetch that can unblock the existing waiter
-        // if local broadcast never arrives. For the standard variant, the
-        // digest is also the variant commitment.
-        if task.is_some() {
-            self.marshal.hint_notarized(round, digest);
-        }
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -651,8 +609,7 @@ where
                 // notarization after sending the proposal to only f+1 honest validators, so
                 // the validators left without the block must fetch it here to certify and
                 // avoid getting stuck.
-                let block_rx =
-                    marshal.subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
+                let block_rx = marshal.acquire(digest);
                 let Some(block) =
                     await_block_subscription(&mut tx, block_rx, &digest, "certification").await
                 else {
@@ -736,7 +693,7 @@ mod tests {
     use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
     use rand::Rng;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     // Compile-time assertion only: inline standard wrapper must not require `CertifiableBlock`.
     #[allow(dead_code)]
@@ -821,14 +778,20 @@ mod tests {
             assert!(marshal.verified(round, block).await);
 
             // Complete verify first so the block is already available locally.
-            let verify_rx = inline.verify(verify_context, digest).await;
+            let verify_rx = inline
+                .verify(
+                    verify_context.clone(),
+                    digest,
+                    Arc::from([verify_context.parent.1]),
+                )
+                .await;
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should complete successfully before certify"
             );
 
             // Certify should return immediately instead of waiting on marshal.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, digest, Arc::from([])).await;
 
             select! {
                 result = certify_rx => {
@@ -902,7 +865,7 @@ mod tests {
             assert!(marshal.verified(round, block).await);
 
             // Certify should still resolve by waiting on marshal block availability directly.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, digest, Arc::from([])).await;
 
             select! {
                 result = certify_rx => {
@@ -974,7 +937,7 @@ mod tests {
                 parent: (View::new(boundary_height.get()), boundary_digest),
             };
 
-            let verify_rx = inline.verify(reproposal_context, boundary_digest).await;
+            let verify_rx = inline.verify(reproposal_context.clone(), boundary_digest, Arc::from([reproposal_context.parent.1])).await;
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should accept a valid boundary re-proposal"
@@ -984,7 +947,7 @@ mod tests {
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
-            let certify_rx = inline.certify(reproposal_round, boundary_digest).await;
+            let certify_rx = inline.certify(reproposal_round, boundary_digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1062,7 +1025,13 @@ mod tests {
                 leader: me,
                 parent: (View::new(2), digest),
             };
-            let verify_rx = inline.verify(reproposal_context, digest).await;
+            let verify_rx = inline
+                .verify(
+                    reproposal_context.clone(),
+                    digest,
+                    Arc::from([reproposal_context.parent.1]),
+                )
+                .await;
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "a non-boundary re-proposal must be rejected"
@@ -1070,7 +1039,7 @@ mod tests {
 
             // The header-scoped rejection must not become the certification
             // verdict for the notarized digest.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1161,9 +1130,15 @@ mod tests {
                 "buffer broadcast for child should be accepted"
             );
 
-            let verify_rx = inline.verify(child_ctx, child_digest).await;
+            let verify_rx = inline
+                .verify(
+                    child_ctx.clone(),
+                    child_digest,
+                    Arc::from([child_ctx.parent.1]),
+                )
+                .await;
             let certify_result = inline
-                .certify(child_round, child_digest)
+                .certify(child_round, child_digest, Arc::from([]))
                 .await
                 .await
                 .expect("certify result missing");
@@ -1258,7 +1233,7 @@ mod tests {
             );
 
             let digest = inline
-                .propose(ctx)
+                .propose(ctx.clone(), Arc::from([ctx.parent.1]))
                 .await
                 .await
                 .expect("propose must return a digest");
@@ -1270,7 +1245,7 @@ mod tests {
             // The leader certifies its own proposal, which awaits the deferred sync handle.
             assert!(
                 inline
-                    .certify(round, child_digest)
+                    .certify(round, child_digest, Arc::from([]))
                     .await
                     .await
                     .expect("certify result missing"),
@@ -1348,7 +1323,13 @@ mod tests {
                 B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
-            let verify_rx = inline.verify(block_context, digest).await;
+            let verify_rx = inline
+                .verify(
+                    block_context.clone(),
+                    digest,
+                    Arc::from([block_context.parent.1]),
+                )
+                .await;
             drop(verify_rx);
 
             // Give the verify task a chance to observe the dropped receiver while its
@@ -1356,7 +1337,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(marshal.verified(round, block).await);
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1440,7 +1421,7 @@ mod tests {
                 "buffer broadcast for child should be accepted"
             );
 
-            let verify_rx = inline.verify(child_ctx, child_digest).await;
+            let verify_rx = inline.verify(child_ctx.clone(), child_digest, Arc::from([child_ctx.parent.1])).await;
 
             // Application verification is now blocked. The store request runs concurrently
             // with it, so the block is locally queryable even though the notarize vote has
@@ -1460,7 +1441,7 @@ mod tests {
                 verify_rx.await.expect("verify result missing"),
                 "inline verify should pass once verification is released"
             );
-            let certify_rx = inline.certify(child_round, child_digest).await;
+            let certify_rx = inline.certify(child_round, child_digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1559,7 +1540,7 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            let digest_rx = inline.propose(ctx).await;
+            let digest_rx = inline.propose(ctx.clone(), Arc::from([ctx.parent.1])).await;
             assert!(
                 digest_rx.await.is_err(),
                 "propose must drop the receiver so the voter nullifies the round via timeout"
@@ -1662,14 +1643,14 @@ mod tests {
                 leader,
                 parent: (View::new(1), certified_digest),
             };
-            let verify_rx = inline.verify(equivocating_ctx, digest).await;
+            let verify_rx = inline.verify(equivocating_ctx.clone(), digest, Arc::from([equivocating_ctx.parent.1])).await;
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "the equivocating proposal must not be notarized"
             );
 
             // The honest notarization for the same `(round, digest)` arrives.
-            let certify_rx = inline.certify(round, digest).await;
+            let certify_rx = inline.certify(round, digest, Arc::from([])).await;
             select! {
                 result = certify_rx => {
                     assert!(

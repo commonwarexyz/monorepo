@@ -1,22 +1,21 @@
 use crate::{
     CertifiableBlock,
     marshal::{
-        ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
+            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
-        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
+        core::{Buffer, ExpectedCommitment, Retirement, Variant},
     },
-    simplex::{scheme::Scheme as SimplexScheme, types::Context},
+    simplex::types::Context,
     types::{Round, coding::Commitment},
 };
 use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
+use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 /// The coding variant of Marshal, which uses erasure coding for block dissemination.
 ///
@@ -82,15 +81,6 @@ where
         block.context().parent.1
     }
 
-    fn check_payload<S>(scheme: &S, payload: Self::Commitment) -> bool
-    where
-        S: SimplexScheme<Self::Commitment>,
-    {
-        let n_participants = u16::try_from(scheme.participants().len())
-            .expect("scheme must have at most 2^16-1 participants");
-        payload.config() == coding_config_for_participants(n_participants)
-    }
-
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
@@ -103,13 +93,6 @@ where
 
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block.inner_shared()
-    }
-
-    fn from_application_block(
-        block: Self::ApplicationBlock,
-        payload: Self::Commitment,
-    ) -> Self::Block {
-        Arc::new(CodedBlock::new_trusted(block, payload))
     }
 }
 
@@ -136,13 +119,6 @@ where
         self.get(commitment).await
     }
 
-    fn subscribe_by_digest(
-        &self,
-        digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> Option<oneshot::Receiver<Arc<CodedBlock<B, C, H>>>> {
-        Some(self.subscribe_by_digest(digest))
-    }
-
     fn subscribe_by_commitment(
         &self,
         commitment: Commitment<B, C, H>,
@@ -157,32 +133,6 @@ where
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
         self.proposed_shared(round, block);
-    }
-}
-
-impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
-where
-    S: Scheme,
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
-    H: Hasher,
-    P: PublicKey,
-{
-    type Block = B;
-
-    fn subscribe_parent(
-        &self,
-        block: &Self::Block,
-    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
-        let receiver = block.height().previous().map(|parent_height| {
-            self.subscribe_by_commitment(
-                block.context().parent.1,
-                CommitmentFallback::FetchByCommitment {
-                    height: parent_height,
-                },
-            )
-        });
-        async move { receiver?.await.ok().map(|block| block.inner_shared()) }
     }
 }
 

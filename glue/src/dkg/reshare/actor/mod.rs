@@ -147,7 +147,7 @@ use crate::dkg::{
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
     Heightable as _,
-    marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher},
 };
@@ -441,10 +441,7 @@ where
             self.register_epoch(&state_sync.info, share).await;
             let floor = self
                 .marshal
-                .subscribe_by_commitment(
-                    state_sync.floor.proposal.payload,
-                    CommitmentFallback::Wait,
-                )
+                .acquire(state_sync.floor.proposal.payload)
                 .await
                 .expect("marshal must yield state sync floor block");
             Some(StateSyncStart {

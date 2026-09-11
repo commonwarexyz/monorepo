@@ -1,12 +1,12 @@
 use crate::stateful::{
     Application,
     actor::{
-        core::mailbox::{Verification, WeakAncestry},
+        core::mailbox::Verification,
         processor::{Disposition, PendingDigest, VerificationProgress, Verifier},
     },
 };
 use commonware_consensus::marshal::{
-    ancestry::BlockProvider,
+    blocks::Blocks,
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -15,13 +15,13 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
 use rand_core::Rng;
-use std::{collections::BTreeMap, future::Future};
+use std::{collections::BTreeMap, future::Future, sync::Weak};
 use tracing::{Instrument as _, Span, info_span};
 
 /// A caller-scoped verification request that can be deferred or restarted.
 ///
-/// The request retains the same non-owning ancestry handle while each active
-/// attempt uses an independent cursor.
+/// Queued requests retain weak body references and shared branch metadata.
+/// Each active attempt owns its bodies and range cursor.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -29,7 +29,9 @@ where
 {
     pub(super) span: Span,
     pub(super) context: (E, A::Context),
-    pub(super) ancestry: WeakAncestry<A::Block>,
+    pub(super) block: Weak<A::Block>,
+    pub(super) parent: Weak<A::Block>,
+    pub(super) blocks: Blocks<A::Block>,
     pub(super) verification: Verification,
 }
 
@@ -86,7 +88,6 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub(super) fn new(marshal: MarshalMailbox<S, V>) -> Self {
         Self {
@@ -98,11 +99,11 @@ where
     }
 
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
-        // Upgrade to an independent cursor for this active attempt. Canceled callers cannot provide
-        // one, while queued requests remain non-owning.
-        let Some(ancestry) = request.ancestry.upgrade() else {
+        let (Some(block), Some(parent)) = (request.block.upgrade(), request.parent.upgrade())
+        else {
             return;
         };
+        let blocks = request.blocks.clone();
 
         // Register the attempt before polling it so actor invalidation and progress share one
         // lifecycle.
@@ -125,8 +126,7 @@ where
                 .is_none()
         );
 
-        // Move only the independent cursor into active work. The original request returns with
-        // its weak ancestry handle intact for completion or another attempt.
+        // Active work owns the bodies; retries retain only caller-scoped weak references.
         let marshal = self.marshal.clone();
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         self.jobs.push(
@@ -137,7 +137,9 @@ where
                         &request.context.0,
                         marshal,
                         request.context.1.clone(),
-                        ancestry,
+                        block,
+                        parent,
+                        blocks,
                         &progress,
                         &mut request.verification,
                     ) => JobResult::Finished { id, request, valid },

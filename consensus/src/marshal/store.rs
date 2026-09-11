@@ -87,9 +87,6 @@ pub trait Certificates: Send + Sync + Sized + 'static {
         Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
 
-    /// Check whether a finalization is stored at `height` without fetching it.
-    fn has(&self, height: Height) -> impl Future<Output = Result<bool, Self::Error>> + Send;
-
     /// Prune the store to the provided minimum height (inclusive).
     ///
     /// # Arguments
@@ -169,6 +166,12 @@ pub trait Blocks: Send + Sync + Sized + 'static {
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
+    /// Checks whether a block is stored by digest without reading its body.
+    fn has(
+        &self,
+        digest: &<Self::Block as Digestible>::Digest,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
     /// Prune the store to the provided minimum height (inclusive).
     ///
     /// # Arguments
@@ -179,23 +182,6 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ///
     /// The store when pruning is applied or unnecessary, or `Err` if pruning fails.
     fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
-
-    /// Returns up to `max` missing items starting from `start`.
-    ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill.
-    ///
-    /// # Arguments
-    ///
-    /// * `start`: The height to start searching from (inclusive).
-    /// * `max`: The maximum number of missing items to return.
-    ///
-    /// # Returns
-    ///
-    /// A vector containing up to `max` missing heights from gaps between ranges.
-    /// The vector may contain fewer than `max` items if there aren't enough gaps.
-    /// If there are no more ranges after the current position, no items are returned.
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height>;
 
     /// Finds the end of the range containing `value` and the start of the
     /// range succeeding `value`. This method is useful for identifying gaps around a given point.
@@ -263,10 +249,6 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn has(&self, height: Height) -> Result<bool, Self::Error> {
-        <Self as Archive>::has(self, Identifier::Index(height.get())).await
-    }
-
     async fn prune(self, _: Height) -> Result<Self, Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(self)
@@ -309,16 +291,13 @@ where
         <Self as Archive>::get(self, id).await
     }
 
+    async fn has(&self, digest: &<Self::Block as Digestible>::Digest) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, Identifier::Key(digest)).await
+    }
+
     async fn prune(self, _: Height) -> Result<Self, Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(self)
-    }
-
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        <Self as Archive>::missing_items(self, start.get(), max)
-            .into_iter()
-            .map(Height::new)
-            .collect()
     }
 
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
@@ -368,10 +347,6 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn has(&self, height: Height) -> Result<bool, Self::Error> {
-        <Self as Archive>::has(self, Identifier::Index(height.get())).await
-    }
-
     async fn prune(self, min: Height) -> Result<Self, Self::Error> {
         Self::prune(self, min.get()).await
     }
@@ -414,15 +389,12 @@ where
         <Self as Archive>::get(self, id).await
     }
 
-    async fn prune(self, min: Height) -> Result<Self, Self::Error> {
-        Self::prune(self, min.get()).await
+    async fn has(&self, digest: &<Self::Block as Digestible>::Digest) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, Identifier::Key(digest)).await
     }
 
-    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
-        <Self as Archive>::missing_items(self, start.get(), max)
-            .into_iter()
-            .map(Height::new)
-            .collect()
+    async fn prune(self, min: Height) -> Result<Self, Self::Error> {
+        Self::prune(self, min.get()).await
     }
 
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {

@@ -1723,7 +1723,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            let view = View::new(2);
+            let view = View::new(1);
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -1910,7 +1910,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            let view = View::new(2);
+            let view = View::new(1);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -4106,6 +4106,142 @@ mod tests {
     fn test_missed_notarization_is_fetched() {
         // Request routing is scheme-independent; one scheme is enough.
         missed_notarization_is_fetched(ed25519::fixture);
+    }
+
+    fn certification_repairs_cross_term_parent(conflicting_local_parent: bool) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let epoch = Epoch::new(333);
+            let Fixture { participants, schemes, .. } =
+                ed25519::fixture(&mut context, b"_COMMONWARE_CONSENSUS_TEST_CERTIFICATION_PARENT_REPAIR", 4);
+            let oracle = start_test_network_with_peers(
+                context.child("network"), participants.clone(), true,
+            ).await;
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let local_round = Round::new(epoch, View::new(1));
+            let parent = Proposal::new(
+                local_round, View::zero(), Sha256::hash(&[b"selected-B"]),
+            );
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(6)), parent.view(), Sha256::hash(&[b"candidate-C"]),
+            );
+            let repaired = Arc::new(Mutex::new(false));
+            let observed = Arc::new(Mutex::new(0usize));
+            let repair_observer = repaired.clone();
+            let call_observer = observed.clone();
+            let expected = vec![genesis, parent.payload];
+            let candidate_view = candidate.view();
+            let candidate_payload = candidate.payload;
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(5)), Duration::from_secs(30), ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, mut resolver, relay, _) = setup_voter(
+                &context, &oracle, &participants, &schemes, elector,
+                VoterOptions {
+                    local_index: 1,
+                    leader_timeout: Duration::from_secs(20),
+                    certifier: mocks::application::Certifier::WithAncestry(Box::new(
+                        move |round, payload, ancestry| {
+                            if round.view() == candidate_view {
+                                assert!(*repair_observer.lock(),
+                                    "certification ran before its untargeted parent repair");
+                                assert_eq!(payload, candidate_payload);
+                                assert_eq!(&*ancestry, expected.as_slice());
+                                *call_observer.lock() += 1;
+                            }
+                            true
+                        },
+                    )),
+                    ..VoterOptions::default()
+                },
+            ).await;
+            if conflicting_local_parent {
+                let local_contents = (local_round, genesis, 0u64).encode();
+                let local = Proposal::new(
+                    local_round, View::zero(), Sha256::hash(&[&local_contents]),
+                );
+
+                // Epoch 333 plus one-based term 1 elects participant 2.
+                let leader = participants[2].clone();
+                relay.broadcast(
+                    &leader, Recipients::All,
+                    (local.payload, local_contents),
+                );
+                mailbox.proposal(local.clone());
+                loop {
+                    select! {
+                        message = batcher.recv() => {
+                            if let batcher::Message::Constructed(Vote::Notarize(vote)) = message.unwrap()
+                                && vote.view() == local.view()
+                            {
+                                assert_eq!(vote.proposal, local);
+                                break;
+                            }
+                        },
+                        _message = resolver.recv() => {},
+                        _ = context.sleep(Duration::from_secs(10)) =>
+                            panic!("local A was not verified and voted"),
+                    }
+                }
+            }
+
+            let quorum_schemes = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let (_, skipped) = build_nullification(
+                &quorum_schemes, Round::new(epoch, View::new(2)), quorum(4),
+            );
+            let (_, parent_certificate) =
+                build_notarization(&quorum_schemes, &parent, quorum(4));
+            let (_, candidate_certificate) =
+                build_notarization(&quorum_schemes, &candidate, quorum(4));
+            mailbox.recovered(Certificate::Nullification(skipped));
+            mailbox.recovered(Certificate::Notarization(candidate_certificate));
+            loop {
+                select! {
+                    message = resolver.recv() => {
+                        match message.unwrap() {
+                            MailboxMessage::Resolve {
+                                proposal, view,
+                                kind: crate::simplex::actors::Kind::Notarization,
+                                target: None, ..
+                            } if proposal == candidate.view() && view == parent.view() => {
+                                assert!(!*repaired.lock(), "repair must be deduplicated");
+                                assert_eq!(*observed.lock(), 0);
+                                *repaired.lock() = true;
+                                mailbox.recovered(Certificate::Notarization(
+                                    parent_certificate.clone(),
+                                ));
+                            }
+                            MailboxMessage::Certified { view, success, .. }
+                                if view == candidate.view() => {
+                                    assert!(*repaired.lock());
+                                    assert!(success);
+                            }
+                            _ => {}
+                        }
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
+                            && vote.view() == candidate.view()
+                        {
+                            assert!(*repaired.lock());
+                            assert_eq!(*observed.lock(), 1);
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) =>
+                        panic!("candidate failed to certify after exact parent repair"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_certification_repairs_conflicting_cross_term_parent() {
+        certification_repairs_cross_term_parent(true);
+    }
+
+    #[test]
+    fn test_certification_repairs_missing_cross_term_ancestry() {
+        certification_repairs_cross_term_parent(false);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote

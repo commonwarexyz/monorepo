@@ -16,10 +16,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Floor, Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
     simplex::types::Finalization,
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
@@ -167,7 +164,6 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
     ///
@@ -303,9 +299,8 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Reporter as _,
-        marshal::{Update, ancestry},
-        simplex::mocks::scheme as scheme_mocks,
+        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _, marshal::Update,
+        simplex::mocks::scheme as scheme_mocks, types::Height,
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
@@ -425,7 +420,8 @@ mod tests {
             select! {
                 result = mailbox.propose(
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
-                    ancestry::from_iter([]),
+                    Arc::new(TestBlock::new(0, 0)),
+                    fixtures::blocks(Height::zero(), &[]),
                     (),
                 ) => {
                     assert!(result.is_none());
@@ -484,32 +480,47 @@ mod tests {
                 .await
                 .expect("startup should reach resolver attachment before processing");
 
-            // Fill the single ready slot and reliable overflow with independently owned ancestries.
-            let owners = [
-                Arc::new(TestBlock::new(2, 2)),
-                Arc::new(TestBlock::new(3, 3)),
-                Arc::new(TestBlock::new(4, 4)),
+            // Fill the single ready slot and reliable overflow with independently owned blocks.
+            let parents = [
+                Arc::new(TestBlock::new(1, 11)),
+                Arc::new(TestBlock::new(2, 12)),
+                Arc::new(TestBlock::new(3, 13)),
             ];
-            let weak_owners = owners.iter().map(Arc::downgrade).collect::<Vec<_>>();
+            let owners = [
+                Arc::new(TestBlock::child(&parents[0], 2)),
+                Arc::new(TestBlock::child(&parents[1], 3)),
+                Arc::new(TestBlock::child(&parents[2], 4)),
+            ];
+            let weak_owners = owners
+                .iter()
+                .chain(&parents)
+                .map(Arc::downgrade)
+                .collect::<Vec<_>>();
 
             let mut first_mailbox = mailbox.clone();
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("verify_first"), owners[0].context()),
-                ancestry::from_iter([Arc::clone(&owners[0])]),
+                Arc::clone(&owners[0]),
+                Arc::clone(&parents[0]),
+                fixtures::blocks(parents[0].height(), std::slice::from_ref(&parents[0])),
             ));
             assert!(poll!(&mut first).is_pending());
 
             let mut second_mailbox = mailbox.clone();
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("verify_second"), owners[1].context()),
-                ancestry::from_iter([Arc::clone(&owners[1])]),
+                Arc::clone(&owners[1]),
+                Arc::clone(&parents[1]),
+                fixtures::blocks(parents[1].height(), std::slice::from_ref(&parents[1])),
             ));
             assert!(poll!(&mut second).is_pending());
 
             let mut third_mailbox = mailbox.clone();
             let mut third = Box::pin(third_mailbox.verify(
                 (context.child("verify_third"), owners[2].context()),
-                ancestry::from_iter([Arc::clone(&owners[2])]),
+                Arc::clone(&owners[2]),
+                Arc::clone(&parents[2]),
+                fixtures::blocks(parents[2].height(), std::slice::from_ref(&parents[2])),
             ));
             assert!(poll!(&mut third).is_pending());
 
@@ -521,14 +532,15 @@ mod tests {
             drop(second);
             drop(third);
             drop(owners);
+            drop(parents);
             context.sleep(Duration::from_millis(10)).await;
 
-            // Startup remains blocked while cancellation releases every ancestry block.
+            // Startup remains blocked while cancellation releases every candidate and parent.
             assert!(poll!(&mut acknowledgement_waiter).is_pending());
             for (index, owner) in weak_owners.iter().enumerate() {
                 assert!(
                     owner.upgrade().is_none(),
-                    "cancelled startup verification {index} retained its ancestry owner",
+                    "cancelled startup verification {index} retained a block owner",
                 );
             }
 

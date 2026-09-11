@@ -138,6 +138,11 @@
 //!
 //! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
 //! request when marshal has no finalization yet.
+//!
+//! During consensus catchup, the orchestrator requests the boundary certificate of the
+//! active epoch. The service verifies responses with the all-epoch verifier and reports them
+//! to marshal for commitment-based block acquisition. It retries discovery until marshal stores
+//! the boundary, while continuing to serve requests from peers.
 
 use crate::dkg::{
     ReshareBlock,
@@ -265,7 +270,7 @@ mod tests {
         Clock as _, Handle, Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef,
         deterministic,
     };
-    use commonware_storage::archive::immutable;
+    use commonware_storage::{archive::prunable, translator::TwoCap};
     use commonware_utils::{
         N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, non_empty,
         ordered::Set, probability, sequence::Unit,
@@ -317,13 +322,20 @@ mod tests {
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
         ) -> Self {
-            Self::start_full(context, source_boundaries, Epoch::zero()).await
+            Self::start_full(
+                context,
+                source_boundaries,
+                Epoch::zero(),
+                Duration::from_millis(500),
+            )
+            .await
         }
 
         async fn start_full(
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
             bootstrap_epoch: Epoch,
+            retry_timeout: Duration,
         ) -> Self {
             let fixture = mocks::scheme_fixture_n(context, 4);
             let participants = fixture.participants.clone();
@@ -420,7 +432,7 @@ mod tests {
                 strategy: Sequential,
                 blocker: oracle.control(participants[1].clone()),
                 blocks_per_epoch: BLOCKS_PER_EPOCH,
-                retry_timeout: NZDuration!(Duration::from_millis(500)),
+                retry_timeout: NZDuration!(retry_timeout),
                 mailbox_size: NZUsize!(16),
                 block_codec_config: (),
             });
@@ -550,6 +562,24 @@ mod tests {
         async fn next_client_boundary_request(&mut self) -> Epoch {
             Self::next_boundary_request(&mut self.client_boundary_receiver).await
         }
+
+        async fn attach_joiner(
+            &mut self,
+            context: &deterministic::Context,
+        ) -> mocks::TestMarshalMailbox {
+            let (marshal, handle) = start_marshal(
+                context.child("joiner_marshal"),
+                &self.oracle,
+                &self.participants,
+                &self.schemes,
+                1,
+                Vec::new(),
+            )
+            .await;
+            self._handles.push(handle);
+            self.joiner.attach(marshal.clone());
+            marshal
+        }
     }
 
     async fn start_marshal(
@@ -586,7 +616,7 @@ mod tests {
             backfill,
         );
         let finalizations_by_height =
-            immutable::Archive::init(context.child("finalizations_by_height"), {
+            prunable::Archive::init(context.child("finalizations_by_height"), {
                 let _: () = mocks::TestScheme::certificate_codec_config_unbounded();
                 archive_config(
                     &partition_prefix,
@@ -597,7 +627,7 @@ mod tests {
             })
             .await
             .expect("failed to initialize finalizations archive");
-        let finalized_blocks = immutable::Archive::init(
+        let finalized_blocks = prunable::Archive::init(
             context.child("finalized_blocks"),
             archive_config(
                 &partition_prefix,
@@ -650,25 +680,19 @@ mod tests {
         name: &str,
         page_cache: CacheRef,
         codec_config: C,
-    ) -> immutable::Config<C> {
-        immutable::Config {
+    ) -> prunable::Config<TwoCap, C> {
+        prunable::Config {
+            translator: TwoCap,
             metadata_partition: format!("{prefix}-{name}-metadata"),
-            freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
-            freezer_table_initial_size: 64,
-            freezer_table_resize_frequency: 10,
-            freezer_table_resize_chunk_size: 10,
-            freezer_key_partition: format!("{prefix}-{name}-freezer-key"),
-            freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{prefix}-{name}-freezer-value"),
-            freezer_value_target_size: 1024,
-            freezer_value_compression: None,
-            ordinal_partition: format!("{prefix}-{name}-ordinal"),
+            key_partition: format!("{prefix}-{name}-key"),
+            key_page_cache: page_cache,
+            value_partition: format!("{prefix}-{name}-value"),
+            compression: None,
             items_per_section: NZU64!(10),
             codec_config,
             replay_buffer: NZUsize!(1024),
-            freezer_key_write_buffer: NZUsize!(1024),
-            freezer_value_write_buffer: NZUsize!(1024),
-            ordinal_write_buffer: NZUsize!(1024),
+            key_write_buffer: NZUsize!(1024),
+            value_write_buffer: NZUsize!(1024),
         }
     }
 
@@ -930,8 +954,13 @@ mod tests {
     fn ignores_latest_reply_below_bootstrap_epoch() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness =
-                Harness::start_full(&mut context, vec![Epoch::new(1)], Epoch::new(1)).await;
+            let mut harness = Harness::start_full(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::new(1),
+                Duration::from_millis(500),
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             // Valid replies below the bootstrap epoch are stale by definition
@@ -1369,6 +1398,179 @@ mod tests {
                 panic!("expected latest response");
             };
             assert_eq!(finalization, harness.boundary_finalization);
+        });
+    }
+
+    #[test]
+    fn catch_up_retries_silent_peer_and_acquires_boundary() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start(&mut context).await;
+            // Catchup can arrive before marshal attaches to the probe.
+            harness
+                .joiner
+                .catch_up(Epoch::zero(), harness.participants[2].clone());
+            let marshal = harness.attach_joiner(&context).await;
+            assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
+            assert!(marshal.get_finalization(Height::new(1)).await.is_none());
+
+            assert_eq!(
+                Harness::next_boundary_request(&mut harness.backup_boundary_receiver).await,
+                Epoch::new(1),
+            );
+            let block = loop {
+                if let Some(block) = marshal.get_block(Height::new(1)).await {
+                    break block;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            };
+            assert_eq!(block.digest(), harness.boundary.digest());
+            assert_eq!(
+                marshal.get_finalization(Height::new(1)).await,
+                Some(harness.boundary_finalization),
+            );
+        });
+    }
+
+    #[test]
+    fn catch_up_stops_after_processed_boundary_is_pruned() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(120));
+        runner.start(|mut context| async move {
+            let retry_timeout = Duration::from_secs(30);
+            let mut harness = Harness::start_full(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                retry_timeout,
+            )
+            .await;
+            let mut marshal = harness.attach_joiner(&context).await;
+            let started = context.current();
+            harness
+                .joiner
+                .catch_up(Epoch::zero(), harness.participants[2].clone());
+            assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
+
+            let leader = harness.participants[1].clone();
+            let mut parent = mocks::genesis_block(leader.clone());
+            for height in 1..=15 {
+                let epoch = Epoch::new(height / BLOCKS_PER_EPOCH.get());
+                let parent_view = if epoch == parent.context().round.epoch() {
+                    parent.context().round.view()
+                } else {
+                    View::zero()
+                };
+                let block_context = mocks::TestContext {
+                    round: Round::new(epoch, View::new(height)),
+                    leader: leader.clone(),
+                    parent: (parent_view, parent.digest()),
+                };
+                let block = mocks::TestBlock::new::<Sha256>(
+                    block_context.clone(),
+                    parent.digest(),
+                    Height::new(height),
+                    height,
+                );
+                let certificate = finalization(
+                    Proposal::new(block_context.round, parent_view, block.digest()),
+                    &harness.schemes,
+                );
+                assert!(marshal.certified(block_context.round, block.clone()).await);
+                if height == 1 {
+                    harness.client_boundary_sender.send(
+                        Recipients::One(harness.participants[1].clone()),
+                        wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryResponse(
+                            certificate,
+                        )
+                        .encode(),
+                        false,
+                    );
+                } else {
+                    assert_eq!(marshal.report(Activity::Finalization(certificate)), Feedback::Ok);
+                }
+                while marshal.get_processed_height().await < Some(Height::new(height)) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                assert!(marshal.get_finalization(Height::new(height)).await.is_some());
+                parent = block;
+            }
+
+            // Keep a full epoch and the current boundary after removing an old section.
+            marshal.prune(Height::new(10));
+            assert!(marshal.get_finalization(Height::new(1)).await.is_none());
+            assert!(marshal.get_block(Height::new(1)).await.is_none());
+            let retained = marshal.get_finalization(Height::new(15)).await.unwrap();
+            assert!(context.current() < started + retry_timeout);
+
+            select! {
+                epoch = harness.next_client_boundary_request() => {
+                    assert_eq!(epoch, Epoch::new(1));
+                    panic!("processed catchup restarted after its boundary was pruned");
+                },
+                _ = context.sleep(retry_timeout * 2 + Duration::from_millis(10)) => {},
+            }
+
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryRequest(
+                    Epoch::new(8),
+                )
+                .encode(),
+                false,
+            );
+            let (_, response) = harness.client_boundary_receiver.recv().await.unwrap();
+            let Some(wire::Response::Boundary(certificate)) =
+                wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
+                    response,
+                    &harness.schemes[1].certificate_codec_config(),
+                )
+                .unwrap()
+            else {
+                panic!("expected the retained boundary response");
+            };
+            assert_eq!(certificate, retained);
+        });
+    }
+
+    #[test]
+    fn catch_up_rejects_invalid_certificate_and_keeps_retrying() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start(&mut context).await;
+            let marshal = harness.attach_joiner(&context).await;
+            harness
+                .joiner
+                .catch_up(Epoch::zero(), harness.participants[2].clone());
+            assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
+
+            let mut invalid = harness.boundary_finalization.clone();
+            invalid.proposal.payload = mocks::TestDigest::EMPTY;
+            harness.client_boundary_sender.send(
+                Recipients::One(harness.participants[1].clone()),
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryResponse(
+                    invalid,
+                )
+                .encode(),
+                false,
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(marshal.get_finalization(Height::new(1)).await.is_none());
+            assert!(harness.oracle.blocked().await.unwrap().contains(&(
+                harness.participants[1].clone(),
+                harness.participants[2].clone(),
+            )));
+
+            assert_eq!(
+                Harness::next_boundary_request(&mut harness.backup_boundary_receiver).await,
+                Epoch::new(1),
+            );
+            loop {
+                if let Some(block) = marshal.get_block(Height::new(1)).await {
+                    assert_eq!(block.digest(), harness.boundary.digest());
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
         });
     }
 
