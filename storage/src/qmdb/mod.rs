@@ -319,12 +319,6 @@ pub enum Error<F: Family> {
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
-    /// The recovered database does not match a caller-supplied checkpoint. Initialization takes
-    /// only a size bound, so callers that require an exact checkpoint compare the recovered root
-    /// and range themselves.
-    #[error("database does not match initialization target")]
-    InitializationTargetMismatch,
-
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 

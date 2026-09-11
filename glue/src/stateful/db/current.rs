@@ -7,8 +7,8 @@
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -526,13 +526,14 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, InitError<Error<F>>> {
         let db = <Self>::init(
             context,
             config,
             expected.as_ref().map(|target| target.range.end()),
         )
-        .await?;
+        .await
+        .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
@@ -629,13 +630,14 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, InitError<Error<F>>> {
         let db = <Self>::init(
             context,
             config,
             expected.as_ref().map(|target| target.range.end()),
         )
-        .await?;
+        .await
+        .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
@@ -810,13 +812,14 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, InitError<Error<F>>> {
         let db = open::variable(
             context,
             config,
             expected.as_ref().map(|target| target.range.end()),
         )
-        .await?;
+        .await
+        .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
@@ -918,13 +921,14 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, InitError<Error<F>>> {
         let db = open::ordered_variable(
             context,
             config,
             expected.as_ref().map(|target| target.range.end()),
         )
-        .await?;
+        .await
+        .map_err(InitError::Database)?;
         validate_initialization(db, expected)
     }
 
@@ -1628,7 +1632,7 @@ mod tests {
                         Some(target),
                     )
                     .await,
-                    Err(Error::InitializationTargetMismatch)
+                    Err(InitError::TargetMismatch)
                 ));
                 let reopened = <OrderedFixedDb as ManagedDb<_>>::init(
                     context.child("restart").with_attribute("case", index),
@@ -1828,7 +1832,7 @@ mod tests {
                     Some(second),
                 )
                 .await,
-                Err(Error::InitializationTargetMismatch)
+                Err(InitError::TargetMismatch)
             ));
 
             // A rejected initialization leaves the first target in place.
