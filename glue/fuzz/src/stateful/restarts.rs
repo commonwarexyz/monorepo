@@ -11,6 +11,7 @@
 
 use super::{
     NUM_IDENTITIES, RUN_TIMEOUT,
+    backend::{Any, Backend},
     input::StatefulRestartsFuzzInput,
     invariants::EngineObservations,
     runner::{self, CorrectEngine, Outcome, RunReport},
@@ -35,17 +36,31 @@ pub fn fuzz_stateful_cert_mock_restarts(input: StatefulRestartsFuzzInput) {
 ///
 /// A run is fully determined by its input bytes.
 pub fn run_stateful_restarts(input: StatefulRestartsFuzzInput) -> RunReport {
-    let entropy = input.raw_bytes.clone();
-    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
-    deterministic::Runner::new(config).start(|context| run(context, input, entropy))
+    execute::<Any>(TARGET, input)
 }
 
-async fn run(
+/// Run one restart schedule over the cluster of four correct nodes, every one
+/// of them managing a database of backend `B`.
+///
+/// The database-adapter driver shares this with the restart driver: only the
+/// backend differs, and with it the database factory, the valid workload, and
+/// the commitment conversion. A run is fully determined by its input bytes.
+pub(super) fn execute<B: Backend>(
+    target: &'static str,
+    input: StatefulRestartsFuzzInput,
+) -> RunReport {
+    let entropy = input.raw_bytes.clone();
+    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
+    deterministic::Runner::new(config).start(|context| run::<B>(context, target, input, entropy))
+}
+
+async fn run<B: Backend>(
     mut context: deterministic::Context,
+    target: &'static str,
     input: StatefulRestartsFuzzInput,
     entropy: Vec<u8>,
 ) -> RunReport {
-    let cluster = runner::setup(&mut context).await;
+    let cluster = runner::setup::<B>(&mut context).await;
     let elector = round_robin(input.term_length);
 
     let observations: Vec<EngineObservations> = (0..NUM_IDENTITIES as usize)
@@ -86,7 +101,7 @@ async fn run(
         }
     };
 
-    runner::measure(TARGET, outcome, &correct, &observations, &cluster.genesis)
+    runner::measure(target, outcome, &correct, &observations, &cluster.genesis)
 }
 
 #[cfg(test)]

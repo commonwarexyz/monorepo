@@ -6,14 +6,13 @@
 //! keyed by engine rather than by identity because the compromised identity's
 //! two halves share a key.
 
-use super::{Digest, app::Block};
+use super::{Ctx, Digest};
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Heightable, Reporter,
+    CertifiableBlock, Reporter,
     marshal::Update,
     types::{Height, View},
 };
-use commonware_cryptography::Digestible;
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,13 +26,29 @@ struct Verdicts {
     rejected: bool,
 }
 
+/// How a delivered block links into the chain: what the check of I1 needs of
+/// a block, independent of the commitment the block carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Linkage {
+    digest: Digest,
+    parent: Digest,
+    /// The parent named by the block's embedded consensus context.
+    context_parent: Digest,
+}
+
+/// A block the observations can record: any block the cluster's marshal
+/// delivers, whatever database backend it commits to.
+pub(super) trait Observable: CertifiableBlock<Digest = Digest, Context = Ctx> {}
+
+impl<B: CertifiableBlock<Digest = Digest, Context = Ctx>> Observable for B {}
+
 #[derive(Default)]
 struct Records {
     /// Arrival-ordered delivery log, so gaps, reordering, duplicates, and
     /// same-height forks all stay observable.
     delivered: Vec<(Height, Digest)>,
     /// The most recent block delivered at each height.
-    blocks: BTreeMap<Height, Block>,
+    blocks: BTreeMap<Height, Linkage>,
     /// The latest finalized tip reported by marshal.
     tip: Option<(Height, Digest)>,
     /// Every database commitment reached at each height. Application is
@@ -62,10 +77,17 @@ impl EngineObservations {
         Self::default()
     }
 
-    fn record_delivery(&self, block: &Block) {
+    fn record_delivery(&self, block: &impl Observable) {
         let mut records = self.0.lock();
         records.delivered.push((block.height(), block.digest()));
-        records.blocks.insert(block.height(), block.clone());
+        records.blocks.insert(
+            block.height(),
+            Linkage {
+                digest: block.digest(),
+                parent: block.parent(),
+                context_parent: block.context().parent.1,
+            },
+        );
     }
 
     fn record_tip(&self, height: Height, digest: Digest) {
@@ -123,7 +145,7 @@ impl EngineObservations {
         self.0.lock().delivered.clone()
     }
 
-    fn blocks(&self) -> BTreeMap<Height, Block> {
+    fn blocks(&self) -> BTreeMap<Height, Linkage> {
         self.0.lock().blocks.clone()
     }
 
@@ -157,16 +179,17 @@ impl<R> ObservingReporter<R> {
     }
 }
 
-impl<R> Reporter for ObservingReporter<R>
+impl<R, B> Reporter for ObservingReporter<R>
 where
-    R: Reporter<Activity = Update<Block>>,
+    R: Reporter<Activity = Update<B>>,
+    B: Observable,
 {
-    type Activity = Update<Block>;
+    type Activity = Update<B>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
             Update::Tip(_, height, digest) => self.observations.record_tip(*height, *digest),
-            Update::Block(block, _) => self.observations.record_delivery(block),
+            Update::Block(block, _) => self.observations.record_delivery(block.as_ref()),
         }
         self.inner.report(activity)
     }
@@ -259,15 +282,14 @@ fn check_in_order(engine: usize, delivered: &[(Height, Digest)]) {
 
 /// Every pair of consecutively delivered blocks is parent-linked, and the chain
 /// is rooted at genesis.
-fn check_parent_linkage(engine: usize, blocks: &BTreeMap<Height, Block>, genesis: Digest) {
+fn check_parent_linkage(engine: usize, blocks: &BTreeMap<Height, Linkage>, genesis: Digest) {
     if let Some((height, block)) = blocks.first_key_value() {
         if *height == Height::zero() {
             assert_eq!(
-                block.digest(),
-                genesis,
+                block.digest, genesis,
                 "I1 violated: engine{engine} delivered the wrong genesis block: digest={} \
                  expected={genesis}",
-                block.digest(),
+                block.digest,
             );
         } else {
             assert_eq!(
@@ -290,23 +312,23 @@ fn check_parent_linkage(engine: usize, blocks: &BTreeMap<Height, Block>, genesis
         };
         assert_eq!(
             next.parent,
-            block.digest(),
+            block.digest,
             "I1 violated: engine{engine} delivered a chain with a broken parent link: height {} \
              digest={} but height {} parent={}",
             height.get(),
-            block.digest(),
+            block.digest,
             next_height.get(),
             next.parent,
         );
         assert_eq!(
-            next.context.parent.1,
-            block.digest(),
+            next.context_parent,
+            block.digest,
             "I1 violated: engine{engine} delivered a chain with a broken embedded consensus \
              parent: height {} digest={} but height {} context parent={}",
             height.get(),
-            block.digest(),
+            block.digest,
             next_height.get(),
-            next.context.parent.1,
+            next.context_parent,
         );
     }
 }
@@ -424,13 +446,13 @@ pub(super) fn check_verdict_agreement(nodes: &[CorrectNode<'_>]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::app::Block;
+    use crate::stateful::{app::Block, backend::AnyCommitment};
     use commonware_consensus::{
         simplex::types::Context,
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{Hasher, Sha256, Signer as _, ed25519, sha256};
-    use commonware_storage::mmr::Location;
+    use commonware_storage::{mmr::Location, qmdb::sync::Target};
     use commonware_utils::non_empty_range;
 
     fn digest(label: &[u8]) -> Digest {
@@ -441,7 +463,7 @@ mod tests {
         (Height::new(height), digest(label))
     }
 
-    fn block(height: u64, label: &[u8]) -> Block {
+    fn block(height: u64, label: &[u8]) -> Block<AnyCommitment> {
         Block {
             context: Context {
                 round: Round::new(Epoch::zero(), View::new(height)),
@@ -450,8 +472,10 @@ mod tests {
             },
             parent: digest(b"parent"),
             height: Height::new(height),
-            state_root: digest(label),
-            range: non_empty_range!(Location::new(0), Location::new(1)),
+            commitment: Target::new(
+                digest(label),
+                non_empty_range!(Location::new(0), Location::new(1)),
+            ),
         }
     }
 

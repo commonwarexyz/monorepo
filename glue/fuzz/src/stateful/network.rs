@@ -27,7 +27,7 @@
 // bindings below stay so the shape survives a scheme whose configuration is not.
 #![allow(clippy::let_unit_value)]
 
-use super::{Digest, PublicKey, Scheme, app::Block};
+use super::{Digest, PublicKey, Scheme, app::Block, backend::Commitment};
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     Viewable,
@@ -111,9 +111,10 @@ fn backfill_routing(message: &IoBuf) -> Routing {
 }
 
 /// Classify a message on the block broadcast channel. A broadcast payload is a
-/// bare block, whose embedded consensus context names its round.
-fn broadcast_routing(message: &IoBuf) -> Routing {
-    Block::decode(message.clone()).map_or(Routing::Undecodable, |block| {
+/// bare block, whose embedded consensus context names its round; the block
+/// carries the commitment of the backend the cluster runs.
+fn broadcast_routing<C: Commitment>(message: &IoBuf) -> Routing {
+    Block::<C>::decode(message.clone()).map_or(Routing::Undecodable, |block| {
         Routing::Partition(block.context.round.view())
     })
 }
@@ -185,7 +186,26 @@ macro_rules! channel {
 
 channel!(vote_forwarder, vote_router, vote_routing);
 channel!(backfill_forwarder, backfill_router, backfill_routing);
-channel!(broadcast_forwarder, broadcast_router, broadcast_routing);
+
+pub(super) fn broadcast_forwarder<C: Commitment>(
+    participants: Arc<[PublicKey]>,
+    scenario: Scenario,
+    term_length: TermLength,
+) -> impl Fn(SplitOrigin, &Recipients<PublicKey>, &IoBuf) -> Option<Recipients<PublicKey>>
++ Send
++ Sync
++ Clone
++ 'static {
+    forwarder(participants, scenario, term_length, broadcast_routing::<C>)
+}
+
+pub(super) fn broadcast_router<C: Commitment>(
+    participants: Arc<[PublicKey]>,
+    scenario: Scenario,
+    term_length: TermLength,
+) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
+    router(participants, scenario, term_length, broadcast_routing::<C>)
+}
 
 pub(super) fn certificate_forwarder(
     participants: Arc<[PublicKey]>,

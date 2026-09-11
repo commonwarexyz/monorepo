@@ -8,6 +8,7 @@
 use super::{
     MAX_CASES, NUM_IDENTITIES, PREFIX_ROUNDS, RUN_TIMEOUT,
     app::{CorrectApp, FaultSchedule, FaultyApp},
+    backend::{Any, Backend},
     input::StatefulTwinsFuzzInput,
     invariants::EngineObservations,
     network::{
@@ -43,17 +44,32 @@ pub fn fuzz_stateful_cert_mock_twins(input: StatefulTwinsFuzzInput) {
 ///
 /// A run is fully determined by its input bytes.
 pub fn run_stateful_twins(input: StatefulTwinsFuzzInput) -> RunReport {
-    let entropy = input.raw_bytes.clone();
-    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
-    deterministic::Runner::new(config).start(|context| run(context, input, entropy))
+    execute::<Any>(TARGET, input)
 }
 
-async fn run(
+/// Run one twins scenario over the five-engine cluster, every engine managing
+/// a database of backend `B`.
+///
+/// The database-adapter twins driver shares this with the twins driver: only
+/// the backend differs, and with it the database factory, the valid workload,
+/// the faulty application's divergent workload, and the commitment conversion.
+/// A run is fully determined by its input bytes.
+pub(super) fn execute<B: Backend>(
+    target: &'static str,
+    input: StatefulTwinsFuzzInput,
+) -> RunReport {
+    let entropy = input.raw_bytes.clone();
+    let config = deterministic::Config::new().with_rng(FuzzRng::new(entropy.clone()));
+    deterministic::Runner::new(config).start(|context| run::<B>(context, target, input, entropy))
+}
+
+async fn run<B: Backend>(
     mut context: deterministic::Context,
+    target: &'static str,
     input: StatefulTwinsFuzzInput,
     entropy: Vec<u8>,
 ) -> RunReport {
-    let cluster = runner::setup(&mut context).await;
+    let cluster = runner::setup::<B>(&mut context).await;
     let participants = cluster.participants.clone();
 
     // Draw the twins scenario from the tape.
@@ -73,7 +89,7 @@ async fn run(
         },
     );
     if cases.is_empty() {
-        return RunReport::skipped(TARGET, Outcome::NoCase);
+        return RunReport::skipped(target, B::NAME, Outcome::NoCase);
     }
     let selected = usize::from(input.case_selector) % cases.len();
     let case = cases
@@ -166,14 +182,17 @@ async fn run(
         node_context.child("backfill_split"),
         backfill_router(participants.clone(), scenario.clone(), term_length),
     );
-    let (broadcast_primary, broadcast_secondary) = raw.broadcast.0.split_with(broadcast_forwarder(
-        participants.clone(),
-        scenario.clone(),
-        term_length,
-    ));
+    let (broadcast_primary, broadcast_secondary) =
+        raw.broadcast
+            .0
+            .split_with(broadcast_forwarder::<B::Commitment>(
+                participants.clone(),
+                scenario.clone(),
+                term_length,
+            ));
     let (broadcast_rx_primary, broadcast_rx_secondary) = raw.broadcast.1.split_with(
         node_context.child("broadcast_split"),
-        broadcast_router(participants.clone(), scenario.clone(), term_length),
+        broadcast_router::<B::Commitment>(participants.clone(), scenario.clone(), term_length),
     );
     let (database_rx_primary, database_rx_secondary) = raw
         .database
@@ -197,7 +216,7 @@ async fn run(
         database: (raw.database.0, database_rx_secondary),
     };
 
-    drop(spawn_engine(
+    drop(spawn_engine::<B, _, _, _, _, _, _, _>(
         node_context.child("primary"),
         cluster.oracle.clone(),
         EngineConfig {
@@ -206,7 +225,7 @@ async fn run(
             elector: elector.clone(),
             genesis: cluster.genesis.clone(),
             partition_prefix: format!("engine-{compromised}-primary"),
-            application: CorrectApp::new(
+            application: CorrectApp::<B>::new(
                 cluster.genesis.clone(),
                 observations[compromised].clone(),
             ),
@@ -217,7 +236,7 @@ async fn run(
 
     let mut fault_rng = FuzzRng::new(entropy);
     let schedule = FaultSchedule::new(&mut fault_rng, input.faults);
-    drop(spawn_engine(
+    drop(spawn_engine::<B, _, _, _, _, _, _, _>(
         node_context.child("secondary"),
         cluster.oracle.clone(),
         EngineConfig {
@@ -227,7 +246,7 @@ async fn run(
             genesis: cluster.genesis.clone(),
             partition_prefix: format!("engine-{compromised}-secondary"),
             application: FaultyApp::new(
-                CorrectApp::new(
+                CorrectApp::<B>::new(
                     cluster.genesis.clone(),
                     observations[SECONDARY_ENGINE].clone(),
                 ),
@@ -255,7 +274,7 @@ async fn run(
     };
 
     // Measurement point. Both halves of the compromised identity are excluded.
-    runner::measure(TARGET, outcome, &correct, &observations, &cluster.genesis)
+    runner::measure(target, outcome, &correct, &observations, &cluster.genesis)
 }
 
 #[cfg(test)]

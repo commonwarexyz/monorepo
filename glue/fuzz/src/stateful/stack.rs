@@ -6,9 +6,9 @@
 //! once, and rebuilding it on the same storage partitions is a restart.
 
 use super::{
-    Ctx, Databases, EPOCH_LENGTH, IO_BUFFER_SIZE, MAILBOX_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE,
-    PublicKey, QMDB_INIT_BUFFER, QMDB_INIT_CACHE, Qmdb, Scheme,
+    Ctx, EPOCH_LENGTH, IO_BUFFER_SIZE, MAILBOX_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, PublicKey, Scheme,
     app::Block,
+    backend::{Backend, Databases},
     invariants::{EngineObservations, ObservingReporter},
 };
 use commonware_broadcast::buffered;
@@ -40,13 +40,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_storage::{
-    archive::prunable,
-    journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, full::Config as MmrJournalConfig},
-    qmdb::any::FixedConfig,
-    translator::TwoCap,
-};
+use commonware_storage::{archive::prunable, mmr, translator::TwoCap};
 use commonware_utils::{NZU64, NZUsize};
 use std::{
     num::{NonZeroU32, NonZeroU64},
@@ -78,9 +72,7 @@ const MAX_PENDING_ACKS: std::num::NonZeroUsize = NZUsize!(2);
 /// How long a stable leader may stall before its term is abandoned.
 const TERM_STALL_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Items per storage blob and per archive section.
-const MERKLE_BLOB_ITEMS: NonZeroU64 = NZU64!(11);
-const LOG_BLOB_ITEMS: NonZeroU64 = NZU64!(7);
+/// Items per archive section.
 const SECTION_ITEMS: NonZeroU64 = NZU64!(10);
 
 /// What an engine needs of a leader-election configuration.
@@ -111,34 +103,8 @@ const SYNC_CONFIG: SyncEngineConfig = SyncEngineConfig {
     max_retained_roots: 8,
 };
 
-/// The QMDB configuration every engine uses.
-fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
-    FixedConfig {
-        merkle_config: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-mmr-journal"),
-            metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
-            items_per_blob: MERKLE_BLOB_ITEMS,
-            write_buffer: IO_BUFFER_SIZE,
-            replay_buffer: IO_BUFFER_SIZE,
-            strategy: Sequential,
-            page_cache: page_cache.clone(),
-        },
-        journal_config: FixedLogConfig {
-            partition: format!("{prefix}-qmdb-log-journal"),
-            items_per_blob: LOG_BLOB_ITEMS,
-            page_cache,
-            write_buffer: IO_BUFFER_SIZE,
-            replay_buffer: IO_BUFFER_SIZE,
-        },
-        translator: TwoCap,
-        init_cache_size: Some(QMDB_INIT_CACHE),
-        init_buffer: QMDB_INIT_BUFFER,
-        init_concurrency: (),
-    }
-}
-
 /// Prunable archive configuration for marshal's finalization and block stores.
-fn archive_config<C>(
+pub(super) fn archive_config<C>(
     prefix: &str,
     name: &str,
     page_cache: CacheRef,
@@ -185,11 +151,11 @@ pub(super) struct EngineChannels<VS, CS, RS, BS, FS> {
 }
 
 /// Everything one engine needs, so a restart can rebuild it unchanged.
-pub(super) struct EngineConfig<A, EC> {
+pub(super) struct EngineConfig<B: Backend, A, EC> {
     pub(super) identity: PublicKey,
     pub(super) scheme: Scheme,
     pub(super) elector: EC,
-    pub(super) genesis: Block,
+    pub(super) genesis: Block<B::Commitment>,
     pub(super) partition_prefix: String,
     pub(super) application: A,
     pub(super) observations: EngineObservations,
@@ -199,19 +165,20 @@ pub(super) struct EngineConfig<A, EC> {
 ///
 /// The task never returns, so the whole node stays alive until the handle is
 /// aborted; aborting it takes every descendant actor down with it.
-pub(super) fn spawn_engine<A, EC, VS, CS, RS, BS, FS>(
+pub(super) fn spawn_engine<B, A, EC, VS, CS, RS, BS, FS>(
     context: deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
-    config: EngineConfig<A, EC>,
+    config: EngineConfig<B, A, EC>,
     channels: EngineChannels<VS, CS, RS, BS, FS>,
 ) -> Handle<()>
 where
+    B: Backend,
     A: Application<
             deterministic::Context,
             SigningScheme = Scheme,
             Context = Ctx,
-            Block = Block,
-            Databases = Databases,
+            Block = Block<B::Commitment>,
+            Databases = Databases<B>,
             Provider = (),
             Input = (),
         >,
@@ -223,22 +190,23 @@ where
     EC: ElectorConfig,
 {
     context.spawn(move |context| async move {
-        run_engine(context, oracle, config, channels).await;
+        run_engine::<B, _, _, _, _, _, _, _>(context, oracle, config, channels).await;
     })
 }
 
-async fn run_engine<A, EC, VS, CS, RS, BS, FS>(
+async fn run_engine<B, A, EC, VS, CS, RS, BS, FS>(
     context: deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
-    config: EngineConfig<A, EC>,
+    config: EngineConfig<B, A, EC>,
     channels: EngineChannels<VS, CS, RS, BS, FS>,
 ) where
+    B: Backend,
     A: Application<
             deterministic::Context,
             SigningScheme = Scheme,
             Context = Ctx,
-            Block = Block,
-            Databases = Databases,
+            Block = Block<B::Commitment>,
+            Databases = Databases<B>,
             Provider = (),
             Input = (),
         >,
@@ -259,7 +227,7 @@ async fn run_engine<A, EC, VS, CS, RS, BS, FS>(
         observations,
     } = config;
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-    let db_config = qmdb_config(&partition_prefix, page_cache.clone());
+    let db_config = B::config(&partition_prefix, page_cache.clone());
     let provider = ConstantProvider::new(scheme.clone());
 
     // Marshal's backfill resolver.
@@ -312,7 +280,7 @@ async fn run_engine<A, EC, VS, CS, RS, BS, FS>(
     let plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
 
     let (marshal_actor, marshal_mailbox, floor) =
-        MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
+        MarshalActor::<_, Standard<Block<B::Commitment>>, _, _, _, _, _>::init(
             context.child("marshal"),
             finalizations_by_height,
             finalized_blocks,
@@ -339,7 +307,7 @@ async fn run_engine<A, EC, VS, CS, RS, BS, FS>(
     // Database sync resolver. It never fetches because no node state syncs, but
     // the stateful actor requires one and it serves peers once attached.
     let (database_resolver, database_sync) =
-        qmdb_resolver::Actor::<_, PublicKey, _, _, mmr::Family, Qmdb>::new(
+        qmdb_resolver::Actor::<_, PublicKey, _, _, mmr::Family, B::Db>::new(
             context.child("database_resolver"),
             qmdb_resolver::Config {
                 peer_provider: oracle.manager(),

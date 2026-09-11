@@ -55,3 +55,24 @@ path = "fuzz_targets/stateful_cert_mock_restarts.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "stateful_cert_mock_restarts_db"
+path = "fuzz_targets/stateful_cert_mock_restarts_db.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_probe"
+path = "fuzz_targets/stateful_probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_twins_db"
+path = "fuzz_targets/stateful_cert_mock_twins_db.rs"
+test = false
+doc = false
+bench = false
