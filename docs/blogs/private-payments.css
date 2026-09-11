@@ -2,30 +2,15 @@
    code, tables, footer) come from /style.css; everything here is scoped to the
    blog's widgets so it cannot leak into the rest of the site. */
 
+/* Live counters inline in the introduction. */
 .live {
     background: #fffbe8;
     border-bottom: 2px solid #d9251c;
+    color: #d9251c;
+    font-weight: bold;
     font-variant-numeric: tabular-nums;
     padding: 0 3px;
     white-space: nowrap;
-}
-
-.live-box {
-    background: #fffbe8;
-    border: 1px solid #d9251c;
-    border-left-width: 6px;
-    font-size: 1.15em;
-    line-height: 1.5;
-    margin: 20px 0 24px;
-    padding: 14px 18px;
-}
-
-.live-box .live {
-    background: none;
-    border-bottom: none;
-    color: #d9251c;
-    font-weight: bold;
-    padding: 0;
 }
 
 /* --- Widget controls ------------------------------------------------------ */

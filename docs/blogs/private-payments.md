@@ -15,36 +15,39 @@ katex: true
 <link rel="stylesheet" href="private-payments.css">
 ```
 
-When I first started thinking about private payments, I focused on throughput. The figures I saw usually ranged from a few hundred to a thousand payments per second, while experiments with ordinary payments were already reaching 100K+ TPS. With a single thread able to verify roughly 1,000 Groth16 proofs per second, I expected better engineering and more parallelism to close the gap.
+THe commonware stack can now comfortably process payments at [~250K TPS](https://x.com/_patrickogrady/status/2077449338230640739) with [Constantinople](https://github.com/commonwarexyz/constantinople). Much higher with [stable leader]((https://commonware.xyz/blogs/pipelining-simplex)), [multiple proposers](https://commonware.xyz/blogs/multimmit) and clearing solutions such as [bajillion](https://commonware.xyz/blogs/clearing). We now turn our attention to privacy. What's stopping us from reaching similar throughputs for private payments?
 
-Working on the Commonware Library raised that throughput target. Once the chain could process transactions [at this rate](https://commonware.xyz/blogs/pipelining-simplex), I had to ask what it would take to sustain comparable throughput for private payments.
+Our goal is to support private payments at over a million transactions per second, with low latency. Let's suppose each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (using [Groth16](https://eprint.iacr.org/2016/260), say). To support a million transactions per second:
 
-Verification cost is only part of that question. Validators must also reject double spending without accumulating an unmanageable amount of state as the payment history grows. And a wallet that has been offline for months should be able to return and make a payment without catching up on everyone else's activity.
+- **bandwidth:** leaders need to disseminate <u>200 MB of data, every second</u>
+- **compute:** every validator needs the equivalent of <u>500-1000 dedicated CPU cores</u>
+- **storage:** since you opened this page, the nullifier set (to prevent double spending) would have grown by <span class="live" id="live-bytes">0 MB</span> across <span class="live" id="live-txs">0</span> transactions, amounting to <u>a petabyte every year</u>
 
-Our goal is to support private payments at over a million transactions per second, with low latency. Assuming each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (using [Groth16](https://eprint.iacr.org/2016/260), say), a million transactions per second requires:
+While bandwidth and compute costs can (unsatisfactorily) be overcome with biggers machines, it is simply impractical for validator to store the nullifier sets.
 
-- **bandwidth:** leaders disseminate <u>200 MB of data, every second</u>
-- **storage:** the nullifier set (32 bytes per transaction) grows by <u>a petabyte every year</u>
-- **compute:** equivalent of <u>500-1000 dedicated CPU cores</u>/validator
+> *How do we process one million private transactions per second on commodity hardware?*
 
-```{=html}
-<div class="live-box">
-    Since you opened this page, a ledger running at 1M transactions/s with a
-    32-byte nullifier per transaction would have added
-    <span class="live" id="live-bytes">0 MB</span> of nullifiers, across
-    <span class="live" id="live-txs">0</span> transactions.
-</div>
-```
+We demand two properties from a payment system that hides amounts, provides privacy for users, and is meant to run at this rate
+indefinitely:
+
+1. Validator state must be succinct in the number of transactions but can grow with the number of
+   accounts. Validator perform a constant amount of work to process every transaction.
+2. Wallets can be offline for indefinite periods of time.
+   When they are back online they must be able to send/receive payments without having to
+   synchronize their state with the chain. Any work done by wallets must only depend on the transactions that they participate in.
 
 <!-- TODO: Add link to Bonsai paper -->
-Bonsai addresses both the verification cost and the growing state. It keeps balances in account commitments and tracks claimed receipts inside each recipient's account, removing the need for a global nullifier set. Batch verification brings the proof-checking cost down enough to target commodity hardware:
+We are excited to share Bonsai, a private payment scheme in the account model with two interfaces:
+- **send:** debits a users account and creates a receipt onchain for a designated recipient
+- **receive:** claims a receipt and credits the recipient's account
+In terms of privacy, an external observer only learns that an account carried out *some* action on chain, hiding whether the operation was a send/receive, the amounts transferred and the link between sender and receiver. 
+<!-- todo: add a pointer to below discussion against zcash -->
 
-- the prototype's batch verifier checks **over a million proofs per second** on an M5 MacBook Pro (18 cores)
-- each operation has a **256-byte payload** and validators store a **single 32-byte commitment value per account**
-- beyond account commitments, validators keep only a **small MMR frontier and a bounded window of recent roots**
-- wallets can **stay offline and resume without scanning the ledger**, obtaining proofs for the receipts they want to claim
+Bonsai addresses both the verification cost and the growing state:
 
-The ledger sees which account acts, while balances, amounts, payment links, and whether the action is a send or receive remain hidden.
+- each operation has a **256-byte payload** and the prototype verifies **over a million operations per second** on an M5 MacBook Pro (18 cores)
+- validators store a **single 32-byte commitment value per account** and a small number of hashes 
+- wallets can **go offline indefinitely** and resume without synchronizing state with the chain
 
 ## Our Construction
 
@@ -101,17 +104,9 @@ Note the cost in the storage panel: the nullifier set grows twice as fast.
 
 ### Scaling: prune receipts
 
-We now focus on scaling the system and insist on three restrictions:
+We now focus on scaling the system. First, instead of signing every single receipt, the ledger appends receipts to a Merkle Mountain Range (see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blogpost](https://commonware.xyz/blogs/mmr) for an explainer). The receive proof is modified to prove knowledge of an MMR opening under a root $\mathsf{root}_\rho$ which the receiver reveals in the clear.
 
-1. **Bounded state:** validators keep account commitments, a logarithmic receipt frontier, and a bounded window of recent roots
-2. **Succinct verification:** our proof system makes verification independent of the number of accounts or the anonymity set; validators also update the receipt MMR
-3. **Fully offline users:** users need not stay online or scan the transaction history; they retain their wallet state and obtain receipt openings and inclusion proofs when they want to claim payments
-
-First, instead of signing every single receipt, the ledger appends receipts to a Merkle Mountain Range (see Peter's [doc](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md) or Roberto's [blogpost](https://commonware.xyz/blogs/mmr) for an explainer). The receive proof is modified to prove knowledge of an MMR opening under a root $\mathsf{root}_\rho$ which the receiver reveals in the clear.
-
-For receipts, validators retain the MMR frontier and a bounded window of recent roots. The frontier contains at most one hash per tree height, so this is the part that grows logarithmically with the number of transactions. For example, fewer than $2^{40}$ receipts require at most 40 frontier hashes, or 1.25 KiB with 32-byte hashes. Validators do not need every historical root.
-
-The recent-root window lets a proof remain valid while the ledger advances. An old receipt is still included in later roots, but claiming it requires an inclusion proof under a root the ledger currently accepts.
+For receipts, validators retain the MMR frontier and a bounded window of recent roots. For the concrete case of $2^{40}$ receipts, we need at most 40 frontier hashes, or 1.25 KiB with 32-byte hashes.
 
 ### Scaling: delegate nullifiers
 
@@ -130,7 +125,7 @@ But eventually... the nullifier set will grow too big for users to manage too? W
 
 Users can also **prune their nullifier state**. Receipt positions increase as receipts are created, although recipients may receive or claim them out of order. For a threshold $L$, a wallet summarizes the claimed positions below $L$ with a frontier of at most $\ell$ hashes, where $\ell$ is the depth of its nullifier tree. It keeps all claimed positions at or above $L$. Together, these suffice to reconstruct insertion proofs for unclaimed positions $\mathsf{pid} \geq L$.
 
-Choosing $L$ to retain the $w$ largest claimed positions bounds this compact hot representation by $\ell$ hashes plus $w$ positions, independent of lifetime claims. Reconstructing paths can require additional memory and work. Older nullifiers remain in cold storage, so a receipt below $L$ can still be claimed by obtaining or reconstructing a current path from that state and updating the frontier.
+Choosing $L$ to retain the $w$ largest claimed positions bounds this compact hot representation by $\ell$ hashes plus $w$ positions, independent of lifetime claims. Older nullifiers remain in cold storage, so a receipt below $L$ can still be claimed by retreiving the relevant path from cold storage and updating the frontier.
 :::
 
 ## The full construction
@@ -141,7 +136,8 @@ $$
 \mathsf{com}_A = \mathsf{Com}_{\mathsf{acct}}\big(b_A,\ \mathsf{root}_{\mathsf{null}}(A);\ r_A\big)
 $$
 
-to its balance $b_A$ and the root $\mathsf{root}_{\mathsf{null}}(A)$ of the account's nullifier tree -- a sparse Merkle tree keyed by receipt position. Knowledge of the current commitment opening authorizes subsequent updates. Balances and payment amounts must lie in the allowed nonnegative range $\mathcal{B}$.
+to its balance $b_A$ and the root $\mathsf{root}_{\mathsf{null}}(A)$ of the account's nullifier tree -- a sparse Merkle tree keyed by receipt position.
+
 **Validators maintain:**
 
 - the account commitments $\mathsf{Acct}[A] = \mathsf{com}_A$
@@ -158,14 +154,14 @@ whose last entry demarcates whether it's a real receipt (coming from the send br
 
 Positions are unique, so distinct receipts always carry distinct nullifiers and no send can block another pending payment (see [Faerie Gold attack](https://zips.z.cash/protocol/protocol.pdf)). The nullifier is inserted into the tree inside the account commitment and is never published on chain. No public nullifier tells the sender which receipt a receive claims.
 
-Every transaction publishes the same record $(A, \mathsf{com}', \rho, \mathsf{root}_\rho, \pi)$: a 32-byte account identifier, the new account commitment, a receipt, an MMR root and a 128-byte proof, giving a 256-byte operation payload with these encodings. Here $\mathsf{root}_\rho$ is the public root under which a receive proves receipt membership. Both sends and receives select the latest available receipt root when preparing their proofs.
+Both send and receive use the same 256-byte payload $(A, \mathsf{com}', \rho, \mathsf{root}_\rho, \pi)$: a 32-byte account identifier, the new account commitment, a receipt, an MMR root and a 128-byte proof.
 
 The ledger supplies $\mathsf{com} = \mathsf{Acct}[A]$ from its current state, checks $\mathsf{root}_\rho \in \mathcal{T}$, and verifies $\pi$. If all checks pass, it updates $\mathsf{Acct}[A] \gets \mathsf{com}'$, appends $\rho$ to the receipt MMR, and records the resulting root in $\mathcal{T}$. The proof $\pi$ is a strict disjunction of the following relations, where only one branch is ever proved at a time:
 
 **If it is a send**, the proof shows that:
 
 - the balance was updated correctly: $\mathsf{com} = \mathsf{Com}_{\mathsf{acct}}(b,\mathsf{root}_{\mathsf{null}};r) \wedge \mathsf{com}' = \mathsf{Com}_{\mathsf{acct}}(b-v,\mathsf{root}_{\mathsf{null}};r')$
-- receipt was created correctly: $\rho = \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r'')$ with $\mathsf{Sen} = A$ and $\mathsf{Rec}$ a valid account verification key
+- receipt was created correctly: $\rho = \mathsf{Com}_{\mathsf{rec}}(v,\mathsf{Sen},\mathsf{Rec},1;r'')$ with $\mathsf{Sen} = A$
 - no overflows: $0 \le v \le b$ and $b,\,v,\,b-v \in \mathcal{B}$
 
 Once the send transaction lands, the sender reads off its position $\mathsf{pid}$ and forwards the opening of $\rho$ together with $\mathsf{pid}$ to the receiver over a private channel. The receiver need not have registered when the receipt is created, but must register before claiming it.
