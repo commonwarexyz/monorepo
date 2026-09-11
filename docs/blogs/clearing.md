@@ -19,15 +19,15 @@ katex: true
 
 If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching a new recipient means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). Rollups either prove a batch's state transition or publish enough transaction data for anyone to replay and challenge it. Even then, binding sequencer preconfirmations need a separate challenge for signed payments omitted from the batch (see [The Unavoidable Challenge](#the-unavoidable-challenge)).
 
-**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by one 32-byte commitment, 101 bytes with the certificate for a committee of 100 validators. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
+**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that existing chains can verify. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
 
-Settlement records grow with active accounts and payment pairs, however many payments pass between them.
+A bajillion payments can share the same settlement records as a handful.
 
 ## Payments as Fast as Browsing the Web
 
-An agent buying an API response should be able to pay and get on with the next request. Bajillion gives the payer an acknowledgment in one round trip to its chosen operator, with a receipt the recipient can verify locally and retain as evidence. Settlement comes later, netting payments across all accounts using that operator, without separate channels or funded routes between counterparties.
+If an API responds in milliseconds, paying for it shouldn't take seconds. Bajillion gives the payer a receipt in one round trip to its chosen operator. The recipient can verify it locally and retain it as evidence, so the request needn't wait for settlement. The operator later nets payments across all participating accounts, without separate channels or funded routes between counterparties.
 
-Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. The payer signs a request $S$ advancing its running total for that recipient. The operator verifies the signature and available funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of the recipient's entry. The payer verifies and durably saves both, then forwards the resulting receipt to the recipient.
+Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. The payer signs a request $S$ advancing its running total for that recipient. The operator verifies the signature and available funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of the recipient's entry. The payer forwards the receipt to the recipient.
 
 ```{=html}
 <style>
@@ -84,7 +84,7 @@ Suppose a payer, $a$, has 100 and wants to pay 20 to a recipient, $b$, with 40. 
 Figure 1: The operator verifies, commits, and countersigns locally. The payer verifies and retains the receipt before forwarding it. The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry records total amount and payment count, changing $(0,0)$ to $(20,1)$.
 :::
 
-An epoch groups accepted payments into a close, the settlement package the operator builds when that epoch ends. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
+An epoch groups accepted payments into a "close", the settlement package the operator builds when that epoch ends. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
 
 The payer tracks a balance $B_a$ and a cumulative debit $D_a$. Its activity within an epoch is one strictly recipient-sorted vector $V_a$ with one cumulative entry per recipient it paid. The entry $(G,J)$ for $b$ is $a$'s cumulative credit to $b$ this epoch and the number of payments behind it. Before the example payment, $a$ holds $B_a=100$ and $D_a=0$, and $V_a$ is empty.
 
@@ -98,15 +98,11 @@ $$
 
 Here the endpoint is $n_a=1$, $D_a=20$, and the root of $V_a=\{b:(20,1)\}$. The operator checks $S$ and available funds, durably records acceptance, then returns $R$ with an opening of $b$'s entry.
 
-This entry receipt proves the operator accepted the payment. The recipient obtains it before relying on the payment and can verify it locally.
-
-The wallet keeps one unacknowledged request in flight and durably saves the verified acknowledgment and openings before signing the next endpoint. It retries that exact request after response loss.
-
-One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
+The receipt lets the recipient verify acceptance locally before relying on the payment. The wallet keeps one unacknowledged request in flight, retries it unchanged after response loss, and durably saves the verified acknowledgment and openings before signing the next endpoint. One signature can also advance several recipients in a batch. The operator accepts or rejects the whole batch and returns one acknowledgment with an opening for each advanced entry.
 
 ## Optimizing for Hot Accounts
 
-A single incoming counter would serialize every payment to a popular recipient. Bajillion has none: acceptance touches only the payer's side, so recipients have no state to serialize. Incoming credit stays a promise until the epoch ends, when the operator collates it. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
+Bajillion defines each payment as an update to the payer's outgoing vector. This lets the operator accept payments from different payers in parallel, even when they share a recipient. Incoming credit stays a promise until the epoch ends, when the operator collates it. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
 
 $$
 (G_{ab},J_{ab})\longrightarrow(G_{ab}+x,J_{ab}+1),
@@ -114,7 +110,7 @@ $$
 \text{every other entry of every other vector unchanged.}
 $$
 
-Payments to one hot account from different payers live in disjoint vectors and never contend, so the incoming path scales with the payers, not the recipient. However many payments an edge carries, the epoch ends with one cumulative entry for it.
+However many payments an edge carries, the epoch ends with one cumulative entry for it.
 
 Consider accounts $(a,b,c,d)$ that open with balances $(100,40,25,35)$ and the epoch accepts
 
@@ -125,6 +121,14 @@ c\xrightarrow{4}b,\quad d\xrightarrow{6}b.
 $$
 
 $b$'s three incoming payments end as the entries $(20,1)$ in $a$'s vector, $(4,1)$ in $c$'s, and $(6,1)$ in $d$'s.
+
+$$
+\begin{bmatrix}
+\underset{a\to b}{(20,1)} &
+\underset{c\to b}{(4,1)} &
+\underset{d\to b}{(6,1)}
+\end{bmatrix}
+$$
 
 Each payer's last vector of the epoch is its terminal vector. When the epoch ends, the operator sorts the union of terminal entries by recipient, then payer, into the transpose. These are the same entries viewed from the receiving side and committed under $\mathsf{TransposeRoot}_e$. $b$'s three entries sum to $20+4+6=30$. Each entry can be opened separately under its payer's signed vector root and the transpose root.
 
