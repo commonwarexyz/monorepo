@@ -162,7 +162,7 @@ pub(crate) mod test {
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
-    use core::num::NonZeroUsize;
+    use core::{num::NonZeroUsize, ops::Range};
     use futures::{FutureExt as _, Stream};
     use rand::Rng;
     use std::{
@@ -621,7 +621,7 @@ pub(crate) mod test {
         db: AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> (AnyTestGeneric<F>, std::ops::Range<GenericLocation<F>>) {
+    ) -> (AnyTestGeneric<F>, Range<GenericLocation<F>>) {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -824,13 +824,11 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_unordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {
-            // Concurrency 201 (200 workers) rounds down to 128 equal two-partition ranges for
-            // P=1 (count=256) and 301 exceeds the partition count and clamps. Both must
-            // reconstruct the same root without panicking.
+            // Cover partition-range rounding and budgets beyond the partition and chunk counts.
             check_parallel_init_equivalence::<1>(
                 context,
                 "unordered_parallel_equiv_p1",
-                &[1, 2, 3, 5, 9, 201, 301],
+                &[1, 2, 3, 5, 9, 201, 301, usize::MAX],
             )
             .await;
         });
@@ -905,11 +903,8 @@ pub(crate) mod test {
                 OneCap,
             );
 
-            // Every read now fails, and the failure necessarily surfaces through the replay
-            // stream: the reopened journal's page cache is fresh (only the buffer pool is shared
-            // across configs, never cached pages), so replay's first item forces a storage read,
-            // and with far fewer ops than the routing batch size no batch reaches a worker, so
-            // workers never read the log themselves.
+            // The reopened journal has a fresh page cache, so replay's first item requires a read.
+            // Failing that read leaves workers idle because no batches have been routed.
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
                 .build_snapshot(
@@ -938,7 +933,7 @@ pub(crate) mod test {
     impl<C: Contiguous<Item: Sync>> Contiguous for FailingReads<C> {
         type Item = C::Item;
 
-        fn bounds(&self) -> std::ops::Range<u64> {
+        fn bounds(&self) -> Range<u64> {
             self.0.bounds()
         }
 
@@ -966,9 +961,9 @@ pub(crate) mod test {
             positions.iter().map(|_| None).collect()
         }
 
-        fn replay(
+        fn replay_range(
             &self,
-            start_pos: u64,
+            range: Range<u64>,
             buffer: NonZeroUsize,
             read_options: ReadOptions,
         ) -> impl Future<
@@ -977,7 +972,7 @@ pub(crate) mod test {
                 JournalError,
             >,
         > + Send {
-            self.0.replay(start_pos, buffer, read_options)
+            self.0.replay_range(range, buffer, read_options)
         }
     }
 
@@ -1053,7 +1048,7 @@ pub(crate) mod test {
     fn test_unordered_partitioned_parallel_init_empty_log() {
         deterministic::Runner::default().start(|context| async move {
             let mut results = Vec::new();
-            for concurrency in [1usize, 4] {
+            for concurrency in [1usize, 4, usize::MAX / 2, usize::MAX] {
                 let cfg =
                     fixed_db_config_partitioned::<OneCap>("unordered_parallel_empty", &context);
                 let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
@@ -1088,7 +1083,7 @@ pub(crate) mod test {
                 assert_eq!(result.0, 0);
                 results.push(result);
             }
-            assert_eq!(results[0], results[1]);
+            assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
         });
     }
 
