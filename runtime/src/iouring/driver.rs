@@ -29,9 +29,9 @@
 //! Queued requests expire even while all operation slots are occupied.
 //!
 //! The ring uses SINGLE_ISSUER and DEFER_TASKRUN, requiring Linux 6.1 or newer.
-//! Pending operation and cancellation SQEs need a GETEVENTS enter even when tasks
-//! keep the worker busy. An idle turn may defer that enter to [`Driver::park`].
-//! The mailbox wake poll alone requires no syscall on a busy turn.
+//! Unfinished requests need a GETEVENTS enter even when tasks keep the worker
+//! busy. An idle turn may defer that enter to [`Driver::park`]. Control SQEs carry
+//! no request resources and may remain until later I/O service or ring teardown.
 //!
 //! Parking installs the wake poll if needed, then arms the mailbox waker and
 //! rechecks publication before blocking. A wake CQE without MORE requires rearm
@@ -41,8 +41,8 @@
 //!
 //! All callbacks and resource destruction go through [`Deferred`], outside the
 //! worker borrow. Closure detaches ordinary observers and cancels eligible
-//! requests. The worker continues servicing until all requests and cancellation
-//! CQEs retire, keeping the driver in place throughout the drain.
+//! requests. The worker continues servicing until all requests retire, keeping
+//! the driver in place throughout the drain.
 
 use super::{
     request::Request,
@@ -71,14 +71,6 @@ use tracing::warn;
 /// Like the wake token, this uses the slot index reserved by [`Waiters::insert`].
 const CANCEL_USER_DATA: UserData = u32::MAX as UserData;
 
-/// Wake notification and kernel-service status from one driver turn.
-pub struct ServiceOutcome {
-    /// Whether a wake CQE requested an inbox check.
-    pub woke: bool,
-    /// Whether pending kernel work received no GETEVENTS service point this turn.
-    pub kernel_deferred: bool,
-}
-
 /// Ring and request state accessed exclusively by the owning worker.
 pub struct Driver {
     /// Declared first so ring destruction precedes descriptor and buffer release.
@@ -105,10 +97,6 @@ struct State {
     waker: Waker,
     /// Whether the multishot wake poll needs to be installed again.
     wake_rearm_needed: bool,
-    /// Cancellation SQEs staged but not yet acknowledged by their own CQEs.
-    outstanding_cancels: usize,
-    /// Whether a transient submit left work requiring another service enter.
-    submit_retry: bool,
 }
 
 impl Driver {
@@ -144,21 +132,31 @@ impl Driver {
                 timeout_wheel: TimeoutWheel::new(max_timeout, cfg.timeout_wheel_tick, now),
                 waker,
                 wake_rearm_needed: true,
-                outstanding_cancels: 0,
-                submit_retry: false,
             },
         })
     }
 
-    /// Accept an owned request into the FIFO without staging kernel work.
+    /// Accept an owned request without staging kernel work.
     ///
-    /// Deadline validation happens during service after the wheel has advanced.
-    pub fn admit(&mut self, request: Request, observer: Observer) -> WaiterId {
-        let timed = request.deadline().is_some();
+    /// Cached time can reject expired requests immediately. Service validates
+    /// remaining deadlines after the wheel has advanced.
+    pub fn admit(
+        &mut self,
+        request: Request,
+        observer: Observer,
+        now: Instant,
+        deferred: &mut Deferred,
+    ) -> WaiterId {
+        let deadline = request.deadline();
 
         // Transfer ownership once. Both queues below carry only this identity.
         let id = self.state.waiters.insert(request, observer);
-        if timed {
+        if let Some(deadline) = deadline {
+            if deadline <= now {
+                self.state.complete(id, Err(Error::Timeout), deferred);
+                return id;
+            }
+
             // A task poll may have taken long enough to leave the wheel behind.
             // Service refreshes it before assigning this deadline a tick.
             self.state.pending_deadlines.push_back(id);
@@ -174,14 +172,9 @@ impl Driver {
         self.state.waiters.len()
     }
 
-    /// Whether all logical requests and cancellation acknowledgements retired.
+    /// Whether all logical requests retired, excluding retained completed outputs.
     pub const fn is_empty(&self) -> bool {
-        self.state.waiters.is_empty() && self.state.outstanding_cancels == 0
-    }
-
-    /// Whether kernel work needs a GETEVENTS service opportunity.
-    pub const fn needs_kernel_service(&self) -> bool {
-        !self.is_empty() || self.state.submit_retry
+        self.state.waiters.is_empty()
     }
 
     /// Whether actionable staging or deadline registration must run before parking.
@@ -190,7 +183,6 @@ impl Driver {
             && self.state.waiters.in_flight() < self.state.in_flight_limit)
             || !self.state.pending_deadlines.is_empty()
             || !self.state.pending_cancels.is_empty()
-            || self.state.submit_retry
     }
 
     /// Earliest active deadline registered on the operation wheel.
@@ -215,11 +207,6 @@ impl Driver {
         }
     }
 
-    /// Reject an expired registration before its first SQE.
-    pub fn expire(&mut self, id: WaiterId, deferred: &mut Deferred) {
-        self.state.cancel(id, deferred);
-    }
-
     /// Clear ordinary observation before draining retained writes and syncs.
     pub fn close(&mut self, deferred: &mut Deferred) {
         for id in self.state.waiters.close(deferred) {
@@ -229,7 +216,7 @@ impl Driver {
 
     /// Process completions, deadlines, and queued submissions without callbacks.
     ///
-    /// Reports wake CQEs and whether kernel service was deferred. The
+    /// Returns whether this turn deferred GETEVENTS for unfinished requests. The
     /// `defer_kernel_service` argument permits the following idle ring wait to
     /// supply GETEVENTS. It is ignored when callbacks or unfinished staging
     /// already require another busy turn.
@@ -238,10 +225,10 @@ impl Driver {
         now: Instant,
         defer_kernel_service: bool,
         deferred: &mut Deferred,
-    ) -> io::Result<ServiceOutcome> {
+    ) -> io::Result<bool> {
         // Finish posted work before expiring requests, then register deadlines
         // against the refreshed wheel so an idle interval cannot shorten them.
-        let mut woke = self.state.reap(&mut self.ring, deferred);
+        self.state.reap(&mut self.ring, deferred);
         self.state.advance_timeouts(now, deferred);
         self.state.register_deadlines(now, deferred);
         self.state.compact_ready_queue();
@@ -253,32 +240,27 @@ impl Driver {
                 // A transient enter may leave the SQ full. Preserve queued
                 // identities and give the kernel a completion-service point
                 // before another staging attempt.
-                self.state.submit_retry = true;
                 break;
             }
         }
 
         // Busy turns must run deferred kernel work. An idle turn can leave this
         // enter to park, unless callbacks or more submissions need attention.
-        let service_kernel = self.needs_kernel_service()
+        let service_kernel = !self.is_empty()
             && (!defer_kernel_service || !deferred.is_empty() || self.has_pending_submissions());
 
         if service_kernel {
             Self::submit_and_wait(&mut self.ring, 1, Some(Duration::ZERO))?;
-            self.state.submit_retry = !self.ring.submission().is_empty();
         }
 
         // New CQEs can complete requests or terminate the multishot wake poll.
         // Park rechecks rearm before its next blocking enter.
-        woke |= self.state.reap(&mut self.ring, deferred);
+        self.state.reap(&mut self.ring, deferred);
 
         #[cfg(test)]
         tests::after_service(&self.ring, deferred)?;
 
-        Ok(ServiceOutcome {
-            woke,
-            kernel_deferred: !service_kernel && self.needs_kernel_service(),
-        })
+        Ok(!service_kernel && !self.is_empty())
     }
 
     /// Wait for ring activity or the deadline while retaining worker ownership.
@@ -298,7 +280,6 @@ impl Driver {
             if !self.state.waker.reinstall(&mut self.ring.submission()) {
                 Self::submit_and_wait(&mut self.ring, 0, None)?;
                 if !self.state.waker.reinstall(&mut self.ring.submission()) {
-                    self.state.submit_retry = true;
                     return Ok(false);
                 }
             }
@@ -313,7 +294,6 @@ impl Driver {
         }
         let timeout = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
         Self::submit_and_wait(&mut self.ring, 1, timeout)?;
-        self.state.submit_retry = !self.ring.submission().is_empty();
         Ok(true)
     }
 
@@ -395,12 +375,8 @@ impl State {
         let Some(expired) = self.timeout_wheel.advance(now) else {
             return;
         };
-        for entry in expired {
-            // A stale wheel entry must match both the waiter generation and
-            // its scheduled tick before changing deadline state.
-            if self.waiters.target_tick(entry.waiter_id) == Some(entry.target_tick) {
-                self.cancel(entry.waiter_id, deferred);
-            }
+        for id in expired {
+            self.cancel(id, deferred);
         }
     }
 
@@ -511,7 +487,6 @@ impl State {
                     .push(&cancel)
                     .expect("checked cancellation SQ capacity");
             }
-            self.outstanding_cancels += 1;
         }
 
         !self.pending_cancels.is_empty()
@@ -542,27 +517,22 @@ impl State {
     }
 
     /// Reap every posted CQE without invoking observer callbacks.
-    fn reap(&mut self, ring: &mut IoUring, deferred: &mut Deferred) -> bool {
-        let mut woke = false;
-
+    fn reap(&mut self, ring: &mut IoUring, deferred: &mut Deferred) {
         // Dropping this CQ view returns the consumed slots to the kernel.
         // Observer callbacks remain deferred until the worker borrow ends.
         for cqe in ring.completion() {
-            // Keep processing the batch after a wake has requested an inbox check.
-            woke |= self.handle_cqe(cqe.user_data(), cqe.result(), cqe.flags(), deferred);
+            self.handle_cqe(cqe.user_data(), cqe.result(), cqe.flags(), deferred);
         }
-
-        woke
     }
 
-    /// Apply a CQE, returning whether the worker should recheck its mailbox.
+    /// Apply a CQE without invoking observer callbacks.
     fn handle_cqe(
         &mut self,
         user_data: UserData,
         result: i32,
         flags: u32,
         deferred: &mut Deferred,
-    ) -> bool {
+    ) {
         // The reserved mailbox token is outside the waiter's ID space.
         if user_data == WAKE_USER_DATA {
             assert!(
@@ -577,8 +547,10 @@ impl State {
                 // the next blocking wait, even if this was service's final reap.
                 self.wake_rearm_needed = true;
             }
-            return true;
+            return;
         }
+
+        // Only the target operation's CQE can retire its resource owners.
         if user_data == CANCEL_USER_DATA {
             if result == 0 {
                 // Cancellation successful.
@@ -593,14 +565,7 @@ impl State {
                 warn!(result, "unexpected async cancel CQE result");
             }
 
-            // The target's slot may already hold another request. Only the global
-            // count changes, so shutdown still waits for every acknowledgement.
-            self.outstanding_cancels = self
-                .outstanding_cancels
-                .checked_sub(1)
-                .expect("untracked cancellation CQE");
-
-            return false;
+            return;
         }
 
         // Waiters releases an operation's in-flight count before returning its outcome.
@@ -609,7 +574,6 @@ impl State {
             CompletionOutcome::Requeue(id) => self.ready_queue.push_back(id),
             CompletionOutcome::Complete(id, result) => self.complete(id, result, deferred),
         }
-        false
     }
 }
 
@@ -769,9 +733,12 @@ pub mod tests {
         /// Queue an ordinary request whose result `collect` will consume automatically.
         fn admit(&mut self, request: Request, tag: u64) -> WaiterId {
             let waker = TaskWaker::from(Arc::new(Notify));
-            let id = self
-                .driver
-                .admit(request, Observer::Ordinary(Some(waker.clone())));
+            let id = self.driver.admit(
+                request,
+                Observer::Ordinary(Some(waker.clone())),
+                self.start,
+                &mut self.deferred,
+            );
             self.tracked.push((id, tag, waker));
             id
         }
@@ -851,16 +818,32 @@ pub mod tests {
             self.collect();
         }
 
-        /// Service at a chosen time, collect results, and report mailbox wake CQEs.
-        fn service_at(&mut self, now: Instant, defer: bool) -> bool {
-            let outcome = self.driver.service(now, defer, &mut self.deferred).unwrap();
+        /// Service at a chosen time and collect results.
+        fn service_at(&mut self, now: Instant, defer: bool) {
+            self.driver.service(now, defer, &mut self.deferred).unwrap();
             self.collect();
-            outcome.woke
         }
 
         /// Service using wall-clock time and run deferred kernel work immediately.
-        fn service(&mut self) -> bool {
-            self.service_at(Instant::now(), false)
+        fn service(&mut self) {
+            self.service_at(Instant::now(), false);
+        }
+
+        /// Require a real wake CQE before any further submission can mask its absence.
+        fn reap_wake(&mut self) {
+            let cqe = self
+                .driver
+                .ring
+                .completion()
+                .next()
+                .expect("missing wake CQE");
+            assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+            self.driver.state.handle_cqe(
+                cqe.user_data(),
+                cqe.result(),
+                cqe.flags(),
+                &mut self.deferred,
+            );
         }
 
         /// Drive until `count` results have been collected, failing if progress stalls.
@@ -873,7 +856,7 @@ pub mod tests {
             }
         }
 
-        /// Close ordinary observation and wait for request and cancellation retirement.
+        /// Close ordinary observation and wait for request retirement.
         fn drain(&mut self) {
             self.driver.close(&mut self.deferred);
             self.collect();
@@ -938,11 +921,14 @@ pub mod tests {
         // Keep completed results in their slots while the sole operation slot
         // stays occupied. Their queue IDs must still count as stale.
         let mut results = Vec::new();
+        let deadline = harness.start + Duration::from_nanos(1);
         for _ in 0..65 {
             let (socket, _peer) = UnixStream::pair().unwrap();
             results.push(harness.driver.admit(
-                recv(socket, 1, Some(harness.start)),
+                recv(socket, 1, Some(deadline)),
                 Observer::Ordinary(None),
+                harness.start,
+                &mut harness.deferred,
             ));
         }
         harness.service();
@@ -957,8 +943,10 @@ pub mod tests {
         // even though its generation still matches a retained result.
         let (socket, _peer) = UnixStream::pair().unwrap();
         results.push(harness.driver.admit(
-            recv(socket, 1, Some(harness.start)),
+            recv(socket, 1, Some(deadline)),
             Observer::Ordinary(None),
+            harness.start,
+            &mut harness.deferred,
         ));
         harness.service();
 
@@ -970,7 +958,6 @@ pub mod tests {
         harness.service();
 
         assert!(harness.driver.is_empty());
-        assert!(!harness.driver.needs_kernel_service());
         assert!(!harness.driver.has_pending_submissions());
 
         // Neither compaction nor skipped staging may consume the results.
@@ -1150,7 +1137,6 @@ pub mod tests {
         harness.drain();
 
         assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-        assert_eq!(harness.driver.state.outstanding_cancels, 0);
     }
 
     #[test]
@@ -1160,9 +1146,12 @@ pub mod tests {
         first_peer.write_all(b"a").unwrap();
 
         // Omit the observer waker so the harness leaves this result in Waiters.
-        let first = harness
-            .driver
-            .admit(recv(first, 1, None), Observer::Ordinary(None));
+        let first = harness.driver.admit(
+            recv(first, 1, None),
+            Observer::Ordinary(None),
+            harness.start,
+            &mut harness.deferred,
+        );
 
         let (second, mut second_peer) = UnixStream::pair().unwrap();
         second_peer.write_all(b"b").unwrap();
@@ -1188,10 +1177,11 @@ pub mod tests {
     fn test_expired_registration_never_stages() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
-        harness.admit(recv(left, 8, Some(harness.start)), 0);
+        let deadline = harness.start + Duration::from_nanos(1);
+        harness.admit(recv(left, 8, Some(deadline)), 0);
 
         // A deadline equal to this turn's time has already expired.
-        harness.service_at(harness.start, true);
+        harness.service_at(deadline, true);
 
         assert!(matches!(
             harness.completed[0].output,
@@ -1389,15 +1379,11 @@ pub mod tests {
 
         // Acknowledgements cannot release the operation's kernel resources.
         for result in [0, -libc::EALREADY, -libc::ENOENT, -libc::EPERM] {
-            harness.driver.state.outstanding_cancels += 1;
-            assert!(!harness.driver.state.handle_cqe(
-                CANCEL_USER_DATA,
-                result,
-                0,
-                &mut harness.deferred
-            ));
+            harness
+                .driver
+                .state
+                .handle_cqe(CANCEL_USER_DATA, result, 0, &mut harness.deferred);
 
-            assert_eq!(harness.driver.state.outstanding_cancels, 0);
             assert_eq!(harness.driver.state.waiters.in_flight(), 1);
             assert!(harness.driver.state.waiters.is_pending(id));
         }
@@ -1418,15 +1404,11 @@ pub mod tests {
             .complete(id, result, &mut harness.deferred);
 
         for result in [0, -libc::ENOENT] {
-            harness.driver.state.outstanding_cancels += 1;
-            assert!(!harness.driver.state.handle_cqe(
-                CANCEL_USER_DATA,
-                result,
-                0,
-                &mut harness.deferred
-            ));
+            harness
+                .driver
+                .state
+                .handle_cqe(CANCEL_USER_DATA, result, 0, &mut harness.deferred);
 
-            assert_eq!(harness.driver.state.outstanding_cancels, 0);
             assert_eq!(harness.driver.state.waiters.in_flight(), 0);
         }
 
@@ -1445,7 +1427,6 @@ pub mod tests {
         }
 
         let mut harness = Harness::new(1);
-        harness.driver.state.outstanding_cancels = 1;
 
         // EINVAL rejects the cancellation SQE itself, regardless of slot reuse.
         assert!(
@@ -1459,88 +1440,104 @@ pub mod tests {
             }))
             .is_err()
         );
-        assert_eq!(harness.driver.state.outstanding_cancels, 1);
-
-        harness
-            .driver
-            .state
-            .handle_cqe(CANCEL_USER_DATA, 0, 0, &mut harness.deferred);
-        assert_eq!(harness.driver.state.outstanding_cancels, 0);
-
-        // An acknowledgement without a staged cancellation is an accounting error.
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| {
-                harness
-                    .driver
-                    .state
-                    .handle_cqe(CANCEL_USER_DATA, 0, 0, &mut harness.deferred);
-            }))
-            .is_err()
-        );
-        assert_eq!(harness.driver.state.outstanding_cancels, 0);
     }
 
     #[test]
-    fn test_drain_waits_for_cancel_cqe_after_request_finishes() {
-        for reuse in [false, true] {
-            let mut harness = Harness::new(1);
-            let (left, _right) = UnixStream::pair().unwrap();
-            let id = harness.stage(recv(left, 8, None), Some(1), 0);
+    fn test_request_retirement_releases_hold_before_cancel_acknowledgement() {
+        for consume_cancel in [false, true] {
+            for reuse in [false, true] {
+                let mut harness = Harness::new(1);
+                let directory = std::env::temp_dir().join(format!(
+                    "commonware_driver_retirement_{}_{}_{}",
+                    std::process::id(),
+                    consume_cancel,
+                    reuse,
+                ));
+                let hold = Hold::acquire(&directory).unwrap();
+                let path = directory.join("read");
+                fs::write(&path, b"hello").unwrap();
+                let file = OpenOptions::new().read(true).open(path).unwrap();
+                let probe = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(directory.join(".hold"))
+                    .unwrap();
+                let id = harness.admit(
+                    Request::ReadAt(ReadAtRequest {
+                        file: Held::new(file, hold),
+                        offset: 0,
+                        read: 0,
+                        buf: IoBufMut::zeroed(5),
+                        cache: Cache::Enabled,
+                    }),
+                    0,
+                );
 
-            // Submit only the cancellation to the real kernel. Simulate the
-            // operation CQE so logical retirement is guaranteed to happen first.
-            harness.driver.state.advance_timeouts(
-                harness.start + Duration::from_millis(5),
-                &mut harness.deferred,
-            );
-            assert!(
-                !harness
+                // Complete the real read in the kernel, retaining its CQE and
+                // userspace owner while a later cancellation enters the SQ.
+                assert!(
+                    !harness
+                        .driver
+                        .state
+                        .stage_ready_requests(&mut harness.driver.ring.submission())
+                );
+                harness.driver.ring.submit_and_wait(1).unwrap();
+                assert!(matches!(
+                    probe.try_lock(),
+                    Err(fs::TryLockError::WouldBlock)
+                ));
+                harness.driver.orphan(id, &mut harness.deferred);
+                assert!(
+                    !harness
+                        .driver
+                        .state
+                        .stage_cancellations(&mut harness.driver.ring.submission())
+                );
+                assert_eq!(harness.driver.ring.submission().len(), 1);
+
+                // Only processing the target CQE permits resource retirement.
+                // The deferred owner still protects the directory until disposal.
+                harness
                     .driver
                     .state
-                    .stage_cancellations(&mut harness.driver.ring.submission())
-            );
-            assert_eq!(harness.driver.state.outstanding_cancels, 1);
+                    .reap(&mut harness.driver.ring, &mut harness.deferred);
+                assert!(matches!(
+                    probe.try_lock(),
+                    Err(fs::TryLockError::WouldBlock)
+                ));
+                harness.collect();
+                let RequestOutput::ReadAt(Ok(buf)) = &harness.completed[0].output else {
+                    panic!("real read did not complete successfully");
+                };
+                assert_eq!(buf.as_ref(), b"hello");
+                probe.try_lock().unwrap();
+                probe.unlock().unwrap();
 
-            harness.simulated_completion(id, 4);
-
-            assert!(matches!(
-                harness.completed[0].output,
-                RequestOutput::Recv(Err((_, Error::Timeout)))
-            ));
-
-            // The kernel will acknowledge the staged cancel after logical
-            // retirement. Drain must wait for that CQE despite the empty slab.
-            assert_eq!(harness.driver.len(), 0);
-            assert!(!harness.driver.is_empty());
-            assert!(harness.driver.next_deadline().is_none());
-
-            if reuse {
-                let (left, _right) = UnixStream::pair().unwrap();
-                let current = harness.stage(recv(left, 1, None), None, 1);
-                assert_eq!(current.0.index, id.0.index);
-                assert_ne!(current, id);
-
-                // Deliver the real cancellation CQE while the reused slot holds
-                // another operation. Its target identity must not affect lookup.
-                let limit = Instant::now() + Duration::from_secs(10);
-                while harness.driver.state.outstanding_cancels != 0 {
-                    assert!(
-                        Instant::now() < limit,
-                        "cancellation acknowledgement stalled"
-                    );
-                    harness.service();
-                    thread::yield_now();
+                if consume_cancel {
+                    // Leave the real cancellation acknowledgement unobserved.
+                    harness.driver.ring.submit_and_wait(1).unwrap();
+                    assert!(harness.driver.ring.submission().is_empty());
+                    assert!(!harness.driver.ring.completion().is_empty());
+                } else {
+                    assert_eq!(harness.driver.ring.submission().len(), 1);
                 }
 
-                assert!(harness.driver.state.waiters.is_in_flight(current));
-                assert_eq!(harness.driver.state.waiters.in_flight(), 1);
-                assert_eq!(harness.completed.len(), 1);
-                harness.simulated_completion(current, 1);
+                if reuse {
+                    let (left, mut right) = UnixStream::pair().unwrap();
+                    right.write_all(b"x").unwrap();
+                    let next = harness.admit(recv(left, 1, None), 1);
+                    assert_eq!(next.0.index, id.0.index);
+                    assert_ne!(next, id);
+                    harness.until(2);
+                    assert_eq!(received(&harness.completed[1]), b"x");
+                }
+
+                harness.drain();
+                drop(harness);
+                probe.try_lock().unwrap();
+                drop(probe);
+                fs::remove_dir_all(directory).unwrap();
             }
-
-            harness.drain();
-
-            assert_eq!(harness.driver.state.outstanding_cancels, 0);
         }
     }
 
@@ -1615,9 +1612,8 @@ pub mod tests {
                     Request::ReadAt(ReadAtRequest {
                         file: held.clone(),
                         offset: 0,
-                        len: 5,
                         read: 0,
-                        buf: IoBufMut::with_capacity(5),
+                        buf: IoBufMut::zeroed(5),
                         cache: Cache::Enabled,
                     }),
                     None,
@@ -1653,30 +1649,103 @@ pub mod tests {
 
     #[test]
     fn test_orphan_in_flight_cancels_once_and_releases_deadline() {
+        for expire_bucket in [false, true] {
+            let mut harness = Harness::new(1);
+            let deadline = harness.start + Duration::from_secs(10);
+            let (left, _right) = UnixStream::pair().unwrap();
+            let id = harness.admit(recv(left, 8, Some(deadline)), 0);
+            let (survivor, _survivor_peer) = UnixStream::pair().unwrap();
+            if expire_bucket {
+                harness.admit(recv(survivor, 1, Some(deadline)), 1);
+            }
+            harness.service();
+
+            assert!(harness.driver.state.waiters.is_in_flight(id));
+
+            // Repeated observer drops must not queue another cancel or remove the
+            // same deadline from the wheel twice.
+            harness.orphan(id);
+            harness.orphan(id);
+
+            if expire_bucket {
+                // A live sibling forces the orphan's stale wheel record through
+                // expiry before its cancellation or operation CQE arrives.
+                harness
+                    .driver
+                    .state
+                    .advance_timeouts(deadline, &mut harness.deferred);
+                assert!(harness.driver.state.waiters.is_in_flight(id));
+            }
+            assert_eq!(harness.driver.state.pending_cancels.len(), 1);
+            assert!(harness.driver.next_deadline().is_none());
+
+            harness.collect();
+            harness.drain();
+
+            assert_eq!(harness.completed.len(), 1 + usize::from(expire_bucket));
+            assert_eq!(
+                harness
+                    .completed
+                    .iter()
+                    .filter(|completed| matches!(completed.observer, TestObserver::Orphaned))
+                    .count(),
+                1
+            );
+            if expire_bucket {
+                let survivor = harness
+                    .completed
+                    .iter()
+                    .find(|completed| matches!(completed.observer, TestObserver::Ordinary(1)))
+                    .unwrap();
+                assert!(matches!(
+                    survivor.output,
+                    RequestOutput::Recv(Err((_, Error::Timeout)))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_expiring_bucket_preserves_unconsumed_success() {
         let mut harness = Harness::new(1);
-        let (left, _right) = UnixStream::pair().unwrap();
-        let id = harness.admit(
-            recv(left, 8, Some(harness.start + Duration::from_secs(10))),
-            0,
-        );
-        harness.service();
+        let deadline = harness.start + Duration::from_secs(30);
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(b"x").unwrap();
+        let completed = harness.admit(recv(socket, 1, Some(deadline)), 0);
+        let (survivor, _peer) = UnixStream::pair().unwrap();
+        harness.admit(recv(survivor, 1, Some(deadline)), 1);
 
-        assert!(harness.driver.state.waiters.is_in_flight(id));
-
-        // Repeated observer drops must not queue another cancel or remove the
-        // same deadline from the wheel twice.
-        harness.orphan(id);
-        harness.orphan(id);
-
-        assert_eq!(harness.driver.state.pending_cancels.len(), 1);
+        // Retain the first result while another request keeps its bucket live.
+        let limit = Instant::now() + Duration::from_secs(10);
+        while harness.driver.state.waiters.is_pending(completed) {
+            assert!(Instant::now() < limit, "receive stalled");
+            harness
+                .driver
+                .service(Instant::now(), false, &mut harness.deferred)
+                .unwrap();
+            thread::yield_now();
+        }
+        harness
+            .driver
+            .state
+            .advance_timeouts(deadline, &mut harness.deferred);
         assert!(harness.driver.next_deadline().is_none());
 
-        harness.drain();
-
-        assert_eq!(harness.completed.len(), 1);
+        harness.collect();
         assert!(matches!(
             harness.completed[0].observer,
-            TestObserver::Orphaned
+            TestObserver::Ordinary(0)
+        ));
+        assert_eq!(received(&harness.completed[0]), b"x");
+        harness.drain();
+        assert_eq!(harness.completed.len(), 2);
+        assert!(matches!(
+            harness.completed[1].observer,
+            TestObserver::Ordinary(1)
+        ));
+        assert!(matches!(
+            harness.completed[1].output,
+            RequestOutput::Recv(Err((_, Error::Timeout)))
         ));
     }
 
@@ -1719,7 +1788,7 @@ pub mod tests {
         harness.service_at(harness.start, true);
 
         assert!(harness.completed.is_empty());
-        assert!(harness.driver.needs_kernel_service());
+        assert!(!harness.driver.is_empty());
 
         // No further admission is needed to drive the deferred task work.
         harness.until(1);
@@ -1736,7 +1805,7 @@ pub mod tests {
         // Staging the mailbox poll must not make a CPU-only turn enter the kernel.
         harness.service();
 
-        assert!(!harness.driver.needs_kernel_service());
+        assert!(harness.driver.is_empty());
         assert!(!harness.driver.has_pending_submissions());
         assert_eq!(harness.driver.ring.submission().len(), 1);
 
@@ -1753,9 +1822,11 @@ pub mod tests {
 
         // Publication prevents parking, so the deferred GETEVENTS enter must
         // still happen through service before the next busy turn.
-        harness.driver.state.waker.wake();
+        if harness.driver.state.waker.publish() {
+            harness.driver.state.waker.wake();
+        }
         assert!(!harness.driver.park(0, None).unwrap());
-        assert!(harness.driver.needs_kernel_service());
+        assert!(!harness.driver.is_empty());
         harness.until(1);
 
         harness.drain();
@@ -1783,8 +1854,7 @@ pub mod tests {
         assert!(harness.driver.state.waker.pending(0));
 
         // A published sequence alone does not prove eventfd reached the ring.
-        // Service must observe the wake CQE produced during the wait.
-        assert!(harness.service());
+        harness.reap_wake();
 
         harness.drain();
     }
@@ -1811,10 +1881,10 @@ pub mod tests {
             let _fault = stalled.then(|| inject(&harness.driver, Fault::StallFlush));
             if stalled {
                 // An unchanged SQ cannot accept the wake poll. Park must return
-                // to service with both rearm and submission retry still pending.
+                // to service with the request and rearm still pending.
                 assert!(!harness.driver.park(0, Some(Instant::now())).unwrap());
                 assert!(harness.driver.state.wake_rearm_needed);
-                assert!(harness.driver.has_pending_submissions());
+                assert!(!harness.driver.is_empty());
                 assert!(harness.driver.ring.submission().is_full());
                 harness.service();
 
@@ -1839,12 +1909,7 @@ pub mod tests {
 
             // Reap directly so service cannot hide a missing poll by installing
             // one after park returns. The receive must still be in flight.
-            assert!(
-                harness
-                    .driver
-                    .state
-                    .reap(&mut harness.driver.ring, &mut harness.deferred)
-            );
+            harness.reap_wake();
             assert!(harness.driver.state.waiters.is_in_flight(id));
 
             // Rearming must preserve the receive that occupied the SQ.
@@ -1946,7 +2011,6 @@ pub mod tests {
             Request::WriteAt(WriteAtRequest {
                 file: held.clone(),
                 offset: 0,
-                written: 0,
                 write: bufs.into(),
                 state: WriteAtState::WritingBeforeSync,
                 cache: Cache::Enabled,
@@ -1959,6 +2023,8 @@ pub mod tests {
         harness.driver.admit(
             Request::Sync(SyncRequest { file: held }),
             Observer::DetachedSync(sender),
+            harness.start,
+            &mut harness.deferred,
         );
 
         // Retained completion receivers do not participate in drain progress.

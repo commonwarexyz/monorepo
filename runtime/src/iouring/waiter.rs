@@ -124,7 +124,7 @@ pub enum Observation {
     Ready(RequestOutput),
     /// Request is unfinished and its installed waker already matches the caller.
     Pending,
-    /// The caller must clone its waker outside the worker borrow, then recheck.
+    /// The caller must clone its waker outside the worker borrow before installing it.
     Refresh,
 }
 
@@ -268,9 +268,8 @@ impl Waiters {
 
     /// Install a waker already cloned outside the worker borrow.
     ///
-    /// Returns the previous waker for deferred destruction. The caller must
-    /// recheck [`Self::observe`] after cloning, since cloning can reenter and
-    /// finish the request. Panics unless a pending ordinary observer remains.
+    /// Returns the previous waker for deferred destruction. Panics unless the
+    /// request has a pending ordinary observer.
     pub fn set_waker(&mut self, id: WaiterId, waker: Waker) -> Option<Waker> {
         let waiter = self.get_mut(id).expect("observer waiter missing");
         let Observer::Ordinary(current) = &mut waiter.observer else {
@@ -588,9 +587,8 @@ pub mod tests {
         Request::ReadAt(ReadAtRequest {
             file: held(File::from(make_socket_fd())),
             offset: 0,
-            len: 5,
             read: 0,
-            buf: IoBufMut::with_capacity(5),
+            buf: IoBufMut::zeroed(5),
             cache: Cache::Enabled,
         })
     }
@@ -608,7 +606,6 @@ pub mod tests {
     fn make_poll_request() -> Request {
         Request::Poll(PollRequest {
             fd: Arc::new(TcpListener::bind("127.0.0.1:0").unwrap()),
-            flags: libc::POLLIN as u32,
             deadline: None,
         })
     }

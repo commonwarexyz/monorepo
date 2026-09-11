@@ -65,23 +65,21 @@ impl Operation {
             };
         }
 
-        let expired = request
-            .deadline()
-            .is_some_and(|deadline| deadline <= local.now);
         let mailbox = Arc::downgrade(&local.mailbox);
-        let Local {
-            driver, deferred, ..
-        } = &mut *local;
-        let driver = driver.as_mut().unwrap();
 
         // The driver takes ownership even when the SQ is full. Polling installs
         // a waker only while the request is still pending.
-        let waiter_id = driver.admit(request, Observer::Ordinary(None));
-
-        if expired {
-            // Immediate timeouts use the same result path as CQE completions.
-            driver.expire(waiter_id, deferred);
-        }
+        let Local {
+            driver,
+            deferred,
+            now,
+            ..
+        } = &mut *local;
+        let waiter_id =
+            driver
+                .as_mut()
+                .unwrap()
+                .admit(request, Observer::Ordinary(None), *now, deferred);
 
         Self {
             state: State::Waiting { mailbox, waiter_id },
@@ -124,50 +122,41 @@ impl Future for Operation {
             }
         };
 
-        let mut cloned_waker = None;
-        loop {
-            let mut local = owner.borrow_mut();
-            if local.closing {
-                // A waker clone may have closed the worker. Defer its destruction
-                // before release borrows the worker again.
-                local.deferred.drops.extend(cloned_waker);
-                drop(local);
-                this.release();
-                return Poll::Ready(Err(Error::Closed));
-            }
-
-            let Local {
-                driver, deferred, ..
-            } = &mut *local;
-            let driver = driver.as_mut().unwrap();
-
-            // Inspect before cloning: ready results and matching wakers require
-            // no callback.
-            match driver.observe(waiter_id, cx.waker()) {
-                Observation::Ready(output) => {
-                    this.state = State::Done;
-
-                    // Completion may have raced the clone, leaving it unused.
-                    deferred.drops.extend(cloned_waker);
-                    return Poll::Ready(Ok(output));
-                }
-                Observation::Pending => {
-                    deferred.drops.extend(cloned_waker);
-                    return Poll::Pending;
-                }
-                Observation::Refresh => {
-                    if let Some(waker) = cloned_waker.take() {
-                        deferred.drops.extend(driver.set_waker(waiter_id, waker));
-                        return Poll::Pending;
-                    }
-                }
-            }
-
-            // A clone can reenter and finish this request, or panic. Keep its
-            // identity intact and inspect the slot again after the callback.
+        let mut local = owner.borrow_mut();
+        if local.closing {
             drop(local);
-            cloned_waker = Some(cx.waker().clone());
+            this.release();
+            return Poll::Ready(Err(Error::Closed));
         }
+
+        // Inspect before cloning: ready results and matching wakers require
+        // no callback.
+        match local
+            .driver
+            .as_mut()
+            .unwrap()
+            .observe(waiter_id, cx.waker())
+        {
+            Observation::Ready(output) => {
+                this.state = State::Done;
+                return Poll::Ready(Ok(output));
+            }
+            Observation::Pending => return Poll::Pending,
+            Observation::Refresh => {}
+        }
+
+        // Worker service cannot run during this poll. Clone outside its borrow,
+        // retaining the cancellation identity if the callback panics.
+        drop(local);
+        let waker = cx.waker().clone();
+        let mut local = owner.borrow_mut();
+        let Local {
+            driver, deferred, ..
+        } = &mut *local;
+        deferred
+            .drops
+            .extend(driver.as_mut().unwrap().set_waker(waiter_id, waker));
+        Poll::Pending
     }
 }
 
@@ -193,11 +182,18 @@ pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> 
     } else {
         // Registration needs no task waker. The worker publishes to this
         // channel when the sync finishes.
-        local
-            .driver
-            .as_mut()
-            .unwrap()
-            .admit(Request::Sync(request), Observer::DetachedSync(sender));
+        let Local {
+            driver,
+            deferred,
+            now,
+            ..
+        } = &mut *local;
+        driver.as_mut().unwrap().admit(
+            Request::Sync(request),
+            Observer::DetachedSync(sender),
+            *now,
+            deferred,
+        );
     }
     receiver
 }
@@ -216,6 +212,7 @@ pub mod tests {
     };
     use futures::{FutureExt as _, future::pending, poll};
     use std::{
+        io::Write as _,
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
         pin::pin,
@@ -346,7 +343,7 @@ pub mod tests {
     fn recv(fd: Arc<OwnedFd>, deadline: Option<Instant>) -> Operation {
         Operation::register(Request::Recv(RecvRequest {
             fd,
-            buf: IoBufMut::with_capacity(1),
+            buf: IoBufMut::from([0]),
             offset: 0,
             len: 1,
             exact: true,
@@ -354,7 +351,7 @@ pub mod tests {
         }))
     }
 
-    /// Service the worker until every request and cancellation CQE retires.
+    /// Service the worker until every logical request retires.
     async fn drained() {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !Local::current()
@@ -396,103 +393,123 @@ pub mod tests {
     }
 
     #[test]
-    fn test_worker_closure_rejects_registration_and_polling() {
-        for during_clone in [false, true] {
-            let callbacks = Arc::new(Reentrant {
-                on_clone: Some(|| Local::current().unwrap().borrow_mut().closing = true),
-                ..Default::default()
-            });
+    fn test_expired_registration_does_not_consume_ready_data() {
+        let callbacks = Arc::new(Reentrant::default());
+        runner().start(|context| async move {
+            let deadline = Instant::now();
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(Local::current().unwrap().borrow().now >= deadline);
 
-            runner().start(|context| async move {
-                let (blob, _) = context.open("observer_closed", b"file").await.unwrap();
-                let (fd, _peer) = socket();
-                let mut operation = recv(fd.clone(), None);
-                let waker = callbacks.waker();
-                let mut cx = Context::from_waker(&waker);
+            let (fd, mut peer) = socket();
+            peer.write_all(b"x").unwrap();
+            let mut operation = recv(fd.clone(), Some(deadline));
+            let waker = callbacks.waker();
+            assert!(matches!(
+                operation.poll_unpin(&mut Context::from_waker(&waker)),
+                Poll::Ready(Ok(RequestOutput::Recv(Err((_, Error::Timeout)))))
+            ));
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), 0);
+            assert!(
+                Local::current()
+                    .unwrap()
+                    .borrow()
+                    .driver
+                    .as_ref()
+                    .unwrap()
+                    .is_empty()
+            );
 
-                // Closure can precede polling or happen while a waker clone
-                // temporarily releases the worker borrow.
-                if !during_clone {
-                    Local::current().unwrap().borrow_mut().closing = true;
-                }
-                assert!(matches!(
-                    operation.poll_unpin(&mut cx),
-                    Poll::Ready(Err(Error::Closed))
-                ));
-                assert_eq!(
-                    callbacks.clones.load(Ordering::Relaxed),
-                    usize::from(during_clone)
-                );
-
-                // New ordinary and detached requests must also reject closure.
-                let mut rejected = recv(fd, None);
-                assert!(matches!(
-                    rejected.poll_unpin(&mut cx),
-                    Poll::Ready(Err(Error::Closed))
-                ));
-                let handle = blob.start_sync().await;
-                assert!(matches!(handle.await, Err(Error::Closed)));
-                assert!(
-                    Local::current()
-                        .unwrap()
-                        .borrow()
-                        .driver
-                        .as_ref()
-                        .unwrap()
-                        .is_empty()
-                );
-            });
-        }
+            let RequestOutput::Recv(Ok((buffer, len))) =
+                recv(fd, Some(Instant::now() + Duration::from_secs(1)))
+                    .await
+                    .unwrap()
+            else {
+                panic!("expired receive consumed ready data");
+            };
+            assert_eq!(len, 1);
+            assert_eq!(buffer.as_ref(), b"x");
+        });
     }
 
     #[test]
-    fn test_observer_clone_reentry_rechecks_expired_registrations() {
-        for sleep_first in [false, true] {
+    fn test_worker_closure_rejects_registration_and_polling() {
+        let callbacks = Arc::new(Reentrant::default());
+        runner().start(|context| async move {
+            let (blob, _) = context.open("observer_closed", b"file").await.unwrap();
+            let (fd, _peer) = socket();
+            let mut operation = recv(fd.clone(), None);
+            let waker = callbacks.waker();
+            let mut cx = Context::from_waker(&waker);
+
+            Local::current().unwrap().borrow_mut().closing = true;
+            assert!(matches!(
+                operation.poll_unpin(&mut cx),
+                Poll::Ready(Err(Error::Closed))
+            ));
+            assert_eq!(callbacks.clones.load(Ordering::Relaxed), 0);
+
+            // New ordinary and detached requests must also reject closure.
+            let mut rejected = recv(fd, None);
+            assert!(matches!(
+                rejected.poll_unpin(&mut cx),
+                Poll::Ready(Err(Error::Closed))
+            ));
+            let handle = blob.start_sync().await;
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(
+                Local::current()
+                    .unwrap()
+                    .borrow()
+                    .driver
+                    .as_ref()
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn test_observer_clone_can_register_and_cancel_other_work() {
+        for in_flight in [false, true] {
             let callbacks = Arc::new(Reentrant {
                 on_clone: Some(|| {
-                    let owner = Local::current().unwrap();
-                    let mut local = owner.borrow_mut();
-                    local.now += Duration::from_secs(120);
-                    let Local {
-                        driver,
-                        deferred,
-                        now,
-                        timers,
-                        ..
-                    } = &mut *local;
-                    driver
-                        .as_mut()
-                        .unwrap()
-                        .service(*now, false, deferred)
-                        .unwrap();
-                    timers.expire(*now, &mut deferred.wakes);
+                    let mut sleep = Sleep::new(Duration::from_secs(60));
+                    let (fd, _peer) = socket();
+                    let mut operation = recv(fd, None);
+                    let mut cx = Context::from_waker(Waker::noop());
+                    assert!(sleep.poll_unpin(&mut cx).is_pending());
+                    assert!(operation.poll_unpin(&mut cx).is_pending());
+                    drop(operation);
+                    drop(sleep);
                 }),
                 ..Default::default()
             });
 
             runner().start(|_| async {
-                let (fd, _peer) = socket();
-                let mut blocker = recv(fd.clone(), None);
-                assert!(poll!(&mut blocker).is_pending());
-                let mut queued = recv(fd, Some(Instant::now() + Duration::from_secs(60)));
+                let (fd, mut peer) = socket();
+                let mut operation = recv(fd, Some(Instant::now() + Duration::from_secs(60)));
                 let mut sleep = Sleep::new(Duration::from_secs(60));
-                assert!(poll!(&mut queued).is_pending());
+                assert!(poll!(&mut operation).is_pending());
                 assert!(poll!(&mut sleep).is_pending());
+                if in_flight {
+                    reschedule().await;
+                }
 
-                // The first future triggers expiry while cloning its waker.
-                // It must recheck before installation, and the other future
-                // must observe its ready result without cloning at all.
+                // Each replacement may register and cancel other identities.
+                // The current registrations still need their own completion.
                 let waker = callbacks.waker();
                 let mut cx = Context::from_waker(&waker);
-                if sleep_first {
-                    assert!(sleep.poll_unpin(&mut cx).is_ready());
-                }
-                assert!(matches!(
-                    queued.poll_unpin(&mut cx),
-                    Poll::Ready(Ok(RequestOutput::Recv(Err((_, Error::Timeout)))))
-                ));
-                assert!(sleep.poll_unpin(&mut cx).is_ready());
-                assert_eq!(callbacks.clones.load(Ordering::Relaxed), 1);
+                assert!(operation.poll_unpin(&mut cx).is_pending());
+                assert!(sleep.poll_unpin(&mut cx).is_pending());
+                assert_eq!(callbacks.clones.load(Ordering::Relaxed), 2);
+
+                drop(sleep);
+                peer.write_all(b"x").unwrap();
+                let RequestOutput::Recv(Ok((buffer, len))) = operation.await.unwrap() else {
+                    panic!("receive failed after observer replacement");
+                };
+                assert_eq!(len, 1);
+                assert_eq!(buffer.as_ref(), b"x");
             });
         }
     }

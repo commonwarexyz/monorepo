@@ -271,7 +271,6 @@ impl crate::Listener for Listener {
 
             let output = Operation::register(Request::Poll(PollRequest {
                 fd: self.inner.clone(),
-                flags: libc::POLLIN as u32,
                 deadline: Some(Instant::now() + self.read_write_timeout),
             }))
             .await
@@ -427,8 +426,6 @@ pub struct Stream {
     buffer: IoBufMut,
     /// Current read position in the buffer.
     buffer_pos: usize,
-    /// Number of valid bytes in the buffer.
-    buffer_len: usize,
     /// Buffer pool for recv allocations.
     pool: BufferPool,
 }
@@ -442,7 +439,6 @@ impl Stream {
             poisoned: false,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
-            buffer_len: 0,
             pool,
         }
     }
@@ -484,21 +480,19 @@ impl Stream {
     }
 
     /// Fills the internal buffer by reading from the socket via io_uring.
-    async fn fill_buffer(&mut self, deadline: Instant) -> Result<usize, Error> {
+    async fn fill_buffer(&mut self, deadline: Instant) -> Result<(), Error> {
         self.buffer_pos = 0;
-        self.buffer_len = 0;
 
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
         let (buffer, read) = self.submit_recv(buffer, 0, len, false, deadline).await?;
         self.buffer = buffer;
-        self.buffer_len = read;
 
-        // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
-        unsafe { self.buffer.set_len(self.buffer_len) };
+        // SAFETY: The successful receive initialized the first `read` bytes.
+        unsafe { self.buffer.set_len(read) };
 
-        Ok(self.buffer_len)
+        Ok(())
     }
 }
 
@@ -520,7 +514,7 @@ impl crate::Stream for Stream {
 
             while bytes_received < len {
                 // First drain any buffered data
-                let buffered = self.buffer_len - self.buffer_pos;
+                let buffered = self.buffer.len() - self.buffer_pos;
                 if buffered > 0 {
                     let to_copy = std::cmp::min(buffered, len - bytes_received);
                     owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
@@ -561,7 +555,7 @@ impl crate::Stream for Stream {
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
-        let buffered = self.buffer_len - self.buffer_pos;
+        let buffered = self.buffer.len() - self.buffer_pos;
         let len = std::cmp::min(buffered, max_len);
         &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + len]
     }
@@ -577,16 +571,31 @@ mod tests {
         telemetry::metrics::{Register, Registry},
     };
     use commonware_macros::{select, test_group};
+    use futures::FutureExt as _;
     use std::{
-        io::Write,
+        io::{Read, Write},
         net::TcpStream,
         os::{
             fd::{AsRawFd, OwnedFd},
             unix::net::UnixStream,
         },
-        sync::Arc,
+        pin::pin,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context, Poll, Wake, Waker},
         time::{Duration, Instant},
     };
+
+    #[derive(Default)]
+    struct Notify(AtomicBool);
+
+    impl Wake for Notify {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
 
     /// Allocate receive buffers with the network pool configuration.
     fn test_pool(scope: &mut impl Register) -> BufferPool {
@@ -787,6 +796,58 @@ mod tests {
     }
 
     #[test]
+    fn test_carried_receive_deadline_completes_without_rescheduling() {
+        iouring::Runner::default().start(|context| async move {
+            let timeout = Duration::from_secs(1);
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let mut observer = socket.try_clone().unwrap();
+            let mut registry = Registry::default();
+            let mut stream = Stream::new(
+                Arc::new(socket.into()),
+                timeout,
+                8,
+                test_pool(&mut registry),
+            );
+            let notified = Arc::new(Notify::default());
+            let waker = Waker::from(notified.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            peer.write_all(b"x").unwrap();
+            {
+                let deadline = Instant::now() + timeout;
+                let mut receive = pin!(stream.recv(2));
+                assert!(receive.poll_unpin(&mut cx).is_pending());
+
+                // Let the first refill complete without observing its result.
+                while !notified.0.load(Ordering::Relaxed) {
+                    assert!(Instant::now() < deadline, "first refill did not complete");
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                assert!(Instant::now() < deadline);
+                assert_eq!(
+                    observer.read(&mut [0]).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+
+                // The next refill carries the first call's deadline. A timer
+                // wake proves the worker's cached time has passed that deadline.
+                context.sleep(timeout).await;
+                peer.write_all(b"y").unwrap();
+                assert!(matches!(
+                    receive.poll_unpin(&mut cx),
+                    Poll::Ready(Err(Error::Timeout))
+                ));
+            }
+
+            context.sleep(Duration::from_millis(1)).await;
+            let mut remaining = [0];
+            assert_eq!(observer.read(&mut remaining).unwrap(), 1);
+            assert_eq!(&remaining, b"y");
+        });
+    }
+
+    #[test]
     fn test_unbuffered_mode() {
         iouring::Runner::default().start(|context| async move {
             let network = test_network(Config {
@@ -883,12 +944,29 @@ mod tests {
             assert_eq!(stream.peek(100), b" world");
             assert_eq!(stream.peek(3), b" wo");
             assert!(stream.peek(0).is_empty());
+
+            // A shorter refill must replace the previous readable extent.
+            peer.write_all(b"xy").unwrap();
+            assert_eq!(stream.recv(7).await.unwrap().coalesce(), b" worldx");
+            assert_eq!(stream.peek(100), b"y");
+
+            // Buffered prefixes and later refills must survive the direct path.
+            let direct = [b'z'; 64];
+            peer.write_all(&direct).unwrap();
+            let received = stream.recv(65).await.unwrap().coalesce();
+            assert_eq!(&received.as_ref()[..1], b"y");
+            assert_eq!(&received.as_ref()[1..], &direct);
+            assert!(stream.peek(100).is_empty());
+
+            peer.write_all(b"next").unwrap();
+            assert_eq!(stream.recv(2).await.unwrap().coalesce(), b"ne");
+            assert_eq!(stream.peek(100), b"xt");
             stream
         });
 
         // Buffered bytes remain readable after the worker has shut down.
-        let rest = futures::executor::block_on(stream.recv(6)).unwrap();
-        assert_eq!(rest.coalesce(), b" world");
+        let rest = futures::executor::block_on(stream.recv(2)).unwrap();
+        assert_eq!(rest.coalesce(), b"xt");
         assert!(stream.peek(100).is_empty());
     }
 
