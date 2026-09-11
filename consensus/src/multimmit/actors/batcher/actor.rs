@@ -495,17 +495,23 @@ where
             error!("failed to compute bounded ingress frame sizes");
             return;
         };
-        let mut data =
-            self.ingress_receiver(data, NetworkPlane::Data, bounds.max_data_frame_bytes());
+        let mut data = self.ingress_receiver(
+            data,
+            NetworkPlane::Data,
+            bounds.max_data_frame_bytes(),
+            self.strategy.clone(),
+        );
         let mut consensus = self.ingress_receiver(
             consensus,
             NetworkPlane::Consensus,
             bounds.max_consensus_frame_bytes(),
+            self.critical_strategy.clone(),
         );
         let mut certificates = self.ingress_receiver(
             certificates,
             NetworkPlane::Certificate,
             bounds.max_certificate_frame_bytes(),
+            self.critical_strategy.clone(),
         );
 
         let mut lanes: Lanes<P, V, H::Digest> =
@@ -636,8 +642,8 @@ where
     async fn recv_network<DR, CR, RR>(
         next: NetworkPlane,
         data: &mut IngressReceiver<E, DR, H, V, T>,
-        consensus: &mut IngressReceiver<E, CR, H, V, T>,
-        certificates: &mut IngressReceiver<E, RR, H, V, T>,
+        consensus: &mut IngressReceiver<E, CR, H, V, C>,
+        certificates: &mut IngressReceiver<E, RR, H, V, C>,
     ) -> Option<(NetworkPlane, IngressCompletion<P, V, H::Digest>)>
     where
         DR: Receiver<PublicKey = P>,
@@ -669,12 +675,13 @@ where
         }
     }
 
-    fn ingress_receiver<R: Receiver<PublicKey = P>>(
+    fn ingress_receiver<R: Receiver<PublicKey = P>, S: Strategy>(
         &self,
         receiver: R,
         plane: NetworkPlane,
         max_frame_bytes: usize,
-    ) -> IngressReceiver<E, R, H, V, T> {
+        strategy: S,
+    ) -> IngressReceiver<E, R, H, V, S> {
         let context = self.context.child("ingress").with_attribute(
             "plane",
             match plane {
@@ -683,6 +690,11 @@ where
                 NetworkPlane::Data => "data",
             },
         );
+        let capacity = self
+            .strategy
+            .manual()
+            .parallelism()
+            .min(strategy.manual().parallelism());
         IngressReceiver {
             context,
             receiver,
@@ -693,9 +705,9 @@ where
                 payload: self.codec,
             },
             scheme: Arc::clone(&self.scheme),
-            strategy: self.strategy.clone(),
+            strategy,
             jobs: Pool::default(),
-            capacity: self.strategy.manual().parallelism(),
+            capacity,
             closed: false,
         }
     }
@@ -1180,6 +1192,7 @@ mod tests {
                 raw,
                 NetworkPlane::Consensus,
                 bounds.max_consensus_frame_bytes(),
+                actor.strategy.clone(),
             );
             let (from, prepared) = receiver.recv().await.unwrap().unwrap();
             assert_eq!(from, peer);
@@ -1191,6 +1204,63 @@ mod tests {
             assert!(matches!(malformed, Err(InvalidIngress::Decode)));
             assert_eq!(strategy.spawns(), 2);
             assert!(receiver.recv().await.is_none());
+        });
+    }
+
+    #[test]
+    fn leader_ingress_progresses_while_data_workers_are_occupied() {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::new(40, 6, Limits::new(2, 1).unwrap());
+            let strategy = rayon();
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let manual = strategy.manual();
+            let blockers = (0..2)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    manual.spawn(1, move |_| {
+                        barrier.wait();
+                        barrier.wait();
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let actor = ingress_actor::<Sha256, _>(context.child("batcher"), &committee, strategy);
+            let raw = || {
+                RawReceiver(VecDeque::from([(
+                    committee.identities[1].clone(),
+                    IoBuf::from(Bytes::from_static(b"invalid")),
+                )]))
+            };
+            let mut data =
+                actor.ingress_receiver(raw(), NetworkPlane::Data, 1024, actor.strategy.clone());
+            let mut consensus = actor.ingress_receiver(
+                raw(),
+                NetworkPlane::Consensus,
+                1024,
+                actor.critical_strategy.clone(),
+            );
+            let mut certificates = actor.ingress_receiver(
+                raw(),
+                NetworkPlane::Certificate,
+                1024,
+                actor.critical_strategy.clone(),
+            );
+            let data_waiting = data.recv().now_or_never().is_none();
+            let consensus_result = consensus.recv().now_or_never();
+            let certificate_result = certificates.recv().now_or_never();
+            barrier.wait();
+            futures::future::join_all(blockers).await;
+            assert!(data_waiting);
+            for result in [consensus_result, certificate_result] {
+                assert!(matches!(
+                    result,
+                    Some(Some(Ok((_, Err(InvalidIngress::Decode)))))
+                ));
+            }
+            assert!(matches!(
+                data.recv().await,
+                Some(Ok((_, Err(InvalidIngress::Decode))))
+            ));
         });
     }
 
@@ -1224,7 +1294,7 @@ mod tests {
                         .map(|_| (peer.clone(), IoBuf::from(Bytes::from_static(b"invalid"))))
                         .collect(),
                 );
-                actor.ingress_receiver(raw, plane, 1024)
+                actor.ingress_receiver(raw, plane, 1024, actor.strategy.clone())
             });
             for _ in 0..4 {
                 for receiver in &mut receivers {
@@ -1264,8 +1334,12 @@ mod tests {
                 &committee,
                 mocks::inline(NonZeroUsize::new(2).unwrap()),
             );
-            let mut receiver =
-                actor.ingress_receiver(RawReceiver::default(), NetworkPlane::Consensus, 1024);
+            let mut receiver = actor.ingress_receiver(
+                RawReceiver::default(),
+                NetworkPlane::Consensus,
+                1024,
+                actor.strategy.clone(),
+            );
             let (send, receive) = futures::channel::oneshot::channel();
             receiver.jobs.push(async { receive.await.unwrap() });
             for _ in 0..4 {
@@ -1329,7 +1403,12 @@ mod tests {
                     committee.identities[1].clone(),
                     IoBuf::from(frame),
                 )]));
-                let mut receiver = actor.ingress_receiver(raw, NetworkPlane::Consensus, 1024);
+                let mut receiver = actor.ingress_receiver(
+                    raw,
+                    NetworkPlane::Consensus,
+                    1024,
+                    actor.strategy.clone(),
+                );
                 // Driving from a pool member lets Rayon execute the job without an external wake.
                 let outcome = strategy
                     .manual()

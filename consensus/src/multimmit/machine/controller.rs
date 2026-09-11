@@ -331,8 +331,14 @@ impl<H: Hasher, V: Variant> CoreState<H, V> {
             .max(3);
         let generation = machine.inspect().generation();
         let local_custody = machine.profile().protocol().codec_config().pipeline_depth();
-        let tasks =
-            TaskReservations::new(generation, TaskLimits::new(local_custody, crypto_tasks))?;
+        let tasks = TaskReservations::new(
+            generation,
+            TaskLimits::new(
+                local_custody,
+                crypto_tasks,
+                resources.max_verification_batch(),
+            ),
+        )?;
         Ok(Self::with_limits(machine, limits, tasks))
     }
 
@@ -1065,6 +1071,7 @@ pub(crate) enum TaskClass {
     LocalCustody,
     LocalSigning,
     CriticalAggregation,
+    CriticalVerification,
     #[allow(dead_code)]
     BulkCrypto,
 }
@@ -1099,18 +1106,24 @@ impl TaskPermit {
     }
 }
 
-/// Bounded task policy. Two crypto slots are structurally unavailable to bulk work.
+/// Bounded task policy with independent view-verification capacity and two reserved crypto slots.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TaskLimits {
     local_custody: usize,
     crypto_tasks: usize,
+    critical_verification: usize,
 }
 
 impl TaskLimits {
-    pub(crate) const fn new(local_custody: usize, crypto_tasks: usize) -> Self {
+    pub(crate) const fn new(
+        local_custody: usize,
+        crypto_tasks: usize,
+        critical_verification: usize,
+    ) -> Self {
         Self {
             local_custody,
             crypto_tasks,
+            critical_verification,
         }
     }
 }
@@ -1126,12 +1139,14 @@ pub(crate) struct TaskReservations {
     local_signing: usize,
     critical_aggregation: usize,
     bulk_crypto: usize,
+    critical_verification: usize,
     stopped: bool,
 }
 
 impl TaskReservations {
     pub(crate) const fn new(generation: u64, limits: TaskLimits) -> Result<Self, TaskError> {
-        if limits.local_custody == 0 || limits.crypto_tasks < 3 {
+        if limits.local_custody == 0 || limits.crypto_tasks < 3 || limits.critical_verification == 0
+        {
             return Err(TaskError::InvalidLimits);
         }
         Ok(Self {
@@ -1144,6 +1159,7 @@ impl TaskReservations {
             local_signing: 0,
             critical_aggregation: 0,
             bulk_crypto: 0,
+            critical_verification: 0,
             stopped: false,
         })
     }
@@ -1190,6 +1206,12 @@ impl TaskReservations {
             {
                 return Err(TaskError::ClassFull);
             }
+            TaskClass::CriticalVerification
+                if self.critical_verification.saturating_add(units)
+                    > self.limits.critical_verification =>
+            {
+                return Err(TaskError::ClassFull);
+            }
             TaskClass::BulkCrypto
                 if self.bulk_crypto.saturating_add(units) > self.limits.crypto_tasks - 2
                     || crypto_used.saturating_add(units) > self.limits.crypto_tasks =>
@@ -1210,6 +1232,7 @@ impl TaskReservations {
             TaskClass::LocalSigning => self.local_signing += units,
             TaskClass::CriticalAggregation => self.critical_aggregation += units,
             TaskClass::BulkCrypto => self.bulk_crypto += units,
+            TaskClass::CriticalVerification => self.critical_verification += units,
         }
         self.active.insert(id, (class, units));
         Ok(TaskPermit {
@@ -1263,6 +1286,7 @@ impl TaskReservations {
         self.local_signing = 0;
         self.critical_aggregation = 0;
         self.bulk_crypto = 0;
+        self.critical_verification = 0;
         released
     }
 
@@ -1287,6 +1311,12 @@ impl TaskReservations {
             TaskClass::CriticalAggregation => {
                 self.critical_aggregation = self
                     .critical_aggregation
+                    .checked_sub(units)
+                    .ok_or(TaskError::Accounting)?;
+            }
+            TaskClass::CriticalVerification => {
+                self.critical_verification = self
+                    .critical_verification
                     .checked_sub(units)
                     .ok_or(TaskError::Accounting)?;
             }
@@ -1731,7 +1761,7 @@ mod tests {
 
     #[test]
     fn task_saturation_preserves_named_critical_capacity() {
-        let mut tasks = TaskReservations::new(7, TaskLimits::new(3, 5)).unwrap();
+        let mut tasks = TaskReservations::new(7, TaskLimits::new(3, 5, 7)).unwrap();
         let bulk = (0..3)
             .map(|_| tasks.reserve(TaskClass::BulkCrypto).unwrap())
             .collect::<Vec<_>>();
@@ -1750,8 +1780,51 @@ mod tests {
     }
 
     #[test]
+    fn critical_verification_admits_a_full_cohort_under_crypto_saturation() {
+        let mut tasks = TaskReservations::new(7, TaskLimits::new(3, 5, 7)).unwrap();
+        tasks.reserve_units(TaskClass::BulkCrypto, 3).unwrap();
+        tasks.reserve(TaskClass::LocalSigning).unwrap();
+        tasks.reserve(TaskClass::CriticalAggregation).unwrap();
+        for terminal in [
+            TaskTerminal::Completed,
+            TaskTerminal::Failed,
+            TaskTerminal::Cancelled,
+            TaskTerminal::Panicked,
+        ] {
+            let cohort = tasks
+                .reserve_units(TaskClass::CriticalVerification, 7)
+                .unwrap();
+            assert_eq!(
+                tasks.reserve(TaskClass::CriticalVerification),
+                Err(TaskError::ClassFull)
+            );
+            tasks.finish(cohort, terminal).unwrap();
+        }
+        assert_eq!(
+            tasks.reserve_units(TaskClass::CriticalVerification, 8),
+            Err(TaskError::ClassFull)
+        );
+        let stale = tasks
+            .reserve_units(TaskClass::CriticalVerification, 7)
+            .unwrap();
+        tasks.advance_generation(8).unwrap();
+        assert_eq!(
+            tasks.finish(stale, TaskTerminal::Completed),
+            Err(TaskError::StaleGeneration)
+        );
+        tasks
+            .reserve_units(TaskClass::CriticalVerification, 7)
+            .unwrap();
+        assert_eq!(tasks.shutdown(), 1);
+        assert_eq!(
+            tasks.reserve(TaskClass::CriticalVerification),
+            Err(TaskError::Stopped)
+        );
+    }
+
+    #[test]
     fn local_custody_capacity_is_bounded_and_independent() {
-        let mut tasks = TaskReservations::new(7, TaskLimits::new(3, 3)).unwrap();
+        let mut tasks = TaskReservations::new(7, TaskLimits::new(3, 3, 7)).unwrap();
         let build = tasks.reserve(TaskClass::LocalBuild).unwrap();
         let custody = (0..3)
             .map(|_| tasks.reserve(TaskClass::LocalCustody).unwrap())
@@ -1769,7 +1842,7 @@ mod tests {
 
     #[test]
     fn stale_generation_cannot_release_current_capacity() {
-        let mut tasks = TaskReservations::new(11, TaskLimits::new(3, 3)).unwrap();
+        let mut tasks = TaskReservations::new(11, TaskLimits::new(3, 3, 7)).unwrap();
         let old = tasks.reserve(TaskClass::LocalBuild).unwrap();
         assert_eq!(tasks.advance_generation(12).unwrap(), 1);
         let current = tasks.reserve(TaskClass::LocalBuild).unwrap();
@@ -1782,7 +1855,7 @@ mod tests {
 
     #[test]
     fn shutdown_reconciles_every_permit_and_rejects_new_work() {
-        let mut tasks = TaskReservations::new(3, TaskLimits::new(3, 4)).unwrap();
+        let mut tasks = TaskReservations::new(3, TaskLimits::new(3, 4, 7)).unwrap();
         tasks.reserve(TaskClass::LocalBuild).unwrap();
         tasks.reserve(TaskClass::LocalCustody).unwrap();
         tasks.reserve(TaskClass::LocalSigning).unwrap();
@@ -1795,7 +1868,7 @@ mod tests {
 
     #[test]
     fn local_build_is_independent_of_custody_saturation() {
-        let mut tasks = TaskReservations::new(1, TaskLimits::new(2, 3)).unwrap();
+        let mut tasks = TaskReservations::new(1, TaskLimits::new(2, 3, 7)).unwrap();
         let first = tasks.reserve(TaskClass::LocalCustody).unwrap();
         let second = tasks.reserve(TaskClass::LocalCustody).unwrap();
         assert_eq!(

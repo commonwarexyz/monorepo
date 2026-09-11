@@ -349,9 +349,9 @@ where
     let completion_span = span.clone();
     let worker_span = span.clone();
     let operation = catch_unwind(AssertUnwindSafe(|| {
-        strategy.manual().spawn(1, move |_| {
-            worker_span.in_scope(|| operation(strategy))
-        })
+        strategy
+            .manual()
+            .spawn(1, move |_| worker_span.in_scope(|| operation(strategy)))
     }));
     async move {
         let outcome = match operation {
@@ -1333,7 +1333,7 @@ where
     verification_sources: BTreeMap<Observation, P>,
     jobs: Pool<'static, AppResult<H::Digest>>,
     crypto: Pool<'static, CryptoResult<V, H::Digest>>,
-    /// Bulk-verification jobs retain their affine permits until the batcher returns them.
+    /// Verification jobs retain their affine permits until the batcher returns them.
     verification_tasks: BTreeMap<JobId, (TaskPermit, Span)>,
     fast_verifications: VecDeque<PendingVerification<P, V, H::Digest>>,
     bulk_verifications: VecDeque<PendingVerification<P, V, H::Digest>>,
@@ -1977,11 +1977,7 @@ where
             .inc_by(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
     }
 
-    fn dispatch_work(
-        &mut self,
-        work: CoreWork<V, H::Digest>,
-        root: &Span,
-    ) -> Result<(), Fatal> {
+    fn dispatch_work(&mut self, work: CoreWork<V, H::Digest>, root: &Span) -> Result<(), Fatal> {
         #[cfg(test)]
         debug!(
             view = self.round_view.get(),
@@ -3227,12 +3223,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::journal;
-    use super::*;
+    use super::{super::journal, *};
     use crate::multimmit::{
         config::Limits,
         engine::open_stores,
-        machine::{Role, Tuning},
+        machine::{Role, Tuning, VerificationItem, VerificationTicket, VerifyJob},
         mocks::{Committee, MockApplication, RecordingRelay, RecordingReporter},
     };
     use commonware_cryptography::{
@@ -3431,7 +3426,13 @@ mod tests {
         ready_runtime_source_between_actions(RuntimeSourceScenario::Signing);
     }
 
+    #[test]
+    fn critical_verification_dispatches_under_bulk_permit_saturation() {
+        ready_runtime_source_between_actions(RuntimeSourceScenario::Verification);
+    }
+
     enum RuntimeSourceScenario {
+        Verification,
         Persistence,
         Heartbeat,
         Signing,
@@ -3567,7 +3568,7 @@ mod tests {
                 checkpoint_interval: NZU64!(1_000_000),
                 skip_timeout: None,
             };
-            let (batcher, _batcher_rx) = mailbox::new(context.child("batcher"), NonZeroUsize::new(64).unwrap());
+            let (batcher, mut batcher_rx) = mailbox::new(context.child("batcher"), NonZeroUsize::new(64).unwrap());
             let (resolver, _resolver_rx) = mailbox::new(context.child("resolver"), NonZeroUsize::new(64).unwrap());
             let (sender, _receiver) = inert_channel(&committee.identities);
             let hooks = TestHooks::default();
@@ -3637,6 +3638,36 @@ mod tests {
             };
             driver.persistence_completed(first_durable, &Span::none()).unwrap();
             assert!(!driver.can_admit(Lane::PersistenceCompletion));
+            if matches!(scenario, RuntimeSourceScenario::Verification) {
+                let resources = driver.machine.profile().resources();
+                let bulk_units = resources.max_cached_artifacts() + resources.max_outbox_effects() - 2;
+                let bulk = driver.core_mut().reserve_task(TaskClass::BulkCrypto, bulk_units).unwrap();
+                let artifact = Artifact::Nullification(committee.nullification(4));
+                let job_id = JobId::new(1234);
+                let ticket = VerificationTicket::new(job_id, artifact.id::<Sha256>(), Observation::new(1234, 0));
+                let job = VerifyJob::new(
+                    job_id,
+                    driver.core().task_generation(),
+                    vec![VerificationItem::new(ticket, Arc::new(artifact), false, Vec::new())],
+                );
+                driver.execute_capabilities(
+                    Capability::Verification(VerificationCapability::Verify(job)).into(),
+                    &Span::none(),
+                ).unwrap();
+                let message = batcher_rx.try_recv().expect(
+                    "critical verification must reach the batcher while producer permits remain held",
+                );
+                let batcher::Message::Verify { job, .. } = message else {
+                    panic!("the observed proof must dispatch verification");
+                };
+                assert!(job.view_critical());
+                assert_eq!(job.items().len(), 1);
+                assert!(driver.fast_verifications.is_empty());
+                assert_eq!(driver.verification_tasks.len(), 1);
+                assert!(driver.finish_task(bulk, TaskTerminal::Cancelled).unwrap());
+                driver.shutdown_tasks();
+                return;
+            }
             if matches!(scenario, RuntimeSourceScenario::Signing) {
                 let job = held_signing.expect("startup must release a real signing request");
                 driver.execute_capabilities(

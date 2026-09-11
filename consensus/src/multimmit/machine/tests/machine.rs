@@ -190,7 +190,7 @@ const fn resources_with_max_artifact_bytes(max_artifact_bytes: usize) -> Resourc
         NonZeroUsize::new(max_artifact_bytes).unwrap(),
         NonZeroUsize::new(32).unwrap(),
         NonZeroUsize::new(8).unwrap(),
-        NonZeroUsize::new(3).unwrap(),
+        NonZeroUsize::new(4).unwrap(),
         2,
         NonZeroUsize::new(8).unwrap(),
         NonZeroUsize::new(8).unwrap(),
@@ -15248,6 +15248,55 @@ fn future_vote_flood_does_not_starve_reanchoring_lqcs() {
         inspection.finality_floor(),
         inspection.view()
     );
+}
+
+#[test]
+fn producer_saturation_preserves_critical_and_proof_admission() {
+    for (cache, jobs, rejection) in [
+        (32, 3, Rejection::VerificationJobsFull),
+        (9, 32, Rejection::ArtifactCacheFull),
+    ] {
+        for proof in 0..3 {
+            let resources = ResourceLimits::new(
+                NonZeroUsize::new(16 * 1024).unwrap(),
+                NonZeroUsize::new(cache).unwrap(),
+                NonZeroUsize::new(8).unwrap(),
+                NonZeroUsize::new(jobs).unwrap(),
+                2,
+                NonZeroUsize::new(8).unwrap(),
+                NonZeroUsize::new(8).unwrap(),
+                NonZeroUsize::new(32).unwrap(),
+                NonZeroUsize::new(64).unwrap(),
+            );
+            let (mut machine, _) =
+                start_profile(profile_with_resources(Role::Observer, 6, 2, resources));
+            let mut saturated = false;
+            for header in frontier_chain(&machine, 32) {
+                let artifact = Artifact::DaCertificate(symbolic_da_certificate(header, 0));
+                let step = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
+                let StepStatus::Observed(results) = step.status() else {
+                    panic!("one observed certificate");
+                };
+                if results[0].status() == ObservationStatus::Rejected(rejection) {
+                    saturated = true;
+                    break;
+                }
+                assert_eq!(results[0].status(), ObservationStatus::Scheduled);
+            }
+            assert!(saturated);
+            let message = Artifact::NoVote(no_vote(&machine, View::new(1), 0));
+            let proof = self_certifying_view_proofs(&machine, View::new(2))[proof].clone();
+            for artifact in [message, proof] {
+                let step = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
+                let StepStatus::Observed(results) = step.status() else {
+                    panic!("one observed view artifact");
+                };
+                assert_eq!(results[0].status(), ObservationStatus::Scheduled);
+                assert!(machine.inspect().cached_artifacts() <= cache);
+                assert!(machine.inspect().verification_jobs().len() <= jobs);
+            }
+        }
+    }
 }
 
 #[test]

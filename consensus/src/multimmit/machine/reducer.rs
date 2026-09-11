@@ -3125,6 +3125,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         let resources = self.profile.resources();
         // Remote non-proof ingress leaves cache room for the atomic timeout choice and one
         // self-certifying view proof. Verification separately keeps one job slot for that proof.
+        // Producer ingress leaves one slot for view messages in each non-proof partition
+        // with at least two slots.
         let anchor = artifact.self_certifying_view();
         if !anchor
             && let Some(view) = artifact.view()
@@ -3134,11 +3136,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             return ObservationStatus::Rejected(Rejection::FutureArtifactsFull);
         }
         let cache_occupancy = self.artifacts.len() + local_artifact_reservations;
-        let cache_limit = if anchor {
+        let mut cache_limit = if anchor {
             resources.max_cached_artifacts()
         } else {
             resources.remote_artifact_capacity()
         };
+        if !artifact.view_critical() && cache_limit >= 2 {
+            cache_limit -= 1;
+        }
         if cache_occupancy >= cache_limit {
             // Occupancy outside the remote-ingress partition belongs to current-view work or
             // local protocol reservations and cannot be discarded here.
@@ -3146,9 +3151,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 return ObservationStatus::Rejected(Rejection::ArtifactCacheFull);
             }
         }
-        let verification_limit = resources
+        let mut verification_limit = resources
             .max_inflight_verifications()
             .saturating_sub(usize::from(!anchor));
+        if !artifact.view_critical() && verification_limit >= 2 {
+            verification_limit -= 1;
+        }
         if self.jobs.len() >= verification_limit {
             return ObservationStatus::Rejected(Rejection::VerificationJobsFull);
         }

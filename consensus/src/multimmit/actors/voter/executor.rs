@@ -661,7 +661,12 @@ where
         pending: PendingVerification<P, V, H::Digest>,
     ) -> Result<Option<PendingVerification<P, V, H::Digest>>, Fatal> {
         let workers = pending.job.items().len().max(1);
-        let permit = match self.core_mut().reserve_task(TaskClass::BulkCrypto, workers) {
+        let class = if pending.view_critical() {
+            TaskClass::CriticalVerification
+        } else {
+            TaskClass::BulkCrypto
+        };
+        let permit = match self.core_mut().reserve_task(class, workers) {
             Ok(permit) => permit,
             Err(TaskError::ClassFull) => return Ok(Some(pending)),
             Err(error) => return Err(error.into()),
