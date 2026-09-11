@@ -2,9 +2,9 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write as CodecWrite,
+    Buf, EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write as CodecWrite,
 };
 use thiserror::Error;
 

@@ -32,6 +32,25 @@
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
+//! # Decode Inputs
+//!
+//! Readers accept [Buf] inputs so decoded byte fields can share the input allocation.
+//! Pass owned buffers such as [::bytes::Bytes] directly, or clone a shared buffer to retain
+//! a separate cursor. Decoders also accept owned [`Vec<u8>`] values through [Input],
+//! transferring their allocation without copying the payload.
+//!
+//! Borrowed slices require [Copying]. Creating this adapter does not allocate, so scalar
+//! and byte-array reads can use reusable scratch storage. Fields that retain bytes copy
+//! their contents when decoded through the adapter.
+//!
+//! Use [Buf] for generic readers of serialized values and every helper on that read path,
+//! including fixed-size reads and length or padding validation. Use [Input] at entry
+//! points that convert owned inputs into readable buffers, then preserve [Buf] internally.
+//!
+//! Use [::bytes::Buf] for raw buffer implementations and byte-stream inputs to I/O,
+//! encoding, or hashing. When its cursor methods must be in scope alongside [Buf],
+//! import it as `use bytes::Buf as _;`.
+//!
 //! # Specialization
 //!
 //! Byte-oriented container paths use hidden trait hooks on [Write], [Read], and [EncodeSize] to
@@ -82,8 +101,8 @@
 //! ## Example 1. Fixed-Size Type
 //!
 //! ```
-//! use bytes::{Buf, BufMut};
-//! use commonware_codec::{Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
+//! use bytes::BufMut;
+//! use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt, Write, Encode, DecodeExt};
 //!
 //! // Define a custom struct
 //! #[derive(Debug, Clone, PartialEq)]
@@ -133,8 +152,8 @@
 //! ## Example 2. Variable-Size Type
 //!
 //! ```
-//! use bytes::{Buf, BufMut};
-//! use commonware_codec::{
+//! use bytes::BufMut;
+//! use commonware_codec::{Buf,
 //!     Decode, Encode, EncodeSize, Error, FixedSize, Read, ReadExt,
 //!     ReadRangeExt, Write, RangeCfg
 //! };
@@ -217,6 +236,9 @@
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
+
+    mod buf;
+    pub use buf::{Buf, Copying, Input};
 
     pub mod codec;
     pub mod config;

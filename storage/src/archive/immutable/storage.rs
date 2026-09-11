@@ -5,9 +5,9 @@ use crate::{
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
 };
-use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    Buf, BufMut,
+    BufMut,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};

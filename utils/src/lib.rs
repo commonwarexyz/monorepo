@@ -66,8 +66,9 @@ commonware_macros::stability_scope!(BETA {
     pub use probability::Probability;
     pub mod range;
 
-    use bytes::Buf;
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt};
+    use commonware_codec::{
+        Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
+    };
 
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///

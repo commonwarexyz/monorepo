@@ -1484,7 +1484,7 @@ where
                     ExpectedCommitment::Untrusted(commitment)
                 };
                 let block_cfg = V::block_cfg(&self.block_codec_config, expected);
-                let Ok(block) = V::Block::decode_cfg(value.as_ref(), &block_cfg) else {
+                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return self;
                 };

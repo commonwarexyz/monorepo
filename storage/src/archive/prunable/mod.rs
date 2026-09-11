@@ -225,7 +225,7 @@ mod tests {
         journal::{Error as JournalError, segmented::glob::corrupt_frame},
         translator::{FourCap, TwoCap},
     };
-    use commonware_codec::{DecodeExt, Error as CodecError, FixedSize};
+    use commonware_codec::{Error as CodecError, FixedSize};
     use commonware_cryptography::Crc32;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
@@ -253,7 +253,7 @@ mod tests {
         let key = key.as_bytes();
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(buf.as_ref()).unwrap()
+        FixedBytes::new(buf)
     }
 
     const DEFAULT_ITEMS_PER_SECTION: u64 = 65536;
@@ -2478,10 +2478,10 @@ mod tests {
                 let index = keys.len() as u64;
                 let mut key = [0u8; 64];
                 context.fill(&mut key);
-                let key = FixedBytes::<64>::decode(key.as_ref()).unwrap();
+                let key = FixedBytes::new(key);
                 let mut data = [0u8; 1024];
                 context.fill(&mut data);
-                let data = FixedBytes::<1024>::decode(data.as_ref()).unwrap();
+                let data = FixedBytes::new(data);
 
                 archive = archive
                     .put(index, key.clone(), &data)

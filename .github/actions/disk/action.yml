@@ -7,16 +7,27 @@ runs:
       run: df -h || true
 
     # Linux Cleanup
-    - name: Maximize build space (Linux)
+    - name: Cleanup (Linux)
       if: runner.os == 'Linux'
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
-      with:
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: false
-        docker-images: true
-        swap-storage: true
+      shell: bash
+      run: |
+        (
+          TIMEFORMAT='Docker pruning: %3R s'
+          time sudo docker image prune --all --force
+        ) &
+        docker_prune_pid=$!
+
+        # Depth three separates Android NDK versions into independent tasks.
+        # Files at that depth are left for the final sweep to avoid a process per file.
+        dirs=(/usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup)
+        TIMEFORMAT='Parallel deletion: %3R s'
+        time sudo find "${dirs[@]}" -mindepth 3 -maxdepth 3 -type d -print0 |
+          sudo xargs -0 -r -n 1 -P "$(nproc --ignore=1)" rm -rf -- || true
+
+        TIMEFORMAT='Final sweep: %3R s'
+        time sudo rm -rf -- "${dirs[@]}" || true
+
+        wait "$docker_prune_pid" || true
 
     # macOS Cleanup
     - name: Cleanup (macOS)
@@ -24,7 +35,8 @@ runs:
       shell: bash
       run: |
         set -euxo pipefail
-        docker system prune -af || true
+        docker system prune -af &
+        docker_prune_pid=$!
         brew cleanup -s || true
         rm -rf "$(brew --cache)" || true
         # Remove large preinstalled SDKs and runtimes
@@ -34,28 +46,7 @@ runs:
         sudo rm -rf ~/Library/Android/sdk || true
         sudo rm -rf ~/Library/Caches || true
 
-    - name: Configure swap (Linux)
-      shell: bash
-      if: runner.os == 'Linux'
-      run: |
-        sudo swapoff -a
-        sudo fallocate -l 8G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        sudo swapon --show
-
-    # macOS manages swap dynamically via dynamic_pager; ensure it is running and report state.
-    - name: Configure swap (macOS)
-      shell: bash
-      if: runner.os == 'macOS'
-      run: |
-        set -euxo pipefail
-        sudo mkdir -p /private/var/vm
-        if ! pgrep -x dynamic_pager >/dev/null; then
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
-        fi
-        sysctl vm.swapusage || true
+        wait "$docker_prune_pid" || true
 
     - name: Show disk free (after)
       shell: bash

@@ -25,7 +25,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
 };
 use ahash::AHashSet;
-use commonware_codec::DecodeExt;
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -337,7 +337,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
                 error!(?pruned_loc, ?pos, "missing pinned node");
                 return Err(Error::MissingNode(pos));
             };
-            let digest = D::decode(bytes.as_ref());
+            let digest = D::decode(Copying(bytes));
             let Ok(digest) = digest else {
                 error!(?pruned_loc, ?pos, "could not convert node bytes to digest");
                 return Err(Error::MissingNode(pos));

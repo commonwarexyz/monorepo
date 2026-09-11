@@ -1,6 +1,8 @@
 //! Utilities for storage tests and fuzz targets.
 
 #[cfg(test)]
+pub(crate) mod codec;
+#[cfg(test)]
 pub(crate) mod detached;
 
 use commonware_utils::bitmap::BitMap;

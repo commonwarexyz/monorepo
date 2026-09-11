@@ -13,10 +13,10 @@
 //! and reopen.
 
 use arbitrary::Arbitrary;
-use commonware_codec::{DecodeExt as _, FixedSize, Read, ReadExt as _};
+use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob as _, Buf, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
+    Blob as _, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
@@ -187,7 +187,7 @@ async fn read_value(
     if Crc32::checksum(&frame.as_ref()[..data_len]) != stored {
         return None;
     }
-    Value::decode(&frame.as_ref()[..data_len]).ok()
+    Value::decode(frame.freeze().slice(..data_len)).ok()
 }
 
 /// Decode the contiguous, whole-record prefix of each raw index section without repairing it.
@@ -232,7 +232,7 @@ async fn read_index_sections(
             .as_chunks::<{ IndexRecord::SIZE }>()
             .0
             .iter()
-            .map(|record| IndexRecord::decode(&record[..]).expect("oracle index record failed"))
+            .map(|record| IndexRecord::decode(Copying(record)).expect("oracle index record failed"))
             .collect();
         sections.insert(section, records);
     }
