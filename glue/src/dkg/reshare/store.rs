@@ -571,7 +571,8 @@ pub(crate) enum AckOutcome {
 impl<V: Variant, C: Signer> Dealer<V, C> {
     /// Returns whether the recorded acknowledgements form a quorum.
     pub fn has_acknowledgement_quorum<M: Faults>(&self, players: usize) -> bool {
-        self.unsent.len() <= M::max_faults(players) as usize
+        u64::try_from(self.unsent.len()).expect("unsent count exceeds u64::MAX")
+            <= M::max_faults(u64::try_from(players).expect("player count exceeds u64::MAX"))
     }
 
     /// Records a player ack.

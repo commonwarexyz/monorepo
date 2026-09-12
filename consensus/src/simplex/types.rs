@@ -3597,7 +3597,10 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(3));
-        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
+        let quorum = usize::try_from(N3f1::quorum(
+            u64::try_from(fixture.schemes.len()).expect("participant count exceeds u64::MAX"),
+        ))
+        .expect("quorum exceeds usize::MAX");
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3635,7 +3638,10 @@ mod tests {
         let mut rng = test_rng();
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(4));
-        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
+        let quorum = usize::try_from(N3f1::quorum(
+            u64::try_from(fixture.schemes.len()).expect("participant count exceeds u64::MAX"),
+        ))
+        .expect("quorum exceeds usize::MAX");
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
@@ -3687,8 +3693,8 @@ mod tests {
         assert_eq!(
             Notarization::from_notarizes(&fixture.schemes[0], non_empty![@&notarizes], &Sequential),
             Err(AssemblyError::InsufficientAttestations(
-                quorum_size,
-                quorum_size - 1
+                u64::from(quorum_size),
+                u64::from(quorum_size - 1)
             )),
             "insufficient votes should not form a notarization"
         );
@@ -3785,7 +3791,10 @@ mod tests {
         let wrong_fixture = setup_seeded(5, 1, &f);
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(9));
-        let quorum = N3f1::quorum(fixture.schemes.len()) as usize;
+        let quorum = usize::try_from(N3f1::quorum(
+            u64::try_from(fixture.schemes.len()).expect("participant count exceeds u64::MAX"),
+        ))
+        .expect("quorum exceeds usize::MAX");
         let finalizes: Vec<_> = fixture
             .schemes
             .iter()
