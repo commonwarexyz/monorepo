@@ -82,6 +82,10 @@ n_cases = 1024
 hash = "1241163e415f24f099d89b6c4f83429a6774b7007d68a0014c18ad39c5a3e6b3"
 n_cases = 1024
 
+["conformance::CodecConformance<EpochContext<VerifyingKey,Sha256Digest>>"]
+hash = "a83acd2a4b751913002f72d4c3099b67ade910546a1cce5490c2019582443d96"
+n_cases = 65536
+
 ["conformance::CodecConformance<ExternalPayoutClaim<VerifyingKey,Sha256Digest>>"]
 hash = "eb9558dc667d201c7e24c6070d0652e61d8fea0bdae27d2d8e2fec09e2d1d0ae"
 n_cases = 256

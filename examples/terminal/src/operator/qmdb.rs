@@ -2,8 +2,8 @@
 
 use super::store::{EpochData, EpochReader};
 use crate::protocol::{
-    AccountIdentity, EpochRegistration, INITIAL_BALANCE, Key, MAX_ACCOUNTS, PreparedEpoch,
-    Protocol, SettlementResult, state_config,
+    Account, EpochRegistration, Key, MAX_ACCOUNTS, PreparedEpoch, Protocol, SettlementResult,
+    state_config,
 };
 use anyhow::{Context as _, Result, ensure};
 use commonware_clearing::bajillion::{
@@ -97,7 +97,7 @@ pub(crate) struct Handle(Arc<Owner>);
 impl Handle {
     pub(crate) fn open(
         path: &Path,
-        identities: &[AccountIdentity],
+        accounts: &[Account],
         protocol: Arc<Protocol>,
         source: EpochReader,
         configured: Option<Genesis<Digest>>,
@@ -113,14 +113,12 @@ impl Handle {
             .open(directory.join("owner.lock"))?;
         lock.try_lock()
             .context("another operator owns this balance database")?;
-        let mut genesis = identities
+        let mut genesis = accounts
             .iter()
-            .map(|identity| {
-                Ok((
-                    account_key(&identity.key)?,
-                    NonZeroU64::new(INITIAL_BALANCE).unwrap(),
-                ))
+            .filter_map(|account| {
+                NonZeroU64::new(account.balance).map(|balance| (account, balance))
             })
+            .map(|(account, balance)| Ok((account_key(&account.key)?, balance)))
             .collect::<Result<Vec<_>>>()?;
         genesis.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let (sender, receiver) = mpsc::channel();

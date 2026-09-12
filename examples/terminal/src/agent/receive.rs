@@ -384,7 +384,8 @@ impl Agent {
                 // fabricated batch or root could otherwise fake coverage through the window,
                 // or point a challenge at another close and burn the window on a worthless
                 // verdict.
-                if evidence.batch_id != admitted.batch_id || evidence.change_root != admitted.change
+                if evidence.batch_id != admitted.batch_id
+                    || evidence.change_root != admitted.roots.change
                 {
                     return EntryVerdict::Refused;
                 }
@@ -395,7 +396,7 @@ impl Agent {
         // Resolving served evidence is a cryptographic check on an untrusted party, so a
         // failure is refusal, not a fatal error that would shadow the higher epochs.
         let Ok((cumulative, count)) =
-            lookup.resolve::<Sha256>(&admitted.change, &held.payer, account)
+            lookup.resolve::<Sha256>(&admitted.roots.change, &held.payer, account)
         else {
             return EntryVerdict::Refused;
         };
@@ -423,6 +424,7 @@ impl Agent {
             sender: Box::new(lookup),
         };
         let tx = SettlementTx::Challenge(ChallengeRequest {
+            deployment: self.deployment,
             batch_id: admitted.batch_id,
             evidence: challenge.encode(),
         });

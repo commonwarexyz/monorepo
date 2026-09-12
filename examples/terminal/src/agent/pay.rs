@@ -440,18 +440,24 @@ impl Agent {
         Ok(PendingOutcome::Abandoned)
     }
 
-    /// Verifies and retains this account's exact finalized balance floor.
+    /// Verifies the deployment-bound payment context and retains the finalized balance floor.
     pub(super) fn verify_head(
         &mut self,
         head: &operator_rpc::PaymentHeadResponse,
         status: &StatusRecord,
     ) -> Result<()> {
         ensure!(
+            head.context.deployment() == &self.deployment
+                && head.context.payment().operator() == &self.operator
+                && head.context.verify_anchor::<Sha256>(),
+            "payment context is not bound to this deployment and operator"
+        );
+        ensure!(
             status.state_root == head.root,
             "payer opening is not the exact settlement head"
         );
         self.retain_head(&head.root, &head.opening)?;
-        self.cache_signing(&head.context, &head.root, floor_epoch(status)?)
+        self.cache_signing(head.context.payment(), &head.root, floor_epoch(status)?)
     }
 
     /// Retains a Current membership proof for custody recovery at its exact root.
@@ -514,18 +520,24 @@ impl Agent {
         requested: &[Entry],
         total: u64,
     ) -> Result<StagedSend> {
-        let operator_error = match operator_head(ctx, operator, self.account(), &self.operator)
-            .await
-        {
-            Ok(head) => {
-                let status = staging_status(ctx, chain, self.deployment).await?;
-                match self.stage_head(&head, &status, total) {
-                    Ok(()) => return self.stage_under(head.context, head.root, requested, total),
-                    Err(error) => error,
+        let operator_error =
+            match operator_head(ctx, operator, self.account(), &self.operator).await {
+                Ok(head) => {
+                    let status = staging_status(ctx, chain, self.deployment).await?;
+                    match self.stage_head(&head, &status, total) {
+                        Ok(()) => {
+                            return self.stage_under(
+                                head.context.payment().clone(),
+                                head.root,
+                                requested,
+                                total,
+                            );
+                        }
+                        Err(error) => error,
+                    }
                 }
-            }
-            Err(error) => error,
-        };
+                Err(error) => error,
+            };
         let (context, root) = self
             .stage_chain_head(ctx, chain, total)
             .await
@@ -750,7 +762,7 @@ pub(super) async fn operator_head<E: Env>(
             .await
             .context("read payer state")?;
     ensure!(
-        head.context.operator() == bound,
+        head.context.payment().operator() == bound,
         "payment context has an unexpected operator"
     );
     Ok(head)

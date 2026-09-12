@@ -64,7 +64,7 @@ trait ClaimChannel {
     ) -> Result<Self::Evidence>;
 
     /// The claim transaction for `evidence`.
-    fn tx(evidence: &Self::Evidence) -> SettlementTx;
+    fn tx(deployment: Digest, evidence: &Self::Evidence) -> SettlementTx;
 
     /// Reads the certified release the applied claim produced, verifying it
     /// consumed exactly this evidence.
@@ -124,7 +124,7 @@ impl ClaimChannel for WithdrawalChannel {
             "operator returned withdrawal evidence for another account"
         );
         ensure!(
-            output.destination().as_ref() == agent.wallet.name.as_bytes(),
+            output.destination().as_ref() == agent.account().as_ref(),
             "operator returned withdrawal evidence for another destination"
         );
 
@@ -169,7 +169,7 @@ impl ClaimChannel for WithdrawalChannel {
     ) -> Result<Self::Evidence> {
         let account = wallet.public_key();
         let claim = holders
-            .withdrawal_claim(ctx, chain, admitted, &account, wallet.name.as_bytes())
+            .withdrawal_claim(ctx, chain, admitted, &account, account.as_ref())
             .await?;
         Ok(operator_rpc::WithdrawalEvidenceResponse {
             batch_id: admitted.batch_id,
@@ -178,8 +178,9 @@ impl ClaimChannel for WithdrawalChannel {
         })
     }
 
-    fn tx(evidence: &Self::Evidence) -> SettlementTx {
+    fn tx(deployment: Digest, evidence: &Self::Evidence) -> SettlementTx {
         SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
+            deployment,
             batch_id: evidence.batch_id,
             claim: evidence.claim.clone(),
         })
@@ -313,8 +314,9 @@ impl ClaimChannel for PayoutChannel {
         })
     }
 
-    fn tx(evidence: &Self::Evidence) -> SettlementTx {
+    fn tx(deployment: Digest, evidence: &Self::Evidence) -> SettlementTx {
         SettlementTx::ClaimExternalPayout(ExternalPayoutClaimRequest {
+            deployment,
             batch_id: evidence.batch_id,
             claim: evidence.claim.clone(),
         })
@@ -393,7 +395,7 @@ impl Agent {
     /// transaction's effect and the only authoritative answer. A missing release is
     /// not a verdict (the batch may not be claimable yet, the claim may not be
     /// included yet, and a rejection is effect-free), so the exact claim retries
-    /// later with the last advisory dry-run answer surfaced for diagnosis. The
+    /// later. The
     /// operator acknowledgement that follows is a courtesy: it lets the operator retire
     /// its own reserve bookkeeping and never holds the claim open.
     async fn drive_claim<C: ClaimChannel, E: Env>(
@@ -455,8 +457,8 @@ impl Agent {
             "the {} batch has not finalized, so the cached evidence waits for finalization",
             C::NOUN
         );
-        let advice = chain
-            .deliver(ctx, &C::tx(&evidence))
+        chain
+            .deliver(ctx, &C::tx(self.deployment, &evidence))
             .await
             .with_context(|| format!("claim settlement {}", C::NOUN))?;
         // A read error (an unavailable snapshot, a briefly stale validator)
@@ -477,8 +479,7 @@ impl Agent {
             // effect: indistinguishable by design, so nothing is dropped and
             // the exact claim retries later.
             anyhow::bail!(
-                "the {} claim earned no certified release yet; the exact claim retries \
-                 (dry-run advice: {advice:?})",
+                "the {} claim earned no certified release yet; the exact claim retries",
                 C::NOUN
             )
         };

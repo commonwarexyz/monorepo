@@ -1,24 +1,15 @@
-//! `setup` subcommand: generate validator directories for the settlement
-//! chain.
+//! Chain bootstrap and live operator registration commands.
 //!
-//! Setup writes one directory per validator holding `node.json` (signing key,
-//! addresses, the validator's consensus threshold share, and its dealt
-//! clearing committee key), the shared `network.json` (participants, dial
-//! addresses, and the operators' network identities), and the shared
-//! `genesis.json` (the trusted-dealer threshold output plus the deployment
-//! list). The committee is fixed for the life of the chain: this is the
-//! reshare example's trusted-bootstrap path without continuous resharing,
-//! which remains a drop-in replacement (swap the fixed scheme provider for
-//! the reshare orchestrator and dkg actors).
+//! Setup writes validator keys, fixed committee shares, query addresses, and
+//! the shared native genesis. It also creates initial operator directories.
+//! Genesis commits the native supply, resource and timing policy, and initial
+//! deployment configurations under the fresh consensus identity.
 //!
-//! Setup also writes one node directory per operator (`operator-0/`,
-//! `operator-1/`, ...): its own `node.json` with a fresh ed25519 NETWORK key
-//! and its curve25519 CLEARING key, plus the shared network and genesis
-//! files. The network key authenticates the operator as a p2p secondary,
-//! while the clearing key is the payment-signing identity whose digest names
-//! the deployment the operator runs. Genesis carries one deployment per
-//! operator, in operator order, each opening with the compiled demo account
-//! set, and one chain-wide epoch timing policy applied to every deployment.
+//! An operator prepared for an existing chain receives fresh network,
+//! clearing and acknowledgment keys plus an exact signed registration. After
+//! its native account is funded, registration joins the certified registry.
+//! Validators authorize its network key from that registry; network.json
+//! supplies bootstrap addresses only.
 //!
 //! The clearing committee is the same machines as the consensus committee
 //! under separate key material: each validator's consensus identity is its
@@ -29,18 +20,27 @@
 //! retaining the deployment's complete close ([`Genesis::holders`]).
 
 use crate::{
-    chain::validator::{MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, SHARING_MODE},
+    chain::{
+        client::{Chain, Client, Env},
+        native::{NativeGenesis, RegistryEntry},
+        query::{Lookup, ReadRequest},
+        state::Record,
+        tx::{RegisterDeploymentRequest, SettlementTx},
+        validator::{MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, SHARING_MODE},
+    },
     protocol::{
-        Account, Deployment, Key, Timing, accounts, clearing_private, committee, operator_ack_key,
-        operator_ack_signer, operator_signer,
+        Account, Deployment, Key, MIN_DEALING_BYTES, Timing, accounts, clearing_private, committee,
+        deployment_of, empty_genesis, operator_ack_key, operator_ack_signer, operator_signer,
+        wallets,
     },
 };
 use anyhow::Context as _;
+use bytes::BytesMut;
 use clap::Args;
 use commonware_clearing::bajillion::{qmdb::StateRoot, transition::OperatorKey};
-use commonware_codec::{Decode as _, Encode as _};
+use commonware_codec::{Decode as _, Encode as _, Write as _};
 use commonware_cryptography::{
-    Signer as _,
+    Hasher as _, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Output, deal},
         primitives::{
@@ -61,9 +61,11 @@ use commonware_utils::{N3f1, Participant, ordered::Set};
 use rand::rngs::StdRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
+    collections::BTreeMap,
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 /// The trusted-dealer threshold output shared by every validator.
@@ -103,10 +105,8 @@ pub(crate) struct Genesis {
     /// Exact blocks between a registration's admission deadline and its
     /// challenge deadline (the same genesis-fixed rule).
     pub(crate) challenge_duration: u64,
-    /// The configured deployments sharing this chain: each an operator
-    /// clearing identity plus the accounts and initial balances its genesis
-    /// machine opens with.
-    pub(crate) deployments: Vec<Deployment>,
+    /// Initial registry, native asset allocations, and resource policy.
+    pub(crate) native: NativeGenesis,
     /// Every committee validator's clearing key with the query address
     /// serving its retained evidence, in validator directory order.
     pub(crate) validators: Vec<ValidatorEntry>,
@@ -117,7 +117,7 @@ impl Genesis {
         identity: Identity,
         timestamp: u64,
         timing: Timing,
-        deployments: Vec<Deployment>,
+        native: NativeGenesis,
         validators: Vec<ValidatorEntry>,
     ) -> Self {
         Self {
@@ -125,7 +125,7 @@ impl Genesis {
             timestamp,
             admission_offset: timing.admission_offset,
             challenge_duration: timing.challenge_duration,
-            deployments,
+            native,
             validators,
         }
     }
@@ -205,18 +205,17 @@ impl NodeConfig {
     }
 }
 
-/// One operator node's config stored in `operator-<index>/node.json`: its
-/// ed25519 network identity and addresses plus its curve25519 clearing key.
-/// The network key authenticates the operator as a p2p secondary, while the
-/// clearing key signs payments and registrations and names the deployment
-/// the operator runs (the deployment digest derives from it).
+/// One operator's keys, network addresses, and explicit registry identity.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct OperatorConfig {
+    /// The registry identity this operator serves.
+    #[serde(with = "hex_digest")]
+    pub(crate) deployment: Digest,
     #[serde(with = "hex_private_key")]
     pub(crate) signing_key: PrivateKey,
     pub(crate) listen: SocketAddr,
     pub(crate) dial: SocketAddr,
-    /// The operator's clearing signing key (a demo protocol constant).
+    /// The operator's clearing signing key.
     #[serde(with = "hex_clearing_signer")]
     pub(crate) clearing: ClearingSigner,
     /// The operator's aggregable-acknowledgment BLS signing key (a demo protocol
@@ -242,9 +241,7 @@ pub(crate) struct NetworkConfig {
     #[serde(with = "hex_public_keys")]
     pub(crate) participants: Vec<PublicKey>,
     pub(crate) peers: Vec<PeerConfig>,
-    /// The operators' network identities, in the same order as the genesis
-    /// deployment list (operator `i` runs deployment `i`): every validator's
-    /// extra bootstrappers and tracked secondaries.
+    /// Initial operator dial hints. The certified registry authorizes peers.
     pub(crate) operators: Vec<PeerConfig>,
 }
 
@@ -313,8 +310,7 @@ struct EncodedGenesis {
     /// Genesis-fixed exact challenge window duration in blocks, applied to
     /// every deployment.
     challenge_duration: u64,
-    /// The configured deployments sharing this chain, in operator order.
-    deployments: Vec<EncodedDeployment>,
+    native: EncodedNative,
     /// Every validator's clearing key and query address, in directory order.
     validators: Vec<EncodedValidator>,
 }
@@ -335,6 +331,8 @@ struct EncodedDeployment {
     #[serde(with = "hex_state_root")]
     root: StateRoot<Digest>,
     operations: u64,
+    #[serde(with = "hex_digest")]
+    digest: Digest,
     /// Hex curve25519 operator clearing public key.
     #[serde(with = "hex_clearing_public")]
     operator: Key,
@@ -360,6 +358,7 @@ impl From<&Deployment> for EncodedDeployment {
         Self {
             root: deployment.genesis().root(),
             operations: deployment.genesis().operations(),
+            digest: *deployment.digest(),
             operator: deployment.operator.clone(),
             operator_ack: deployment.operator_ack,
             accounts: deployment
@@ -379,6 +378,7 @@ impl TryFrom<EncodedDeployment> for Deployment {
 
     fn try_from(encoded: EncodedDeployment) -> Result<Self, Self::Error> {
         Self::configured(
+            encoded.digest,
             encoded.operator,
             encoded.operator_ack,
             encoded
@@ -392,6 +392,151 @@ impl TryFrom<EncodedDeployment> for Deployment {
             encoded.root,
             encoded.operations,
         )
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct EncodedRegistryEntry {
+    deployment: EncodedDeployment,
+    #[serde(with = "hex_public_key")]
+    network_key: PublicKey,
+    max_dealing_bytes: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EncodedNative {
+    #[serde(with = "hex_state_root")]
+    empty_root: StateRoot<Digest>,
+    empty_operations: u64,
+    balances: Vec<EncodedAccount>,
+    deployments: Vec<EncodedRegistryEntry>,
+    #[serde(with = "hex_clearing_public")]
+    fee_recipient: Key,
+    registration_fee: u64,
+    epoch_fee: u64,
+    max_deployments: u32,
+    max_dealing_bytes: u32,
+}
+
+impl From<&NativeGenesis> for EncodedNative {
+    fn from(native: &NativeGenesis) -> Self {
+        Self {
+            empty_root: native.empty_root,
+            empty_operations: native.empty_operations,
+            balances: native
+                .balances
+                .iter()
+                .map(|account| EncodedAccount {
+                    key: account.key.clone(),
+                    balance: account.balance,
+                })
+                .collect(),
+            deployments: native
+                .deployments
+                .iter()
+                .map(|entry| EncodedRegistryEntry {
+                    deployment: EncodedDeployment::from(&entry.deployment),
+                    network_key: entry.network_key.clone(),
+                    max_dealing_bytes: entry.max_dealing_bytes,
+                })
+                .collect(),
+            fee_recipient: native.fee_recipient.clone(),
+            registration_fee: native.registration_fee,
+            epoch_fee: native.epoch_fee,
+            max_deployments: native.max_deployments,
+            max_dealing_bytes: native.max_dealing_bytes,
+        }
+    }
+}
+
+impl TryFrom<EncodedNative> for NativeGenesis {
+    type Error = anyhow::Error;
+    fn try_from(encoded: EncodedNative) -> anyhow::Result<Self> {
+        Ok(Self {
+            empty_root: encoded.empty_root,
+            empty_operations: encoded.empty_operations,
+            balances: encoded
+                .balances
+                .into_iter()
+                .map(|account| Account {
+                    key: account.key,
+                    balance: account.balance,
+                })
+                .collect(),
+            deployments: encoded
+                .deployments
+                .into_iter()
+                .map(|entry| {
+                    Ok(RegistryEntry {
+                        deployment: Deployment::try_from(entry.deployment)?,
+                        network_key: entry.network_key,
+                        max_dealing_bytes: entry.max_dealing_bytes,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            fee_recipient: encoded.fee_recipient,
+            registration_fee: encoded.registration_fee,
+            epoch_fee: encoded.epoch_fee,
+            max_deployments: encoded.max_deployments,
+            max_dealing_bytes: encoded.max_dealing_bytes,
+        })
+    }
+}
+
+/// Allocates a finite native supply alongside the initial clearing custody.
+pub(crate) fn native_genesis(
+    deployments: Vec<RegistryEntry>,
+    empty: &commonware_clearing::bajillion::settlement::Genesis<Digest>,
+) -> NativeGenesis {
+    let mut balances = BTreeMap::new();
+    for wallet in wallets() {
+        balances.insert(wallet.public_key(), 1_000_000_000);
+    }
+    for entry in &deployments {
+        balances.insert(entry.deployment.operator.clone(), 1_000_000_000);
+    }
+    NativeGenesis {
+        empty_root: empty.root(),
+        empty_operations: empty.operations(),
+        balances: balances
+            .into_iter()
+            .map(|(key, balance)| Account { key, balance })
+            .collect(),
+        deployments,
+        fee_recipient: ClearingSigner::from_seed(30_000).public_key(),
+        registration_fee: 10,
+        epoch_fee: 1,
+        max_deployments: 64,
+        max_dealing_bytes: 4 * 1024 * 1024,
+    }
+}
+
+/// Commits initial deployment domains to the committee and complete native policy.
+fn bind_genesis_deployments(
+    identity: &Identity,
+    timestamp: u64,
+    timing: Timing,
+    native: &mut NativeGenesis,
+) {
+    const NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_GENESIS_DEPLOYMENT";
+    let mut config = BytesMut::new();
+    identity.write(&mut config);
+    timestamp.write(&mut config);
+    timing.admission_offset.write(&mut config);
+    timing.challenge_duration.write(&mut config);
+    native.empty_root.write(&mut config);
+    native.empty_operations.write(&mut config);
+    native.balances.write(&mut config);
+    native.deployments.write(&mut config);
+    native.fee_recipient.write(&mut config);
+    native.registration_fee.write(&mut config);
+    native.epoch_fee.write(&mut config);
+    native.max_deployments.write(&mut config);
+    native.max_dealing_bytes.write(&mut config);
+    let domain = Sha256::hash(&[NAMESPACE, &config]);
+    for (index, entry) in native.deployments.iter_mut().enumerate() {
+        let digest = Sha256::hash(&[NAMESPACE, domain.as_ref(), &(index as u64).to_be_bytes()]);
+        entry.deployment.rebind(digest);
     }
 }
 
@@ -412,34 +557,19 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
         encoded.challenge_duration >= 1,
         "the genesis challenge duration must be at least one block"
     );
+    let native = NativeGenesis::try_from(encoded.native)?;
     anyhow::ensure!(
-        !encoded.deployments.is_empty(),
-        "the genesis must configure at least one deployment"
+        native.validate(),
+        "invalid native genesis supply or registry policy"
     );
-    let deployments = encoded
-        .deployments
-        .into_iter()
-        .map(Deployment::try_from)
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut digests = std::collections::BTreeSet::new();
-    for deployment in &deployments {
-        anyhow::ensure!(
-            !deployment.accounts.is_empty(),
-            "every genesis deployment must configure at least one account"
-        );
-        let mut keys = std::collections::BTreeSet::new();
-        anyhow::ensure!(
-            deployment
-                .accounts
-                .iter()
-                .all(|account| keys.insert(account.key.clone())),
-            "a genesis deployment configures a duplicate account"
-        );
-        anyhow::ensure!(
-            digests.insert(*deployment.digest()),
-            "genesis deployment operators must be distinct"
-        );
-    }
+    anyhow::ensure!(
+        native.deployments.iter().all(|entry| !encoded
+            .output
+            .players()
+            .iter()
+            .any(|key| key == &entry.network_key)),
+        "operator network identities must be separate from consensus participants"
+    );
 
     // The validators are exactly the clearing committee, each key once, each
     // at its own query address, so the committee resolves to distinct
@@ -479,7 +609,7 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
             admission_offset: encoded.admission_offset,
             challenge_duration: encoded.challenge_duration,
         },
-        deployments,
+        native,
         validators,
     ))
 }
@@ -532,6 +662,178 @@ pub fn run(args: Setup) {
     run_inner(args).expect("setup failed");
 }
 
+/// Prepare an operator that can register on an existing chain.
+#[derive(Args)]
+#[commonware_macros::stability(ALPHA)]
+pub struct OperatorSetup {
+    /// Empty directory for the operator's keys and registration request.
+    #[arg(long)]
+    pub node_dir: PathBuf,
+    /// Existing chain genesis file.
+    #[arg(long)]
+    genesis: PathBuf,
+    /// Existing validator network file used for bootstrap addresses.
+    #[arg(long)]
+    network: PathBuf,
+    /// Operator P2P listen and advertised address.
+    #[arg(long, default_value = "127.0.0.1:3500")]
+    listen: SocketAddr,
+    /// Reserved maximum bytes per epoch's validator dealing (at least 256 KiB).
+    #[arg(long, default_value_t = 4 * 1024 * 1024)]
+    max_dealing_bytes: u32,
+}
+
+/// Save fresh operator keys and the exact signed registration to submit after funding.
+#[commonware_macros::stability(ALPHA)]
+pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
+    let genesis = read_genesis_file(&args.genesis)?;
+    let network: NetworkConfig = read_json(&args.network)?;
+    network.validate()?;
+    anyhow::ensure!(
+        args.max_dealing_bytes >= MIN_DEALING_BYTES,
+        "the stock operator requires a dealing reservation of at least {MIN_DEALING_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        args.max_dealing_bytes <= genesis.native.max_dealing_bytes,
+        "dealing reservation exceeds the chain resource policy"
+    );
+    anyhow::ensure!(
+        !args.node_dir.exists() || args.node_dir.read_dir()?.next().is_none(),
+        "operator directory must be empty"
+    );
+    let mut rng = rand::make_rng::<StdRng>();
+    let signing_key = PrivateKey::random(&mut rng);
+    let clearing = ClearingSigner::random(&mut rng);
+    let ack = ClearingKey::random(&mut rng);
+    let request = RegisterDeploymentRequest::sign(
+        genesis.native.chain_id(),
+        Digest::random(&mut rng),
+        compute_public::<MinSig>(&ack),
+        signing_key.public_key(),
+        accounts().into_iter().map(|account| account.key).collect(),
+        args.max_dealing_bytes,
+        genesis.native.registration_fee,
+        &clearing,
+    );
+    let node = OperatorConfig {
+        deployment: request.deployment_id(),
+        signing_key,
+        listen: args.listen,
+        dial: args.listen,
+        clearing,
+        ack,
+    };
+    fs::create_dir_all(&args.node_dir)?;
+    write_json(&args.node_dir.join("node.json"), &node)?;
+    write_json(&args.node_dir.join("network.json"), &network)?;
+    fs::copy(&args.genesis, args.node_dir.join("genesis.json"))?;
+    write_json(
+        &args.node_dir.join("registration.json"),
+        &hex(&request.encode()),
+    )?;
+    println!("Deployment: {}", hex(request.deployment_id().as_ref()));
+    println!("Fund native account: {}", hex(&request.operator.encode()));
+    println!(
+        "Registration fee: {}; reserved epoch fee: {}",
+        request.fee,
+        genesis.native.epoch_fee * u64::from(request.max_dealing_bytes).div_ceil(1024)
+    );
+    println!(
+        "Register with: terminal-chain register --node-dir {}",
+        args.node_dir.display()
+    );
+    Ok(())
+}
+
+/// Submit a saved operator registration to an existing chain.
+#[derive(Args)]
+#[commonware_macros::stability(ALPHA)]
+pub struct RegisterOperator {
+    /// Prepared operator directory containing its signed registration.
+    #[arg(long)]
+    pub node_dir: PathBuf,
+    /// Validator query address; repeat for failover. Defaults to genesis addresses.
+    #[arg(long = "query")]
+    queries: Vec<SocketAddr>,
+}
+
+/// Complete registration only after a certified registry read contains the exact entry.
+#[commonware_macros::stability(ALPHA)]
+pub async fn register_operator(
+    context: tokio::Context,
+    args: RegisterOperator,
+) -> anyhow::Result<()> {
+    let genesis = read_genesis(&args.node_dir)?;
+    let node = OperatorConfig::load(&args.node_dir)?;
+    let raw: String = read_json(&args.node_dir.join("registration.json"))?;
+    let bytes = from_hex(&raw).context("invalid registration encoding")?;
+    let request = RegisterDeploymentRequest::decode_cfg(bytes.as_slice(), &())?;
+    let chain_id = genesis.native.chain_id();
+    anyhow::ensure!(
+        request.verify(&chain_id)
+            && request.deployment_id() == node.deployment
+            && request.operator == node.clearing.public_key()
+            && request.operator_ack == compute_public::<MinSig>(&node.ack)
+            && request.network_key == node.public_key(),
+        "registration does not match this operator and chain"
+    );
+    let queries = if args.queries.is_empty() {
+        genesis
+            .validators
+            .iter()
+            .map(|validator| validator.query)
+            .collect()
+    } else {
+        args.queries
+    };
+    let mut client = Client::new(
+        &genesis,
+        node.deployment,
+        queries,
+        context.child("registration_rng"),
+    )?;
+    complete_registration(&context, &mut client, &genesis.native, request).await?;
+    println!("Registered deployment: {}", hex(node.deployment.as_ref()));
+    Ok(())
+}
+
+/// Completes a signed registration only after its exact entry is certified.
+pub(crate) async fn complete_registration<E: Env, C: Chain>(
+    context: &E,
+    client: &mut C,
+    native: &NativeGenesis,
+    request: RegisterDeploymentRequest,
+) -> anyhow::Result<()> {
+    let chain_id = request.chain_id;
+    let deployment = request.deployment_id();
+    let expected = request.entry(native)?;
+    let tx = SettlementTx::RegisterDeployment(request);
+    for _ in 0..100 {
+        let read = client
+            .read(
+                context,
+                &ReadRequest::new(
+                    deployment,
+                    Lookup::RegistryEntry {
+                        chain_id,
+                        deployment,
+                    },
+                ),
+            )
+            .await?;
+        if let Some(Record::RegistryEntry(entry)) = read.record {
+            anyhow::ensure!(
+                entry == expected,
+                "certified registration differs from the prepared configuration"
+            );
+            return Ok(());
+        }
+        client.deliver(context, &tx).await?;
+        context.sleep(Duration::from_millis(500)).await;
+    }
+    anyhow::bail!("registration was not certified; retry with the same saved request")
+}
+
 fn run_inner(args: Setup) -> anyhow::Result<()> {
     validate(&args)?;
     if args.node_dir.exists() && args.node_dir.read_dir()?.next().is_some() {
@@ -547,9 +849,8 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
 
-    // One fresh network identity, one clearing identity, and therefore one
-    // deployment per operator. Operator `index` runs deployment `index` in
-    // both the network config and the genesis deployment list.
+    // Network keys authenticate secondary peers; clearing keys authorize
+    // deployment transactions and private acknowledgments.
     let operator_signers = (0..args.operators)
         .map(|_| PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
@@ -560,6 +861,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         .map(|index| {
             let index = u64::try_from(index).expect("the operator count fits u64");
             Deployment::new(
+                deployment_of(&operator_signer(index).public_key()),
                 operator_signer(index).public_key(),
                 operator_ack_key(index),
                 accounts(),
@@ -574,10 +876,11 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         for deployment in &mut deployments {
             deployment.generate(context.child("genesis")).await?;
         }
-        Ok::<_, anyhow::Error>(deployments)
+        let empty = empty_genesis(context.child("empty_genesis")).await?;
+        Ok::<_, anyhow::Error>((deployments, empty))
     });
     fs::remove_dir_all(&scratch).context("remove temporary genesis preparation")?;
-    let deployments = generated?;
+    let (deployments, empty) = generated?;
     let peers = signers
         .iter()
         .enumerate()
@@ -616,6 +919,19 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
             .as_millis(),
     )
     .context("the system clock exceeds u64 milliseconds")?;
+    let mut native = native_genesis(
+        deployments
+            .into_iter()
+            .zip(&operator_signers)
+            .map(|(deployment, signer)| RegistryEntry {
+                deployment,
+                network_key: signer.public_key(),
+                max_dealing_bytes: 4 * 1024 * 1024,
+            })
+            .collect(),
+        &empty,
+    );
+    bind_genesis_deployments(&output, timestamp, Timing::GENESIS, &mut native);
     let validators = (0..args.peers)
         .map(|index| {
             Ok(EncodedValidator {
@@ -629,7 +945,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         timestamp,
         admission_offset: Timing::GENESIS.admission_offset,
         challenge_duration: Timing::GENESIS.challenge_duration,
-        deployments: deployments.iter().map(EncodedDeployment::from).collect(),
+        native: EncodedNative::from(&native),
         validators: validators
             .iter()
             .map(|validator| EncodedValidator {
@@ -673,6 +989,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         write_json(
             &operator_dir.join("node.json"),
             &OperatorConfig {
+                deployment: *native.deployments[index].deployment.digest(),
                 signing_key: signer,
                 listen: operator_addresses[index],
                 dial: operator_addresses[index],
@@ -716,7 +1033,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         .join(" ");
     let genesis = args.node_dir.join("validator-0").join("genesis.json");
     println!(
-        "Point the agents at the chain with: --genesis {} {queries} --deployment <operator index>",
+        "Point the agents at the chain with: --genesis {} {queries} --deployment <deployment ID or index>",
         genesis.display()
     );
     Ok(())
@@ -735,8 +1052,11 @@ fn validate(args: &Setup) -> anyhow::Result<()> {
     if args.peers > MAX_PARTICIPANTS.get() as usize {
         anyhow::bail!("peers exceeds max supported participants");
     }
-    if args.operators == 0 {
-        anyhow::bail!("at least one operator is required");
+    if args.operators == 0 || args.operators > super::native::MAX_DEPLOYMENTS {
+        anyhow::bail!(
+            "operator count must be between 1 and {}",
+            super::native::MAX_DEPLOYMENTS
+        );
     }
     port(args.base_port, args.peers - 1)?;
     port(args.base_query_port, args.peers - 1)?;
@@ -748,6 +1068,26 @@ fn port(base: u16, index: usize) -> anyhow::Result<u16> {
     let offset = u16::try_from(index)?;
     base.checked_add(offset)
         .ok_or_else(|| anyhow::anyhow!("base port plus peer index overflows u16"))
+}
+
+/// Serde codec for a hex-encoded deployment identifier.
+mod hex_digest {
+    use super::*;
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &Digest,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex(&value.encode()))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Digest, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
+        Digest::decode_cfg(bytes.as_slice(), &()).map_err(D::Error::custom)
+    }
 }
 
 /// Serde codec for a hex-encoded [`PrivateKey`].
@@ -1034,11 +1374,25 @@ mod tests {
             let genesis = read_genesis(&operator_dir).unwrap();
             assert_eq!(genesis.players().len(), 4);
             assert_eq!(
-                genesis.deployments[usize::from(index)].operator,
+                operator.deployment,
+                *genesis.native.deployments[usize::from(index)]
+                    .deployment
+                    .digest()
+            );
+            assert_eq!(
+                operator.public_key(),
+                genesis.native.deployments[usize::from(index)].network_key
+            );
+            assert_eq!(
+                genesis.native.deployments[usize::from(index)]
+                    .deployment
+                    .operator,
                 operator.clearing.public_key()
             );
             assert_eq!(
-                genesis.deployments[usize::from(index)].operator_ack,
+                genesis.native.deployments[usize::from(index)]
+                    .deployment
+                    .operator_ack,
                 operator_ack_key(u64::from(index))
             );
         }
@@ -1056,16 +1410,21 @@ mod tests {
         // demo accounts under a distinct operator.
         assert_eq!(genesis.timing(), Timing::GENESIS);
         assert!(genesis.timestamp > 0);
-        assert_eq!(genesis.deployments.len(), 2);
+        assert_eq!(genesis.native.deployments.len(), 2);
         assert_ne!(
-            genesis.deployments[0].digest(),
-            genesis.deployments[1].digest()
+            genesis.native.deployments[0].deployment.digest(),
+            genesis.native.deployments[1].deployment.digest()
         );
-        for deployment in &genesis.deployments {
-            assert_eq!(deployment.accounts.len(), accounts().len());
+        for entry in &genesis.native.deployments {
+            assert_eq!(entry.deployment.accounts.len(), accounts().len());
         }
         assert!(!node_dir.join(".genesis").exists());
-        let configured = genesis.deployments.clone();
+        let configured = genesis
+            .native
+            .deployments
+            .iter()
+            .map(|entry| entry.deployment.clone())
+            .collect::<Vec<_>>();
         deterministic::Runner::default().start(|context| async move {
             for deployment in configured {
                 let state = commonware_clearing::bajillion::qmdb::State::<
@@ -1135,7 +1494,93 @@ mod tests {
         for account in accounts() {
             assert_eq!(genesis.holders_for_account(&account.key).unwrap(), holders);
         }
+
+        let undersized = node_dir.join("undersized");
+        assert!(
+            prepare_operator(OperatorSetup {
+                node_dir: undersized.clone(),
+                genesis: first.join("genesis.json"),
+                network: first.join("network.json"),
+                listen: SocketAddr::from(([127, 0, 0, 1], 4_901)),
+                max_dealing_bytes: 1,
+            })
+            .is_err()
+        );
+        assert!(!undersized.exists());
+
+        let joining = node_dir.join("joining");
+        prepare_operator(OperatorSetup {
+            node_dir: joining.clone(),
+            genesis: first.join("genesis.json"),
+            network: first.join("network.json"),
+            listen: SocketAddr::from(([127, 0, 0, 1], 4_900)),
+            max_dealing_bytes: MIN_DEALING_BYTES,
+        })
+        .unwrap();
+        let encoded: String = read_json(&joining.join("registration.json")).unwrap();
+        let bytes = from_hex(&encoded).unwrap();
+        let registration = RegisterDeploymentRequest::decode_cfg(bytes.as_slice(), &()).unwrap();
+        let operator = OperatorConfig::load(&joining).unwrap();
+        assert!(registration.verify(&genesis.native.chain_id()));
+        assert_eq!(registration.deployment_id(), operator.deployment);
+        assert_eq!(registration.operator, operator.clearing.public_key());
+        assert_eq!(registration.network_key, operator.public_key());
+        assert_eq!(read_genesis(&joining).unwrap(), genesis);
+        assert!(
+            !genesis
+                .native
+                .deployments
+                .iter()
+                .any(|entry| entry.deployment.digest() == &operator.deployment)
+        );
         let _ = fs::remove_dir_all(node_dir);
+    }
+
+    #[test]
+    fn genesis_domains_bind_committee_timing_and_native_policy() {
+        let mut rng = commonware_utils::test_rng();
+        let genesis = crate::chain::harness::identity(&mut rng);
+        let other = crate::chain::harness::identity(&mut rng);
+        let mut native = genesis.native.clone();
+        bind_genesis_deployments(&genesis.identity, 1, Timing::DEFAULT, &mut native);
+        let domain = native.chain_id();
+        let mut replay = genesis.native.clone();
+        bind_genesis_deployments(&genesis.identity, 1, Timing::DEFAULT, &mut replay);
+        assert_eq!(domain, replay.chain_id());
+        for (identity, timestamp, timing, epoch_fee) in [
+            (
+                &other.identity,
+                1,
+                Timing::DEFAULT,
+                genesis.native.epoch_fee,
+            ),
+            (
+                &genesis.identity,
+                2,
+                Timing::DEFAULT,
+                genesis.native.epoch_fee,
+            ),
+            (
+                &genesis.identity,
+                1,
+                Timing {
+                    admission_offset: Timing::DEFAULT.admission_offset + 1,
+                    ..Timing::DEFAULT
+                },
+                genesis.native.epoch_fee,
+            ),
+            (
+                &genesis.identity,
+                1,
+                Timing::DEFAULT,
+                genesis.native.epoch_fee + 1,
+            ),
+        ] {
+            let mut changed = genesis.native.clone();
+            changed.epoch_fee = epoch_fee;
+            bind_genesis_deployments(identity, timestamp, timing, &mut changed);
+            assert_ne!(domain, changed.chain_id());
+        }
     }
 
     /// The genesis validator list must be exactly the clearing committee,
@@ -1164,7 +1609,7 @@ mod tests {
             timestamp: 1,
             admission_offset: Timing::GENESIS.admission_offset,
             challenge_duration: Timing::GENESIS.challenge_duration,
-            deployments: deployments().iter().map(EncodedDeployment::from).collect(),
+            native: EncodedNative::from(&crate::chain::harness::native(deployments())),
             validators,
         };
         let path = node_dir.join("genesis.json");

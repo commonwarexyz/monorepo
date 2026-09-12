@@ -59,16 +59,14 @@ pub(crate) const MAX_ENTRIES: usize = 256;
 
 const DEPLOYMENT_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_DEPLOYMENT";
 
-/// The deployment digest of one operator clearing key: the deployment
-/// namespace folded with the operator identity, so every configured
-/// deployment's digest is unique and self-describing. One settlement chain
-/// hosts one deployment per operator.
+/// Deterministic deployment identity for in-process protocol fixtures.
+/// Network deployments use domains committed by genesis or the native registry.
 pub(crate) fn deployment_of(operator: &Key) -> Digest {
     Sha256::hash(&[DEPLOYMENT_NAMESPACE, &operator.encode()])
 }
 
 /// Namespace for chain registrations. The signed payload is the boundary
-/// material alone (epoch, predecessor liability, deposit and staged roots,
+/// material and native fee (epoch, predecessor liability, deposit and staged roots,
 /// withdrawal batch): execution assigns the absolute block-height deadlines
 /// at the registration's inclusion height, so the operator has nothing about
 /// timing to commit.
@@ -81,6 +79,8 @@ const VALIDATORS: usize = 4;
 pub(crate) const MAX_ACCOUNTS: usize = 1_024;
 /// Maximum accepted payments in one epoch, counting one per batched-send entry.
 pub(crate) const MAX_ACCEPTED_PAYMENTS: usize = 1_024;
+/// Reservation floor covering the stock operator's maximum account and entry counts.
+pub(crate) const MIN_DEALING_BYTES: u32 = 256 * 1024;
 /// Bounds one encoded [`Acceptance`]: a batch send at the protocol entry limit plus one receipt
 /// per entry.
 pub(crate) const MAX_ACCEPTANCE_BYTES: usize = 64 * 1024;
@@ -703,9 +703,8 @@ pub(crate) struct Account {
     pub(crate) balance: u64,
 }
 
-/// One configured deployment: an operator clearing identity and the account
-/// set its genesis machine opens with. The epoch timing policy is not part
-/// of it: one chain-wide genesis policy applies to every deployment.
+/// One deployment's identity, signing authorities, and initial account state.
+/// The registry authenticates the identity within its chain's replay domain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Deployment {
     digest: Digest,
@@ -716,9 +715,14 @@ pub(crate) struct Deployment {
 }
 
 impl Deployment {
-    pub(crate) fn new(operator: Key, operator_ack: OperatorKey, accounts: Vec<Account>) -> Self {
+    pub(crate) const fn new(
+        digest: Digest,
+        operator: Key,
+        operator_ack: OperatorKey,
+        accounts: Vec<Account>,
+    ) -> Self {
         Self {
-            digest: deployment_of(&operator),
+            digest,
             genesis: None,
             operator,
             operator_ack,
@@ -756,13 +760,14 @@ impl Deployment {
     }
 
     pub(crate) fn configured(
+        digest: Digest,
         operator: Key,
         operator_ack: OperatorKey,
         accounts: Vec<Account>,
         root: StateRoot<Digest>,
         operations: u64,
     ) -> Result<Self> {
-        let mut deployment = Self::new(operator, operator_ack, accounts);
+        let mut deployment = Self::new(digest, operator, operator_ack, accounts);
         deployment.genesis = Some(ConfiguredGenesis::new(
             root,
             operations,
@@ -771,13 +776,18 @@ impl Deployment {
         Ok(deployment)
     }
 
+    /// Binds setup's generated commitment to its complete network identity.
+    pub(crate) const fn rebind(&mut self, digest: Digest) {
+        self.digest = digest;
+    }
+
     pub(crate) const fn genesis(&self) -> &ConfiguredGenesis<Digest> {
         self.genesis
             .as_ref()
             .expect("genesis configured before chain execution")
     }
 
-    /// The deployment digest, derived from the operator clearing key.
+    /// The deployment's chain-scoped identity.
     pub(crate) const fn digest(&self) -> &Digest {
         &self.digest
     }
@@ -793,16 +803,19 @@ pub(crate) fn genesis_balances(
         .map(|account| {
             Ok((
                 commonware_clearing::bajillion::qmdb::account_key(&account.key)?,
-                NonZeroU64::new(account.balance).context("genesis balance must be positive")?,
+                NonZeroU64::new(account.balance),
             ))
         })
         .collect::<Result<Vec<_>>>()?;
     balances.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     ensure!(
-        balances.windows(2).all(|w| w[0].0 < w[1].0),
+        balances.windows(2).all(|pair| pair[0].0 < pair[1].0),
         "duplicate genesis account"
     );
-    Ok(balances)
+    Ok(balances
+        .into_iter()
+        .filter_map(|(key, balance)| balance.map(|balance| (key, balance)))
+        .collect())
 }
 
 /// Partitions for the single account QMDB and its retained historical proofs.
@@ -839,6 +852,87 @@ pub(crate) fn state_config<S: commonware_parallel::Strategy>(
     }
 }
 
+impl Write for Account {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.key.write(buf);
+        self.balance.write(buf);
+    }
+}
+
+impl EncodeSize for Account {
+    fn encode_size(&self) -> usize {
+        self.key.encode_size() + self.balance.encode_size()
+    }
+}
+
+impl Read for Account {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Ok(Self {
+            key: Key::read(buf)?,
+            balance: u64::read(buf)?,
+        })
+    }
+}
+
+impl Write for Deployment {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.digest.write(buf);
+        self.operator.write(buf);
+        self.operator_ack.write(buf);
+        self.accounts.write(buf);
+        self.genesis().root().write(buf);
+        self.genesis().operations().write(buf);
+    }
+}
+
+impl EncodeSize for Deployment {
+    fn encode_size(&self) -> usize {
+        self.digest.encode_size()
+            + self.operator.encode_size()
+            + self.operator_ack.encode_size()
+            + self.accounts.encode_size()
+            + self.genesis().root().encode_size()
+            + self.genesis().operations().encode_size()
+    }
+}
+
+impl Read for Deployment {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+        Self::configured(
+            Digest::read(buf)?,
+            Key::read(buf)?,
+            OperatorKey::read(buf)?,
+            Vec::<Account>::read_cfg(buf, &(RangeCfg::new(0..=MAX_ACCOUNTS), ()))?,
+            StateRoot::read(buf)?,
+            u64::read(buf)?,
+        )
+        .map_err(|_| CodecError::Invalid("Deployment", "invalid genesis configuration"))
+    }
+}
+
+/// Generates the trusted empty account commitment for runtime deployment creation.
+pub(crate) async fn empty_genesis<E>(context: E) -> Result<ConfiguredGenesis<Digest>>
+where
+    E: commonware_storage::Context + commonware_runtime::Spawner,
+{
+    let config = state_config(
+        "setup-empty-genesis",
+        &context,
+        commonware_parallel::Sequential,
+    );
+    let state = State::<_, Sha256>::open(context, config).await?;
+    ensure!(
+        state.is_bootstrap(),
+        "empty genesis generation requires fresh storage"
+    );
+    let candidate = state.prepare(state.head(), Vec::new()).await?;
+    Ok(ConfiguredGenesis::from(candidate.head()))
+}
+
 /// The compiled demo account set: the four wallets at the initial balance,
 /// which setup writes into every generated deployment's genesis.
 pub(crate) fn accounts() -> Vec<Account> {
@@ -855,6 +949,7 @@ pub(crate) fn accounts() -> Vec<Account> {
 /// configuration the fixture and harness paths run under.
 pub(crate) fn deployments() -> Vec<Deployment> {
     vec![Deployment::new(
+        deployment(),
         operator_key(),
         operator_ack_key(0),
         accounts(),
@@ -863,9 +958,9 @@ pub(crate) fn deployments() -> Vec<Deployment> {
 
 /// Digest committing to the whole configured deployment set in genesis
 /// order: the chain identity the genesis block's parent field carries.
-pub(crate) fn chain_id(deployments: &[Deployment]) -> Digest {
+pub(crate) fn chain_id<'a>(deployments: impl IntoIterator<Item = &'a Deployment>) -> Digest {
     let digests = deployments
-        .iter()
+        .into_iter()
         .map(|deployment| deployment.digest().as_ref())
         .collect::<Vec<_>>();
     Sha256::hash(&digests)
@@ -882,6 +977,7 @@ fn chain_registration_message(
     deposits_root: &VectorRoot<Digest>,
     staged_root: &VectorRoot<Digest>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
+    fee: u64,
 ) -> Bytes {
     let mut message = BytesMut::with_capacity(
         deployment.encode_size()
@@ -889,7 +985,8 @@ fn chain_registration_message(
             + predecessor_liability.encode_size()
             + deposits_root.encode_size()
             + staged_root.encode_size()
-            + withdrawals.encode_size(),
+            + withdrawals.encode_size()
+            + fee.encode_size(),
     );
     deployment.write(&mut message);
     epoch.write(&mut message);
@@ -897,12 +994,14 @@ fn chain_registration_message(
     deposits_root.write(&mut message);
     staged_root.write(&mut message);
     withdrawals.write(&mut message);
+    fee.write(&mut message);
     message.freeze()
 }
 
 /// Verifies a chain registration against one configured deployment: the
 /// signature must be the deployment's operator's, over a message naming the
 /// deployment's own digest.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_chain_registration_signature(
     deployment: &Deployment,
     epoch: u64,
@@ -910,6 +1009,7 @@ pub(crate) fn verify_chain_registration_signature(
     deposits_root: &VectorRoot<Digest>,
     staged_root: &VectorRoot<Digest>,
     withdrawals: &WithdrawalBatch<Key, Digest>,
+    fee: u64,
     signature: &Signature,
 ) -> bool {
     deployment.operator.verify(
@@ -921,6 +1021,7 @@ pub(crate) fn verify_chain_registration_signature(
             deposits_root,
             staged_root,
             withdrawals,
+            fee,
         ),
         signature,
     )
@@ -1069,18 +1170,23 @@ impl Protocol {
     /// Protocol machinery for the compiled default deployment (the seed-1
     /// demo operator): the fixture and harness path.
     pub(crate) fn new(workers: NonZeroUsize) -> Result<Self> {
-        Self::with_signer(workers, operator_signer(0), operator_ack_signer(0))
+        Self::with_signer(
+            workers,
+            deployment(),
+            operator_signer(0),
+            operator_ack_signer(0),
+        )
     }
 
-    /// Protocol machinery for the deployment `operator` runs: the deployment
-    /// digest derives from the signing identity.
+    /// Protocol machinery bound to a registered deployment and its signing keys.
     pub(crate) fn with_signer(
         workers: NonZeroUsize,
+        deployment: Digest,
         operator: SigningKey,
         operator_ack: Private,
     ) -> Result<Self> {
         Ok(Self {
-            deployment: deployment_of(&operator.public_key()),
+            deployment,
             operator,
             operator_ack_key: compute_public::<OperatorVariant>(&operator_ack),
             operator_ack,
@@ -1128,6 +1234,7 @@ impl Protocol {
         deposits_root: &VectorRoot<Digest>,
         staged_root: &VectorRoot<Digest>,
         withdrawals: &WithdrawalBatch<Key, Digest>,
+        fee: u64,
     ) -> Signature {
         self.operator.sign(
             CHAIN_REGISTRATION_SIGNATURE_NAMESPACE,
@@ -1138,6 +1245,7 @@ impl Protocol {
                 deposits_root,
                 staged_root,
                 withdrawals,
+                fee,
             ),
         )
     }

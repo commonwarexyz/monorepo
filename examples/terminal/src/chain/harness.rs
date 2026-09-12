@@ -16,13 +16,13 @@ use crate::{
     chain::{
         da::answer,
         ingress::Submission,
+        native::{NativeGenesis, RegistryEntry},
         query::{
             CertifiedRead, Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse,
             METHOD_EVIDENCE, METHOD_READ, METHOD_SUBMIT_TX, ReadProof, ReadRequest, ReadResponse,
-            Submitted,
         },
-        setup::{Genesis, ValidatorEntry},
-        state::{Advice, Record, admitted_key, advise, execute},
+        setup::{Genesis, ValidatorEntry, native_genesis},
+        state::{Record, admitted_key, execute, registry_entry_key},
         tx::SettlementTx,
         types::{Block, Database, MAX_TX_BYTES, StateKey, now},
         validator::{NAMESPACE, SHARING_MODE, Scheme, db_config},
@@ -33,7 +33,7 @@ use crate::{
     rpc::{self, error_response},
 };
 use commonware_clearing::bajillion::qmdb::{State, StateLookup, StateOpening, account_key};
-use commonware_codec::{Decode as _, Encode as _, EncodeSize as _};
+use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
     simplex::types::{Context, Finalization, Finalize, Proposal},
     types::{Epoch, Height, Round, View},
@@ -48,7 +48,7 @@ use commonware_glue::stateful::db::{DatabaseSet, Merkleized as _};
 use commonware_macros::select;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Listener as _, Network as _, Spawner as _, Supervisor as _,
+    Clock as _, Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{
@@ -67,11 +67,15 @@ const TICK: Duration = Duration::from_millis(250);
 /// One control message for the chain task.
 #[allow(clippy::large_enum_variant)]
 enum Message {
-    /// Submit one transaction, sealing it into its own block. Answers the
-    /// sealing height and the pre-inclusion dry-run advice.
+    #[cfg(test)]
+    SealBatch {
+        transactions: Vec<SettlementTx>,
+        response: oneshot::Sender<Block>,
+    },
+    /// Submit one transaction and return its sealing height.
     Submit {
         tx: Box<SettlementTx>,
-        response: oneshot::Sender<(u64, Advice)>,
+        response: oneshot::Sender<u64>,
     },
     /// Seal `blocks` empty blocks.
     #[cfg(test)]
@@ -109,14 +113,27 @@ pub(crate) struct Control {
 }
 
 impl Control {
+    /// Executes and certifies a batch, including canonically rejected inputs.
+    #[cfg(test)]
+    pub(crate) async fn seal_batch(&self, transactions: Vec<SettlementTx>) -> Block {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(Message::SealBatch {
+                transactions,
+                response,
+            })
+            .await;
+        receiver.await.expect("chain answers batch sealing")
+    }
+
     /// The genesis threshold identity certified reads verify against.
     pub(crate) const fn identity(&self) -> &Genesis {
         &self.identity
     }
 
-    /// Submits one transaction directly, returning the height that sealed it
-    /// and the pre-inclusion dry-run advice.
-    pub(crate) async fn submit(&self, tx: SettlementTx) -> (u64, Advice) {
+    /// Executes one transaction directly and returns its sealing height.
+    pub(crate) async fn submit(&self, tx: SettlementTx) -> u64 {
         let (response, receiver) = oneshot::channel();
         let message = Message::Submit {
             tx: Box::new(tx),
@@ -185,7 +202,8 @@ struct Node {
     db: Database<deterministic::Context>,
     scheme: Scheme,
     leader: ed25519::PublicKey,
-    deployments: Vec<Deployment>,
+    native: NativeGenesis,
+    prefix: String,
     /// Each configured deployment's account owner and next canonical epoch.
     genesis: BTreeMap<Digest, (State<deterministic::Context, Sha256>, u64)>,
     latest: Option<Latest>,
@@ -218,7 +236,7 @@ impl Node {
             Height::new(height),
             timestamp,
             &Timing::DEFAULT,
-            &self.deployments,
+            &self.native,
             &transactions,
         )
         .await
@@ -292,9 +310,42 @@ impl Node {
 
     /// Serves one evidence request from the closes the in-process simulation
     /// retains, exactly as a validator serves from its sealed dealings.
-    async fn evidence(&mut self, request: &EvidenceRequest) -> EvidenceResponse {
-        let Some((mut state, mut next)) = self.genesis.remove(&request.deployment) else {
-            return EvidenceResponse::Unknown;
+    async fn evidence(
+        &mut self,
+        context: &deterministic::Context,
+        request: &EvidenceRequest,
+    ) -> EvidenceResponse {
+        let entry = {
+            let db = self.db.read().await;
+            match db
+                .get(&registry_entry_key(
+                    &self.native.chain_id(),
+                    &request.deployment,
+                ))
+                .await
+                .unwrap()
+            {
+                Some(Record::RegistryEntry(entry)) => entry,
+                _ => return EvidenceResponse::Unknown,
+            }
+        };
+        let (mut state, mut next) = match self.genesis.remove(&request.deployment) {
+            Some(state) => state,
+            None => {
+                let config = state_config(
+                    &format!("{}-balances-{}", self.prefix, request.deployment),
+                    context,
+                    Sequential,
+                );
+                let state = State::<_, Sha256>::init(
+                    context.child("balances"),
+                    config,
+                    genesis_balances(&entry.deployment).unwrap(),
+                )
+                .await
+                .unwrap();
+                (state, 0)
+            }
         };
         let retained = retained_closes();
         let relevant = retained
@@ -331,21 +382,10 @@ impl Node {
                 .expect("harness balance application");
             next += 1;
         }
-        let genesis_head = self
-            .deployments
-            .iter()
-            .find(|d| d.digest() == &request.deployment)
-            .unwrap()
-            .genesis();
+        let genesis_head = entry.deployment.genesis();
         let response = match &request.lookup {
             EvidenceLookup::GenesisState { account } => {
-                let root = self
-                    .deployments
-                    .iter()
-                    .find(|d| d.digest() == &request.deployment)
-                    .unwrap()
-                    .genesis()
-                    .root();
+                let root = genesis_head.root();
                 match state
                     .lookup_at(
                         root,
@@ -472,7 +512,7 @@ pub(crate) fn identity(rng: &mut impl rand_core::CryptoRng) -> Genesis {
         identity,
         0,
         Timing::DEFAULT,
-        deployments(),
+        native(deployments()),
         validators(SocketAddr::from(([127, 0, 0, 1], 0))),
     )
 }
@@ -506,11 +546,45 @@ pub(crate) async fn start_with(
     context: &deterministic::Context,
     address: SocketAddr,
     prefix: &str,
-    mut configured: Vec<Deployment>,
+    configured: Vec<Deployment>,
+) -> Control {
+    start_with_native(context, address, prefix, native(configured)).await
+}
+
+/// Generates trusted native genesis for deterministic fixtures.
+pub(crate) fn native(mut configured: Vec<Deployment>) -> NativeGenesis {
+    deterministic::Runner::default().start(|context| async move {
+        for deployment in &mut configured {
+            deployment.generate(context.child("genesis")).await.unwrap();
+        }
+        let empty = crate::protocol::empty_genesis(context.child("empty"))
+            .await
+            .unwrap();
+        native_genesis(
+            configured
+                .into_iter()
+                .enumerate()
+                .map(|(index, deployment)| RegistryEntry {
+                    deployment,
+                    network_key: ed25519::PrivateKey::from_seed(50_000 + index as u64).public_key(),
+                    max_dealing_bytes: 4 * 1024 * 1024,
+                })
+                .collect(),
+            &empty,
+        )
+    })
+}
+
+/// Starts a certified chain with explicit native allocations and resource policy.
+pub(crate) async fn start_with_native(
+    context: &deterministic::Context,
+    address: SocketAddr,
+    prefix: &str,
+    native: NativeGenesis,
 ) -> Control {
     let mut balances = BTreeMap::new();
-    for deployment in &mut configured {
-        deployment.generate(context.child("genesis")).await.unwrap();
+    for entry in &native.deployments {
+        let deployment = &entry.deployment;
         let config = state_config(
             &format!("{prefix}-balances-{}", deployment.digest()),
             context,
@@ -534,7 +608,7 @@ pub(crate) async fn start_with(
         identity,
         now(context),
         Timing::DEFAULT,
-        configured.clone(),
+        native.clone(),
         validators(address),
     );
     let share = shares
@@ -560,7 +634,8 @@ pub(crate) async fn start_with(
         scheme,
         leader: signer.public_key(),
         genesis: balances,
-        deployments: configured,
+        native,
+        prefix: prefix.into(),
         latest: None,
         reads: 0,
         submissions: 0,
@@ -585,13 +660,16 @@ pub(crate) async fn start_with(
                             return;
                         };
                         match message {
+                            #[cfg(test)]
+                            Message::SealBatch { transactions, response } => {
+                                node.seal(now(&context), transactions).await;
+                                response.send_lossy(Block::decode_cfg(node.latest.as_ref().unwrap().block.clone(), &()).unwrap());
+                            }
+
                             Message::Submit { tx, response } => {
                                 node.submissions += 1;
-                                let advice = advise(&node.db, &node.deployments, &tx)
-                                    .await
-                                    .expect("harness dry-run succeeds");
                                 let height = node.seal(now(&context), vec![*tx]).await;
-                                response.send_lossy((height, advice));
+                                response.send_lossy(height);
                             }
                             #[cfg(test)]
                             Message::Advance { blocks, response } => {
@@ -609,7 +687,7 @@ pub(crate) async fn start_with(
                                 response.send_lossy(node.read(&request).await);
                             }
                             Message::Evidence { request, response } => {
-                                response.send_lossy(node.evidence(&request).await);
+                                response.send_lossy(node.evidence(&context, &request).await);
                             }
                             Message::Record { key, response } => {
                                 let guard = node.db.read().await;
@@ -656,23 +734,13 @@ pub(crate) async fn start_with(
                 let response = match request.method {
                     METHOD_SUBMIT_TX => {
                         if request.body.len() > MAX_TX_BYTES {
-                            respond(&Submitted {
-                                admission: Submission::Oversized,
-                                advice: None,
-                            })
+                            respond(&Submission::Oversized)
                         } else {
                             match SettlementTx::decode_cfg(request.body, &()) {
-                                Ok(tx) if tx.encode_size() <= MAX_TX_BYTES => {
-                                    let (_, advice) = listener_control.submit(tx).await;
-                                    respond(&Submitted {
-                                        admission: Submission::Accepted,
-                                        advice: Some(advice),
-                                    })
+                                Ok(tx) => {
+                                    listener_control.submit(tx).await;
+                                    respond(&Submission::Accepted)
                                 }
-                                Ok(_) => respond(&Submitted {
-                                    admission: Submission::Oversized,
-                                    advice: None,
-                                }),
                                 Err(_) => {
                                     error_response("submitted transaction does not decode".into())
                                 }

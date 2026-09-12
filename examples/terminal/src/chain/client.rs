@@ -26,10 +26,9 @@
 //! [`SettlementTx`] through [`Chain::deliver`] and completes only on a
 //! certified read of the variant's effect record (a deposit's custody
 //! record, the registration record, the admitted record, a claim's release
-//! record, the fault record). The advisory [`Submitted`] answer is used only
-//! to fast-fail an oversized submission, pace a full queue, and decorate
-//! timeout diagnostics, never as evidence. Rejections are effect-free, so an
-//! effect-free rejection is indistinguishable from not-yet-included: flows
+//! record, the fault record). The advisory [`Submission`] answer is used only
+//! to reject oversized submissions and pace a full queue. An effect-free
+//! rejection is indistinguishable from not-yet-included: flows
 //! retry until the effect appears or a bounded budget ends, and only a
 //! certified record proving the input can never land (a consumed idempotence
 //! key bound to other bytes) discards a durable intent.
@@ -40,17 +39,15 @@ use crate::{
     chain::{
         ingress::Submission,
         light::{self, Latest, Verified},
-        query::{
-            CertifiedRead, Lookup, METHOD_READ, METHOD_SUBMIT_TX, ReadRequest, ReadResponse,
-            Submitted,
-        },
+        native::RegistryEntry,
+        query::{CertifiedRead, Lookup, METHOD_READ, METHOD_SUBMIT_TX, ReadRequest, ReadResponse},
         setup::Genesis,
         state::{
-            AdmittedRootsResponse, Advice, ClaimPendingDepositResponse, ClaimRootsResponse,
-            FaultRecord, HardFaultReleaseRecord, PayoutReleaseRecord, Record, RegistrationRecord,
-            StatusRecord, WithdrawalReleaseRecord,
+            AdmittedRootsResponse, ClaimPendingDepositResponse, ClaimRootsResponse, FaultRecord,
+            HardFaultReleaseRecord, PayoutReleaseRecord, Record, RegistrationRecord, StatusRecord,
+            WithdrawalReleaseRecord,
         },
-        tx::SettlementTx,
+        tx::{NativeTransferRequest, SettlementTx},
         types::now,
         validator::{NAMESPACE, Scheme},
     },
@@ -62,7 +59,7 @@ use commonware_clearing::bajillion::{boundary::SignedWithdrawal, transition::Bat
 #[cfg(test)]
 use commonware_codec::DecodeExt as _;
 use commonware_codec::{Decode as _, Encode as _};
-use commonware_cryptography::sha256::Digest;
+use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_runtime::{Clock, Network, Spawner};
 use commonware_storage::Context as StorageContext;
 use rand_core::CryptoRng;
@@ -75,7 +72,7 @@ pub(crate) const POLL: Duration = Duration::from_millis(200);
 pub(crate) const EFFECT_ATTEMPTS: usize = 300;
 
 /// Submission attempts while the ingress queue is full or the server binds.
-const SUBMIT_ATTEMPTS: usize = 50;
+pub(crate) const SUBMIT_ATTEMPTS: usize = 50;
 
 /// Passes over the configured validators before a recency shortfall is
 /// surfaced. A validator briefly restarting, a connect timeout, or a lagging
@@ -113,6 +110,61 @@ pub(crate) trait Chain: Send + 'static {
     /// reads that deployment's records.
     fn deployment(&self) -> Digest;
 
+    /// Shared native balance proven at a recent finalized block.
+    fn native_balance<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain_id: Digest,
+        account: Key,
+    ) -> impl Future<Output = Result<u64>> + Send {
+        async move {
+            let request = self.request(Lookup::NativeBalance { chain_id, account });
+            match self.recent(ctx, &request).await?.record {
+                Some(Record::NativeBalance(balance)) => Ok(balance),
+                None => Ok(0),
+                Some(_) => bail!("certified native balance read returned a foreign record"),
+            }
+        }
+    }
+
+    /// One immutable deployment entry, or certified absence, at a recent block.
+    fn registry_entry<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain_id: Digest,
+        deployment: Digest,
+    ) -> impl Future<Output = Result<Option<RegistryEntry>>> + Send {
+        async move {
+            let request = self.request(Lookup::RegistryEntry {
+                chain_id,
+                deployment,
+            });
+            match self.recent(ctx, &request).await?.record {
+                Some(Record::RegistryEntry(entry)) => Ok(Some(entry)),
+                None => Ok(None),
+                Some(_) => bail!("certified registry entry read returned a foreign record"),
+            }
+        }
+    }
+
+    /// A native transfer's exact successful request, or certified absence.
+    fn native_transfer<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain_id: Digest,
+        from: Key,
+        id: Digest,
+    ) -> impl Future<Output = Result<Option<NativeTransferRequest>>> + Send {
+        async move {
+            let request = self.request(Lookup::NativeTransfer { chain_id, from, id });
+            match self.read(ctx, &request).await?.record {
+                Some(Record::NativeTransfer(transfer)) => Ok(Some(transfer)),
+                None => Ok(None),
+                Some(_) => bail!("certified native transfer read returned a foreign record"),
+            }
+        }
+    }
+
     /// One deployment-scoped read request for this backend's deployment.
     fn request(&self, lookup: Lookup) -> ReadRequest {
         ReadRequest::new(self.deployment(), lookup)
@@ -135,7 +187,7 @@ pub(crate) trait Chain: Send + 'static {
         request: &ReadRequest,
     ) -> impl Future<Output = Result<Verified>> + Send;
 
-    /// Submits one transaction, returning the advisory [`Submitted`] answer.
+    /// Submits one transaction, returning the advisory [`Submission`] answer.
     /// Acceptance promises gossip and proposal attempts, never inclusion: the
     /// authoritative answer is the certified read of the variant's effect
     /// record.
@@ -143,33 +195,31 @@ pub(crate) trait Chain: Send + 'static {
         &mut self,
         ctx: &E,
         tx: &SettlementTx,
-    ) -> impl Future<Output = Result<Submitted>> + Send;
+    ) -> impl Future<Output = Result<Submission>> + Send;
 
-    /// Submits one transaction with bounded retries, returning the last
-    /// advisory dry-run answer.
+    /// Submits one transaction with bounded retries.
     ///
     /// Delivery is not completion: the caller completes by polling a
     /// certified read of the variant's effect record. A rejection is
     /// effect-free and therefore indistinguishable from not-yet-included, so
-    /// effect polls run until the effect appears or a bounded budget ends,
-    /// and the returned advice exists to decorate that timeout diagnosis.
+    /// effect polls run until the effect appears or a bounded budget ends.
     fn deliver<E: Env>(
         &mut self,
         ctx: &E,
         tx: &SettlementTx,
-    ) -> impl Future<Output = Result<Option<Advice>>> + Send {
+    ) -> impl Future<Output = Result<()>> + Send {
         async move {
             for attempt in 0..SUBMIT_ATTEMPTS {
                 match self.submit(ctx, tx).await {
-                    Ok(submitted) => match submitted.admission {
+                    Ok(submitted) => match submitted {
                         Submission::Accepted | Submission::Duplicate => {
-                            return Ok(submitted.advice);
+                            return Ok(());
                         }
                         Submission::Oversized => {
                             bail!("the transaction exceeds the per-transaction wire bound")
                         }
                         Submission::Full if attempt + 1 < SUBMIT_ATTEMPTS => {}
-                        Submission::Full => bail!("the ingress queue stayed full"),
+                        Submission::Full => return Ok(()),
                     },
                     Err(error) if attempt + 1 == SUBMIT_ATTEMPTS => {
                         return Err(error.context("submit settlement transaction"));
@@ -265,9 +315,7 @@ pub(crate) trait Chain: Send + 'static {
     }
 
     /// The custody record for one deposit id, or a proven exclusion.
-    ///
-    /// Recency-bounded: the wallet discards a staged deposit on this
-    /// absence, so it must hold at a recent finalized tip.
+    /// A conflicting record can resolve a staged request; absence alone cannot.
     fn deposit<E: Env>(
         &mut self,
         ctx: &E,
@@ -275,7 +323,7 @@ pub(crate) trait Chain: Send + 'static {
     ) -> impl Future<Output = Result<Option<DepositEvent>>> + Send {
         async move {
             let request = self.request(Lookup::Deposit { id });
-            let verified = self.recent(ctx, &request).await?;
+            let verified = self.read(ctx, &request).await?;
             match verified.record {
                 Some(Record::Deposit(event)) => Ok(Some(event)),
                 Some(_) => bail!("certified deposit read returned a foreign record"),
@@ -412,8 +460,8 @@ pub(crate) trait Chain: Send + 'static {
 }
 
 /// The remote settlement-chain backend: an RPC client of the validators'
-/// certified query servers, used by the wallet agents. Bound to exactly one
-/// configured deployment at construction: every typed read is scoped to it.
+/// certified query servers, used by wallet agents. Clearing reads bind the selected
+/// deployment; native reads share the chain identity across deployments.
 pub(crate) struct Client {
     scheme: Scheme,
     /// The chain genesis: the validators' evidence-serving identities, so an
@@ -433,7 +481,8 @@ pub(crate) struct Client {
 
 impl Client {
     /// Builds a client over the chain's genesis threshold identity and the
-    /// validator query addresses, bound to the configured `deployment`.
+    /// validator query addresses, bound to the selected `deployment`.
+    /// Call [`Self::registered`] to authenticate its operator configuration.
     pub(crate) fn new(
         identity: &Genesis,
         deployment: Digest,
@@ -443,13 +492,6 @@ impl Client {
         ensure!(
             !queries.is_empty(),
             "at least one query address is required"
-        );
-        ensure!(
-            identity
-                .deployments
-                .iter()
-                .any(|configured| configured.digest() == &deployment),
-            "the deployment is not configured in genesis"
         );
         Ok(Self {
             scheme: Scheme::verifier(
@@ -466,6 +508,14 @@ impl Client {
         })
     }
 
+    /// Resolves this client's deployment against the certified registry.
+    pub(crate) async fn registered<E: Env>(&mut self, ctx: &E) -> Result<RegistryEntry> {
+        let chain_id = self.genesis.native.chain_id();
+        self.registry_entry(ctx, chain_id, self.deployment)
+            .await?
+            .context("the selected deployment is not registered")
+    }
+
     /// The chain genesis this client was built over: the validators'
     /// evidence-serving identities that route an evidence request to the
     /// committee retaining the complete close.
@@ -480,8 +530,7 @@ impl Client {
     /// holder serves.
     ///
     /// Nothing here is verified: the caller checks a served opening against
-    /// the certified roots it already holds (the admitted record's roots, a
-    /// requested interval root, or the genesis state root).
+    /// the certified admitted roots or the deployment's genesis state root.
     ///
     /// The wallet routes through its own holder rotation (see the agent's
     /// evidence module), so this direct form serves the query tests only.
@@ -611,13 +660,13 @@ impl Chain for Client {
     }
 
     /// Submits one transaction to the first answering validator.
-    async fn submit<E: Env>(&mut self, ctx: &E, tx: &SettlementTx) -> Result<Submitted> {
+    async fn submit<E: Env>(&mut self, ctx: &E, tx: &SettlementTx) -> Result<Submission> {
         let mut last = None;
         for attempt in 0..self.queries.len() {
             let address = self.queries[(self.primary + attempt) % self.queries.len()];
             match rpc::invoke(ctx, address, "query", METHOD_SUBMIT_TX, tx.encode()).await {
                 Ok(body) => {
-                    return Submitted::decode_cfg(body, &()).context("decode advisory answer");
+                    return Submission::decode_cfg(body, &()).context("decode advisory answer");
                 }
                 Err(error) => last = Some(error),
             }
@@ -634,60 +683,37 @@ fn extract_status(verified: Verified) -> Result<StatusRecord> {
     }
 }
 
-/// Certified admission polls before an admitted close is reported stuck. The
-/// budget must outlast a genesis challenge window at live cadence: the
-/// admitted close finalizes only past its challenge deadline, roughly the
-/// genesis admission offset plus challenge duration after its registration's
-/// inclusion.
-pub(crate) const FINALIZE_ATTEMPTS: usize = 3_000;
+/// Poll budget for certified close admission.
+const ADMISSION_ATTEMPTS: usize = 3_000;
 
-/// Submits a completed close and completes once the chain certifiably
-/// finalized the exact batch.
+/// Space exact admission renewals to limit repeated gossip while ingress may evict pending work.
+const ADMISSION_RESUBMIT_POLLS: usize = 25;
+
+/// Submits a completed close and returns its certified admission.
 ///
-/// Completion is certified end to end: the admitted record naming exactly
-/// `expected.batch_id` with the close's change root, its finalized flag, and
-/// (while this epoch is still the finalized tip) the status root pinned to
-/// the close's successor root. An admission rejection is effect-free, so a
-/// close that never earns its admitted record times out here. A proven
-/// challenge against the batch invalidates it and fails the close.
+/// The admitted record must name the exact batch and every committed root.
+/// Clearing finalization is observed separately, so successor certification
+/// can proceed while this close remains challengeable.
 pub(crate) async fn admit<C: Chain, E: Env>(
     ctx: &E,
     chain: &mut C,
     request: crate::chain::tx::AdmitRequest,
-    expected: &commonware_clearing::bajillion::settlement::FinalizedBatch<Digest>,
-    change: commonware_clearing::bajillion::commitment::VectorRoot<Digest>,
 ) -> Result<()> {
     let epoch = request.epoch;
-    let batch_id = expected.batch_id;
-    let successor_root = expected.successor_root;
+    let batch_id = request.header.batch_id::<Sha256>();
+    let roots = request.roots;
     let tx = SettlementTx::Admit(request);
-    let advice = chain
+    chain
         .deliver(ctx, &tx)
         .await
         .context("submit close admission")?;
-    for _ in 0..FINALIZE_ATTEMPTS {
+    for attempt in 0..ADMISSION_ATTEMPTS {
         if let Ok(Some(admitted)) = chain.admitted(ctx, epoch).await {
             ensure!(
-                admitted.batch_id == batch_id && admitted.change == change,
+                admitted.batch_id == batch_id && admitted.roots == roots,
                 "the chain admitted a different close for this epoch"
             );
-            if admitted.finalized {
-                let status = chain
-                    .status(ctx)
-                    .await
-                    .context("read certified finalization status")?;
-                ensure!(
-                    status.last_finalized.is_some_and(|last| last >= epoch),
-                    "the finalized admitted record outran the status horizon"
-                );
-                if status.last_finalized == Some(epoch) {
-                    ensure!(
-                        status.state_root == successor_root,
-                        "the chain finalized a different successor root"
-                    );
-                }
-                return Ok(());
-            }
+            return Ok(());
         }
 
         // A proven challenge against this batch invalidates the admitted
@@ -707,7 +733,96 @@ pub(crate) async fn admit<C: Chain, E: Env>(
                 bail!("the admitted close was invalidated by a proven challenge");
             }
         }
+        if (attempt + 1) % ADMISSION_RESUBMIT_POLLS == 0 {
+            // Delivery may be ambiguous; a stalled renewal must not stop certified effect polling.
+            commonware_macros::select! {
+                _ = chain.submit(ctx, &tx) => {},
+                _ = ctx.sleep(POLL * ADMISSION_RESUBMIT_POLLS as u32) => {},
+            }
+        }
         ctx.sleep(POLL).await;
     }
-    bail!("the admitted close did not certifiably finalize in time (dry-run advice: {advice:?})")
+    bail!("the close did not earn certified admission in time")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::{Runner as _, deterministic};
+
+    struct SubmissionBackend {
+        replies: std::collections::VecDeque<std::result::Result<Submission, &'static str>>,
+        submissions: usize,
+    }
+
+    impl Chain for SubmissionBackend {
+        fn deployment(&self) -> Digest {
+            crate::protocol::deployment()
+        }
+
+        async fn read<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!()
+        }
+
+        async fn recent<E: Env>(&mut self, _: &E, _: &ReadRequest) -> Result<Verified> {
+            unreachable!()
+        }
+
+        async fn submit<E: Env>(&mut self, _: &E, _: &SettlementTx) -> Result<Submission> {
+            self.submissions += 1;
+            self.replies
+                .pop_front()
+                .expect("unexpected submission")
+                .map_err(anyhow::Error::msg)
+        }
+    }
+
+    #[test]
+    fn delivery_retries_transient_full_before_effect_polling() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut chain = SubmissionBackend {
+                replies: [
+                    Ok(Submission::Full),
+                    Ok(Submission::Full),
+                    Ok(Submission::Accepted),
+                ]
+                .into(),
+                submissions: 0,
+            };
+            let tx = SettlementTx::BeginHardFaultSettlement(
+                crate::chain::tx::BeginHardFaultSettlementRequest {
+                    deployment: chain.deployment(),
+                },
+            );
+            chain.deliver(&context, &tx).await.unwrap();
+            assert_eq!(chain.submissions, 3);
+        });
+    }
+
+    #[test]
+    fn delivery_keeps_oversized_and_transport_failures_terminal() {
+        deterministic::Runner::default().start(|context| async move {
+            for (replies, expected, message) in [
+                (vec![Ok(Submission::Oversized)], 1, "wire bound"),
+                (
+                    vec![Err("transport unavailable"); SUBMIT_ATTEMPTS],
+                    SUBMIT_ATTEMPTS,
+                    "transport unavailable",
+                ),
+            ] {
+                let mut chain = SubmissionBackend {
+                    replies: replies.into(),
+                    submissions: 0,
+                };
+                let tx = SettlementTx::BeginHardFaultSettlement(
+                    crate::chain::tx::BeginHardFaultSettlementRequest {
+                        deployment: chain.deployment(),
+                    },
+                );
+                let error = chain.deliver(&context, &tx).await.unwrap_err();
+                assert!(format!("{error:#}").contains(message));
+                assert_eq!(chain.submissions, expected);
+            }
+        });
+    }
 }

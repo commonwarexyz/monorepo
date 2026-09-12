@@ -10,11 +10,12 @@
 //! openings they are counterparty-death-surviving evidence, never an overwritable cache.
 
 use crate::{
-    chain::state as chain_state,
-    operator::rpc as operator_rpc,
-    protocol::{
-        Acceptance, Ack, DepositEvent, Entry, Key, MAX_ACCEPTANCE_BYTES, MAX_ENTRIES, Receipt,
+    chain::{
+        state as chain_state,
+        tx::{DepositRequest, NativeTransferRequest},
     },
+    operator::rpc as operator_rpc,
+    protocol::{Acceptance, Ack, Entry, Key, MAX_ACCEPTANCE_BYTES, MAX_ENTRIES, Receipt},
     store::CommitUnknown,
 };
 use anyhow::{Context, Result, ensure};
@@ -27,15 +28,18 @@ use commonware_clearing::bajillion::{
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, FixedSize, RangeCfg};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+use commonware_cryptography_curve25519::signing::Signature;
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 const MAX_PENDING_CLAIM_BYTES: usize = 16 * 1024;
 const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + u64::SIZE;
 const MAX_STATE_OPENING_BYTES: usize = 16 * 1024;
 const MAX_STATE_PROOF_DIGESTS: usize = 256;
-const DEPOSIT_EVENT_BYTES: usize = Digest::SIZE + Key::SIZE + u64::SIZE;
+const DEPOSIT_REQUEST_BYTES: usize = Digest::SIZE * 3 + Key::SIZE + u64::SIZE + Signature::SIZE;
+const TRANSFER_REQUEST_BYTES: usize =
+    Digest::SIZE * 2 + Key::SIZE * 2 + u64::SIZE + Signature::SIZE;
 const AUTHORIZATION_BYTES: usize = SendAuthorization::<Key, Digest>::SIZE;
 /// Bounds one encoded delta-entry list: a bounded length prefix plus [`MAX_ENTRIES`] fixed
 /// entries.
@@ -84,7 +88,8 @@ pub(crate) struct State {
     /// invalidation.
     pub(crate) cache: Option<ContextCache>,
     pub(crate) pending_payment: Option<PendingPayment>,
-    pub(crate) pending_deposit: Option<DepositEvent>,
+    pub(crate) pending_deposit: Option<DepositRequest>,
+    pub(crate) pending_transfer: Option<NativeTransferRequest>,
     pub(crate) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
     pub(crate) pending_payout_claim: Option<PendingPayoutClaim>,
     pub(crate) receipt_count: u64,
@@ -842,46 +847,71 @@ impl Store {
         self.finish_mutation(result).map(|()| next_receipt_count)
     }
 
-    /// Durably stages one deposit event before custody moves at settlement.
-    ///
-    /// The event's identifier derives from a volatile nonce and only that exact identifier
-    /// can be retried against recorded custody. Staging first means a crash between the
-    /// settlement record and the operator credit cannot orphan the deposit: a restarted
-    /// wallet retries the same event, which both custody surfaces deduplicate.
-    pub(crate) fn stage_deposit(&mut self, event: &DepositEvent) -> Result<()> {
+    /// Persists an exact native transfer before it can debit the wallet.
+    pub(crate) fn stage_transfer(&mut self, request: &NativeTransferRequest) -> Result<()> {
         self.ensure_usable()?;
-        validate_deposit(event, &self.account)?;
-        let encoded = event.encode();
-        ensure!(
-            encoded.len() == DEPOSIT_EVENT_BYTES,
-            "deposit event encoding has an unexpected length"
+        validate_transfer(request, &self.account)?;
+        let result = stage_native_transaction(
+            &mut self.connection,
+            "agent_pending_transfer",
+            &request.encode(),
         );
-        let result = stage_deposit_transaction(&mut self.connection, encoded.as_ref());
         self.finish_mutation(result)
     }
 
-    /// Removes the staged deposit after the operator acknowledged the exact event.
-    pub(crate) fn complete_deposit(&mut self, event: &DepositEvent) -> Result<()> {
+    /// Retires a transfer after its matching certified receipt is observed.
+    pub(crate) fn complete_transfer(&mut self, request: &NativeTransferRequest) -> Result<()> {
+        self.ensure_usable()?;
+        let result = remove_native_transaction(
+            &mut self.connection,
+            "agent_pending_transfer",
+            &request.encode(),
+            "native transfer completion",
+        );
+        self.finish_mutation(result)
+    }
+
+    /// Persists the exact signed native debit before submitting its deposit.
+    pub(crate) fn stage_deposit(&mut self, event: &DepositRequest) -> Result<()> {
+        self.ensure_usable()?;
+        validate_deposit(event, &self.account)?;
+        ensure!(
+            event.deployment == read_binding(&self.connection)?.deployment,
+            "pending deposit belongs to another deployment"
+        );
+        let encoded = event.encode();
+        ensure!(
+            encoded.len() == DEPOSIT_REQUEST_BYTES,
+            "deposit event encoding has an unexpected length"
+        );
+        let result = stage_native_transaction(
+            &mut self.connection,
+            "agent_pending_deposit",
+            encoded.as_ref(),
+        );
+        self.finish_mutation(result)
+    }
+
+    /// Removes the staged deposit after its exact custody record is certified.
+    pub(crate) fn complete_deposit(&mut self, event: &DepositRequest) -> Result<()> {
         self.ensure_usable()?;
         let encoded = event.encode();
-        let result = remove_deposit_transaction(
+        let result = remove_native_transaction(
             &mut self.connection,
+            "agent_pending_deposit",
             encoded.as_ref(),
             "pending deposit completion",
         );
         self.finish_mutation(result)
     }
 
-    /// Discards the staged deposit after settlement confirmed the exact id was never
-    /// recorded.
-    ///
-    /// The caller must hold that confirmation: it proves no custody moved, so abandoning
-    /// the event cannot orphan a recorded deposit and a fresh event may be staged.
-    pub(crate) fn discard_deposit(&mut self, event: &DepositEvent) -> Result<()> {
+    /// Discards a deposit whose identifier is certifiably consumed by another event.
+    pub(crate) fn discard_deposit(&mut self, event: &DepositRequest) -> Result<()> {
         self.ensure_usable()?;
         let encoded = event.encode();
-        let result = remove_deposit_transaction(
+        let result = remove_native_transaction(
             &mut self.connection,
+            "agent_pending_deposit",
             encoded.as_ref(),
             "pending deposit discard",
         );
@@ -1102,6 +1132,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
     let has_vector_entries = table_exists(connection, "agent_vector_entries")?;
     let has_pending = table_exists(connection, "agent_pending_payment")?;
     let has_pending_deposit = table_exists(connection, "agent_pending_deposit")?;
+    let has_pending_transfer = table_exists(connection, "agent_pending_transfer")?;
     let has_pending_claims = table_exists(connection, "agent_pending_claims")?;
     let has_completed_claims = table_exists(connection, "agent_completed_claims")?;
     let has_payments = table_exists(connection, "agent_payments")?;
@@ -1116,7 +1147,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
                     AND name NOT IN (
                         'agent_meta', 'agent_state_openings', 'agent_context',
                         'agent_vector', 'agent_vector_entries',
-                        'agent_pending_payment', 'agent_pending_deposit',
+                        'agent_pending_payment', 'agent_pending_deposit', 'agent_pending_transfer',
                         'agent_pending_claims', 'agent_completed_claims', 'agent_payments',
                         'agent_incoming_cursor', 'agent_incoming', 'agent_reconciled'
                     ))
@@ -1140,6 +1171,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
         && !has_vector_entries
         && !has_pending
         && !has_pending_deposit
+        && !has_pending_transfer
         && !has_pending_claims
         && !has_completed_claims
         && !has_payments
@@ -1158,6 +1190,7 @@ fn schema_presence(connection: &Connection) -> Result<SchemaPresence> {
             && has_vector_entries
             && has_pending
             && has_pending_deposit
+            && has_pending_transfer
             && has_pending_claims
             && has_completed_claims
             && has_payments
@@ -1272,6 +1305,12 @@ fn initialize_schema(
              FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE
          );
 
+         CREATE TABLE agent_pending_transfer (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             event BLOB NOT NULL CHECK (length(event) = {transfer_request_size}),
+             FOREIGN KEY (singleton) REFERENCES agent_meta(singleton) ON DELETE CASCADE
+         );
+
          CREATE TABLE agent_pending_claims (
              kind INTEGER PRIMARY KEY CHECK (kind IN (1, 2)),
              evidence BLOB CHECK (
@@ -1353,7 +1392,8 @@ fn initialize_schema(
         max_claim_size = MAX_PENDING_CLAIM_BYTES,
         batch_id_size = BatchId::<Digest>::SIZE,
         max_receipt_size = MAX_RECEIPT_BYTES,
-        deposit_event_size = DEPOSIT_EVENT_BYTES,
+        deposit_event_size = DEPOSIT_REQUEST_BYTES,
+        transfer_request_size = TRANSFER_REQUEST_BYTES,
     );
     let encoded_account = account.encode();
     let encoded_deployment = deployment.encode();
@@ -1427,6 +1467,12 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
     let cache = read_context_cache(connection, account, operator)?;
     let pending_payment = read_pending_payment(connection, account)?;
     let pending_deposit = read_pending_deposit(connection, account)?;
+    if let Some(request) = &pending_deposit {
+        ensure!(
+            request.deployment == read_binding(connection)?.deployment,
+            "pending deposit belongs to another deployment"
+        );
+    }
     let (pending_withdrawal_claim, pending_payout_claim) =
         read_pending_claims(connection, account)?;
     if let Some(pending) = &pending_payment {
@@ -1450,6 +1496,7 @@ fn read_state(connection: &Connection, account: &Key, operator: &Key) -> Result<
         cache,
         pending_payment,
         pending_deposit,
+        pending_transfer: read_pending_transfer(connection, account)?,
         pending_withdrawal_claim,
         pending_payout_claim,
         receipt_count,
@@ -1673,7 +1720,37 @@ fn read_pending_payment(connection: &Connection, account: &Key) -> Result<Option
     }))
 }
 
-fn read_pending_deposit(connection: &Connection, account: &Key) -> Result<Option<DepositEvent>> {
+fn validate_transfer(request: &NativeTransferRequest, account: &Key) -> Result<()> {
+    ensure!(
+        &request.from == account,
+        "pending transfer belongs to another account"
+    );
+    ensure!(request.amount > 0, "pending transfer has no value");
+    ensure!(
+        request.verify(&request.chain_id),
+        "pending transfer has an invalid signature"
+    );
+    Ok(())
+}
+
+fn read_pending_transfer(
+    connection: &Connection,
+    account: &Key,
+) -> Result<Option<NativeTransferRequest>> {
+    let mut statement = connection
+        .prepare("SELECT length(event), event FROM agent_pending_transfer WHERE singleton = 1")?;
+    let mut rows = statement.query([])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let encoded = read_fixed_blob(row, 0, 1, TRANSFER_REQUEST_BYTES, "pending native transfer")?;
+    let request = NativeTransferRequest::decode(bytes::Bytes::from(encoded))
+        .context("decode pending native transfer")?;
+    validate_transfer(&request, account)?;
+    Ok(Some(request))
+}
+
+fn read_pending_deposit(connection: &Connection, account: &Key) -> Result<Option<DepositRequest>> {
     let mut statement = connection.prepare(
         "SELECT singleton, length(event), event
          FROM agent_pending_deposit
@@ -1688,12 +1765,13 @@ fn read_pending_deposit(connection: &Connection, account: &Key) -> Result<Option
         row.get::<_, i64>(0)? == 1,
         "agent database pending deposit singleton is not canonical"
     );
-    let encoded = read_fixed_blob(row, 1, 2, DEPOSIT_EVENT_BYTES, "pending deposit event")?;
+    let encoded = read_fixed_blob(row, 1, 2, DEPOSIT_REQUEST_BYTES, "pending deposit event")?;
     ensure!(
         rows.next()?.is_none(),
         "agent database has multiple pending deposits"
     );
-    let event = DepositEvent::decode(encoded.as_slice()).context("decode pending deposit event")?;
+    let event = DepositRequest::decode(bytes::Bytes::from(encoded))
+        .context("decode pending deposit event")?;
     validate_deposit(&event, account)?;
     Ok(Some(event))
 }
@@ -1795,12 +1873,16 @@ fn validate_recovery_opening(
     Ok(())
 }
 
-fn validate_deposit(event: &DepositEvent, account: &Key) -> Result<()> {
+fn validate_deposit(event: &DepositRequest, account: &Key) -> Result<()> {
     ensure!(
-        &event.account == account,
+        &event.event.account == account,
         "pending deposit belongs to another account"
     );
-    ensure!(event.amount > 0, "pending deposit has no value");
+    ensure!(event.event.amount > 0, "pending deposit has no value");
+    ensure!(
+        event.verify(&event.chain_id),
+        "pending deposit has an invalid signature"
+    );
     Ok(())
 }
 
@@ -2360,31 +2442,38 @@ fn commit_payment_transaction(
     )
 }
 
-fn stage_deposit_transaction(connection: &mut Connection, encoded_event: &[u8]) -> Result<()> {
+fn stage_native_transaction(
+    connection: &mut Connection,
+    table: &str,
+    encoded_event: &[u8],
+) -> Result<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .context("begin pending deposit stage")?;
+        .context("begin pending native operation stage")?;
     transaction.execute(
-        "INSERT INTO agent_pending_deposit (singleton, event) VALUES (1, ?1)
-         ON CONFLICT(singleton) DO NOTHING",
+        &format!("INSERT INTO {table} (singleton, event) VALUES (1, ?1) ON CONFLICT(singleton) DO NOTHING"),
         [encoded_event],
     )?;
     let stored = transaction
         .query_row(
-            "SELECT event FROM agent_pending_deposit WHERE singleton = 1",
+            &format!("SELECT event FROM {table} WHERE singleton = 1"),
             [],
             |row| row.get::<_, Vec<u8>>(0),
         )
-        .context("staged deposit event is missing")?;
-    ensure!(stored == encoded_event, "another deposit is already staged");
+        .context("staged native operation is missing")?;
+    ensure!(
+        stored == encoded_event,
+        "another native operation is already staged"
+    );
     transaction
         .commit()
-        .map_err(|source| CommitUnknown::new("pending deposit stage", source))?;
+        .map_err(|source| CommitUnknown::new("pending native operation stage", source))?;
     Ok(())
 }
 
-fn remove_deposit_transaction(
+fn remove_native_transaction(
     connection: &mut Connection,
+    table: &str,
     encoded_event: &[u8],
     operation: &'static str,
 ) -> Result<()> {
@@ -2393,7 +2482,7 @@ fn remove_deposit_transaction(
         .with_context(|| format!("begin {operation}"))?;
     ensure!(
         transaction.execute(
-            "DELETE FROM agent_pending_deposit WHERE singleton = 1 AND event = ?1",
+            &format!("DELETE FROM {table} WHERE singleton = 1 AND event = ?1"),
             [encoded_event],
         )? == 1,
         "{operation} does not match durable staging"

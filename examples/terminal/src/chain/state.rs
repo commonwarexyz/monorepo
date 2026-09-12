@@ -1,97 +1,52 @@
-//! Settlement state layout and block execution over QMDB.
+//! Native balances, operator registration, and clearing execution over QMDB.
 //!
-//! # State shape
+//! Genesis fixes the native supply, resource prices, timing policy, and initial deployments.
+//! The certified registry authorizes later deployments with immutable operator identities,
+//! account enrollment, peer identities, and dealing limits. Registry and native-account keys
+//! use the immutable chain domain; clearing records use their deployment domain.
+//! A bounded digest directory enumerates immutable registration point records. Deadline work
+//! uses deployment IDs and machines; routed transactions load their complete account rosters.
 //!
-//! One chain hosts several deployments, and every key domain carries the
-//! deployment dimension. Every key is 32 entropy bytes (a domain-tagged
-//! digest of the deployment digest and the record's identity) followed by
-//! one domain tag byte, so the prefix-indexing translator sees high-entropy
-//! prefixes and the domain stays explicit in the key. All domains live
-//! forever. The value is the [`Record`] enum, one variant per domain:
+//! Native deposits debit their signing account and credit clearing custody atomically. A
+//! finalized clearing output creates a claim reserve; claiming it consumes the proof position
+//! and credits its authenticated native destination in the same state transition. Refunds
+//! and frozen-state claims follow the same rule. Fees transfer native value from the operator
+//! to the genesis treasury, preserving the sum of native balances, active custody, and reserves.
+//! [`SettlementTx::ClaimDeposit`] combines a finalized claim and a signed deposit without
+//! exposing either half if the destination rejects the operation.
 //!
-//! - machine singleton (per deployment): the codec-encoded settlement
-//!   machine (the clearing [`SettlementChain`] plus the last advanced
-//!   height)
-//! - status singleton (per deployment): height, block timestamp,
-//!   deployment, clearing state root, last finalized epoch, custody,
-//!   claimable, hard fault flag
-//! - epoch anchor by epoch, admitted roots by epoch, claim roots by batch id
-//! - deposit records by id, withdrawal queue by account, registration
-//!   singleton (per deployment), fault singleton (per deployment)
-//! - release records: withdrawal by (batch, position), payout by (batch,
-//!   position), hard fault by account, deposit refund by account
+//! # Deadlines and faults
 //!
-//! The machine record is state, never a query target: every certified read
-//! goes through the granular domains, which remain derived write-only
-//! projections of the machine. The stateful determinism contract holds
-//! trivially because the machines themselves live in the batch: given the
-//! same parent state and inputs, execution reads, mutates, and rewrites the
-//! same values on every fork.
+//! Block height is the only deadline clock. Execution observes each machine's liveness
+//! deadlines before processing transactions, retaining those observations even if a subsequent
+//! request is rejected. Registration assigns deadlines from genesis policy and enables a
+//! successor registration after admission. Finalization consumes the FIFO front strictly after
+//! its challenge window. A hard fault permanently fences its deployment while preserving the
+//! valid pending prefix, finalized reserves, and independent terminal claims.
 //!
-//! # Deployment isolation
+//! # Persistence and replay
 //!
-//! Execution routes every transaction to exactly one configured deployment's
-//! machine (see [`crate::chain::tx`] for how each variant names or derives
-//! its deployment) and applies it there alone. The isolation invariant: no
-//! transaction reads or writes another deployment's records. Every key a
-//! transaction's handler touches derives from its routed deployment's
-//! digest, the machine it mutates is that deployment's, and a transaction
-//! naming an unconfigured deployment is rejected effect-free with the typed
-//! [`Reject::UnknownDeployment`] reason. Deadline observations likewise run
-//! per machine, and each deployment's derived records are written under its
-//! own digest.
+//! Every machine, native balance, registry entry, and consumed transfer or claim record lives
+//! in the same forked QMDB batch. The batch commits only after execution finishes. Deposit IDs,
+//! signed transfer IDs scoped to their debit owner, deployment identities, epoch sequence, and
+//! claim positions own replay protection; no global wallet nonce is required. Native transfer
+//! records and the clearing primitive's lifetime replay records remain available for exact
+//! retry resolution. Certified granular records expose each applied effect to clients.
 //!
-//! # Block-height deadlines
-//!
-//! Block height is the clock, and every deadline is an absolute block height
-//! opened by the chain at the inclusion of the operator submission that
-//! triggers it. A registration carries no timing: execution assigns its
-//! admission deadline (the inclusion height plus the genesis admission
-//! offset) and its challenge deadline (the admission deadline plus the
-//! genesis challenge duration), and an admission opens the challenge window
-//! and the successor epoch's registration eligibility while that window is
-//! still running. Deposits and withdrawals carry their signed absolute
-//! deadlines in height units. The deployment fixes the policy, the chain
-//! assigns the instance, and the operator chooses nothing about timing, only
-//! when to submit. An idle deployment has no live obligations and can never
-//! fault by idling. There is no admission fast-forward: finalization waits
-//! for real heights past the challenge deadline.
-//!
-//! Block timestamps are threaded through execution only for the status
-//! record (query recency and display). No deadline ever reads a timestamp.
-//!
-//! # Replay protection
-//!
-//! Replay protection is domain state, never a history of transaction hashes:
-//! every transaction carries a natural idempotence key, so no account nonces
-//! and no digest-keyed outcome map are needed and the guard set is O(live
-//! state). A duplicate inclusion of already-applied bytes re-executes and
-//! lands on its variant's own guard as a harmless no-op or a typed conflict:
-//! a deposit on its consumed id, a withdrawal on its account slot and replay
-//! id, a registration on the registration record and the epoch sequence, an
-//! admission on the registration's admitted mark and the admitted record, a
-//! claim on its consumed (batch, position) or account release, a challenge
-//! on the one-proven-per-batch rule, and the hard-fault transitions on the
-//! fault records. Rejected transactions write nothing: acceptance is provable
-//! through the variant's effect record, and a rejection is effect-free.
-//!
-//! # Execution shape
-//!
-//! [`execute`] runs one block: decode the machine record (or start from
-//! genesis), observe deadlines exactly once for the block height, apply each
-//! transaction to a typed outcome (never a panic for data-dependent
-//! rejections), then write the derived records, the status singleton, and
-//! the re-encoded machine, and merkleize. The typed outcome is internal:
-//! only an applied transaction's derived records reach state.
+//! [`execute`] loads the registry and machines, observes clocks, applies transactions, and
+//! merkleizes the complete result. [`preflight`] trials canonical application at one applied tip;
+//! execution repeats every authoritative check at inclusion.
 
 use crate::{
     chain::{
+        app::Finalized,
+        native::{MAX_DEPLOYMENTS, NativeGenesis, RegistryEntry},
         tx::{
             AdmitRequest, ChallengeRequest, ClaimHardFaultRequest, ClaimPendingDepositRequest,
-            ExternalPayoutClaimRequest, QueueWithdrawalRequest, RegisterEpochRequest, SettlementTx,
-            WithdrawalClaimRequest,
+            ExternalPayoutClaimRequest, FinalizedClaim, NativeTransferRequest,
+            QueueWithdrawalRequest, RegisterEpochRequest, SettlementTx, WithdrawalClaimRequest,
         },
-        types::{Batch, Database, KEY_BYTES, Sealed, StateKey},
+        types::{Batch, Database, KEY_BYTES, Qmdb, Sealed, StateKey},
     },
     protocol::{
         Deployment, DepositEvent, Key, MAX_DESTINATION_BYTES, SQLITE_U64_MAX, Timing, committee,
@@ -108,14 +63,16 @@ use commonware_clearing::bajillion::{
         Bounds, ClaimError, DepositRefund, HardFaultReason, HardFaultRelease, HardFaultSettlement,
         Registered, SettlementChain, SettlementError,
     },
-    transition::{BatchId, ExternalPayout, OperatorKey, RootBundle, WithdrawalOutput},
+    transition::{BatchId, ExternalPayout, RootBundle, WithdrawalOutput},
 };
 use commonware_codec::{
-    Decode, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Decode, DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read,
+    ReadExt as _, Write,
 };
 use commonware_consensus::types::Height;
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_glue::stateful::db::Unmerkleized as _;
+use commonware_macros::boxed;
 use commonware_runtime::Spawner;
 use commonware_storage::{Context as StorageContext, mmr, qmdb::Error as QmdbError};
 use std::collections::BTreeMap;
@@ -135,10 +92,9 @@ const MACHINE_BOUNDS: Bounds = Bounds {
 /// Maximum encoded bytes accepted for the persisted machine record.
 const MAX_MACHINE_BYTES: usize = 1 << 24;
 
-/// The demo asset adapter admits any non-empty destination within the
-/// operator bound.
-const fn eligible(destination: &Bytes) -> bool {
-    !destination.is_empty() && destination.len() <= MAX_DESTINATION_BYTES
+/// Native withdrawals require a canonical public key with a stable credit destination.
+fn eligible(destination: &Bytes) -> bool {
+    Key::decode(destination.clone()).is_ok()
 }
 
 /// Key domains. The discriminant is the trailing key byte.
@@ -158,6 +114,10 @@ enum Domain {
     Refund = 10,
     Fault = 11,
     Machine = 12,
+    Registry = 13,
+    NativeBalance = 14,
+    NativeTransfer = 15,
+    RegistryEntry = 16,
 }
 
 /// Derives one state key: the domain-tagged digest of the deployment digest
@@ -248,6 +208,114 @@ pub(crate) fn fault_key(deployment: &Digest) -> StateKey {
 /// Key of one deployment's machine singleton.
 pub(crate) fn machine_key(deployment: &Digest) -> StateKey {
     derive(deployment, Domain::Machine, &[])
+}
+
+/// Key of the chain's bounded authenticated operator registry.
+pub(crate) fn registry_key(chain: &Digest) -> StateKey {
+    derive(chain, Domain::Registry, &[])
+}
+
+/// Key of an account's spendable native balance.
+pub(crate) fn native_balance_key(chain: &Digest, account: &Key) -> StateKey {
+    derive(chain, Domain::NativeBalance, account.as_ref())
+}
+
+/// Key consuming one signed native transfer identifier under its debit owner.
+pub(crate) fn native_transfer_key(chain: &Digest, from: &Key, id: &Digest) -> StateKey {
+    derive(chain, Domain::NativeTransfer, &(from.clone(), *id).encode())
+}
+
+/// Key of one immutable deployment registration under the chain domain.
+pub(crate) fn registry_entry_key(chain: &Digest, deployment: &Digest) -> StateKey {
+    derive(chain, Domain::RegistryEntry, deployment.as_ref())
+}
+
+/// Reads the bounded deployment directory, using genesis before its first block.
+#[cfg(test)]
+pub(crate) async fn registry<E>(
+    db: &Database<E>,
+    native: &NativeGenesis,
+) -> Result<Vec<Digest>, QmdbError<mmr::Family>>
+where
+    E: StorageContext + Spawner,
+{
+    Ok(
+        match db
+            .read()
+            .await
+            .get(&registry_key(&native.chain_id()))
+            .await?
+        {
+            Some(Record::Registry(ids)) => ids,
+            None => native
+                .deployments
+                .iter()
+                .map(|entry| *entry.deployment.digest())
+                .collect(),
+            Some(_) => unreachable!("registry key has a directory record"),
+        },
+    )
+}
+
+/// Reads one complete immutable registration without loading unrelated account rosters.
+#[cfg(test)]
+pub(crate) async fn registry_entry<E>(
+    db: &Database<E>,
+    native: &NativeGenesis,
+    deployment: &Digest,
+) -> Result<Option<RegistryEntry>, QmdbError<mmr::Family>>
+where
+    E: StorageContext + Spawner,
+{
+    let chain_id = native.chain_id();
+    let guard = db.read().await;
+    match guard
+        .get(&registry_entry_key(&chain_id, deployment))
+        .await?
+    {
+        Some(Record::RegistryEntry(entry)) => {
+            assert_eq!(
+                entry.deployment.digest(),
+                deployment,
+                "registration key binds its deployment"
+            );
+            Ok(Some(entry))
+        }
+        None => Ok(native
+            .deployments
+            .iter()
+            .find(|entry| entry.deployment.digest() == deployment)
+            .cloned()),
+        Some(_) => unreachable!("registration entry key holds a registration"),
+    }
+}
+
+/// Reads a native account balance, including the allocation before the first block.
+#[cfg(test)]
+pub(crate) async fn native_balance<E>(
+    db: &Database<E>,
+    native: &NativeGenesis,
+    account: &Key,
+) -> Result<u64, QmdbError<mmr::Family>>
+where
+    E: StorageContext + Spawner,
+{
+    Ok(
+        match db
+            .read()
+            .await
+            .get(&native_balance_key(&native.chain_id(), account))
+            .await?
+        {
+            Some(Record::NativeBalance(balance)) => balance,
+            None => native
+                .balances
+                .iter()
+                .find(|entry| &entry.key == account)
+                .map_or(0, |entry| entry.balance),
+            Some(_) => unreachable!("native balance key has a balance record"),
+        },
+    )
 }
 
 /// The status singleton: the chain's one coherent settlement fact.
@@ -423,9 +491,6 @@ impl Read for ClaimRootsResponse {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AdmittedRootsResponse {
     pub(crate) batch_id: BatchId<Digest>,
-    /// The change root, always `roots.change`: the one root every
-    /// reconciliation reads, kept as a field for those readers.
-    pub(crate) change: VectorRoot<Digest>,
     /// The full root bundle the admitted header commits.
     pub(crate) roots: RootBundle<Digest>,
     /// Whether FIFO settlement finalized the close.
@@ -440,7 +505,6 @@ impl AdmittedRootsResponse {
     ) -> Self {
         Self {
             batch_id,
-            change: roots.change,
             roots,
             finalized,
         }
@@ -1022,10 +1086,14 @@ impl Read for HardFaultReleaseRecord {
     }
 }
 
-/// One state value. Every domain stores exactly one variant.
+/// One authenticated state value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Record {
+    Registry(Vec<Digest>),
+    RegistryEntry(RegistryEntry),
+    NativeBalance(u64),
+    NativeTransfer(NativeTransferRequest),
     Status(StatusRecord),
     Anchor(Digest),
     Admitted(AdmittedRootsResponse),
@@ -1046,6 +1114,22 @@ pub(crate) enum Record {
 impl Write for Record {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
+            Self::Registry(r) => {
+                13u8.write(buf);
+                r.write(buf);
+            }
+            Self::RegistryEntry(entry) => {
+                16u8.write(buf);
+                entry.write(buf);
+            }
+            Self::NativeBalance(r) => {
+                14u8.write(buf);
+                r.write(buf);
+            }
+            Self::NativeTransfer(r) => {
+                15u8.write(buf);
+                r.write(buf);
+            }
             Self::Status(record) => {
                 0_u8.write(buf);
                 record.write(buf);
@@ -1105,6 +1189,10 @@ impl Write for Record {
 impl EncodeSize for Record {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Self::Registry(r) => r.encode_size(),
+            Self::RegistryEntry(entry) => entry.encode_size(),
+            Self::NativeBalance(r) => r.encode_size(),
+            Self::NativeTransfer(r) => r.encode_size(),
             Self::Status(record) => record.encode_size(),
             Self::Anchor(anchor) => anchor.encode_size(),
             Self::Admitted(record) => record.encode_size(),
@@ -1127,6 +1215,16 @@ impl Read for Record {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
+            13 => {
+                let ids = Vec::<Digest>::read_cfg(buf, &(RangeCfg::new(0..=MAX_DEPLOYMENTS), ()))?;
+                if ids.iter().collect::<std::collections::BTreeSet<_>>().len() != ids.len() {
+                    return Err(CodecError::Invalid("Registry", "duplicate deployment"));
+                }
+                Ok(Self::Registry(ids))
+            }
+            16 => Ok(Self::RegistryEntry(RegistryEntry::read(buf)?)),
+            14 => Ok(Self::NativeBalance(u64::read(buf)?)),
+            15 => Ok(Self::NativeTransfer(NativeTransferRequest::read(buf)?)),
             0 => Ok(Self::Status(StatusRecord::read(buf)?)),
             1 => Ok(Self::Anchor(Digest::read(buf)?)),
             2 => Ok(Self::Admitted(AdmittedRootsResponse::read(buf)?)),
@@ -1155,9 +1253,9 @@ impl Read for Record {
 ///
 /// Never persisted: acceptance is provable through the variant's effect
 /// record and a rejection is effect-free, so the typed reason exists only
-/// for execution tracing and the advisory dry-run taxonomy.
+/// for execution tracing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TxOutcome {
+enum TxOutcome {
     /// The transaction mutated settlement state.
     Applied,
     /// A challenge adjudicated with no contradiction.
@@ -1171,148 +1269,69 @@ pub(crate) enum TxOutcome {
 
 /// Typed rejection reasons.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub(crate) enum Reject {
-    /// The account is not a configured terminal agent.
-    UnknownAccount = 0,
+enum Reject {
+    /// The account is not enrolled in the target deployment.
+    UnknownAccount,
     /// A deposit id was reused for another event.
-    DepositConflict = 1,
+    DepositConflict,
     /// An account already queued another withdrawal.
-    WithdrawalConflict = 2,
+    WithdrawalConflict,
     /// An epoch registration changed after it was accepted.
-    RegistrationConflict = 3,
+    RegistrationConflict,
     /// Another close was admitted or finalized for the epoch.
-    AdmissionConflict = 4,
+    AdmissionConflict,
     /// Challenge evidence changed after it was proven.
-    ChallengeConflict = 5,
+    ChallengeConflict,
     /// A terminal state claim position was reused.
-    PositionConflict = 6,
+    PositionConflict,
     /// The next settlement epoch is already registered.
-    Fenced = 7,
+    Fenced,
     /// A deadline-bearing transition landed outside its window, or the
     /// assigned epoch deadlines exceed the block clock.
-    Deadline = 8,
+    Deadline,
     /// The value exceeds the operator storage domain.
-    Domain = 9,
+    Domain,
     /// The epoch is not the consecutive boundary or its replay expired.
-    EpochSequence = 10,
+    EpochSequence,
     /// The settlement epoch was not registered.
-    NotRegistered = 11,
+    NotRegistered,
     /// The close does not match the registered settlement epoch.
-    SubmissionMismatch = 12,
+    SubmissionMismatch,
     /// The operator staged deposits differ from settlement.
-    StagedDivergence = 13,
+    StagedDivergence,
     /// The operator deposit boundary differs from settlement.
-    BoundaryDivergence = 14,
+    BoundaryDivergence,
     /// The registration omits a queued settlement withdrawal.
-    MissingQueuedWithdrawal = 15,
+    MissingQueuedWithdrawal,
     /// The registration is missing an opening for a carried withdrawal.
-    MissingOpening = 16,
+    MissingOpening,
     /// The registration signature failed authentication.
-    Signature = 17,
+    Signature,
     /// The claim was adjudicated against an immutable finalized batch and
     /// rejected. The verdict can never change.
-    ClaimInvalid = 18,
+    ClaimInvalid,
     /// Terminal hard-fault settlement has not begun.
-    FaultUnavailable = 19,
+    FaultUnavailable,
     /// The deployment is permanently hard-faulted.
-    Faulted = 20,
+    Faulted,
     /// The settlement chain rejected the transition.
-    Chain = 21,
-    /// The transaction names a deployment this chain does not configure.
-    UnknownDeployment = 22,
-}
-
-impl Reject {
-    const fn from_tag(tag: u8) -> Result<Self, CodecError> {
-        Ok(match tag {
-            0 => Self::UnknownAccount,
-            1 => Self::DepositConflict,
-            2 => Self::WithdrawalConflict,
-            3 => Self::RegistrationConflict,
-            4 => Self::AdmissionConflict,
-            5 => Self::ChallengeConflict,
-            6 => Self::PositionConflict,
-            7 => Self::Fenced,
-            8 => Self::Deadline,
-            9 => Self::Domain,
-            10 => Self::EpochSequence,
-            11 => Self::NotRegistered,
-            12 => Self::SubmissionMismatch,
-            13 => Self::StagedDivergence,
-            14 => Self::BoundaryDivergence,
-            15 => Self::MissingQueuedWithdrawal,
-            16 => Self::MissingOpening,
-            17 => Self::Signature,
-            18 => Self::ClaimInvalid,
-            19 => Self::FaultUnavailable,
-            20 => Self::Faulted,
-            21 => Self::Chain,
-            22 => Self::UnknownDeployment,
-            tag => return Err(CodecError::InvalidEnum(tag)),
-        })
-    }
-}
-
-/// Advisory dry-run verdict for one submitted transaction, answered by the
-/// serving validator against its latest applied state.
-///
-/// Unauthenticated UX advice for submitters, never authorization or
-/// evidence: execution re-checks everything at inclusion, and a `Doomed`
-/// answer can go stale the moment state advances. It exists because
-/// rejections are effect-free, so this is the only typed diagnosis a
-/// submitter gets.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Advice {
-    /// The latest applied state already holds the transaction's effect.
-    Applied,
-    /// The checked subset (stateless checks plus a read-only feasibility
-    /// peek at the domain records the transaction would consume) shows no
-    /// contradiction. Deeper data-dependent checks still run at inclusion.
-    Plausible,
-    /// The transaction would be rejected as of the latest applied state.
-    Doomed(Reject),
-}
-
-impl Write for Advice {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Applied => 0_u8.write(buf),
-            Self::Plausible => 1_u8.write(buf),
-            Self::Doomed(reject) => {
-                2_u8.write(buf);
-                (*reject as u8).write(buf);
-            }
-        }
-    }
-}
-
-impl EncodeSize for Advice {
-    fn encode_size(&self) -> usize {
-        match self {
-            Self::Doomed(_) => 2,
-            _ => 1,
-        }
-    }
-}
-
-impl Read for Advice {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            0 => Ok(Self::Applied),
-            1 => Ok(Self::Plausible),
-            2 => Ok(Self::Doomed(Reject::from_tag(u8::read(buf)?)?)),
-            tag => Err(CodecError::InvalidEnum(tag)),
-        }
-    }
+    Chain,
+    /// The transaction names an unregistered deployment.
+    UnknownDeployment,
+    /// Native account cannot cover the authorized debit.
+    InsufficientBalance,
+    /// The signed resource price differs from genesis policy.
+    Fee,
+    /// The registry is full or the requested resource budget exceeds policy.
+    RegistryLimit,
+    /// An immutable registration or native transfer identifier was already consumed.
+    NativeConflict,
 }
 
 /// The result of applying one transaction: its outcome plus the granular
 /// records it derives.
-pub(crate) struct Step {
-    pub(crate) outcome: TxOutcome,
+struct Step {
+    outcome: TxOutcome,
     /// Derived record writes for an applied transaction.
     writes: Vec<(StateKey, Option<Record>)>,
 }
@@ -1392,14 +1411,22 @@ const fn chain_rejection(error: &SettlementError) -> Reject {
 /// therefore the operation order in the batch) is the canonical key order.
 type Writes = BTreeMap<StateKey, Option<Record>>;
 
-/// Read view over the block's pending writes with fall-through to the parent
-/// batch, so a transaction observes records written earlier in its own block.
+/// Canonical source beneath the transaction's pending writes.
+enum Source<'a, E>
+where
+    E: StorageContext + Spawner,
+{
+    Batch(&'a Batch<E>),
+    Applied(&'a Qmdb<E>),
+}
+
+/// Pending writes over a parent batch or one pinned applied database snapshot.
 struct View<'a, E>
 where
     E: StorageContext + Spawner,
 {
     writes: &'a Writes,
-    batch: &'a Batch<E>,
+    source: Source<'a, E>,
 }
 
 impl<E> View<'_, E>
@@ -1410,7 +1437,18 @@ where
         if let Some(record) = self.writes.get(key) {
             return Ok(record.clone());
         }
-        self.batch.get(key).await
+        match self.source {
+            Source::Batch(batch) => batch.get(key).await,
+            Source::Applied(db) => db.get(key).await,
+        }
+    }
+
+    async fn balance(&self, chain: &Digest, account: &Key) -> Result<u64, QmdbError<mmr::Family>> {
+        Ok(match self.get(&native_balance_key(chain, account)).await? {
+            Some(Record::NativeBalance(balance)) => balance,
+            None => 0,
+            Some(_) => unreachable!("native balance key has a balance record"),
+        })
     }
 
     /// Reads one deployment's live registration record.
@@ -1448,12 +1486,6 @@ where
 /// transaction is a harmless no-op or a typed conflict.
 pub(crate) struct Machine {
     chain: SettlementChain<Sha256, Key>,
-    /// The deployment's aggregable-acknowledgment public key.
-    ///
-    /// Genesis-fixed alongside the operator clearing key and persisted with
-    /// the machine so the DA sealer can verify a dealing's combined operator
-    /// countersignatures against the deployment it routes to.
-    operator_ack: OperatorKey,
     /// Last advanced block height.
     height: u64,
     /// Last advanced block timestamp (milliseconds since the Unix epoch).
@@ -1467,7 +1499,6 @@ pub(crate) struct Machine {
 impl Write for Machine {
     fn write(&self, buf: &mut impl BufMut) {
         self.chain.write(buf);
-        self.operator_ack.write(buf);
         self.height.write(buf);
         self.timestamp.write(buf);
     }
@@ -1475,10 +1506,7 @@ impl Write for Machine {
 
 impl EncodeSize for Machine {
     fn encode_size(&self) -> usize {
-        self.chain.encode_size()
-            + self.operator_ack.encode_size()
-            + self.height.encode_size()
-            + self.timestamp.encode_size()
+        self.chain.encode_size() + self.height.encode_size() + self.timestamp.encode_size()
     }
 }
 
@@ -1488,7 +1516,6 @@ impl Read for Machine {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
             chain: SettlementChain::read_cfg(buf, &MACHINE_BOUNDS)?,
-            operator_ack: OperatorKey::read(buf)?,
             height: u64::read(buf)?,
             timestamp: u64::read(buf)?,
         })
@@ -1510,15 +1537,9 @@ impl Machine {
         .expect("the genesis settlement configuration is valid");
         Self {
             chain,
-            operator_ack: config.operator_ack,
             height: 0,
             timestamp: 0,
         }
-    }
-
-    /// The deployment's genesis-fixed aggregable-acknowledgment public key.
-    pub(crate) const fn operator_ack(&self) -> &OperatorKey {
-        &self.operator_ack
     }
 
     /// Returns the live registered close: the bound context with the exact
@@ -1612,6 +1633,11 @@ impl Machine {
         E: StorageContext + Spawner,
     {
         Ok(match tx {
+            SettlementTx::RegisterDeployment(_)
+            | SettlementTx::NativeTransfer(_)
+            | SettlementTx::ClaimDeposit(_) => {
+                unreachable!("native transaction is executed by the native ledger")
+            }
             SettlementTx::Deposit(request) => self.deposit(config, height, &request.event),
             SettlementTx::QueueWithdrawal(request) => {
                 self.queue_withdrawal(config, height, request)
@@ -1628,7 +1654,9 @@ impl Machine {
             SettlementTx::Challenge(request) => {
                 self.challenge(config, height, request, view).await?
             }
-            SettlementTx::BeginHardFaultSettlement(_) => self.begin_hard_fault_settlement(config),
+            SettlementTx::BeginHardFaultSettlement(_) => {
+                self.begin_hard_fault_settlement(config, view).await?
+            }
             SettlementTx::ClaimHardFault(request) => self.claim_hard_fault(config, request),
             SettlementTx::ClaimPendingDeposit(request) => {
                 self.claim_pending_deposit(config, height, request)
@@ -1707,6 +1735,7 @@ impl Machine {
             &request.deposits_root,
             &request.staged_root,
             &request.withdrawals,
+            request.fee,
             &request.signature,
         ) {
             return Ok(Step::rejected(Reject::Signature));
@@ -1969,15 +1998,28 @@ impl Machine {
         }
     }
 
-    fn begin_hard_fault_settlement(&mut self, config: &Deployment) -> Step {
+    async fn begin_hard_fault_settlement<E>(
+        &mut self,
+        config: &Deployment,
+        view: &View<'_, E>,
+    ) -> Result<Step, QmdbError<mmr::Family>>
+    where
+        E: StorageContext + Spawner,
+    {
+        if matches!(
+            view.get(&fault_key(config.digest())).await?,
+            Some(Record::Fault(FaultRecord::Settling(_)))
+        ) {
+            return Ok(Step::outcome(TxOutcome::Unavailable));
+        }
         let settlement = match self.chain.begin_hard_fault_settlement() {
             Ok(settlement) => settlement,
-            Err(error) => return Step::rejected(chain_rejection(&error)),
+            Err(error) => return Ok(Step::rejected(chain_rejection(&error))),
         };
-        Step::applied(vec![(
+        Ok(Step::applied(vec![(
             fault_key(config.digest()),
             Some(Record::Fault(FaultRecord::Settling(settlement.into()))),
-        )])
+        )]))
     }
 
     fn claim_hard_fault(&mut self, config: &Deployment, request: &ClaimHardFaultRequest) -> Step {
@@ -2050,11 +2092,11 @@ impl Machine {
     }
 
     /// The status record for a block at `height` with `timestamp`.
-    const fn status(&self, config: &Deployment, height: u64, timestamp: u64) -> StatusRecord {
+    const fn status(&self, deployment: Digest, height: u64, timestamp: u64) -> StatusRecord {
         StatusRecord {
             height,
             timestamp,
-            deployment: *config.digest(),
+            deployment,
             state_root: self.chain.current_state_root(),
             last_finalized: self.chain.expected_epoch().checked_sub(1),
             custody: self.chain.custody_balance(),
@@ -2064,123 +2106,543 @@ impl Machine {
     }
 }
 
-/// Resolves the deployment index one transaction routes to, or the final
-/// outcome when no configured deployment matches.
-///
-/// Naming variants resolve by their explicit or signed deployment digest and
-/// fail typed on an unconfigured one. Batch-keyed variants resolve by their
-/// batch id, which is deployment-unique by construction: a claim's batch
-/// routes by the deployment holding its claim roots record (absent
-/// everywhere means not claimable anywhere yet, the retryable
-/// [`TxOutcome::Unavailable`]), and a challenge's batch routes by the
-/// deployment whose admitted pipeline holds it (absent everywhere mirrors
-/// the chain's own `NoPendingBatch` rejection).
-async fn route<E>(
-    deployments: &[Deployment],
-    machines: &[Machine],
+/// Builds checked native account updates without committing any clearing or replay effect.
+async fn balance_changes<E>(
     view: &View<'_, E>,
-    tx: &SettlementTx,
-) -> Result<Result<usize, TxOutcome>, QmdbError<mmr::Family>>
+    chain: &Digest,
+    changes: &[(Key, i128)],
+) -> Result<Result<Vec<(StateKey, Option<Record>)>, Reject>, QmdbError<mmr::Family>>
 where
     E: StorageContext + Spawner,
 {
-    let named = |digest: &Digest| {
-        deployments
-            .iter()
-            .position(|deployment| deployment.digest() == digest)
-            .ok_or(TxOutcome::Rejected(Reject::UnknownDeployment))
-    };
-    Ok(match tx {
-        SettlementTx::Deposit(request) => named(&request.deployment),
-        SettlementTx::QueueWithdrawal(request) => named(request.request.body().deployment()),
-        SettlementTx::RegisterEpoch(request) => named(&request.deployment),
-        SettlementTx::Admit(request) => named(&request.deployment),
-        SettlementTx::BeginHardFaultSettlement(request) => named(&request.deployment),
-        SettlementTx::ClaimHardFault(request) => named(&request.deployment),
-        SettlementTx::ClaimPendingDeposit(request) => named(&request.deployment),
-        SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest { batch_id, .. })
-        | SettlementTx::ClaimExternalPayout(ExternalPayoutClaimRequest { batch_id, .. }) => {
-            let mut routed = Err(TxOutcome::Unavailable);
-            for (index, deployment) in deployments.iter().enumerate() {
-                if view
-                    .get(&claim_roots_key(deployment.digest(), batch_id))
-                    .await?
-                    .is_some()
-                {
-                    routed = Ok(index);
-                    break;
-                }
-            }
-            routed
-        }
-        SettlementTx::Challenge(request) => machines
-            .iter()
-            .position(|machine| {
-                machine
-                    .chain
-                    .pending_batches()
-                    .any(|batch| batch.header.batch_id::<Sha256>() == request.batch_id)
-            })
-            .ok_or(TxOutcome::Rejected(Reject::Chain)),
-    })
+    let mut totals = BTreeMap::<Key, i128>::new();
+    for (account, amount) in changes {
+        *totals.entry(account.clone()).or_default() += amount;
+    }
+    let mut writes = Vec::with_capacity(totals.len());
+    for (account, change) in totals {
+        let balance = i128::from(view.balance(chain, &account).await?) + change;
+        let Ok(balance) = u64::try_from(balance) else {
+            return Ok(Err(if balance < 0 {
+                Reject::InsufficientBalance
+            } else {
+                Reject::Domain
+            }));
+        };
+        writes.push((
+            native_balance_key(chain, &account),
+            Some(Record::NativeBalance(balance)),
+        ));
+    }
+    Ok(Ok(writes))
 }
 
-/// Executes one block against a forked batch: decode every configured
-/// deployment's machine record (or start it from genesis), observe each
-/// machine's deadlines exactly once for `height`, route and apply every
-/// transaction to its deployment's machine, then write the derived records,
-/// each status singleton, and each re-encoded machine, and merkleize.
+/// Native credits are derived only from successful, proof-authenticated clearing releases.
+fn released_credits(step: &Step) -> Vec<(Key, i128)> {
+    let mut credits = Vec::new();
+    for (_, record) in &step.writes {
+        match record {
+            Some(Record::WithdrawalRelease(record)) => {
+                let account = Key::decode(record.released.destination.clone())
+                    .expect("accepted destination is a canonical account key");
+                credits.push((account, i128::from(record.released.amount)));
+            }
+            Some(Record::PayoutRelease(record)) => credits.push((
+                record.released.receiver.clone(),
+                i128::from(record.released.amount),
+            )),
+            Some(Record::Refund(record)) => {
+                credits.push((record.account.clone(), i128::from(record.amount)))
+            }
+            Some(Record::HardFault(record)) => {
+                let release = &record.released;
+                credits.push((release.account.clone(), i128::from(release.residual)));
+                if let Some(withdrawal) = &release.withdrawal {
+                    let account = Key::decode(withdrawal.destination().clone())
+                        .expect("accepted destination is a canonical account key");
+                    credits.push((account, i128::from(withdrawal.amount())));
+                }
+            }
+            _ => {}
+        }
+    }
+    credits
+}
+
+/// Loads each routed registration and machine once from the transaction's exact view.
+async fn load_deployments<E>(
+    view: &View<'_, E>,
+    chain: &Digest,
+    deployments: &[Digest],
+    entries: &mut [Option<RegistryEntry>],
+    machines: &mut [Option<Machine>],
+    indices: &[usize],
+) -> Result<(), QmdbError<mmr::Family>>
+where
+    E: StorageContext + Spawner,
+{
+    for &index in indices {
+        if entries[index].is_none() {
+            let Some(Record::RegistryEntry(entry)) = view
+                .get(&registry_entry_key(chain, &deployments[index]))
+                .await?
+            else {
+                unreachable!(
+                    "directory membership and immutable registration are written atomically"
+                );
+            };
+            assert_eq!(
+                entry.deployment.digest(),
+                &deployments[index],
+                "registration key binds its deployment"
+            );
+            entries[index] = Some(entry);
+        }
+        if machines[index].is_none() {
+            let Some(Record::Machine(encoded)) =
+                view.get(&machine_key(&deployments[index])).await?
+            else {
+                unreachable!("every registered deployment has a machine");
+            };
+            machines[index] = Some(Machine::decode(encoded).expect("machine encoding is valid"));
+        }
+    }
+    Ok(())
+}
+
+/// Applies native ownership and clearing effects within the same uncommitted block view.
+#[allow(clippy::too_many_arguments)]
+async fn apply_native<E>(
+    native: &NativeGenesis,
+    chain_id: &Digest,
+    entries: &mut Vec<Option<RegistryEntry>>,
+    deployments: &mut Vec<Digest>,
+    machines: &mut Vec<Option<Machine>>,
+    height: u64,
+    timestamp: u64,
+    timing: &Timing,
+    tx: &SettlementTx,
+    view: &View<'_, E>,
+) -> Result<Step, QmdbError<mmr::Family>>
+where
+    E: StorageContext + Spawner,
+{
+    if let SettlementTx::NativeTransfer(request) = tx {
+        if !request.verify(chain_id) {
+            return Ok(Step::rejected(Reject::Signature));
+        }
+        if request.amount == 0 {
+            return Ok(Step::rejected(Reject::Domain));
+        }
+        let key = native_transfer_key(chain_id, &request.from, &request.id);
+        if view.get(&key).await?.is_some() {
+            return Ok(Step::rejected(Reject::NativeConflict));
+        }
+        if view.balance(chain_id, &request.from).await? < request.amount {
+            return Ok(Step::rejected(Reject::InsufficientBalance));
+        }
+        let changes = [
+            (request.from.clone(), -i128::from(request.amount)),
+            (request.to.clone(), i128::from(request.amount)),
+        ];
+        let mut writes = match balance_changes(view, chain_id, &changes).await? {
+            Ok(writes) => writes,
+            Err(error) => return Ok(Step::rejected(error)),
+        };
+        writes.push((key, Some(Record::NativeTransfer(request.clone()))));
+        return Ok(Step::applied(writes));
+    }
+    if let SettlementTx::RegisterDeployment(request) = tx {
+        if !request.verify(chain_id) {
+            return Ok(Step::rejected(Reject::Signature));
+        }
+        if request.fee != native.registration_fee {
+            return Ok(Step::rejected(Reject::Fee));
+        }
+        let Ok(entry) = request.entry(native) else {
+            return Ok(Step::rejected(Reject::Domain));
+        };
+        let digest = *entry.deployment.digest();
+        if deployments.contains(&digest) {
+            return Ok(Step::rejected(Reject::NativeConflict));
+        }
+        if entries.len() >= native.max_deployments as usize
+            || request.max_dealing_bytes == 0
+            || request.max_dealing_bytes > native.max_dealing_bytes
+            || request.accounts.len() > crate::protocol::MAX_ACCOUNTS
+        {
+            return Ok(Step::rejected(Reject::RegistryLimit));
+        }
+        let changes = [
+            (request.operator.clone(), -i128::from(request.fee)),
+            (native.fee_recipient.clone(), i128::from(request.fee)),
+        ];
+        if view.balance(chain_id, &request.operator).await? < request.fee {
+            return Ok(Step::rejected(Reject::InsufficientBalance));
+        }
+        let mut writes = match balance_changes(view, chain_id, &changes).await? {
+            Ok(writes) => writes,
+            Err(error) => return Ok(Step::rejected(error)),
+        };
+        let mut machine = Machine::genesis(&entry.deployment, timing);
+        machine.height = height;
+        machine.timestamp = timestamp;
+        writes.push((
+            registry_entry_key(chain_id, &digest),
+            Some(Record::RegistryEntry(entry.clone())),
+        ));
+        entries.push(Some(entry));
+        deployments.push(digest);
+        machines.push(Some(machine));
+        writes.push((
+            registry_key(chain_id),
+            Some(Record::Registry(deployments.clone())),
+        ));
+        return Ok(Step::applied(writes));
+    }
+    if let SettlementTx::ClaimDeposit(request) = tx {
+        if !request.deposit.verify(chain_id) {
+            return Ok(Step::rejected(Reject::Signature));
+        }
+        let claim_tx = match &request.claim {
+            FinalizedClaim::Withdrawal(claim) => SettlementTx::ClaimWithdrawal(claim.clone()),
+            FinalizedClaim::ExternalPayout(claim) => {
+                SettlementTx::ClaimExternalPayout(claim.clone())
+            }
+        };
+        let source = match route(deployments, &claim_tx) {
+            Ok(index) => index,
+            Err(outcome) => return Ok(Step::outcome(outcome)),
+        };
+        let target = match route(deployments, tx) {
+            Ok(index) => index,
+            Err(outcome) => return Ok(Step::outcome(outcome)),
+        };
+        load_deployments(
+            view,
+            chain_id,
+            deployments,
+            entries,
+            machines,
+            &[source, target],
+        )
+        .await?;
+        let source_config = &entries[source]
+            .as_ref()
+            .expect("source registration loaded")
+            .deployment;
+        let target_config = &entries[target]
+            .as_ref()
+            .expect("target registration loaded")
+            .deployment;
+
+        // Trial machines own the entire compound operation. Block deadline observations already
+        // belong to the originals and remain durable when either trial rejects.
+        let mut source_trial = Machine::decode(
+            machines[source]
+                .as_ref()
+                .expect("source machine loaded")
+                .encode(),
+        )
+        .expect("machine encoding is valid");
+        let mut step = source_trial
+            .apply(source_config, height, timing, &claim_tx, view)
+            .await?;
+        if step.outcome != TxOutcome::Applied {
+            return Ok(step);
+        }
+        let mut credits = released_credits(&step);
+        if credits.len() != 1 || credits[0].0 != request.deposit.event.account {
+            return Ok(Step::rejected(Reject::Signature));
+        }
+        let mut target_trial = if target == source {
+            None
+        } else {
+            Some(
+                Machine::decode(
+                    machines[target]
+                        .as_ref()
+                        .expect("target machine loaded")
+                        .encode(),
+                )
+                .expect("machine encoding is valid"),
+            )
+        };
+        let target_machine = target_trial.as_mut().unwrap_or(&mut source_trial);
+        let deposit = target_machine.deposit(target_config, height, &request.deposit.event);
+        if deposit.outcome != TxOutcome::Applied {
+            return Ok(Step::outcome(deposit.outcome));
+        }
+        credits.push((
+            request.deposit.event.account.clone(),
+            -i128::from(request.deposit.event.amount),
+        ));
+        let balances = match balance_changes(view, chain_id, &credits).await? {
+            Ok(writes) => writes,
+            Err(error) => return Ok(Step::rejected(error)),
+        };
+        step.writes.extend(deposit.writes);
+        step.writes.extend(balances);
+        machines[source] = Some(source_trial);
+        if let Some(target_trial) = target_trial {
+            machines[target] = Some(target_trial);
+        }
+        return Ok(step);
+    }
+    let index = match route(deployments, tx) {
+        Ok(index) => index,
+        Err(outcome) => return Ok(Step::outcome(outcome)),
+    };
+    load_deployments(view, chain_id, deployments, entries, machines, &[index]).await?;
+    let entry = entries[index].as_ref().expect("routed registration loaded");
+    let config = &entry.deployment;
+    let mut changes = Vec::new();
+    match tx {
+        SettlementTx::Deposit(request) => {
+            if !request.verify(chain_id) {
+                return Ok(Step::rejected(Reject::Signature));
+            }
+            changes.push((
+                request.event.account.clone(),
+                -i128::from(request.event.amount),
+            ));
+        }
+        SettlementTx::RegisterEpoch(request) => {
+            let fee = u64::from(entry.max_dealing_bytes).div_ceil(1024) * native.epoch_fee;
+            if request.fee != fee {
+                return Ok(Step::rejected(Reject::Fee));
+            }
+            if view.balance(chain_id, &config.operator).await? < fee {
+                return Ok(Step::rejected(Reject::InsufficientBalance));
+            }
+            changes.push((config.operator.clone(), -i128::from(fee)));
+            changes.push((native.fee_recipient.clone(), i128::from(fee)));
+        }
+        _ => {}
+    }
+    let balances = match balance_changes(view, chain_id, &changes).await? {
+        Ok(writes) => writes,
+        Err(error) => return Ok(Step::rejected(error)),
+    };
+    let mut step = machines[index]
+        .as_mut()
+        .expect("routed machine loaded")
+        .apply(config, height, timing, tx, view)
+        .await?;
+    if step.outcome == TxOutcome::Applied {
+        step.writes.extend(balances);
+
+        // A release reduces clearing custody by the same value it credits. Genesis bounds
+        // total native and clearing supply by u64, so a successful release cannot overflow.
+        let credits = released_credits(&step);
+        step.writes.extend(
+            balance_changes(view, chain_id, &credits)
+                .await?
+                .expect("conserved native supply bounds release credits"),
+        );
+    }
+    Ok(step)
+}
+
+/// Resolves a claimed deployment route. Each machine verifies its own batch and context bindings.
+fn route(deployments: &[Digest], tx: &SettlementTx) -> Result<usize, TxOutcome> {
+    let digest = tx
+        .deployment()
+        .ok_or(TxOutcome::Rejected(Reject::UnknownDeployment))?;
+    deployments
+        .iter()
+        .position(|deployment| *deployment == digest)
+        .ok_or(TxOutcome::Rejected(Reject::UnknownDeployment))
+}
+
+/// One proof-authorized effect with multiple valid transaction representations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProofAction {
+    Effect(StateKey),
+    Challenge {
+        deployment: Digest,
+        batch_id: BatchId<Digest>,
+    },
+}
+
+/// Eligibility for bounded ingress at one coherent applied snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Preflight {
+    Eligible { action: Option<ProofAction> },
+    Unavailable,
+}
+
+/// Tests canonical execution without changing state or advancing its clock.
 ///
-/// `timestamp` is the block's certified timestamp, `timing` is the
-/// chain-wide genesis epoch timing policy applied to every deployment, and
-/// `deployments` is the configured deployment set from the shared genesis:
-/// all are identical on every validator, so determinism holds. Every other
-/// result-affecting value lives in the batch (the machine records are part
-/// of the forked state), so given the same parent state and inputs, every
-/// call produces the same writes and therefore the same roots.
+/// The applied read guard pins all trial reads to the finalized tip. It is released before
+/// returning: eligibility is advisory and execution rechecks every condition at inclusion.
+pub(crate) async fn preflight<E>(
+    db: &Database<E>,
+    finalized: &Finalized,
+    native: &NativeGenesis,
+    timing: &Timing,
+    tx: &SettlementTx,
+) -> Result<Preflight, QmdbError<mmr::Family>>
+where
+    E: StorageContext + Spawner,
+{
+    let guard = db.read().await;
+    let Some(tip) = finalized.latest() else {
+        return Ok(Preflight::Unavailable);
+    };
+    if guard.root() != tip.root {
+        return Ok(Preflight::Unavailable);
+    }
+    let chain_id = native.chain_id();
+    let mut deployments = match guard.get(&registry_key(&chain_id)).await? {
+        Some(Record::Registry(deployments)) => deployments,
+        None => return Ok(Preflight::Unavailable),
+        Some(_) => unreachable!("registry key has a directory record"),
+    };
+    let mut entries = vec![None; deployments.len()];
+    let mut machines = (0..deployments.len()).map(|_| None).collect();
+    let writes = Writes::new();
+    let view = View {
+        writes: &writes,
+        source: Source::Applied(&guard),
+    };
+    let step = apply_native(
+        native,
+        &chain_id,
+        &mut entries,
+        &mut deployments,
+        &mut machines,
+        tip.height,
+        tip.timestamp,
+        timing,
+        tx,
+        &view,
+    )
+    .await?;
+    if step.outcome != TxOutcome::Applied {
+        return Ok(Preflight::Unavailable);
+    }
+    let action = match tx {
+        SettlementTx::Admit(request) => Some(ProofAction::Effect(admitted_key(
+            &request.deployment,
+            request.epoch,
+        ))),
+        SettlementTx::Challenge(request) => Some(ProofAction::Challenge {
+            deployment: request.deployment,
+            batch_id: request.batch_id,
+        }),
+        SettlementTx::ClaimWithdrawal(request) => {
+            Some(ProofAction::Effect(withdrawal_release_key(
+                &request.deployment,
+                &request.batch_id,
+                request.claim.position(),
+            )))
+        }
+        SettlementTx::ClaimExternalPayout(request) => {
+            Some(ProofAction::Effect(payout_release_key(
+                &request.deployment,
+                &request.batch_id,
+                request.claim.position(),
+            )))
+        }
+        SettlementTx::ClaimDeposit(request) => Some(ProofAction::Effect(match &request.claim {
+            FinalizedClaim::Withdrawal(claim) => {
+                withdrawal_release_key(&claim.deployment, &claim.batch_id, claim.claim.position())
+            }
+            FinalizedClaim::ExternalPayout(claim) => {
+                payout_release_key(&claim.deployment, &claim.batch_id, claim.claim.position())
+            }
+        })),
+        _ => None,
+    };
+    Ok(Preflight::Eligible { action })
+}
+
+/// Executes native transfers and clearing transitions in one deterministic state fork.
+///
+/// The immutable genesis config supplies the chain domain and initial allocations. The
+/// parent state's registry supplies every currently registered deployment. Block height is
+/// the clock; the certified timestamp supplies recency metadata only.
+///
+/// The execution future is heap-owned so proposal and replay call chains do not accumulate
+/// its state machine's stack footprint.
+#[boxed]
 pub(crate) async fn execute<E>(
     batch: Batch<E>,
     height: Height,
     timestamp: u64,
     timing: &Timing,
-    deployments: &[Deployment],
+    native: &NativeGenesis,
     transactions: &[SettlementTx],
 ) -> Result<Sealed<E>, QmdbError<mmr::Family>>
 where
     E: StorageContext + Spawner,
 {
-    assert!(
-        !deployments.is_empty(),
-        "the chain configures at least one deployment"
-    );
+    let chain_id = native.chain_id();
+    let mut writes = Writes::new();
+    let (mut deployments, mut entries) = match batch.get(&registry_key(&chain_id)).await? {
+        Some(Record::Registry(ids)) => {
+            let entries = vec![None; ids.len()];
+            (ids, entries)
+        }
+        None => {
+            assert!(native.validate(), "genesis supply and policy are valid");
+            for account in &native.balances {
+                writes.insert(
+                    native_balance_key(&chain_id, &account.key),
+                    Some(Record::NativeBalance(account.balance)),
+                );
+            }
+            for entry in &native.deployments {
+                writes.insert(
+                    registry_entry_key(&chain_id, entry.deployment.digest()),
+                    Some(Record::RegistryEntry(entry.clone())),
+                );
+            }
+            let deployments = native
+                .deployments
+                .iter()
+                .map(|entry| *entry.deployment.digest())
+                .collect::<Vec<_>>();
+            writes.insert(
+                registry_key(&chain_id),
+                Some(Record::Registry(deployments.clone())),
+            );
+            (
+                deployments,
+                native.deployments.iter().cloned().map(Some).collect(),
+            )
+        }
+        Some(_) => unreachable!("registry key has a directory record"),
+    };
 
-    // Load each deployment's machine from the parent state, or start it at
-    // genesis.
+    // Every registered machine advances, including deployments without transactions in this block.
     let mut machines = Vec::with_capacity(deployments.len());
-    for config in deployments {
-        let machine = match batch.get(&machine_key(config.digest())).await? {
-            None => Machine::genesis(config, timing),
-
-            // The machine record is written only by execution and otherwise
-            // arrives only through state sync verified against a certified
-            // root, so it always decodes.
+    for (index, deployment) in deployments.iter().enumerate() {
+        let machine = match batch.get(&machine_key(deployment)).await? {
+            None => Machine::genesis(
+                &entries[index]
+                    .as_ref()
+                    .expect("only genesis machines are absent")
+                    .deployment,
+                timing,
+            ),
             Some(Record::Machine(encoded)) => {
                 Machine::decode_cfg(encoded, &()).expect("the persisted machine decodes")
             }
             Some(_) => unreachable!("the machine key holds a machine record"),
         };
-        machines.push(machine);
+        machines.push(Some(machine));
     }
 
     // Observe each machine's deadlines exactly once for this block, deriving
     // records from every observation that changed machine state.
-    let mut writes = Writes::new();
-    for (config, machine) in deployments.iter().zip(machines.iter_mut()) {
-        let deployment = config.digest();
+    for (deployment, machine) in deployments.iter().zip(machines.iter_mut()) {
+        let machine = machine.as_mut().expect("all block machines loaded");
         for fired in machine.advance(height.get(), timestamp) {
             let view = View {
                 writes: &writes,
-                batch: &batch,
+                source: Source::Batch(&batch),
             };
             let emitted = match &fired {
                 Fired::Finalized {
@@ -2238,23 +2700,24 @@ where
         }
     }
 
-    // Route each transaction to its deployment's machine and apply it there
-    // alone, to a typed outcome. Only applied transactions write records: a
-    // rejection is effect-free, and a replay re-executes into its variant's
-    // domain guard.
     for tx in transactions {
         let view = View {
             writes: &writes,
-            batch: &batch,
+            source: Source::Batch(&batch),
         };
-        let step = match route(deployments, &machines, &view, tx).await? {
-            Ok(index) => {
-                machines[index]
-                    .apply(&deployments[index], height.get(), timing, tx, &view)
-                    .await?
-            }
-            Err(outcome) => Step::outcome(outcome),
-        };
+        let step = apply_native(
+            native,
+            &chain_id,
+            &mut entries,
+            &mut deployments,
+            &mut machines,
+            height.get(),
+            timestamp,
+            timing,
+            tx,
+            &view,
+        )
+        .await?;
         if step.outcome != TxOutcome::Applied {
             debug!(outcome = ?step.outcome, digest = ?tx.digest(), "transaction left no effect");
         }
@@ -2262,21 +2725,21 @@ where
             writes.insert(key, value);
         }
     }
-    for (config, machine) in deployments.iter().zip(machines.iter()) {
+    for (deployment, machine) in deployments.iter().zip(machines.iter()) {
+        let machine = machine.as_ref().expect("all block machines loaded");
         writes.insert(
-            status_key(config.digest()),
+            status_key(deployment),
             Some(Record::Status(machine.status(
-                config,
+                *deployment,
                 height.get(),
                 timestamp,
             ))),
         );
         writes.insert(
-            machine_key(config.digest()),
+            machine_key(deployment),
             Some(Record::Machine(machine.encode())),
         );
     }
-
     let mut batch = batch;
     for (key, value) in writes {
         batch = batch.write(key, value);
@@ -2284,260 +2747,60 @@ where
     batch.merkleize().await
 }
 
-/// Advisory dry-run of one submitted transaction: the stateless checks plus
-/// a read-only feasibility peek at the domain records the transaction would
-/// consume, against the latest applied state.
-///
-/// Unauthenticated UX advice for submitters, never authorization or
-/// evidence. Rejections are effect-free, so this is the only typed
-/// diagnosis a submitter gets: execution re-checks everything at inclusion,
-/// the peek deliberately skips the expensive arms (certificate verification,
-/// challenge adjudication, machine-internal gates), and
-/// any answer can go stale the moment state advances.
-pub(crate) async fn advise<E>(
-    db: &Database<E>,
-    deployments: &[Deployment],
-    tx: &SettlementTx,
-) -> Result<Advice, QmdbError<mmr::Family>>
-where
-    E: StorageContext + Spawner,
-{
-    let named = |digest: &Digest| {
-        deployments
-            .iter()
-            .find(|deployment| deployment.digest() == digest)
-    };
-    let guard = db.read().await;
-    Ok(match tx {
-        SettlementTx::Deposit(request) => {
-            let Some(config) = named(&request.deployment) else {
-                return Ok(Advice::Doomed(Reject::UnknownDeployment));
-            };
-            let deployment = config.digest();
-            let event = &request.event;
-            if !config
-                .accounts
-                .iter()
-                .any(|account| account.key == event.account)
-            {
-                Advice::Doomed(Reject::UnknownAccount)
-            } else if let Some(Record::Deposit(recorded)) =
-                guard.get(&deposit_key(deployment, &event.id)).await?
-            {
-                if &recorded == event {
-                    Advice::Applied
-                } else {
-                    Advice::Doomed(Reject::DepositConflict)
-                }
-            } else if let Some(Record::Status(status)) = guard.get(&status_key(deployment)).await?
-                && status
-                    .custody
-                    .checked_add(status.claimable)
-                    .and_then(|held| held.checked_add(event.amount))
-                    .is_none_or(|holdings| holdings > SQLITE_U64_MAX)
-            {
-                Advice::Doomed(Reject::Domain)
-            } else {
-                Advice::Plausible
-            }
-        }
-        SettlementTx::QueueWithdrawal(request) => {
-            let Some(config) = named(request.request.body().deployment()) else {
-                return Ok(Advice::Doomed(Reject::UnknownDeployment));
-            };
-            if request.request.verify_signature().is_err() {
-                Advice::Doomed(Reject::Signature)
-            } else if let Some(Record::Withdrawal(recorded)) = guard
-                .get(&withdrawal_key(config.digest(), request.request.account()))
-                .await?
-                && recorded == request.request
-            {
-                Advice::Applied
-            } else {
-                Advice::Plausible
-            }
-        }
-        SettlementTx::RegisterEpoch(request) => {
-            let Some(config) = named(&request.deployment) else {
-                return Ok(Advice::Doomed(Reject::UnknownDeployment));
-            };
-            if !verify_chain_registration_signature(
-                config,
-                request.epoch,
-                request.predecessor_liability,
-                &request.deposits_root,
-                &request.staged_root,
-                &request.withdrawals,
-                &request.signature,
-            ) {
-                Advice::Doomed(Reject::Signature)
-            } else if let Some(Record::Registration(record)) =
-                guard.get(&registration_key(config.digest())).await?
-                && record.epoch == request.epoch
-            {
-                let same = record.predecessor_liability == request.predecessor_liability
-                    && record.deposits_root == request.deposits_root
-                    && record.staged_root == request.staged_root
-                    && request
-                        .withdrawals
-                        .root::<Sha256>()
-                        .is_ok_and(|root| root == record.withdrawals_root);
-                if same {
-                    Advice::Applied
-                } else {
-                    Advice::Doomed(Reject::RegistrationConflict)
-                }
-            } else {
-                Advice::Plausible
-            }
-        }
-        SettlementTx::Admit(request) => {
-            let Some(config) = named(&request.deployment) else {
-                return Ok(Advice::Doomed(Reject::UnknownDeployment));
-            };
-            let deployment = config.digest();
-            let batch_id = request.header.batch_id::<Sha256>();
-            if let Some(Record::Admitted(admitted)) =
-                guard.get(&admitted_key(deployment, request.epoch)).await?
-            {
-                if admitted.batch_id == batch_id {
-                    Advice::Applied
-                } else {
-                    Advice::Doomed(Reject::AdmissionConflict)
-                }
-            } else {
-                match guard.get(&registration_key(deployment)).await? {
-                    None => Advice::Doomed(Reject::NotRegistered),
-                    Some(Record::Registration(record)) if record.epoch != request.epoch => {
-                        Advice::Doomed(Reject::SubmissionMismatch)
-                    }
-                    _ => Advice::Plausible,
-                }
-            }
-        }
-        SettlementTx::ClaimWithdrawal(request) => {
-            let mut advice = Advice::Plausible;
-            for config in deployments {
-                let key = withdrawal_release_key(
-                    config.digest(),
-                    &request.batch_id,
-                    request.claim.position(),
-                );
-                if let Some(Record::WithdrawalRelease(release)) = guard.get(&key).await? {
-                    advice = if release.claim == Sha256::hash(&[&request.claim.encode()]) {
-                        Advice::Applied
-                    } else {
-                        Advice::Doomed(Reject::PositionConflict)
-                    };
-                    break;
-                }
-            }
-            advice
-        }
-        SettlementTx::ClaimExternalPayout(request) => {
-            let mut advice = Advice::Plausible;
-            for config in deployments {
-                let key = payout_release_key(
-                    config.digest(),
-                    &request.batch_id,
-                    request.claim.position(),
-                );
-                if let Some(Record::PayoutRelease(release)) = guard.get(&key).await? {
-                    advice = if release.claim == Sha256::hash(&[&request.claim.encode()]) {
-                        Advice::Applied
-                    } else {
-                        Advice::Doomed(Reject::PositionConflict)
-                    };
-                    break;
-                }
-            }
-            advice
-        }
-        SettlementTx::Challenge(request) => {
-            let mut advice = Advice::Plausible;
-            for config in deployments {
-                if let Some(Record::Fault(FaultRecord::Faulted(
-                    HardFaultReasonResponse::ProvenChallenge { batch_id, .. },
-                ))) = guard.get(&fault_key(config.digest())).await?
-                    && batch_id == request.batch_id
-                {
-                    advice = Advice::Applied;
-                    break;
-                }
-            }
-            advice
-        }
-        SettlementTx::BeginHardFaultSettlement(request) => {
-            let Some(config) = named(&request.deployment) else {
-                return Ok(Advice::Doomed(Reject::UnknownDeployment));
-            };
-            match guard.get(&fault_key(config.digest())).await? {
-                None => Advice::Doomed(Reject::FaultUnavailable),
-                Some(Record::Fault(FaultRecord::Settling(_))) => Advice::Applied,
-                _ => Advice::Plausible,
-            }
-        }
-        SettlementTx::ClaimHardFault(request) => {
-            let Some(config) = named(&request.deployment) else {
-                return Ok(Advice::Doomed(Reject::UnknownDeployment));
-            };
-            let deployment = config.digest();
-            if let Some(Record::HardFault(release)) = guard
-                .get(&hard_fault_key(deployment, &request.opening.account))
-                .await?
-            {
-                if request.opening.verify::<Sha256>(&release.root).is_ok()
-                    && release.released.account == request.opening.account
-                {
-                    Advice::Applied
-                } else {
-                    Advice::Doomed(Reject::PositionConflict)
-                }
-            } else {
-                match guard.get(&fault_key(deployment)).await? {
-                    Some(Record::Fault(FaultRecord::Settling(_))) => Advice::Plausible,
-                    _ => Advice::Doomed(Reject::FaultUnavailable),
-                }
-            }
-        }
-        SettlementTx::ClaimPendingDeposit(request) => {
-            let Some(config) = named(&request.deployment) else {
-                return Ok(Advice::Doomed(Reject::UnknownDeployment));
-            };
-            let deployment = config.digest();
-            if let Some(Record::Refund(_)) =
-                guard.get(&refund_key(deployment, &request.account)).await?
-            {
-                Advice::Applied
-            } else if guard.get(&fault_key(deployment)).await?.is_none() {
-                Advice::Doomed(Reject::FaultUnavailable)
-            } else {
-                Advice::Plausible
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod codec_tests {
     use super::*;
     use crate::protocol::identities;
     use bytes::BytesMut;
-    use commonware_codec::DecodeExt as _;
+    use commonware_runtime::{Runner as _, deterministic};
 
     #[test]
-    fn advice_codecs_round_trip_and_reject_unknown_tags() {
-        for advice in [
-            Advice::Applied,
-            Advice::Plausible,
-            Advice::Doomed(Reject::DepositConflict),
-            Advice::Doomed(Reject::Chain),
-            Advice::Doomed(Reject::UnknownDeployment),
-        ] {
-            assert_eq!(Advice::decode(advice.encode()).unwrap(), advice);
+    fn applied_trial_reads_finish_with_a_queued_writer() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = crate::chain::tests::open(context, "trial-writer").await;
+            let guard = db.read().await;
+            let writes = Writes::new();
+            let view = View {
+                writes: &writes,
+                source: Source::Applied(&guard),
+            };
+            let chain = Sha256::hash(&[b"trial-writer-chain"]);
+            assert_eq!(view.get(&registry_key(&chain)).await.unwrap(), None);
+            let mut writer = Box::pin(db.write());
+            assert!(futures::poll!(writer.as_mut()).is_pending());
+            assert_eq!(
+                view.get(&native_balance_key(&chain, &identities()[0].key))
+                    .await
+                    .unwrap(),
+                None
+            );
+            drop(guard);
+            let (slot, state) = writer.await;
+            slot.put(state);
+            assert_eq!(
+                db.read().await.get(&registry_key(&chain)).await.unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn registry_directory_is_bounded_unique_and_independent_of_rosters() {
+        for count in [0, 1, MAX_DEPLOYMENTS] {
+            let ids = (0..count)
+                .map(|index| Sha256::hash(&[&index.to_le_bytes()]))
+                .collect::<Vec<_>>();
+            let record = Record::Registry(ids);
+            let encoded = record.encode();
+            assert!(encoded.len() <= 2 + MAX_DEPLOYMENTS * 32);
+            assert_eq!(Record::decode(encoded.clone()).unwrap(), record);
+            for end in 0..encoded.len() {
+                assert!(Record::decode(encoded.slice(..end)).is_err());
+            }
         }
-        assert!(Advice::decode(Bytes::from_static(&[3])).is_err());
-        assert!(Advice::decode(Bytes::from_static(&[2, 23])).is_err());
+        let id = Sha256::hash(&[b"duplicate-deployment"]);
+        assert!(Record::decode(Record::Registry(vec![id; 2]).encode()).is_err());
+        assert!(Record::decode(Record::Registry(vec![id; MAX_DEPLOYMENTS + 1]).encode()).is_err());
     }
 
     #[test]
@@ -2558,9 +2821,13 @@ mod codec_tests {
             AdmittedRootsResponse::new(batch_id, roots, false),
             AdmittedRootsResponse::new(batch_id, roots, true),
         ] {
+            let mut expected = Vec::new();
+            batch_id.write(&mut expected);
+            roots.write(&mut expected);
+            admitted.finalized.write(&mut expected);
+            assert_eq!(admitted.encode().as_ref(), expected);
             let decoded = AdmittedRootsResponse::decode(admitted.encode()).unwrap();
             assert_eq!(decoded, admitted);
-            assert_eq!(decoded.change, roots.change);
         }
         let roots = ClaimRootsResponse {
             withdrawal_outputs: VectorRoot {

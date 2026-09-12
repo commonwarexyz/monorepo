@@ -2,15 +2,12 @@
 //!
 //! The server reuses the terminal's one-request/one-response framing (see
 //! [`crate::rpc`]) with concurrent accepts and an async handler. It exposes
-//! two methods:
+//! three methods:
 //!
-//! - [`METHOD_SUBMIT_TX`] feeds the ingress mailbox and returns the advisory
-//!   [`Submitted`] answer: the queue admission result plus a typed dry-run
-//!   verdict against the serving validator's latest applied state
-//!   ([`crate::chain::state::advise`]). Both halves are unauthenticated UX
-//!   advice: acceptance promises gossip and proposal attempts, never
-//!   inclusion, and the authoritative answer is the submitter's certified
-//!   read of the transaction's effect record (rejections are effect-free).
+//! - [`METHOD_SUBMIT_TX`] submits owned bytes for ingress qualification and
+//!   returns an advisory [`crate::chain::ingress::Submission`]. Clients resolve
+//!   execution through
+//!   certified effect records; accepted requests can become stale before inclusion.
 //! - [`METHOD_READ`] answers one [`ReadRequest`] with a [`CertifiedRead`]:
 //!   the finalization certificate, the finalized block bytes, and a presence
 //!   or absence proof against the block's canonical state root. The snapshot
@@ -34,16 +31,16 @@ use crate::{
     chain::{
         app::Finalized,
         da::{Mailbox as SealerMailbox, Sealed},
-        ingress::{Mailbox as IngressMailbox, Submission},
+        ingress::Mailbox as IngressMailbox,
         state::{
-            Advice, Record, admitted_key, advise, anchor_key, claim_roots_key, deposit_key,
-            fault_key, hard_fault_key, payout_release_key, refund_key, registration_key,
-            status_key, withdrawal_key, withdrawal_release_key,
+            Record, admitted_key, anchor_key, claim_roots_key, deposit_key, fault_key,
+            hard_fault_key, native_balance_key, native_transfer_key, payout_release_key,
+            refund_key, registration_key, registry_entry_key, registry_key, status_key,
+            withdrawal_key, withdrawal_release_key,
         },
-        tx::SettlementTx,
-        types::{Block, Database, Exclusion, MAX_TX_BYTES, Proof, StateKey},
+        types::{Block, Database, Exclusion, Proof, StateKey},
     },
-    protocol::{Deployment, Key, MAX_DESTINATION_BYTES},
+    protocol::{Key, MAX_DESTINATION_BYTES},
     rpc::{self, ACCEPT_RETRY_DELAY, error_response},
 };
 use bytes::{Buf, BufMut, Bytes};
@@ -60,9 +57,11 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{certificate::Scheme, sha256::Digest};
+use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::Acknowledgement;
+use futures::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
 use std::net::SocketAddr;
 use tracing::debug;
 
@@ -88,6 +87,21 @@ pub(crate) const MAX_READ_BYTES: usize = rpc::MAX_BODY_SIZE / 2;
 /// the fault singleton, and terminal releases.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Lookup {
+    /// Shared native funds under the immutable chain domain.
+    NativeBalance { chain_id: Digest, account: Key },
+    /// The bounded directory of registered deployment IDs.
+    Registry { chain_id: Digest },
+    /// One immutable registered deployment and its account roster.
+    RegistryEntry {
+        chain_id: Digest,
+        deployment: Digest,
+    },
+    /// The successful native transfer with this replay identity.
+    NativeTransfer {
+        chain_id: Digest,
+        from: Key,
+        id: Digest,
+    },
     /// The status singleton.
     Status,
     /// The registered payment anchor for one epoch.
@@ -114,10 +128,8 @@ pub(crate) enum Lookup {
     Fault,
 }
 
-/// One certified-read key request: the deployment whose records it reads
-/// plus the lookup within that deployment's domains. Every read is
-/// deployment-scoped: the requested key derives from the named deployment,
-/// so a proof never answers for another deployment's records.
+/// One certified read. Clearing keys bind the named deployment; shared native
+/// keys bind the lookup's immutable chain identity and account or replay identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReadRequest {
     pub(crate) deployment: Digest,
@@ -133,6 +145,15 @@ impl ReadRequest {
     pub(crate) fn key(&self) -> StateKey {
         let deployment = &self.deployment;
         match &self.lookup {
+            Lookup::NativeBalance { chain_id, account } => native_balance_key(chain_id, account),
+            Lookup::Registry { chain_id } => registry_key(chain_id),
+            Lookup::RegistryEntry {
+                chain_id,
+                deployment,
+            } => registry_entry_key(chain_id, deployment),
+            Lookup::NativeTransfer { chain_id, from, id } => {
+                native_transfer_key(chain_id, from, id)
+            }
             Lookup::Status => status_key(deployment),
             Lookup::Anchor { epoch } => anchor_key(deployment, *epoch),
             Lookup::Admitted { epoch } => admitted_key(deployment, *epoch),
@@ -221,6 +242,29 @@ impl Write for Lookup {
                 account.write(buf);
             }
             Self::Fault => 11_u8.write(buf),
+            Self::NativeBalance { chain_id, account } => {
+                12_u8.write(buf);
+                chain_id.write(buf);
+                account.write(buf);
+            }
+            Self::Registry { chain_id } => {
+                13_u8.write(buf);
+                chain_id.write(buf);
+            }
+            Self::RegistryEntry {
+                chain_id,
+                deployment,
+            } => {
+                15_u8.write(buf);
+                chain_id.write(buf);
+                deployment.write(buf);
+            }
+            Self::NativeTransfer { chain_id, from, id } => {
+                14_u8.write(buf);
+                chain_id.write(buf);
+                from.write(buf);
+                id.write(buf);
+            }
         }
     }
 }
@@ -228,6 +272,17 @@ impl Write for Lookup {
 impl EncodeSize for Lookup {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Self::NativeBalance { chain_id, account } => {
+                chain_id.encode_size() + account.encode_size()
+            }
+            Self::Registry { chain_id } => chain_id.encode_size(),
+            Self::RegistryEntry {
+                chain_id,
+                deployment,
+            } => chain_id.encode_size() + deployment.encode_size(),
+            Self::NativeTransfer { chain_id, from, id } => {
+                chain_id.encode_size() + from.encode_size() + id.encode_size()
+            }
             Self::Status | Self::Registration | Self::Fault => 0,
             Self::Anchor { epoch } | Self::Admitted { epoch } => epoch.encode_size(),
             Self::ClaimRoots { batch } => batch.encode_size(),
@@ -280,6 +335,22 @@ impl Read for Lookup {
                 account: Key::read(buf)?,
             }),
             11 => Ok(Self::Fault),
+            12 => Ok(Self::NativeBalance {
+                chain_id: Digest::read(buf)?,
+                account: Key::read(buf)?,
+            }),
+            13 => Ok(Self::Registry {
+                chain_id: Digest::read(buf)?,
+            }),
+            14 => Ok(Self::NativeTransfer {
+                chain_id: Digest::read(buf)?,
+                from: Key::read(buf)?,
+                id: Digest::read(buf)?,
+            }),
+            15 => Ok(Self::RegistryEntry {
+                chain_id: Digest::read(buf)?,
+                deployment: Digest::read(buf)?,
+            }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -416,44 +487,6 @@ impl Read for ReadResponse {
             1 => Ok(Self::Unavailable),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
-    }
-}
-
-/// The advisory answer to one submission: the queue admission result plus a
-/// dry-run verdict when the answering path holds applied state to peek at.
-///
-/// Both halves are unauthenticated UX advice, never authorization or
-/// evidence: the authoritative answer is a certified read of the
-/// transaction's effect record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Submitted {
-    pub(crate) admission: Submission,
-    /// Dry-run verdict against the answering validator's latest applied
-    /// state, or `None` for paths that assess nothing (p2p submission).
-    pub(crate) advice: Option<Advice>,
-}
-
-impl Write for Submitted {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.admission.write(buf);
-        self.advice.write(buf);
-    }
-}
-
-impl EncodeSize for Submitted {
-    fn encode_size(&self) -> usize {
-        self.admission.encode_size() + self.advice.encode_size()
-    }
-}
-
-impl Read for Submitted {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            admission: Submission::read(buf)?,
-            advice: Option::<Advice>::read(buf)?,
-        })
     }
 }
 
@@ -922,6 +955,12 @@ impl Read for EvidenceResponse {
     }
 }
 
+/// The frontend buffers at most 16 request frames (4 MiB each). Ingress owns
+/// separately bounded work after handoff. Shared limits do not guarantee public
+/// availability under an unlimited unauthenticated connection flood.
+pub(super) const MAX_CONNECTIONS: usize = 16;
+pub(super) const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Query server configuration.
 pub(crate) struct Config<E, S, A>
 where
@@ -931,8 +970,6 @@ where
 {
     /// Listen address.
     pub(crate) address: SocketAddr,
-    /// The configured deployment set the dry-run advises against.
-    pub(crate) deployments: Vec<Deployment>,
     /// The applied settlement database.
     pub(crate) db: Database<E>,
     /// The finalized (height, digest, root) index maintained by the app.
@@ -972,8 +1009,23 @@ where
             return;
         }
     };
+    // Slots include request buffering, state/evidence work, and response writes.
+    // Finished handles are reaped before accepting another connection.
+    let mut connections = FuturesUnordered::<Handle<()>>::new();
     loop {
-        let (_, mut sink, mut stream) = match listener.accept().await {
+        while let Some(Some(result)) = connections.next().now_or_never() {
+            result.expect("query connection task failed");
+        }
+        let accepted = select! {
+            result = async {
+                if connections.is_empty() { std::future::pending().await } else { connections.next().await }
+            } => {
+                result.expect("connection exists").expect("query connection task failed");
+                continue;
+            },
+            accepted = listener.accept() => accepted,
+        };
+        let (_, mut sink, mut stream) = match accepted {
             Ok(connection) => connection,
             Err(error) => {
                 debug!(?error, "query accept failed; retrying");
@@ -981,34 +1033,43 @@ where
                 continue;
             }
         };
-        let deployments = config.deployments.clone();
+        if connections.len() >= MAX_CONNECTIONS {
+            continue;
+        }
         let db = config.db.clone();
         let finalized = config.finalized.clone();
         let marshal = config.marshal.clone();
         let ingress = config.ingress.clone();
         let sealer = config.sealer.clone();
-        context.child("connection").spawn(move |_| async move {
-            let Ok(request) = rpc::recv_request(&mut stream).await else {
-                return;
-            };
-            let response = handle(
-                &deployments,
-                &db,
-                &finalized,
-                &marshal,
-                &ingress,
-                sealer.as_ref(),
-                request,
-            )
-            .await;
-            let _ = rpc::send_response(&mut sink, &response).await;
-        });
+        connections.push(
+            context
+                .child("connection")
+                .spawn(move |context| async move {
+                    let request = select! {
+                        request = rpc::recv_request(&mut stream) => request,
+                        _ = context.sleep(REQUEST_READ_TIMEOUT) => return,
+                    };
+                    let Ok(request) = request else { return };
+                    let response = handle(
+                        &db,
+                        &finalized,
+                        &marshal,
+                        &ingress,
+                        sealer.as_ref(),
+                        request,
+                    )
+                    .await;
+                    select! {
+                        _ = rpc::send_response(&mut sink, &response) => {},
+                        _ = context.sleep(REQUEST_READ_TIMEOUT) => {},
+                    }
+                }),
+        );
     }
 }
 
 /// Handles one decoded request.
 async fn handle<E, S, A>(
-    deployments: &[Deployment],
     db: &Database<E>,
     finalized: &Finalized,
     marshal: &MarshalMailbox<S, Standard<Block>>,
@@ -1022,25 +1083,10 @@ where
     A: Acknowledgement,
 {
     match request.method {
-        METHOD_SUBMIT_TX => {
-            if request.body.len() > MAX_TX_BYTES {
-                return respond(&Submitted {
-                    admission: Submission::Oversized,
-                    advice: None,
-                });
-            }
-            let Ok(tx) = SettlementTx::decode_cfg(request.body, &()) else {
-                return error_response("submitted transaction does not decode".into());
-            };
-            let advice = match advise(db, deployments, &tx).await {
-                Ok(advice) => advice,
-                Err(error) => return error_response(format!("dry-run failed: {error}")),
-            };
-            respond(&Submitted {
-                admission: ingress.submit(tx).await,
-                advice: Some(advice),
-            })
-        }
+        METHOD_SUBMIT_TX => match ingress.submit_raw(request.body.into()).await {
+            Ok(submission) => respond(&submission),
+            Err(error) => error_response(format!("submission failed: {error:#}")),
+        },
         METHOD_READ => {
             let Ok(request) = ReadRequest::decode_cfg(request.body, &()) else {
                 return error_response("read request does not decode".into());
@@ -1130,10 +1176,115 @@ mod tests {
     use super::*;
     use crate::protocol::{deployments, genesis_balances, identities, state_config};
     use commonware_clearing::bajillion::qmdb::{State, StateLookup, account_key};
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{DecodeExt as _, FixedSize as _};
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
+
+    #[test]
+    fn native_read_keys_bind_chain_and_transfer_owner() {
+        let accounts = identities();
+        let chain_id = Sha256::hash(&[b"chain"]);
+        let id = Sha256::hash(&[b"transfer"]);
+        let lookups = [
+            Lookup::NativeBalance {
+                chain_id,
+                account: accounts[0].key.clone(),
+            },
+            Lookup::Registry { chain_id },
+            Lookup::RegistryEntry {
+                chain_id,
+                deployment: id,
+            },
+            Lookup::NativeTransfer {
+                chain_id,
+                from: accounts[0].key.clone(),
+                id,
+            },
+        ];
+        for lookup in lookups {
+            let request = ReadRequest::new(Sha256::hash(&[b"deployment"]), lookup);
+            assert_eq!(ReadRequest::decode(request.encode()).unwrap(), request);
+            assert_eq!(
+                request.key(),
+                ReadRequest::new(
+                    Sha256::hash(&[b"another deployment"]),
+                    request.lookup.clone()
+                )
+                .key()
+            );
+        }
+        let request = |chain_id, from| {
+            ReadRequest::new(
+                Sha256::hash(&[b"deployment"]),
+                Lookup::NativeTransfer { chain_id, from, id },
+            )
+        };
+        assert_ne!(
+            request(chain_id, accounts[0].key.clone()).key(),
+            request(chain_id, accounts[1].key.clone()).key()
+        );
+        assert_ne!(
+            request(chain_id, accounts[0].key.clone()).key(),
+            request(Sha256::hash(&[b"other chain"]), accounts[0].key.clone()).key()
+        );
+    }
+
+    #[test]
+    fn registry_entry_lookup_binds_chain_and_deployment() {
+        let lookup = |chain_id, deployment| {
+            ReadRequest::new(
+                Sha256::hash(&[b"outer deployment"]),
+                Lookup::RegistryEntry {
+                    chain_id,
+                    deployment,
+                },
+            )
+        };
+        let chain = Sha256::hash(&[b"chain"]);
+        let deployment = Sha256::hash(&[b"registered deployment"]);
+        let request = lookup(chain, deployment);
+        assert_eq!(ReadRequest::decode(request.encode()).unwrap(), request);
+        assert_ne!(
+            request.key(),
+            lookup(Sha256::hash(&[b"other chain"]), deployment).key()
+        );
+        assert_ne!(
+            request.key(),
+            lookup(chain, Sha256::hash(&[b"other deployment"])).key()
+        );
+        assert_ne!(
+            request.key(),
+            ReadRequest::new(deployment, Lookup::Registry { chain_id: chain }).key()
+        );
+    }
+
+    #[test]
+    fn registry_entry_record_rejects_non_prime_order_roster_key() {
+        let deployment = crate::chain::harness::native(deployments())
+            .deployments
+            .remove(0)
+            .deployment;
+        let account_offset = 1
+            + Digest::SIZE
+            + Key::SIZE
+            + deployment.operator_ack.encode_size()
+            + deployment.accounts.len().encode_size();
+        let entry = crate::chain::native::RegistryEntry {
+            network_key: commonware_cryptography::ed25519::PublicKey::decode(
+                deployment.operator.encode(),
+            )
+            .unwrap(),
+            deployment,
+            max_dealing_bytes: 1,
+        };
+        let record = Record::RegistryEntry(entry);
+        assert_eq!(Record::decode(record.encode()).unwrap(), record);
+        let mut invalid = record.encode().to_vec();
+        invalid[account_offset..account_offset + Key::SIZE].fill(0);
+        invalid[account_offset] = 1;
+        assert!(Record::decode(Bytes::from(invalid)).is_err());
+    }
 
     #[test]
     fn evidence_request_codecs_round_trip() {

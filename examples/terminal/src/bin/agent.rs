@@ -23,10 +23,21 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     identity: usize,
 
-    /// Deployment index in the genesis deployment list (operator N runs
-    /// deployment N). Must match the operator behind --operator.
-    #[arg(long, default_value_t = 0)]
-    deployment: usize,
+    /// Registered deployment digest in hex, or a genesis deployment index.
+    #[arg(long, default_value = "0")]
+    deployment: String,
+
+    /// Print the certified shared native balance and exit.
+    #[arg(long, conflicts_with_all = ["scripted", "transfer_to"])]
+    native_balance: bool,
+
+    /// Transfer native funds to this hex-encoded account key and exit.
+    #[arg(long, requires = "amount", conflicts_with = "scripted")]
+    transfer_to: Option<String>,
+
+    /// Native amount to transfer (for example, to fund a new operator).
+    #[arg(long, requires = "transfer_to")]
+    amount: Option<u64>,
 
     /// SQLite wallet database path. Defaults to
     /// `terminal-agent-<deployment>-<identity>.sqlite`.
@@ -40,19 +51,15 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let database = args.database.unwrap_or_else(|| {
-        PathBuf::from(format!(
-            "terminal-agent-{}-{}.sqlite",
-            args.deployment, args.identity
-        ))
-    });
     commonware_terminal::run_agent(
         args.operator,
         args.genesis,
         args.queries,
-        database,
+        args.database,
         args.identity,
         args.deployment,
         args.scripted,
+        args.native_balance,
+        args.transfer_to.zip(args.amount),
     )
 }

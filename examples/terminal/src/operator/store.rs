@@ -1,8 +1,10 @@
 //! SQLite ownership boundary for the operator.
 
+#[cfg(test)]
+use crate::protocol::INITIAL_BALANCE;
 use crate::{
     protocol::{
-        Acceptance, AcceptedEntry, AccountIdentity, Ack, DepositEvent, Entry, INITIAL_BALANCE, Key,
+        Acceptance, AcceptedEntry, Account, AccountIdentity, Ack, DepositEvent, Entry, Key,
         MAX_ACCEPTED_PAYMENTS, MAX_DEPOSIT_EVENTS, MAX_DESTINATION_BYTES, MAX_ENTRIES,
         MAX_WITHDRAWALS, Protocol, Receipt, SQLITE_U64_MAX, SettlementResult, encoded_artifacts,
     },
@@ -37,7 +39,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 14;
 /// Finalized epochs retained in the operational balance history. Authenticated close evidence
 /// and Current history have independent durable ownership in the balance worker.
 pub(crate) const RETAINED_EPOCHS: u64 = 4;
@@ -450,10 +452,34 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    #[cfg(test)]
     pub(crate) fn open(path: &Path, identities: &[AccountIdentity]) -> Result<Self> {
+        let accounts = identities
+            .iter()
+            .map(|identity| Account {
+                key: identity.key.clone(),
+                balance: INITIAL_BALANCE,
+            })
+            .collect::<Vec<_>>();
+        Self::open_configured(path, identities, &accounts)
+    }
+
+    pub(crate) fn open_configured(
+        path: &Path,
+        identities: &[AccountIdentity],
+        accounts: &[Account],
+    ) -> Result<Self> {
+        ensure!(
+            identities.len() == accounts.len()
+                && identities
+                    .iter()
+                    .zip(accounts)
+                    .all(|(identity, account)| identity.key == account.key),
+            "configured account identities differ from the deployment"
+        );
         let source = StoreSource::new(path)?;
         let connection = source.connect()?;
-        Self::from_connection(connection, source, identities)
+        Self::from_connection(connection, source, identities, accounts)
     }
 
     #[cfg(test)]
@@ -465,6 +491,7 @@ impl Store {
         connection: Connection,
         source: StoreSource,
         identities: &[AccountIdentity],
+        accounts: &[Account],
     ) -> Result<Self> {
         let schema = format!(
             "PRAGMA foreign_keys = ON;
@@ -487,7 +514,7 @@ impl Store {
 
              CREATE TABLE IF NOT EXISTS account_identities (
                  public_key BLOB PRIMARY KEY CHECK (length(public_key) = 32),
-                 name TEXT NOT NULL UNIQUE
+                 name TEXT NOT NULL
              );
 
              CREATE TABLE IF NOT EXISTS account_states (
@@ -570,10 +597,11 @@ impl Store {
 
              CREATE TABLE IF NOT EXISTS registrations (
                  epoch INTEGER PRIMARY KEY CHECK (epoch >= 0),
-                 admission_deadline INTEGER NOT NULL CHECK (admission_deadline >= 0),
-                 challenge_deadline INTEGER NOT NULL CHECK (
+                 admission_deadline INTEGER CHECK (admission_deadline >= 0),
+                 challenge_deadline INTEGER CHECK (
                      challenge_deadline > admission_deadline
-                 )
+                 ),
+                 CHECK ((admission_deadline IS NULL) = (challenge_deadline IS NULL))
              );
 
              CREATE TABLE IF NOT EXISTS close_jobs (
@@ -662,19 +690,21 @@ impl Store {
             ),
             None => {
                 let transaction = connection.unchecked_transaction()?;
-                let initial_liability = u64::try_from(identities.len())
-                    .context("wallet count does not fit u64")?
-                    .checked_mul(INITIAL_BALANCE)
-                    .context("initial liability overflow")?;
+                let initial_liability = accounts.iter().try_fold(0_u64, |total, account| {
+                    sql_u64(account.balance, "initial balance")?;
+                    total
+                        .checked_add(account.balance)
+                        .context("initial liability overflow")
+                })?;
                 transaction.execute(
                     "INSERT INTO operator_meta(
                          singleton, schema_version, epoch, live_liability, deposit_events
                      ) VALUES(1, ?1, 0, ?2, 0)",
                     params![SCHEMA_VERSION, initial_liability.to_be_bytes().as_slice()],
                 )?;
-                for identity in identities {
+                for (identity, account) in identities.iter().zip(accounts) {
                     let key = identity.key.clone();
-                    let balance = sql_u64(INITIAL_BALANCE, "initial balance")?;
+                    let balance = sql_u64(account.balance, "initial balance")?;
                     transaction.execute(
                         "INSERT INTO account_identities(public_key, name) VALUES(?1, ?2)",
                         params![key.as_ref(), identity.name],
@@ -929,13 +959,34 @@ impl Store {
         })
     }
 
-    /// Returns the chain-assigned deadlines adopted for `epoch`.
+    /// Records the boundary's publication before signed registration bytes can escape.
+    pub(crate) fn begin_registration(&mut self, expected: &EpochPaymentContext) -> Result<()> {
+        mutate(
+            &mut self.connection,
+            "prepare registration",
+            |transaction| {
+                let epoch = metadata_epoch(transaction)?;
+                ensure!(epoch == expected.epoch(), "registration context is stale");
+                ensure!(
+                    metadata_payment_context(transaction)?.as_ref() == Some(expected),
+                    "registration anchor is stale"
+                );
+                transaction.execute(
+                    "INSERT OR IGNORE INTO registrations(epoch) VALUES(?1)",
+                    [sql_u64(epoch, "epoch")?],
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    /// Returns the chain-assigned deadlines, excluding unadopted publications.
     pub(crate) fn chain_deadlines(&self, epoch: u64) -> Result<Option<(u64, u64)>> {
         let deadlines = self
             .connection
             .query_row(
                 "SELECT admission_deadline, challenge_deadline
-                 FROM registrations WHERE epoch = ?1",
+                 FROM registrations WHERE epoch = ?1 AND admission_deadline IS NOT NULL",
                 [sql_u64(epoch, "epoch")?],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
@@ -1022,17 +1073,7 @@ impl Store {
     }
 
     pub(crate) fn has_current_work(&self) -> Result<bool> {
-        let epoch = sql_u64(self.epoch()?, "epoch")?;
-        self.connection
-            .query_row(
-                "SELECT
-                     EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)
-                     OR EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1)
-                     OR EXISTS(SELECT 1 FROM withdrawals WHERE epoch = ?1)",
-                [epoch],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(Into::into)
+        epoch_has_work(&self.connection, self.epoch()?)
     }
 
     fn load_epoch(connection: &Connection, epoch: u64) -> Result<EpochData> {
@@ -1223,7 +1264,7 @@ impl Store {
         let deadlines = connection
             .query_row(
                 "SELECT admission_deadline, challenge_deadline
-                 FROM registrations WHERE epoch = ?1",
+                 FROM registrations WHERE epoch = ?1 AND admission_deadline IS NOT NULL",
                 [epoch_sql],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
@@ -1569,19 +1610,18 @@ impl Store {
                 metadata_payment_context(transaction)?.as_ref() == Some(expected),
                 "withdrawal anchor is stale"
             );
-            let accepted: i64 = transaction.query_row(
-                "SELECT count(*) FROM acks WHERE epoch = ?1",
+
+            // A registration may reach settlement before its read-back or first receipt.
+            // Published withdrawal boundaries remain fixed across those crash cuts.
+            let frozen: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1)
+                 OR EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)",
                 [sql_u64(epoch, "epoch")?],
                 |row| row.get(0),
             )?;
-
-            // The boundary is committed by the epoch's on-chain registration,
-            // which the first receipt triggers before it is released. A
-            // nonzero batch count therefore means the committed boundary
-            // may no longer move, so intake freezes here.
             ensure!(
-                accepted == 0,
-                "withdrawals are frozen once the first payment registers the epoch boundary"
+                !frozen,
+                "withdrawals are frozen once registration publication begins"
             );
 
             let mut account = effective_account(transaction, epoch, request.account())?
@@ -1746,17 +1786,9 @@ impl Store {
                 "successor context does not extend the closing epoch"
             );
             let epoch_sql = sql_u64(epoch, "epoch")?;
-            let work: i64 = transaction.query_row(
-                "SELECT
-                 EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)
-                 OR EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1)
-                 OR EXISTS(SELECT 1 FROM withdrawals WHERE epoch = ?1)",
-                [epoch_sql],
-                |row| row.get(0),
-            )?;
             ensure!(
-                work != 0,
-                "there are no payments, deposits, or withdrawals to close"
+                epoch_has_work(transaction, epoch)?,
+                "there is nothing to close"
             );
 
             let closing_accounts = pending_close_accounts(transaction, epoch)?;
@@ -2379,11 +2411,11 @@ impl Store {
         )))
     }
 
-    pub(crate) fn next_closing_epoch(&self) -> Result<Option<u64>> {
+    pub(crate) fn closing_epoch_from(&self, first: u64) -> Result<Option<u64>> {
         self.connection
             .query_row(
-                "SELECT epoch FROM close_jobs WHERE status = 'closing' ORDER BY epoch LIMIT 1",
-                [],
+                "SELECT epoch FROM close_jobs WHERE status = 'closing' AND epoch >= ?1 ORDER BY epoch LIMIT 1",
+                [sql_u64(first, "first closing epoch")?],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -2398,6 +2430,25 @@ impl Store {
             |row| row.get::<_, i64>(0),
         )?;
         usize::try_from(count).context("pending close count does not fit usize")
+    }
+
+    pub(crate) fn pending_epochs(&self) -> Result<Vec<u64>> {
+        let mut query = self.connection.prepare_cached(
+            "SELECT epoch FROM close_jobs WHERE status = 'closing' ORDER BY epoch",
+        )?;
+        query
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .map(|epoch| from_sql_u64(epoch?, "closing epoch"))
+            .collect()
+    }
+
+    pub(crate) fn current_entry_count(&self) -> Result<usize> {
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM accepted_entries WHERE epoch = ?1",
+            [sql_u64(self.epoch()?, "epoch")?],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).context("entry count does not fit usize")
     }
 
     /// Returns whether the exact epoch already has a durable close job.
@@ -3139,16 +3190,15 @@ fn stage_event(
         deposit_events < MAX_DEPOSIT_EVENTS,
         "deposit event capacity is exhausted"
     );
+
+    // Settlement rejects deposits during an active registration. A confirmed event
+    // therefore precedes any registration of this boundary and invalidates a pending
+    // request with an older staged root. It remains stageable before read-back.
     let accepted: i64 = transaction.query_row(
         "SELECT count(*) FROM acks WHERE epoch = ?1",
         [sql_u64(epoch, "epoch")?],
         |row| row.get(0),
     )?;
-
-    // The boundary is committed by the epoch's on-chain registration, which
-    // the first receipt triggers before it is released. A nonzero batch
-    // count therefore means the committed boundary may no longer move, so
-    // intake freezes here.
     ensure!(
         accepted == 0,
         "deposits are frozen once the first payment registers the epoch boundary"
@@ -3297,6 +3347,21 @@ fn validate_applied_withdrawal(
         WithdrawalAction::Close => {}
     }
     Ok(applied_amount)
+}
+
+// A published registration must close even if no receipt followed its preparation.
+fn epoch_has_work(connection: &Connection, epoch: u64) -> Result<bool> {
+    connection
+        .query_row(
+            "SELECT
+             EXISTS(SELECT 1 FROM acks WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM deposits WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM withdrawals WHERE epoch = ?1)
+             OR EXISTS(SELECT 1 FROM registrations WHERE epoch = ?1)",
+            [sql_u64(epoch, "epoch")?],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn metadata_epoch(connection: &Connection) -> Result<u64> {
@@ -3520,8 +3585,13 @@ mod tests {
             } = self;
             let source = store.source.clone();
             drop(store);
-            let store =
-                Store::from_connection(source.connect().unwrap(), source, &identities()).unwrap();
+            let store = Store::from_connection(
+                source.connect().unwrap(),
+                source,
+                &identities(),
+                &crate::protocol::accounts(),
+            )
+            .unwrap();
             Self {
                 store,
                 context,

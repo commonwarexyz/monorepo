@@ -362,6 +362,9 @@ impl Read for CloseLimits {
 /// The settlement chain binds this registration to exactly one predecessor state root when the
 /// close is registered. An embedding must never reuse the registration after its ancestry is
 /// invalidated.
+///
+/// Decoding checks structure. Call [`Self::verify_anchor`] to verify the committed parameters;
+/// the embedding authenticates registration provenance separately.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EpochContext<P: PublicKey, D: Digest> {
     payment: PaymentContext<P, D>,
@@ -585,6 +588,46 @@ where
     }
 }
 
+impl<P: PublicKey, D: Digest> Write for EpochContext<P, D> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.payment.write(writer);
+        self.deployment.write(writer);
+        self.deposit_root.write(writer);
+        self.withdrawal_root.write(writer);
+        self.predecessor_liability.write(writer);
+        self.admission_deadline.write(writer);
+        self.challenge_deadline.write(writer);
+        self.limits.write(writer);
+        self.committee.write(writer);
+    }
+}
+
+impl<P: PublicKey, D: Digest> FixedSize for EpochContext<P, D> {
+    const SIZE: usize = PaymentContext::<P, D>::SIZE
+        + D::SIZE * 2
+        + VectorRoot::<D>::SIZE * 2
+        + u64::SIZE * 3
+        + CloseLimits::SIZE;
+}
+
+impl<P: PublicKey, D: Digest> Read for EpochContext<P, D> {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self::from_parts(
+            PaymentContext::read(reader)?,
+            D::read(reader)?,
+            VectorRoot::read(reader)?,
+            VectorRoot::read(reader)?,
+            u64::read(reader)?,
+            u64::read(reader)?,
+            u64::read(reader)?,
+            CloseLimits::read(reader)?,
+            D::read(reader)?,
+        ))
+    }
+}
+
 /// Chain-known epoch registration bound to one exact predecessor state root.
 ///
 /// Decoding checks structure. Header and full-close validation recompute the epoch anchor;
@@ -681,56 +724,22 @@ impl<P: PublicKey, D: Digest> CloseContext<P, D> {
 
 impl<P: PublicKey, D: Digest> Write for CloseContext<P, D> {
     fn write(&self, writer: &mut impl BufMut) {
-        self.epoch.payment.write(writer);
-        self.epoch.deployment.write(writer);
-        self.epoch.deposit_root.write(writer);
-        self.epoch.withdrawal_root.write(writer);
-        self.epoch.predecessor_liability.write(writer);
-        self.epoch.admission_deadline.write(writer);
-        self.epoch.challenge_deadline.write(writer);
-        self.epoch.limits.write(writer);
-        self.epoch.committee.write(writer);
+        self.epoch.write(writer);
         self.predecessor_root.write(writer);
     }
 }
 
 impl<P: PublicKey, D: Digest> FixedSize for CloseContext<P, D> {
-    const SIZE: usize = PaymentContext::<P, D>::SIZE
-        + D::SIZE
-        + VectorRoot::<D>::SIZE * 2
-        + StateRoot::<D>::SIZE
-        + u64::SIZE * 3
-        + CloseLimits::SIZE
-        + D::SIZE;
+    const SIZE: usize = EpochContext::<P, D>::SIZE + StateRoot::<D>::SIZE;
 }
 
 impl<P: PublicKey, D: Digest> Read for CloseContext<P, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let payment = PaymentContext::read(reader)?;
-        let deployment = D::read(reader)?;
-        let deposit_root = VectorRoot::read(reader)?;
-        let withdrawal_root = VectorRoot::read(reader)?;
-        let predecessor_liability = u64::read(reader)?;
-        let admission_deadline = u64::read(reader)?;
-        let challenge_deadline = u64::read(reader)?;
-        let limits = CloseLimits::read(reader)?;
-        let committee = D::read(reader)?;
-        let predecessor_root = StateRoot::read(reader)?;
         Ok(Self::from_parts(
-            EpochContext::from_parts(
-                payment,
-                deployment,
-                deposit_root,
-                withdrawal_root,
-                predecessor_liability,
-                admission_deadline,
-                challenge_deadline,
-                limits,
-                committee,
-            ),
-            predecessor_root,
+            EpochContext::read(reader)?,
+            StateRoot::read(reader)?,
         ))
     }
 }
