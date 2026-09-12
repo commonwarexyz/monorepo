@@ -189,3 +189,7 @@ The operation-hiding relation $\mathcal R_{\mathsf{op}}$ is *not* the sum of the
 Prover timings include witness generation but exclude constraint synthesis, which is performed once per circuit. Compiling R1CS to Square R1CS roughly doubles the constraint count; supporting R1CS directly is one opportunity to reduce prover cost.
 
 These early results show batch proof verification exceeding a million proofs per second on a laptop. Bonsai pairs that verification throughput with compact transactions and validator state that avoids a global nullifier set, while letting wallets return after long periods offline. The next step is to carry that throughput through networking, consensus, and storage into a complete private payment system.
+
+## Discussion
+
+<script src="https://blohard.social/embed.js" data-post="8453/8" data-theme="light"></script>
