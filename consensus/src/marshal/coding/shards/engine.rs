@@ -1552,6 +1552,7 @@ where
         commitment: Commitment<B, C, H>,
         shard: IndexedShard<C>,
         is_participant: bool,
+        strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         // Store data for equivocation detection first (move), then clone
@@ -1559,8 +1560,13 @@ where
         // for both check and storage.
         self.received_shards.insert(shard.index, shard.data);
         let data = self.received_shards.get(&shard.index).unwrap();
-        let Ok(checked) = C::check(&commitment.config(), &commitment.root(), shard.index, data)
-        else {
+        let Ok(checked) = C::check(
+            &commitment.config(),
+            &commitment.root(),
+            shard.index,
+            data,
+            strategy,
+        ) else {
             self.received_shards.remove(&shard.index);
             commonware_p2p::block!(blocker, sender, "invalid assigned shard received");
             return false;
@@ -1612,6 +1618,7 @@ where
                     &commitment.root(),
                     shard.index,
                     &shard.data,
+                    strategy,
                 );
                 (peer, checked.ok())
             });
@@ -1843,6 +1850,7 @@ where
                 commitment,
                 indexed,
                 ctx.scheme.me().is_some(),
+                ctx.strategy,
                 blocker,
             );
 

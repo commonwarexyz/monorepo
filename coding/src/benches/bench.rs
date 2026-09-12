@@ -92,7 +92,8 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                     let checked_shards: Vec<_> = selected_shards
                                         .iter()
                                         .map(|(idx, shard)| {
-                                            S::check(&config, &commitment, *idx, shard).unwrap()
+                                            S::check(&config, &commitment, *idx, shard, &strategy)
+                                                .unwrap()
                                         })
                                         .collect();
 

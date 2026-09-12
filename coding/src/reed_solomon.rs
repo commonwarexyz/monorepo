@@ -1167,6 +1167,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: &Self::Shard,
+        _strategy: &impl Strategy,
     ) -> Result<Self::CheckedShard, Self::Error> {
         let total = total_shards(config)?;
         if index >= total {
@@ -1880,7 +1881,7 @@ mod tests {
 
         // A proof generated under a different shard configuration is invalid
         // for this commitment.
-        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
+        let check_result = RS::check(&config_expected, &commitment, 0, &shards[0], &STRATEGY);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
 
