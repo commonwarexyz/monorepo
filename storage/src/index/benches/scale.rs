@@ -16,6 +16,7 @@
 //! For a smaller memory experiment with the same mean partition occupancy as 1B keys at P=3,
 //! use `-- 3906250 partitioned_ordered_2`. Run each variant in a fresh process under a memory
 //! profiler to include allocator fragmentation as well as live allocations.
+//! This binary uses mimalloc for all Rust allocations, including the index's backing slabs.
 //!
 //! For decoded locations and existing-key replacements, explicitly select `locations_u64_2`
 //! or `locations_packed_2` (also available with `_3`). See PACKED_LOCATIONS.md for the experiment.
@@ -44,6 +45,9 @@ const DEFAULT_ITEMS: [u64; 2] = [20_000_000, 100_000_000];
 
 // Fixed RNG seed so the insert and lookup phases generate the same key sequence.
 const SEED: u64 = 0;
+
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// No-op metrics context. Mirrors the criterion benches' helper; duplicated because a separate
 /// `harness = false` target cannot share the criterion entry point's module.
@@ -126,7 +130,7 @@ fn main() {
     };
 
     for items in sizes {
-        println!("index_scale: items={items}");
+        println!("index_scale: items={items} allocator=mimalloc");
         packed_scale::run(items, &only);
 
         // Each variant is built once; insert is the timed build, lookup re-seeds and reuses the

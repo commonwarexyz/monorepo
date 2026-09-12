@@ -47,6 +47,10 @@ The prototype does not claim end-to-end QMDB performance or recovery coverage.
 
 ## Validation and measurement
 
+- Use mimalloc for all further large-scale experiments, including occupancy-matched proxies.
+  Both scale binaries select it as their Rust global allocator and report it at startup.
+  Build both baseline and candidate with the same allocator version and settings; retain the
+  lockfile and record any `MIMALLOC_*` overrides alongside results.
 - Test boundaries, wraparound, invalid windows, overflow, floor advancement, collisions,
   replacement, deletion, and spilled partitions against absolute `u64` values.
 - Use identical seeded keys, five-byte translated suffixes, and fresh processes for both variants.
@@ -59,6 +63,9 @@ The prototype does not claim end-to-end QMDB performance or recovery coverage.
   or amplify the benefit. Record results here after running the experiment.
 
 ## Results
+
+These historical measurements used the system allocator, not mimalloc. Re-run both variants with
+mimalloc before drawing conclusions for that allocator.
 
 Measured on macOS/arm64 (Mac16,7, 48 GiB), rustc nightly 1.100.0
 (`fd7ed57df`, 2026-08-29), optimized bench profile, seed 0. Each row is the median of three
@@ -83,8 +90,10 @@ allocates capacity for 78 eight-byte values or 102 five-byte values. Both buffer
 contribute to process RSS. Five-byte encoding alone does not justify QMDB integration on these
 measurements; improving allocation density is the next experiment.
 
-Reproduce with `cargo bench -p commonware-storage --bench index_scale --no-run`. Run the emitted
-executable in separate processes under `/usr/bin/time -l`, passing either `3906250` or `15625000`
+To reproduce these system-allocator results, check out commit `bfa857156` before building.
+Current builds use mimalloc. Build with
+`cargo bench -p commonware-storage --bench index_scale --no-run`. Run the emitted executable in
+separate processes under `/usr/bin/time -l`, passing either `3906250` or `15625000`
 and either `locations_u64_2` or `locations_packed_2`. Run three times per variant, alternating
 order. `_3` variants support a future full-scale check. Benchmark executable SHA-256:
 `e81b8dd91750bf028b2b0a37a6a3ffbbfa0b61f144ce814e220ccd2b6f8c064a`.

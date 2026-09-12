@@ -58,6 +58,11 @@ For component-specific test and conformance guidance, see:
 
 Benchmarks use Criterion and live with the module they measure. The benchmark dashboard parses their names, so follow these rules exactly.
 
+Large-scale memory experiments, including smaller proxies with matching partition occupancy,
+use mimalloc. The standalone storage `index_scale` and QMDB `scale` binaries select it as their
+Rust global allocator and print the allocator in their output. Use the same allocator version
+and settings for baseline and candidate runs, and record any `MIMALLOC_*` environment overrides.
+
 ### Layout
 
 Use one file per operation and an entry point for the module:

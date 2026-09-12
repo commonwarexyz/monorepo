@@ -54,6 +54,7 @@
 //! Each invocation does exactly one reopen, so `init` numbers are warm only if the OS file cache is
 //! already warm. For the realistic cold-cache case (init at process start), have the driver drop the
 //! OS cache (`sudo purge` on macOS) between invocations.
+//! This binary uses mimalloc for all Rust allocations.
 
 #[allow(dead_code, unused_imports, unused_macros)]
 #[path = "common.rs"]
@@ -76,6 +77,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Items per blob for the generated database. Much larger than the shared bench default (50k) so a
 /// multi-GB database is split across far fewer blob files, which keeps the partition-directory scan
@@ -147,6 +151,7 @@ fn usage() {
 }
 
 fn main() {
+    eprintln!("scale: allocator=mimalloc");
     // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries; drop it so
     // trailing optional args parse.
     let argv: Vec<String> = std::env::args()
