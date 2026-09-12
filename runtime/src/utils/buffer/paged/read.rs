@@ -1,6 +1,6 @@
 use super::Checksum;
 use crate::{Blob, Error, ReadOptions};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
@@ -267,6 +267,34 @@ impl bytes::Buf for ReplayBuf {
         self.remaining
     }
 
+    fn try_copy_to_slice(&mut self, mut dst: &mut [u8]) -> Result<(), TryGetError> {
+        if dst.len() > self.remaining {
+            return Err(TryGetError {
+                requested: dst.len(),
+                available: self.remaining,
+            });
+        }
+
+        // Fast path: the request ends strictly inside the current page, so the cursor
+        // stays on this page and no page or buffer transition is needed.
+        let chunk = self.chunk();
+        if dst.len() < chunk.len() {
+            dst.copy_from_slice(&chunk[..dst.len()]);
+            self.offset_in_page += dst.len();
+            self.remaining -= dst.len();
+            return Ok(());
+        }
+
+        while !dst.is_empty() {
+            let src = self.chunk();
+            let cnt = usize::min(src.len(), dst.len());
+            dst[..cnt].copy_from_slice(&src[..cnt]);
+            dst = &mut dst[cnt..];
+            self.advance(cnt);
+        }
+        Ok(())
+    }
+
     fn chunk(&self) -> &[u8] {
         let Some(buf) = self.buffers.front() else {
             return &[];
@@ -407,6 +435,10 @@ impl<B: Blob> bytes::Buf for Replay<B> {
         self.buffer.remaining()
     }
 
+    fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+        self.buffer.try_copy_to_slice(dst)
+    }
+
     fn chunk(&self) -> &[u8] {
         self.buffer.chunk()
     }
@@ -450,6 +482,45 @@ mod tests {
         assert_eq!(last.as_ref(), b"gh");
         assert!(range.contains(&last.as_ptr()));
         assert_eq!(replay.remaining(), 0);
+    }
+
+    #[test]
+    fn test_replay_buf_copy_to_slice_page_boundaries() {
+        let source = bytes::Bytes::from_static(b"abcd............efgh............");
+        let mut replay = ReplayBuf::new(16, 4);
+        replay.push(
+            BufferState {
+                buffer: source,
+                num_pages: 2,
+                last_page_len: 4,
+            },
+            8,
+        );
+
+        // Ends inside the first page.
+        let mut inside = [0u8; 3];
+        replay.try_copy_to_slice(&mut inside).unwrap();
+        assert_eq!(&inside, b"abc");
+        assert_eq!(replay.chunk(), b"d");
+        assert_eq!(replay.remaining(), 5);
+
+        // Spans the page boundary.
+        let mut spanning = [0u8; 3];
+        replay.try_copy_to_slice(&mut spanning).unwrap();
+        assert_eq!(&spanning, b"def");
+        assert_eq!(replay.chunk(), b"gh");
+        assert_eq!(replay.remaining(), 2);
+
+        // Ends exactly at the end of the last page.
+        let mut tail = [0u8; 2];
+        replay.try_copy_to_slice(&mut tail).unwrap();
+        assert_eq!(&tail, b"gh");
+        assert_eq!(replay.chunk(), b"");
+        assert_eq!(replay.remaining(), 0);
+
+        let err = replay.try_copy_to_slice(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(err.requested, 1);
+        assert_eq!(err.available, 0);
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
