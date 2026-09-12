@@ -4,6 +4,7 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
+#![recursion_limit = "256"]
 
 mod agent;
 mod chain;

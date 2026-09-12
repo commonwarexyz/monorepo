@@ -1,5 +1,7 @@
 # Bajillion benchmarks
 
+The [September 11 measurements](results/2026-09-11/README.md) compare QMDB and the sliced reference on the same c8a.4xlarge, with phase timings, filesystem commit measurements, proof sizes, raw samples, and reproduction inputs.
+
 Each process uses 100 validators and one adaptive strategy with 16 workers. Default profiles are dense N=1024/K=1, sparse N=1024 with 128 senders/K=8, and zero-net N=512/K=1. `RUSTFLAGS='--cfg full_bench'` selects 14 profiles: dense N=1024/10k/100k/1M and sparse N=1M with 1024/10k/100k senders, each K1/K8. The recipient pool is 512 accounts; a small sender set may touch fewer recipients. `COMMONWARE_CLEARING_PROFILE` accepts a profile index or the printed `N=... A=... B=... K=...` label.
 
 Build and run a local correctness smoke:

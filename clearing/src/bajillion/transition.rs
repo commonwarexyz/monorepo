@@ -1757,11 +1757,14 @@ where
         return Err(TransitionError::CloseLimit);
     }
     validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
-    for request in withdrawals.requests() {
-        let balance = state
-            .get(&account_key(request.account())?)
-            .await?
-            .map_or(0, NonZeroU64::get);
+    let keys = withdrawals
+        .requests()
+        .iter()
+        .map(|request| account_key(request.account()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let balances = state.get_many(&keys.iter().collect::<Vec<_>>()).await?;
+    for (request, balance) in withdrawals.requests().iter().zip(balances) {
+        let balance = balance.map_or(0, NonZeroU64::get);
         let deposit = deposits.amount_for(request.account());
         match request.body().action() {
             WithdrawalAction::Amount(amount)

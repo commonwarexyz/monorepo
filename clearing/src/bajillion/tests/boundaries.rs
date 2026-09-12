@@ -1,5 +1,6 @@
 use super::*;
 use crate::bajillion::{serve::Index, state::SettlementOutput};
+use commonware_runtime::Metrics as _;
 
 #[test]
 fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
@@ -211,5 +212,181 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
                 .unwrap(),
             payout
         );
+    });
+}
+
+#[test]
+fn withdrawal_validation_batches_native_balance_reads() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let mut signers = (30..33).map(SigningKey::from_seed).collect::<Vec<_>>();
+        signers.sort_by_key(|signer| signer.public_key());
+        let state = new_state(
+            runtime.child("state"),
+            "withdrawal-reads",
+            vec![
+                (signers[0].public_key(), 100),
+                (signers[1].public_key(), 200),
+            ],
+        )
+        .await;
+        let operator = SigningKey::from_seed(OPERATOR_SEED);
+        let operator_bls = compute_public::<crate::bajillion::transition::OperatorVariant>(
+            &BlsPrivate::new(Scalar::from(OPERATOR_SEED)),
+        );
+        let deployment = Sha256::hash(&[b"withdrawal-read-deployment"]);
+        let counts = || {
+            let metrics = runtime.encode();
+            ["_get_calls_total", "_get_many_calls_total"].map(|suffix| {
+                metrics
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(' ')?;
+                        name.ends_with(suffix)
+                            .then(|| value.parse::<u64>().unwrap())
+                    })
+                    .expect("native QMDB read counter")
+            })
+        };
+        let mut reads = Vec::new();
+        for (label, amount, absent_action, deposit, expected) in [
+            (
+                "covered",
+                90,
+                WithdrawalAction::Amount(NZU64!(30)),
+                30,
+                None,
+            ),
+            (
+                "insufficient",
+                101,
+                WithdrawalAction::Amount(NZU64!(30)),
+                30,
+                Some(CloseError::WithdrawalCoverage),
+            ),
+            (
+                "absent amount",
+                90,
+                WithdrawalAction::Amount(NZU64!(1)),
+                0,
+                Some(CloseError::WithdrawalCoverage),
+            ),
+            (
+                "absent close",
+                90,
+                WithdrawalAction::Close,
+                0,
+                Some(CloseError::BoundaryNoStateChange),
+            ),
+        ] {
+            let deposits = if deposit == 0 {
+                DepositBatch::empty()
+            } else {
+                DepositBatch::new(vec![
+                    DepositRecord::new(signers[2].public_key(), deposit).unwrap(),
+                ])
+                .unwrap()
+            };
+            let actions = [
+                WithdrawalAction::Amount(NonZeroU64::new(amount).unwrap()),
+                WithdrawalAction::Close,
+                absent_action,
+            ];
+            let withdrawals = WithdrawalBatch::new(
+                signers
+                    .iter()
+                    .zip(actions)
+                    .rev()
+                    .map(|(signer, action)| {
+                        SignedWithdrawal::sign(
+                            deployment,
+                            state.root().digest,
+                            Bytes::from_static(b"destination"),
+                            action,
+                            99,
+                            signer,
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let epoch = EpochContext::new::<Sha256>(
+                deployment,
+                EPOCH,
+                operator.public_key(),
+                &deposits,
+                &withdrawals,
+                state.liability(),
+                98,
+                99,
+                CloseLimits::protocol_maximum(),
+                Sha256::hash(&[b"committee"]),
+            )
+            .unwrap();
+            let before = counts();
+            let bound = epoch
+                .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+                .await;
+            reads.push((label, before, counts()));
+            if let Some(expected) = expected {
+                assert!(
+                    matches!(
+                        (bound.unwrap_err(), expected),
+                        (
+                            CloseError::WithdrawalCoverage,
+                            CloseError::WithdrawalCoverage
+                        ) | (
+                            CloseError::BoundaryNoStateChange,
+                            CloseError::BoundaryNoStateChange
+                        )
+                    ),
+                    "{label}"
+                );
+                continue;
+            }
+            let context = bound.unwrap();
+            let before = counts();
+            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+                &state,
+                &context,
+                &deposits,
+                &withdrawals,
+                vec![],
+                &Sequential,
+            )
+            .await
+            .unwrap();
+            reads.push(("prepare", before, counts()));
+            let dealing = posted::decode(prepared.encoded().clone(), &context).unwrap();
+            let before = counts();
+            let verified = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                &state,
+                &context,
+                &operator_bls,
+                &deposits,
+                &withdrawals,
+                dealing,
+                &mut TestRng::new(71),
+                &Sequential,
+            )
+            .await
+            .unwrap();
+            reads.push(("validate", before, counts()));
+            assert_eq!(verified.close().header, prepared.close().header);
+            assert_eq!(verified.state().head().liability(), 10);
+            assert_eq!(verified.close().rows.len(), 3);
+            for (row, (signer, old, new, withdrawal)) in verified.close().rows.iter().zip([
+                (&signers[0], 100, 10, 90),
+                (&signers[1], 200, 0, 200),
+                (&signers[2], 0, 0, 30),
+            ]) {
+                assert_eq!(row.account, signer.public_key());
+                assert_eq!((row.predecessor, row.successor), (old, new));
+                assert_eq!(row.output, SettlementOutput::Withdrawal(withdrawal));
+            }
+        }
+        for (label, before, after) in reads {
+            assert_eq!(after[0] - before[0], 0, "{label}: serial balance reads");
+            assert!(after[1] > before[1], "{label}: native batch reads");
+        }
     });
 }
