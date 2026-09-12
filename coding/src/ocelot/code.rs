@@ -184,10 +184,14 @@ impl<I: Impl> Encoder<I> {
             return vec![Vec::new(); recovery];
         }
         let mut acc = Shards::new(m, len);
-        let mut tmp = Shards::new(m, len);
+        let mut tmp = (k > m).then(|| Shards::new(m, len));
         for (i, block) in original.chunks(m).enumerate() {
             let shift = m * (i + 1);
-            let work = if i == 0 { &mut acc } else { &mut tmp };
+            let work = if i == 0 {
+                &mut acc
+            } else {
+                tmp.as_mut().expect("multiple original blocks")
+            };
             for (j, shard) in work.shards_mut().enumerate() {
                 match block.get(j) {
                     Some(data) => shard.copy_from_slice(data),
@@ -196,7 +200,10 @@ impl<I: Impl> Encoder<I> {
             }
             self.transform.ifft(work, block.len(), shift);
             if i != 0 {
-                for (a, t) in acc.shards_mut().zip(tmp.shards()) {
+                for (a, t) in acc
+                    .shards_mut()
+                    .zip(tmp.as_ref().expect("multiple original blocks").shards())
+                {
                     self.transform.imp.add_into(a, t);
                 }
             }
@@ -328,40 +335,59 @@ impl<I: Impl> Decoder<I> {
             return Ok(missing.into_iter().map(|i| (i, Vec::new())).collect());
         }
 
+        // Each missing original requires one recovery shard. Treat surplus
+        // recovery shards as erasures so decoding does not process more shard
+        // bytes than necessary. All supplied shards have already been
+        // validated above.
+        let recovery_end = recovery
+            .iter()
+            .enumerate()
+            .filter(|(_, shard)| shard.is_some())
+            .nth(missing.len() - 1)
+            .map(|(i, _)| i + 1)
+            .expect("present count checked above");
         let n = (m + k).next_power_of_two();
         n.checked_mul(len).ok_or(Error::InvalidShardLength)?;
         let erased: Vec<_> = recovery
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.is_none().then_some(i))
+            .filter_map(|(i, s)| (i >= recovery_end || s.is_none()).then_some(i))
             .chain(recovery.len()..m)
             .chain(missing.iter().map(|i| m + i))
             .collect();
         // Skipping the zero factor at an erased position evaluates L' there;
         // elsewhere this is L. Cantor coordinates add by XOR.
-        let locator: Vec<_> = (0..m + k)
-            .map(|i| {
-                erased
-                    .iter()
-                    .filter(|&&e| e != i)
-                    .fold(I::Element::one(), |acc, &e| acc * &self.points[i ^ e])
-            })
-            .collect();
+        let mut locator = vec![I::Element::zero(); m + k];
+        for i in recovery[..recovery_end]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, shard)| shard.is_some().then_some(i))
+            .chain(m..m + k)
+        {
+            locator[i] = erased
+                .iter()
+                .filter(|&&e| e != i)
+                .fold(I::Element::one(), |acc, &e| acc * &self.points[i ^ e]);
+        }
 
         let imp = self.transform.imp;
         let mut work = Shards::new(n, len);
+        let mut nonzero = 0;
         for (i, shard) in recovery
             .iter()
+            .take(recovery_end)
             .enumerate()
             .chain(original.iter().enumerate().map(|(i, shard)| (m + i, shard)))
         {
             if let Some(shard) = shard {
                 imp.mul_add(&mut work.data[i * len..(i + 1) * len], shard, locator[i]);
+                nonzero = i + 1;
             }
         }
-        self.transform.ifft(&mut work, m + k, 0);
+        self.transform.ifft(&mut work, nonzero, 0);
         derivative(imp, &mut work.data, len);
-        self.transform.fft(&mut work, m + k);
+        self.transform
+            .fft(&mut work, m + missing.last().unwrap() + 1);
 
         Ok(missing
             .into_iter()
@@ -572,5 +598,79 @@ pub mod test_suites {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Decoder, Encoder, Impl};
+    use crate::ocelot::{Impl8, field::gf8::GF8, kernel::portable::Portable};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn decode_ignores_surplus_recovery_shards() {
+        const OCELOT8: Impl8<Portable> = Impl8::new(Portable);
+        static MUL_ADDS: AtomicUsize = AtomicUsize::new(0);
+
+        #[derive(Clone, Copy)]
+        struct CountingImpl;
+
+        impl Impl for CountingImpl {
+            type Element = GF8;
+            const BITS: usize = <Impl8<Portable> as Impl>::BITS;
+            const NAMESPACE: &'static [u8] = <Impl8<Portable> as Impl>::NAMESPACE;
+
+            fn basis() -> &'static [Self::Element] {
+                <Impl8<Portable> as Impl>::basis()
+            }
+
+            fn add_into(self, dst: &mut [u8], src: &[u8]) {
+                OCELOT8.add_into(dst, src);
+            }
+
+            fn sub_into(self, dst: &mut [u8], src: &[u8]) {
+                OCELOT8.sub_into(dst, src);
+            }
+
+            fn mul_add(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+                MUL_ADDS.fetch_add(1, Ordering::Relaxed);
+                OCELOT8.mul_add(dst, src, c);
+            }
+
+            fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element) {
+                OCELOT8.mul_sub(dst, src, c);
+            }
+
+            fn checksum(self, shard: &[u8], coefficients: &[u8], out: &mut [u8]) {
+                OCELOT8.checksum(shard, coefficients, out);
+            }
+
+            fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
+                OCELOT8.fft_butterfly(x, y, c);
+            }
+
+            fn ifft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
+                OCELOT8.ifft_butterfly(x, y, c);
+            }
+        }
+
+        let original = [[1; 16], [2; 16], [3; 16]];
+        let original_refs: Vec<_> = original.iter().map(<[u8; 16]>::as_slice).collect();
+        let recovery = Encoder::new(OCELOT8).encode(&original_refs, 4);
+        let original = [Some(original[0].as_slice()), None, None];
+        let recovery: Vec<_> = recovery
+            .iter()
+            .map(|shard| Some(shard.as_slice()))
+            .collect();
+
+        MUL_ADDS.store(0, Ordering::Relaxed);
+        let recovered = Decoder::new(CountingImpl)
+            .decode(&original, &recovery)
+            .unwrap();
+
+        assert_eq!(recovered, vec![(1, vec![2; 16]), (2, vec![3; 16])]);
+        // Three input shards and two recovered outputs are multiplied. The
+        // other two supplied recovery shards must not be touched.
+        assert_eq!(MUL_ADDS.load(Ordering::Relaxed), 5);
     }
 }
