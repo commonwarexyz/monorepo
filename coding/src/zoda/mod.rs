@@ -602,6 +602,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: Self::StrongShard,
+        _strategy: &impl Strategy,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
         let weak_shard = WeakShard {
             inclusion_proof: shard.inclusion_proof,
@@ -625,6 +626,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         checking_data: &Self::CheckingData,
         index: u16,
         weak_shard: Self::WeakShard,
+        _strategy: &impl Strategy,
     ) -> Result<Self::CheckedShard, Self::Error> {
         checking_data.check::<H>(commitment, index, &weak_shard)
     }
@@ -711,7 +713,7 @@ mod tests {
             Zoda::<Sha256>::encode(b"", &config, &data[..], &STRATEGY).unwrap();
         let shard0 = shards[0].clone();
         let (checking_data, checked_shard0, _weak_shard0) =
-            Zoda::<Sha256>::weaken(b"", &config, &commitment, 0, shard0).unwrap();
+            Zoda::<Sha256>::weaken(b"", &config, &commitment, 0, shard0, &STRATEGY).unwrap();
         let duplicate = CheckedShard {
             index: checked_shard0.index,
             shard: checked_shard0.shard.clone(),
@@ -778,6 +780,7 @@ mod tests {
                 &commitment,
                 leader_i as u16,
                 shards[leader_i].clone(),
+                &STRATEGY,
             )
             .unwrap();
 
@@ -797,14 +800,28 @@ mod tests {
         }
 
         assert!(matches!(
-            Zoda::<Sha256>::weaken(b"", &config, &commitment, b_i as u16, shards[b_i].clone()),
+            Zoda::<Sha256>::weaken(
+                b"",
+                &config,
+                &commitment,
+                b_i as u16,
+                shards[b_i].clone(),
+                &STRATEGY,
+            ),
             Err(Error::InvalidWeakShard)
         ));
 
         // Without robust Fiat-Shamir, this will succeed.
         // This should be rejected once follower-specific challenge binding is fixed.
         assert!(matches!(
-            Zoda::<Sha256>::weaken(b"", &config, &commitment, a_i as u16, shards[a_i].clone()),
+            Zoda::<Sha256>::weaken(
+                b"",
+                &config,
+                &commitment,
+                a_i as u16,
+                shards[a_i].clone(),
+                &STRATEGY,
+            ),
             Err(Error::InvalidWeakShard)
         ));
     }
@@ -834,15 +851,22 @@ mod tests {
                 let mut log = commitment.encode().to_vec();
                 for (i, shard) in shards.into_iter().enumerate() {
                     let index: u16 = i.try_into().unwrap();
-                    let (checking_data, _, weak_shard) =
-                        Zoda::<Sha256>::weaken(b"conformance", &config, &commitment, index, shard)
-                            .unwrap();
+                    let (checking_data, _, weak_shard) = Zoda::<Sha256>::weaken(
+                        b"conformance",
+                        &config,
+                        &commitment,
+                        index,
+                        shard,
+                        &STRATEGY,
+                    )
+                    .unwrap();
                     let checked_shard = Zoda::<Sha256>::check(
                         &config,
                         &commitment,
                         &checking_data,
                         index,
                         weak_shard.clone(),
+                        &STRATEGY,
                     )
                     .unwrap();
 
