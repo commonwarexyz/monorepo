@@ -52,6 +52,7 @@ use crate::{
     },
     translator::Translator,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
@@ -158,12 +159,22 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
     fn maybe_spill(&mut self, i: usize) {
-        if self.partitions[i].len() < self.threshold {
-            return;
+        self.parts().maybe_spill(i);
+    }
+
+    /// A full-range [ShardParts] view over this index's mutable state.
+    fn parts(&mut self) -> ShardParts<'_, T, V> {
+        ShardParts {
+            base: 0,
+            partitions: &mut self.partitions,
+            spilled: &mut self.spilled,
+            translator: &self.translator,
+            threshold: self.threshold,
+            keys: &self.keys,
+            items: &self.items,
+            pruned: &self.pruned,
+            spills: &self.spills,
         }
-        let inner: BTreeMap<T::Key, Vec<V>> = self.partitions[i].drain_runs().into_iter().collect();
-        self.spilled.insert(i, inner);
-        self.spills.inc();
     }
 
     /// The `BTreeMap` of spilled partition `i`, or `None` if `i` has not spilled. The empty-map
@@ -244,40 +255,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     /// Mutable cursor over the values of sub-key `sub` in the partition at local slot `i`, if the
     /// key exists (see [Unordered::get_mut]).
     fn get_mut_slot(&mut self, i: usize, sub: &[u8]) -> Option<Cursor<'_, T::Key, V>> {
-        let k = self.translator.transform(sub);
-        self.maybe_spill(i);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
-            if run.is_empty() {
-                return None;
-            }
-            return Some(Cursor::soa(
-                &mut self.partitions[i],
-                k,
-                run,
-                &self.keys,
-                &self.items,
-                &self.pruned,
-            ));
-        }
-
-        // Hand out a spilled cursor if the partition has spilled and holds `k`.
-        if self
-            .spilled_partition(i)
-            .is_some_and(|inner| inner.contains_key(&k))
-        {
-            return Some(Cursor::spilled(
-                &mut self.spilled,
-                i,
-                k,
-                &self.keys,
-                &self.items,
-                &self.pruned,
-            ));
-        }
-
-        // Partition is genuinely empty.
-        None
+        self.parts().get_mut(i, sub)
     }
 
     /// Mutable cursor over the values of sub-key `sub` in the partition at local slot `i` if the
@@ -289,21 +267,136 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         sub: &[u8],
         value: V,
     ) -> Option<Cursor<'_, T::Key, V>> {
+        self.parts().get_mut_or_insert(i, sub, value)
+    }
+}
+
+/// A mutable view over a contiguous range of an [Index]'s partitions plus that range's
+/// spilled entries. This is the canonical home of the index's mutation logic: the full
+/// index operates through a `base = 0` view over all partitions, and
+/// `apply_sorted_diffs` shard workers operate through disjoint range views in parallel.
+/// Partition addressing is by global index; `base` maps it to the local slice.
+struct ShardParts<'a, T: Translator, V: Send + Sync> {
+    base: usize,
+    partitions: &'a mut [Partition<T::Key, V>],
+    spilled: &'a mut HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
+    translator: &'a T,
+    threshold: usize,
+    keys: &'a Gauge,
+    items: &'a Gauge,
+    pruned: &'a Counter,
+    spills: &'a Counter,
+}
+
+/// Per-shard extraction of the spilled partition maps a batch touches, one map per shard.
+type SpilledMinis<K, V> = Vec<HashMap<usize, BTreeMap<K, Vec<V>>>>;
+
+impl<'a, T: Translator, V: Send + Sync> ShardParts<'a, T, V> {
+    /// Reborrow a shorter-lived view, letting a caller keep this one after a
+    /// consuming call.
+    const fn reborrow(&mut self) -> ShardParts<'_, T, V> {
+        ShardParts {
+            base: self.base,
+            partitions: self.partitions,
+            spilled: self.spilled,
+            translator: self.translator,
+            threshold: self.threshold,
+            keys: self.keys,
+            items: self.items,
+            pruned: self.pruned,
+            spills: self.spills,
+        }
+    }
+
+    /// The partition at global index `i`.
+    const fn partition(&mut self, i: usize) -> &mut Partition<T::Key, V> {
+        &mut self.partitions[i - self.base]
+    }
+
+    /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
+    fn maybe_spill(&mut self, i: usize) {
+        if self.partition(i).len() < self.threshold {
+            return;
+        }
+        let inner: BTreeMap<T::Key, Vec<V>> = self.partition(i).drain_runs().into_iter().collect();
+        self.spilled.insert(i, inner);
+        self.spills.inc();
+    }
+
+    /// The `BTreeMap` of spilled partition `i`, or `None` if `i` has not spilled. The empty-map
+    /// check skips hashing `i` in the common case where no partition has ever spilled.
+    fn spilled_partition(&self, i: usize) -> Option<&BTreeMap<T::Key, Vec<V>>> {
+        if self.spilled.is_empty() {
+            return None;
+        }
+        self.spilled.get(&i)
+    }
+
+    /// Mutable cursor over the values of sub-key `sub` in partition `i`, if the key exists.
+    /// Consumes the view so the cursor can carry its full lifetime; use
+    /// [`Self::reborrow`] to keep working with the view afterwards.
+    fn get_mut(mut self, i: usize, sub: &[u8]) -> Option<Cursor<'a, T::Key, V>> {
         let k = self.translator.transform(sub);
         self.maybe_spill(i);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
+        let local = i - self.base;
+        if !self.partitions[local].is_empty() {
+            let run = self.partitions[local].run_range(&k);
+            if run.is_empty() {
+                return None;
+            }
+            return Some(Cursor::soa(
+                &mut self.partitions[local],
+                k,
+                run,
+                self.keys,
+                self.items,
+                self.pruned,
+            ));
+        }
+
+        // Hand out a spilled cursor if the partition has spilled and holds `k`.
+        if self
+            .spilled_partition(i)
+            .is_some_and(|inner| inner.contains_key(&k))
+        {
+            return Some(Cursor::spilled(
+                self.spilled,
+                i,
+                k,
+                self.keys,
+                self.items,
+                self.pruned,
+            ));
+        }
+
+        // Partition is genuinely empty.
+        None
+    }
+
+    /// Mutable cursor over the values of sub-key `sub` in partition `i` if the key exists,
+    /// otherwise inserts `value` for it and returns `None`.
+    fn get_mut_or_insert(
+        mut self,
+        i: usize,
+        sub: &[u8],
+        value: V,
+    ) -> Option<Cursor<'a, T::Key, V>> {
+        let k = self.translator.transform(sub);
+        self.maybe_spill(i);
+        let local = i - self.base;
+        if !self.partitions[local].is_empty() {
+            let run = self.partitions[local].run_range(&k);
             if !run.is_empty() {
                 return Some(Cursor::soa(
-                    &mut self.partitions[i],
+                    &mut self.partitions[local],
                     k,
                     run,
-                    &self.keys,
-                    &self.items,
-                    &self.pruned,
+                    self.keys,
+                    self.items,
+                    self.pruned,
                 ));
             }
-            self.partitions[i].insert_at(run.end, k, value);
+            self.partitions[local].insert_at(run.end, k, value);
             self.keys.inc();
             self.items.inc();
             self.maybe_spill(i);
@@ -315,12 +408,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         if let Some(inner) = self.spilled_partition(i) {
             if inner.contains_key(&k) {
                 return Some(Cursor::spilled(
-                    &mut self.spilled,
+                    self.spilled,
                     i,
                     k,
-                    &self.keys,
-                    &self.items,
-                    &self.pruned,
+                    self.keys,
+                    self.items,
+                    self.pruned,
                 ));
             }
             self.spilled.get_mut(&i).unwrap().insert(k, vec![value]);
@@ -330,12 +423,51 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
 
         // Partition i is genuinely empty: start a fresh sorted array.
-        self.partitions[i].insert_at(0, k, value);
+        self.partitions[local].insert_at(0, k, value);
         self.keys.inc();
         self.items.inc();
         self.maybe_spill(i);
 
         None
+    }
+
+    /// Insert `value` for sub-key `sub` in partition `i` (see [Unordered::insert]).
+    fn insert(&mut self, i: usize, sub: &[u8], value: V) {
+        let k = self.translator.transform(sub);
+        self.maybe_spill(i);
+        let local = i - self.base;
+        if !self.partitions[local].is_empty() {
+            let run = self.partitions[local].run_range(&k);
+            let new_key = run.is_empty();
+            self.partitions[local].insert_at(run.end, k, value);
+            self.items.inc();
+            if new_key {
+                self.keys.inc();
+            }
+            self.maybe_spill(i);
+            return;
+        }
+
+        // Route into the spilled partition's `BTreeMap`.
+        if !self.spilled.is_empty()
+            && let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i)
+        {
+            match partition.get_mut().entry(k) {
+                btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
+                btree_map::Entry::Vacant(run) => {
+                    run.insert(vec![value]);
+                    self.keys.inc();
+                }
+            }
+            self.items.inc();
+            return;
+        }
+
+        // Genuinely empty partition: start a fresh sorted array.
+        self.partitions[local].insert_at(0, k, value);
+        self.items.inc();
+        self.keys.inc();
+        self.maybe_spill(i);
     }
 }
 
@@ -503,40 +635,174 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
 
     fn insert(&mut self, key: &[u8], value: Self::Value) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
-        let k = self.translator.transform(sub);
-        self.maybe_spill(i);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
-            let new_key = run.is_empty();
-            self.partitions[i].insert_at(run.end, k, value);
-            self.items.inc();
-            if new_key {
-                self.keys.inc();
+        self.parts().insert(i, sub, value);
+    }
+
+    fn apply_sorted_diffs<S: Strategy>(
+        &mut self,
+        strategy: &S,
+        diffs: &[(&[u8], Option<Self::Value>, Option<Self::Value>)],
+    ) where
+        Self::Value: PartialEq + Copy,
+    {
+        // Shard the batch across the strategy's workers, snapping shard boundaries to
+        // partition boundaries so each worker mutates a disjoint partition range. Small
+        // batches apply sequentially: below this size the fan-out costs more than the
+        // walk it splits.
+        const MIN_DIFFS_PER_SHARD: usize = 64;
+        let workers = strategy.manual().parallelism();
+        let shards = workers.min(diffs.len() / MIN_DIFFS_PER_SHARD);
+        if shards <= 1 {
+            for &(key, old, new) in diffs {
+                crate::index::apply_one_diff(self, key, old, new);
             }
-            self.maybe_spill(i);
             return;
         }
 
-        // Route into the spilled partition's `BTreeMap`.
-        if !self.spilled.is_empty()
-            && let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i)
-        {
-            match partition.get_mut().entry(k) {
-                btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
-                btree_map::Entry::Vacant(run) => {
-                    run.insert(vec![value]);
-                    self.keys.inc();
+        // Split points in `diffs`, advanced past any run of equal partitions so a
+        // partition never straddles two shards.
+        let mut bounds: Vec<usize> = Vec::with_capacity(shards + 1);
+        bounds.push(0);
+        for s in 1..shards {
+            // Start at the previous bound when it already passed this target:
+            // a partition run spanning several targets is then walked once
+            // in total instead of once per target.
+            let mut at =
+                (diffs.len() * s / shards).max(*bounds.last().expect("bounds is non-empty"));
+            while at < diffs.len()
+                && at > 0
+                && partition_index_and_sub_key::<P>(diffs[at].0).0
+                    == partition_index_and_sub_key::<P>(diffs[at - 1].0).0
+            {
+                at += 1;
+            }
+            if at >= diffs.len() {
+                // A run reaching the end of `diffs` can never host a later
+                // bound, and it would otherwise be rescanned from every
+                // remaining target.
+                break;
+            }
+            if at > *bounds.last().expect("bounds is non-empty") {
+                bounds.push(at);
+            }
+        }
+        bounds.push(diffs.len());
+
+        // Boundary snapping can collapse everything into a single shard (e.g.
+        // one partition dominating the batch); no parallelism is possible, so
+        // skip the fan-out machinery.
+        if bounds.len() == 2 {
+            for &(key, old, new) in diffs {
+                crate::index::apply_one_diff(self, key, old, new);
+            }
+            return;
+        }
+
+        // Partition ranges per shard (for carving the partition array), then
+        // the spilled entries each shard owns for the duration of the fan-out.
+        let ranges: Vec<(usize, usize)> = bounds
+            .windows(2)
+            .map(|w| {
+                let p_lo = partition_index_and_sub_key::<P>(diffs[w[0]].0).0;
+                let p_hi = partition_index_and_sub_key::<P>(diffs[w[1] - 1].0).0 + 1;
+                (p_lo, p_hi)
+            })
+            .collect();
+        let mut minis: SpilledMinis<T::Key, V> =
+            (0..ranges.len()).map(|_| HashMap::new()).collect();
+        if !self.spilled.is_empty() {
+            // Extract exactly the spilled maps this batch touches: walk each
+            // shard's key-sorted diff slice and pull its distinct partitions.
+            // Probing by shard endpoint ranges instead would churn every
+            // spilled partition that merely falls between a shard's first and
+            // last touched partition.
+            for (s, w) in bounds.windows(2).enumerate() {
+                let mut prev = usize::MAX;
+                for &(key, _, _) in &diffs[w[0]..w[1]] {
+                    let (pid, _) = partition_index_and_sub_key::<P>(key);
+                    if pid != prev {
+                        prev = pid;
+                        if let Some(entry) = self.spilled.remove(&pid) {
+                            minis[s].insert(pid, entry);
+                        }
+                    }
                 }
             }
-            self.items.inc();
-            return;
         }
 
-        // Genuinely empty partition: start a fresh sorted array.
-        self.partitions[i].insert_at(0, k, value);
-        self.items.inc();
-        self.keys.inc();
-        self.maybe_spill(i);
+        // Carve the partition array into one disjoint mutable slice per shard.
+        struct Shard<'s, T: Translator, V: Send + Sync> {
+            parts: ShardParts<'s, T, V>,
+            diffs: &'s [(&'s [u8], Option<V>, Option<V>)],
+        }
+        let mut shard_tasks: Vec<Shard<'_, T, V>> = Vec::with_capacity(ranges.len());
+        let mut remaining: &mut [Partition<T::Key, V>] = &mut self.partitions;
+        let mut carved = 0usize;
+        for ((&(p_lo, p_hi), mini), w) in ranges.iter().zip(minis.iter_mut()).zip(bounds.windows(2))
+        {
+            let (lo, hi) = (w[0], w[1]);
+            let (_, tail) = remaining.split_at_mut(p_lo - carved);
+            let (mine, rest) = tail.split_at_mut(p_hi - p_lo);
+            remaining = rest;
+            carved = p_hi;
+            shard_tasks.push(Shard {
+                parts: ShardParts {
+                    base: p_lo,
+                    partitions: mine,
+                    spilled: mini,
+                    translator: &self.translator,
+                    threshold: self.threshold,
+                    keys: &self.keys,
+                    items: &self.items,
+                    pruned: &self.pruned,
+                    spills: &self.spills,
+                },
+                diffs: &diffs[lo..hi],
+            });
+        }
+
+        // Feed the policy the per-shard diff count: the fan-out presents only
+        // shard-count items, which alone would read as trivial work and
+        // converge the adaptive policy to serial.
+        let per_shard = diffs.len() / shard_tasks.len().max(1);
+        strategy.map_collect_vec_with_multiplier(shard_tasks, per_shard, |mut shard| {
+            for &(key, old, new) in shard.diffs {
+                let (i, sub) = partition_index_and_sub_key::<P>(key);
+                match (old, new) {
+                    (None, Some(new)) => shard.parts.insert(i, sub, new),
+                    (Some(old), Some(new)) => {
+                        let mut cursor = shard
+                            .parts
+                            .reborrow()
+                            .get_mut(i, sub)
+                            .expect("key should be known to exist");
+                        assert!(
+                            cursor.find(|v| *v == old),
+                            "known key with given old value should have been found"
+                        );
+                        cursor.update(new);
+                    }
+                    (Some(old), None) => {
+                        let mut cursor = shard
+                            .parts
+                            .reborrow()
+                            .get_mut(i, sub)
+                            .expect("key should be known to exist");
+                        assert!(
+                            cursor.find(|v| *v == old),
+                            "known key with given old value should have been found"
+                        );
+                        cursor.delete();
+                    }
+                    (None, None) => {}
+                }
+            }
+        });
+
+        // Fold any spilled entries (including new spills) back into the side-table.
+        for mini in minis {
+            self.spilled.extend(mini);
+        }
     }
 
     fn insert_and_retain(
@@ -1472,6 +1738,361 @@ mod tests {
                 assert_eq!(wrapped, i == 0, "prev wrap at index {i}");
                 assert_eq!(it.next(), Some(&prev), "prev at {i}");
                 assert_eq!(it.next(), None);
+            }
+        });
+    }
+
+    /// The parallel sharded `apply_sorted_diffs` must produce the same index state as
+    /// the sequential trait default, including when partitions spill mid-batch and when
+    /// shard boundaries need snapping to partition boundaries.
+    #[test_traced]
+    fn apply_sorted_diffs_parallel_matches_sequential() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut parallel =
+                Index::<OneCap, u64, 1>::with_threshold(context.child("parallel"), OneCap, 4);
+            let mut sequential =
+                Index::<OneCap, u64, 1>::with_threshold(context.child("sequential"), OneCap, 4);
+            let rayon =
+                commonware_parallel::Rayon::new(std::num::NonZeroUsize::new(4).unwrap()).unwrap();
+
+            // Seed both indices identically: several values per key across many partitions,
+            // enough per partition to cross the spill threshold for some.
+            let mut keys: Vec<[u8; 2]> = Vec::new();
+            for hi in 0u8..64 {
+                for lo in 0u8..8 {
+                    keys.push([hi, lo]);
+                }
+            }
+            for (n, key) in keys.iter().enumerate() {
+                parallel.insert(key, n as u64);
+                sequential.insert(key, n as u64);
+            }
+
+            // A key-sorted diff batch mixing inserts (new suffixes), moves, and deletes.
+            let mut diffs: Vec<(&[u8], Option<u64>, Option<u64>)> = Vec::new();
+            let mut fresh: Vec<[u8; 2]> = Vec::new();
+            for hi in 0u8..64 {
+                fresh.push([hi, 100]);
+            }
+            for (n, key) in keys.iter().enumerate() {
+                match n % 3 {
+                    0 => diffs.push((key.as_slice(), Some(n as u64), Some(n as u64 + 10_000))),
+                    1 => diffs.push((key.as_slice(), Some(n as u64), None)),
+                    _ => {}
+                }
+            }
+            for (n, key) in fresh.iter().enumerate() {
+                diffs.push((key.as_slice(), None, Some(n as u64 + 20_000)));
+            }
+            diffs.sort_by(|a, b| a.0.cmp(b.0));
+
+            // Apply the same batch through the sharded path and the sequential default.
+            parallel.apply_sorted_diffs(&rayon, &diffs);
+            for &(key, old, new) in &diffs {
+                crate::index::apply_one_diff(&mut sequential, key, old, new);
+            }
+
+            // Every key's value set must match.
+            for key in keys
+                .iter()
+                .map(|k| k.as_slice())
+                .chain(fresh.iter().map(|k| k.as_slice()))
+            {
+                let mut a: Vec<u64> = parallel.get(key).copied().collect();
+                let mut b: Vec<u64> = sequential.get(key).copied().collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                assert_eq!(a, b, "mismatch at key {:?}", key);
+            }
+            assert_eq!(parallel.keys(), sequential.keys());
+            assert_eq!(parallel.items(), sequential.items());
+            assert_eq!(parallel.spilled_count(), sequential.spilled_count());
+        });
+    }
+
+    /// The sharded path must also hold at P=2: a sparse slice of a 65,536-entry
+    /// partition array, keys of exactly P bytes (empty sub-keys), and spills,
+    /// none of which the P=1 tests can produce.
+    #[test_traced]
+    fn apply_sorted_diffs_parallel_matches_sequential_p2() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut parallel =
+                Index::<OneCap, u64, 2>::with_threshold(context.child("parallel"), OneCap, 4);
+            let mut sequential =
+                Index::<OneCap, u64, 2>::with_threshold(context.child("sequential"), OneCap, 4);
+            let rayon =
+                commonware_parallel::Rayon::new(std::num::NonZeroUsize::new(4).unwrap()).unwrap();
+
+            // Sparse partitions spread across the 65,536-entry array; per
+            // partition, keys of exactly P bytes (empty sub-key) and longer,
+            // several values per translated key to cross the spill threshold.
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            for i in 0u16..48 {
+                let p = i.wrapping_mul(1381).to_be_bytes();
+                keys.push(vec![p[0], p[1]]);
+                for suffix in 0u8..6 {
+                    keys.push(vec![p[0], p[1], suffix]);
+                    keys.push(vec![p[0], p[1], suffix, 0xEE]);
+                }
+            }
+            keys.sort();
+            keys.dedup();
+            for (n, key) in keys.iter().enumerate() {
+                parallel.insert(key, n as u64);
+                sequential.insert(key, n as u64);
+            }
+
+            // Key-sorted diffs mixing moves, deletes, and fresh inserts
+            // (including fresh empty-sub-key keys).
+            let mut fresh: Vec<Vec<u8>> = Vec::new();
+            for i in 0u16..48 {
+                let p = i.wrapping_mul(2749).to_be_bytes();
+                fresh.push(vec![p[0], p[1]]);
+            }
+            fresh.sort();
+            fresh.dedup();
+            let mut diffs: Vec<(&[u8], Option<u64>, Option<u64>)> = Vec::new();
+            for (n, key) in keys.iter().enumerate() {
+                match n % 3 {
+                    0 => diffs.push((key.as_slice(), Some(n as u64), Some(n as u64 + 10_000))),
+                    1 => diffs.push((key.as_slice(), Some(n as u64), None)),
+                    _ => {}
+                }
+            }
+            for (n, key) in fresh.iter().enumerate() {
+                diffs.push((key.as_slice(), None, Some(n as u64 + 20_000)));
+            }
+            diffs.sort_by(|a, b| a.0.cmp(b.0));
+
+            parallel.apply_sorted_diffs(&rayon, &diffs);
+            for &(key, old, new) in &diffs {
+                crate::index::apply_one_diff(&mut sequential, key, old, new);
+            }
+
+            for key in keys.iter().chain(fresh.iter()) {
+                let mut a: Vec<u64> = parallel.get(key).copied().collect();
+                let mut b: Vec<u64> = sequential.get(key).copied().collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                assert_eq!(a, b, "mismatch at key {key:?}");
+            }
+            assert_eq!(parallel.keys(), sequential.keys());
+            assert_eq!(parallel.items(), sequential.items());
+            assert_eq!(parallel.spilled_count(), sequential.spilled_count());
+        });
+    }
+
+    /// Sequential-executing strategy that records the work hints passed to the
+    /// multiplier-aware map, reporting parallelism 4 so the sharded path engages.
+    #[derive(Clone, Debug)]
+    struct RecordingStrategy {
+        inner: commonware_parallel::Sequential,
+        multiplier_calls: std::sync::Arc<std::sync::Mutex<Vec<(usize, usize)>>>,
+    }
+
+    impl RecordingStrategy {
+        fn new() -> Self {
+            Self {
+                inner: commonware_parallel::Sequential,
+                multiplier_calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl commonware_parallel::Strategy for RecordingStrategy {
+        fn manual(&self) -> commonware_parallel::Manual<Self> {
+            commonware_parallel::Manual::new(self.clone(), std::num::NonZeroUsize::new(4).unwrap())
+        }
+
+        fn spawn<F, T>(
+            &self,
+            _len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
+        where
+            F: FnOnce(Self) -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            core::future::ready(f(self.clone()))
+        }
+
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            self.inner.run(len, serial, parallel)
+        }
+
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.inner.try_run(len, serial, parallel)
+        }
+
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.inner
+                .fold_init(iter, init, identity, fold_op, reduce_op)
+        }
+
+        fn try_fold<I, R, E, ID, F, RD>(
+            &self,
+            iter: I,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> Result<R, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            R: Send,
+            E: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.inner.try_fold(iter, identity, fold_op, reduce_op)
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            self.inner.join(a, b)
+        }
+
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> core::cmp::Ordering + Send + Sync,
+        {
+            self.inner.sort_by(items, compare)
+        }
+
+        fn map_init_collect_vec_with_multiplier<I, INIT, T, F, R>(
+            &self,
+            iter: I,
+            multiplier: usize,
+            init: INIT,
+            map_op: F,
+        ) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            let items: Vec<I::Item> = iter.into_iter().collect();
+            self.multiplier_calls
+                .lock()
+                .expect("lock poisoned")
+                .push((items.len(), multiplier));
+            self.inner.map_init_collect_vec(items, init, map_op)
+        }
+    }
+
+    /// The sharded fan-out must pass its true per-shard workload to the
+    /// adaptive policy. A regression to the plain map keeps every result
+    /// identical (so the equivalence test stays green) while silently
+    /// re-exposing the policy to shard-count-as-work serial convergence.
+    #[test_traced]
+    fn apply_sorted_diffs_reports_work_multiplier() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut index =
+                Index::<OneCap, u64, 1>::with_threshold(context.child("index"), OneCap, 64);
+            let mut keys: Vec<[u8; 2]> = Vec::new();
+            for hi in 0u8..64 {
+                for lo in 0u8..8 {
+                    keys.push([hi, lo]);
+                }
+            }
+            for (n, key) in keys.iter().enumerate() {
+                index.insert(key, n as u64);
+            }
+            let mut diffs: Vec<(&[u8], Option<u64>, Option<u64>)> = Vec::new();
+            for (n, key) in keys.iter().enumerate() {
+                diffs.push((key.as_slice(), Some(n as u64), Some(n as u64 + 10_000)));
+            }
+            diffs.sort_by(|a, b| a.0.cmp(b.0));
+
+            let strategy = RecordingStrategy::new();
+            index.apply_sorted_diffs(&strategy, &diffs);
+
+            let calls = strategy.multiplier_calls.lock().expect("lock poisoned");
+            assert_eq!(
+                calls.len(),
+                1,
+                "sharded apply must use the multiplier-aware map"
+            );
+            let (shards, multiplier) = calls[0];
+            assert!(shards > 1, "fan-out should have sharded (got {shards})");
+            assert_eq!(multiplier, diffs.len() / shards);
+        });
+    }
+
+    /// A batch concentrated in one partition collapses to a single shard after
+    /// boundary snapping: the apply must fall back to the sequential path
+    /// (no fan-out call) and still produce correct results.
+    #[test_traced]
+    fn apply_sorted_diffs_single_partition_batch_falls_back() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut index =
+                Index::<OneCap, u64, 1>::with_threshold(context.child("index"), OneCap, 1024);
+            let mut keys: Vec<[u8; 2]> = Vec::new();
+            for lo in 0u8..=255 {
+                keys.push([7, lo]);
+            }
+            for (n, key) in keys.iter().enumerate() {
+                index.insert(key, n as u64);
+            }
+            let mut diffs: Vec<(&[u8], Option<u64>, Option<u64>)> = Vec::new();
+            for (n, key) in keys.iter().enumerate() {
+                diffs.push((key.as_slice(), Some(n as u64), Some(n as u64 + 10_000)));
+            }
+            diffs.sort_by(|a, b| a.0.cmp(b.0));
+
+            let strategy = RecordingStrategy::new();
+            index.apply_sorted_diffs(&strategy, &diffs);
+
+            assert!(
+                strategy
+                    .multiplier_calls
+                    .lock()
+                    .expect("lock poisoned")
+                    .is_empty(),
+                "single-partition batch must not fan out"
+            );
+            for (n, key) in keys.iter().enumerate() {
+                let got: Vec<u64> = index.get(key).copied().collect();
+                assert_eq!(got, vec![n as u64 + 10_000], "key {key:?}");
             }
         });
     }
