@@ -4,9 +4,7 @@ mod kernel;
 mod scheme;
 mod transform;
 
-use crate::{
-    Config, PhasedScheme,
-};
+use crate::{Config, PhasedScheme};
 use bytes::Buf;
 use code::Impl;
 use commonware_cryptography::{Hasher, transcript::Summary};
@@ -15,7 +13,7 @@ use field::gf8::{GF8, GF8Vec};
 use kernel::{Kernel, WithKernel, with_kernel};
 pub use scheme::Error;
 use scheme::{CheckedShard, CheckingData, OcelotX, StrongShard, WeakShard};
-use std::{fmt, marker::PhantomData};
+use std::{fmt, marker::PhantomData, ops::Range};
 
 /// Reed-Solomon coding over GF(2^8), with commitments using `H`.
 ///
@@ -24,6 +22,11 @@ use std::{fmt, marker::PhantomData};
 /// checksum projections with Fiat-Shamir. A strong shard carries the unencoded
 /// checksums; participants encode them locally and use the resulting checksum
 /// codeword alongside Merkle proofs to check forwarded shards.
+///
+/// Encoding and decoding process large shards in independent byte stripes
+/// using the supplied strategy. Checksums use tiles spanning shards and column
+/// ranges, including when checking a single shard. Encoding also parallelizes
+/// shard hashing through that strategy.
 ///
 /// A successful shard check does not prove that the entire encoding is
 /// available. Availability is established only when decoding succeeds from
@@ -75,16 +78,15 @@ impl<H: Hasher> PhasedScheme for Ocelot8<H> {
         commitment: &Self::Commitment,
         index: u16,
         shard: Self::StrongShard,
-    ) -> Result<
-        (Self::CheckingData, Self::CheckedShard, Self::WeakShard),
-        Self::Error,
-    > {
-        with_kernel(Weaken::<H> {
+        strategy: &impl Strategy,
+    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
+        with_kernel(Weaken::<H, _> {
             namespace,
             config,
             commitment,
             index,
             shard,
+            strategy,
         })
     }
 
@@ -94,13 +96,15 @@ impl<H: Hasher> PhasedScheme for Ocelot8<H> {
         checking_data: &Self::CheckingData,
         index: u16,
         weak_shard: Self::WeakShard,
+        strategy: &impl Strategy,
     ) -> Result<Self::CheckedShard, Self::Error> {
-        with_kernel(Check::<H> {
+        with_kernel(Check::<H, _> {
             config,
             commitment,
             checking_data,
             index,
             weak_shard,
+            strategy,
         })
     }
 
@@ -166,19 +170,17 @@ impl<'a, H: Hasher, T: Iterator<Item = &'a CheckedShard>, S: Strategy> WithKerne
     }
 }
 
-struct Weaken<'a, H: Hasher> {
+struct Weaken<'a, H: Hasher, S> {
     namespace: &'a [u8],
     config: &'a Config,
     commitment: &'a Summary,
     index: u16,
     shard: StrongShard<H::Digest>,
+    strategy: &'a S,
 }
 
-impl<H: Hasher> WithKernel for Weaken<'_, H> {
-    type Output = Result<
-        (CheckingData<H::Digest>, CheckedShard, WeakShard<H::Digest>),
-        Error,
-    >;
+impl<H: Hasher, S: Strategy> WithKernel for Weaken<'_, H, S> {
+    type Output = Result<(CheckingData<H::Digest>, CheckedShard, WeakShard<H::Digest>), Error>;
 
     fn call<K: Kernel>(self, kernel: K) -> Self::Output {
         OcelotX::<_, H, 16>::new(Impl8::new(kernel)).weaken(
@@ -187,19 +189,21 @@ impl<H: Hasher> WithKernel for Weaken<'_, H> {
             self.commitment,
             self.index,
             self.shard,
+            self.strategy,
         )
     }
 }
 
-struct Check<'a, H: Hasher> {
+struct Check<'a, H: Hasher, S> {
     config: &'a Config,
     commitment: &'a Summary,
     checking_data: &'a CheckingData<H::Digest>,
     index: u16,
     weak_shard: WeakShard<H::Digest>,
+    strategy: &'a S,
 }
 
-impl<H: Hasher> WithKernel for Check<'_, H> {
+impl<H: Hasher, S: Strategy> WithKernel for Check<'_, H, S> {
     type Output = Result<CheckedShard, Error>;
 
     fn call<K: Kernel>(self, kernel: K) -> Self::Output {
@@ -209,6 +213,7 @@ impl<H: Hasher> WithKernel for Check<'_, H> {
             self.checking_data,
             self.index,
             self.weak_shard,
+            self.strategy,
         )
     }
 }
@@ -280,12 +285,23 @@ impl<K: Kernel> Impl for Impl8<K> {
         self.mul_add(dst, src, c);
     }
 
-    fn checksum(self, shard: &[u8], coefficients: &[u8], out: &mut [u8]) {
+    fn checksum_range(
+        self,
+        shard: &[u8],
+        coefficients: &[u8],
+        range: Range<usize>,
+        out: &mut [u8],
+    ) {
         assert_eq!(coefficients.len(), shard.len() * out.len());
+        let input = &shard[range.clone()];
+        if input.is_empty() {
+            out.fill(0);
+            return;
+        }
         for (result, coefficients) in out.iter_mut().zip(coefficients.chunks_exact(shard.len())) {
             let mut sum = 0;
-            let mut shard_chunks = shard.chunks_exact(K::LANES);
-            let mut coefficient_chunks = coefficients.chunks_exact(K::LANES);
+            let mut shard_chunks = input.chunks_exact(K::LANES);
+            let mut coefficient_chunks = coefficients[range.clone()].chunks_exact(K::LANES);
             for (shard, coefficients) in shard_chunks.by_ref().zip(coefficient_chunks.by_ref()) {
                 let product = self
                     .kernel
@@ -311,6 +327,7 @@ mod tests {
         code::{Encoder, test_suites::fuzz_code},
         kernel::{Kernel, WithKernel, portable::Portable, with_kernel},
     };
+    use commonware_parallel::Sequential;
 
     const OCELOT8: Impl8<Portable> = Impl8::new(Portable);
 
@@ -332,6 +349,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "too many shards")]
     fn encode_rejects_padded_count_overflow() {
-        Encoder::new(OCELOT8).encode(&[&[1][..]; 127], 129);
+        Encoder::new(OCELOT8).encode(&[&[1][..]; 127], 129, &Sequential);
     }
 }

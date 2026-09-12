@@ -893,8 +893,13 @@ where
                 .get_mut(&commitment)
                 .and_then(CommitmentRecord::reconstruction_mut)
                 .expect("reconstruction checked as present");
-            let progressed =
-                state.on_network_shard(peer, shard, scheme.as_ref(), &mut self.blocker);
+            let progressed = state.on_network_shard(
+                peer,
+                shard,
+                scheme.as_ref(),
+                &self.strategy,
+                &mut self.blocker,
+            );
             if progressed {
                 self.try_advance(sender, commitment);
             }
@@ -1246,7 +1251,13 @@ where
         // Ingest buffered shards into the active reconstruction state.
         let mut progressed = false;
         for (peer, shard) in buffered {
-            progressed |= state.on_network_shard(peer, shard, scheme.as_ref(), &mut self.blocker);
+            progressed |= state.on_network_shard(
+                peer,
+                shard,
+                scheme.as_ref(),
+                &self.strategy,
+                &mut self.blocker,
+            );
         }
         progressed
     }
@@ -1803,6 +1814,7 @@ where
         commitment: Commitment<B, C, H>,
         shard: IndexedShard<C>,
         is_participant: bool,
+        strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
     ) -> bool {
         let Ok(checked) = C::check(
@@ -1810,6 +1822,7 @@ where
             &commitment.root(),
             shard.index,
             &shard.data,
+            strategy,
         ) else {
             commonware_p2p::block!(blocker, sender, "invalid assigned shard received");
             return false;
@@ -1884,6 +1897,7 @@ where
         sender: P,
         shard: Shard<B, C, H>,
         scheme: &Sch,
+        strategy: &impl Strategy,
         blocker: &mut X,
     ) -> bool
     where
@@ -1953,6 +1967,7 @@ where
                 commitment,
                 indexed,
                 scheme.me().is_some(),
+                strategy,
                 blocker,
             );
         }
@@ -2155,9 +2170,10 @@ mod tests {
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error> {
             assert_eq!(index, 3, "only the assigned shard is checked eagerly");
-            C::check(config, commitment, index, shard)
+            C::check(config, commitment, index, shard, strategy)
         }
 
         fn check_many(
@@ -2216,8 +2232,9 @@ mod tests {
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error> {
-            C::check(config, commitment, index, shard)
+            C::check(config, commitment, index, shard, strategy)
         }
 
         fn check_many(
@@ -6630,6 +6647,7 @@ mod tests {
                         peer_keys[usize::from(index)].clone(),
                         shard,
                         &scheme,
+                        &engine.strategy,
                         &mut engine.blocker,
                     ));
                 }
