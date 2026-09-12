@@ -95,6 +95,10 @@ pub(super) struct Allocation {
 
 impl Drop for Allocation {
     fn drop(&mut self) {
+        // A single-slot slab cannot be reused; dropping its Arc releases the slab directly.
+        if self.slab.layout.size() == self.slab.slot.size() {
+            return;
+        }
         // SAFETY: ptr addresses a slot within this slab's allocation.
         let offset = unsafe { self.ptr.as_ptr().offset_from(self.slab.ptr.as_ptr()) } as usize;
         let was_full = {
@@ -142,6 +146,24 @@ mod tests {
         assert!(slab.upgrade().is_none());
         let allocation = pool.allocate(layout);
         assert_eq!(allocation.ptr.as_ptr().align_offset(layout.align()), 0);
+    }
+
+    #[test]
+    fn test_dedicated_slabs_leave_no_available_entries() {
+        for size in [SLAB_BYTES / 2 + 8, SLAB_BYTES, SLAB_BYTES * 2] {
+            let pool = Arc::new(Pool::default());
+            let layout = Layout::from_size_align(size, 8).unwrap();
+            let allocations: Vec<_> = (0..64).map(|_| pool.allocate(layout)).collect();
+            let slab = Arc::downgrade(&allocations[0].slab);
+
+            // Release the whole batch without allocating again to sweep dead weak references.
+            drop(allocations);
+            assert!(slab.upgrade().is_none());
+            assert_eq!(
+                pool.available.lock().values().map(Vec::len).sum::<usize>(),
+                0
+            );
+        }
     }
 
     #[test]
