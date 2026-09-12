@@ -317,6 +317,43 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
       <td style="text-align:right;"><strong>101 B</strong></td>
       <td style="text-align:right;"><strong>101 B</strong></td>
     </tr>
+    <tr><th colspan="5" style="text-align:left;">Operator</th></tr>
+    <tr>
+      <td>Prepare and apply</td>
+      <td style="text-align:right;">5.40 ms</td>
+      <td style="text-align:right;">30.2 ms</td>
+      <td style="text-align:right;">326 ms</td>
+      <td style="text-align:right;">4.04 s</td>
+    </tr>
+    <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
+    <tr>
+      <td>Decode</td>
+      <td style="text-align:right;">54.5 ms</td>
+      <td style="text-align:right;">531 ms</td>
+      <td style="text-align:right;">5.32 s</td>
+      <td style="text-align:right;">53.3 s</td>
+    </tr>
+    <tr>
+      <td>Verify and sign</td>
+      <td style="text-align:right;">8.67 ms</td>
+      <td style="text-align:right;">46.8 ms</td>
+      <td style="text-align:right;">468 ms</td>
+      <td style="text-align:right;">5.28 s</td>
+    </tr>
+    <tr>
+      <td>Apply balances</td>
+      <td style="text-align:right;">0.225 ms</td>
+      <td style="text-align:right;">2.10 ms</td>
+      <td style="text-align:right;">20.6 ms</td>
+      <td style="text-align:right;">266 ms</td>
+    </tr>
+    <tr>
+      <td><strong>Receive and apply</strong></td>
+      <td style="text-align:right;"><strong>63.6 ms</strong></td>
+      <td style="text-align:right;"><strong>583 ms</strong></td>
+      <td style="text-align:right;"><strong>5.81 s</strong></td>
+      <td style="text-align:right;"><strong>58.9 s</strong></td>
+    </tr>
     <tr><th colspan="5" style="text-align:left;">Retained between closes</th></tr>
     <tr>
       <td>Account records per validator</td>
@@ -331,10 +368,12 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
 ```
 
 ::: {.image-caption}
-Figure 5: Measured encoded payloads, with one signed payment per account and no boundary flows. Egress assumes direct delivery of 100 copies, excluding transport and other messages. Account records count 32-byte keys and 8-byte balances; QMDB indexes, history, and retained evidence are additional.
+Figure 5: One signed payment per account, with no boundary flows. Times are medians of ten successive closes after one warmup on an AWS c8a.4xlarge with 16 workers and in-memory storage. Verification includes balance reads and construction of the new QMDB root; the total also includes decoding and application. Durable commit and networking are excluded. Egress assumes 100 direct copies. Account records count 32-byte keys and 8-byte balances, before QMDB indexes, history, and retained evidence.
 :::
 
-With a million live accounts but only 1,024 senders paying that same recipient pool, the dealing is still 105 KB. Validators check the activity and update the affected balances in QMDB. Latency measurements for this implementation are pending.
+With a million live accounts but only 1,024 senders paying that same recipient pool, the dealing is still 105 KB and takes 64.5 ms to decode, verify, and apply.
+
+On filesystem storage, the same close takes 74.9 ms from decoding through QMDB commit. This uses a 4 MiB page cache with uncontrolled OS caching and excludes the accepted-close journal and networking.
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
 
@@ -346,9 +385,9 @@ Repeated payments between the same pairs reuse these settlement records, spreadi
 Figure 6: More unit payments on the same pairs spread the update and certificate cost. Every account pays its next neighbor, and the model includes growing counter widths. Left: one validator's keyed update. Right: the 101-byte commitment and certificate for 100 validators.
 :::
 
-### Proof Sizes
+### Proof Sizes and Verification
 
-Receipts and per-close claims use BMTs. The following payloads were encoded and verified against the same closes.
+Verifying the certified commitment takes 0.672 ms for a 100-validator committee. The tables below show encoded proof sizes, with verification times beneath them. Times are medians of ten samples on one CPU thread of the same host, starting from decoded proofs.
 
 ```{=html}
 <div class="clearing-benchmark-table">
@@ -358,16 +397,16 @@ Receipts and per-close claims use BMTs. The following payloads were encoded and 
     <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
   </thead>
   <tbody>
-    <tr><td>Debit mismatch</td><td style="text-align:right;">588 B</td><td style="text-align:right;">716 B</td><td style="text-align:right;">812 B</td><td style="text-align:right;">908 B</td></tr>
-    <tr><td>Entry mismatch</td><td style="text-align:right;">639 B</td><td style="text-align:right;">767 B</td><td style="text-align:right;">863 B</td><td style="text-align:right;">959 B</td></tr>
-    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td></tr>
+    <tr><td>Debit mismatch</td><td style="text-align:right;">588 B<br><small>224 µs</small></td><td style="text-align:right;">716 B<br><small>215 µs</small></td><td style="text-align:right;">812 B<br><small>223 µs</small></td><td style="text-align:right;">908 B<br><small>213 µs</small></td></tr>
+    <tr><td>Entry mismatch</td><td style="text-align:right;">639 B<br><small>225 µs</small></td><td style="text-align:right;">767 B<br><small>216 µs</small></td><td style="text-align:right;">863 B<br><small>223 µs</small></td><td style="text-align:right;">959 B<br><small>214 µs</small></td></tr>
+    <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B<br><small>220 µs</small></td><td style="text-align:right;">417 B<br><small>212 µs</small></td><td style="text-align:right;">417 B<br><small>219 µs</small></td><td style="text-align:right;">417 B<br><small>218 µs</small></td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 7: Measured BMT challenge payloads for payers included in the close, with Ed25519 receipts and one-entry vectors. They exclude the separately supplied close and chain transaction framing.
+Figure 7: BMT challenges for payers included in the close, with Ed25519 receipts and one-entry vectors. Sizes exclude the separately supplied close and chain transaction framing.
 :::
 
 A normal withdrawal opens a certified output in its close's BMT. Its proof grows with the number of withdrawal outputs $W$, independently of the live account database.
@@ -391,11 +430,11 @@ A normal withdrawal opens a certified output in its close's BMT. Its proof grows
   <tbody>
     <tr>
       <td>Withdrawal-output claim</td>
-      <td style="text-align:right;"><strong>39 B</strong></td>
-      <td style="text-align:right;"><strong>359 B</strong></td>
-      <td style="text-align:right;"><strong>487 B</strong></td>
-      <td style="text-align:right;"><strong>583 B</strong></td>
-      <td style="text-align:right;"><strong>679 B</strong></td>
+      <td style="text-align:right;"><strong>39 B</strong><br><small>0.314 µs</small></td>
+      <td style="text-align:right;"><strong>359 B</strong><br><small>1.18 µs</small></td>
+      <td style="text-align:right;"><strong>487 B</strong><br><small>1.52 µs</small></td>
+      <td style="text-align:right;"><strong>583 B</strong><br><small>1.79 µs</small></td>
+      <td style="text-align:right;"><strong>679 B</strong><br><small>2.05 µs</small></td>
     </tr>
   </tbody>
 </table>
@@ -403,7 +442,7 @@ A normal withdrawal opens a certified output in its close's BMT. Its proof grows
 ```
 
 ::: {.image-caption}
-Figure 8: Encoded withdrawal output and its BMT opening, with a 21-byte destination. Values use maximum-depth paths for each output count. Chain transaction framing is excluded.
+Figure 8: Withdrawal outputs with a 21-byte destination and maximum-depth BMT paths. Verification checks inclusion under a supplied root. Chain transaction framing is excluded.
 :::
 
 QMDB proofs authenticate balances for forced withdrawal intake and recovery. A recovery claim opens the account's balance at the frozen finalized root.
@@ -416,16 +455,16 @@ QMDB proofs authenticate balances for forced withdrawal intake and recovery. A r
     <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
   </thead>
   <tbody>
-    <tr><td>Account present</td><td style="text-align:right;">497 B</td><td style="text-align:right;">593 B</td><td style="text-align:right;">691 B</td><td style="text-align:right;">819 B</td></tr>
-    <tr><td>Account absent</td><td style="text-align:right;">530 B</td><td style="text-align:right;">626 B</td><td style="text-align:right;">724 B</td><td style="text-align:right;">852 B</td></tr>
-    <tr><td>Recovery balance opening</td><td style="text-align:right;">528 B</td><td style="text-align:right;">624 B</td><td style="text-align:right;">722 B</td><td style="text-align:right;">850 B</td></tr>
+    <tr><td>Account present</td><td style="text-align:right;">497 B<br><small>1.53 µs</small></td><td style="text-align:right;">593 B<br><small>1.83 µs</small></td><td style="text-align:right;">691 B<br><small>2.14 µs</small></td><td style="text-align:right;">819 B<br><small>2.58 µs</small></td></tr>
+    <tr><td>Account absent</td><td style="text-align:right;">530 B<br><small>1.53 µs</small></td><td style="text-align:right;">626 B<br><small>1.83 µs</small></td><td style="text-align:right;">724 B<br><small>2.14 µs</small></td><td style="text-align:right;">852 B<br><small>2.59 µs</small></td></tr>
+    <tr><td>Recovery balance opening</td><td style="text-align:right;">528 B<br><small>1.53 µs</small></td><td style="text-align:right;">624 B<br><small>1.83 µs</small></td><td style="text-align:right;">722 B<br><small>2.15 µs</small></td><td style="text-align:right;">850 B<br><small>2.56 µs</small></td></tr>
   </tbody>
 </table>
 </div>
 ```
 
 ::: {.image-caption}
-Figure 9: Measured Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key; recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
+Figure 9: Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key; recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
 :::
 
 Adjust the workload and committee size below to estimate the operator's traffic. Every validator receives the same update; adding validators changes total egress.
