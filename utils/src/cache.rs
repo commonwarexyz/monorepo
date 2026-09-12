@@ -99,11 +99,14 @@ pub mod clock;
 pub mod clock2qplus;
 pub mod sieve;
 
+#[cfg(feature = "std")]
+use ahash::AHashMap as HashMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 pub use clock::Clock;
 pub use clock2qplus::Clock2QPlus;
 use core::{hash::Hash, num::NonZeroUsize, ops::Index};
+#[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 pub use sieve::Sieve;
 
