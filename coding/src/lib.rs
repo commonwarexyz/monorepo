@@ -118,7 +118,7 @@ commonware_macros::stability_scope!(ALPHA {
     ///         .iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
-    ///             RS::check(&config, &commitment, i as u16, shard).unwrap()
+    ///             RS::check(&config, &commitment, i as u16, shard, &STRATEGY).unwrap()
     ///         })
     ///         .collect();
     ///
@@ -190,11 +190,13 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// This takes in an index, to make sure that the shard you're checking
         /// is associated with the participant you expect it to be.
+        /// `strategy` controls how any parallel work is executed.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Check the integrity of multiple shards.
@@ -208,7 +210,7 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
             strategy.map_collect_vec(shards, |&(index, shard)| {
-                Self::check(config, commitment, index, shard)
+                Self::check(config, commitment, index, shard, strategy)
             })
         }
 
@@ -270,9 +272,11 @@ commonware_macros::stability_scope!(ALPHA {
     /// let (commitment, mut shards) = Z::encode(namespace, &config, data.as_slice(), &STRATEGY).unwrap();
     ///
     /// let (checking_data, checked_0, _) =
-    ///     Z::weaken(namespace, &config, &commitment, 0, shards.remove(0)).unwrap();
-    /// let (_, _, weak_1) = Z::weaken(namespace, &config, &commitment, 1, shards.remove(0)).unwrap();
-    /// let checked_1 = Z::check(&config, &commitment, &checking_data, 1, weak_1).unwrap();
+    ///     Z::weaken(namespace, &config, &commitment, 0, shards.remove(0), &STRATEGY).unwrap();
+    /// let (_, _, weak_1) =
+    ///     Z::weaken(namespace, &config, &commitment, 1, shards.remove(0), &STRATEGY).unwrap();
+    /// let checked_1 =
+    ///     Z::check(&config, &commitment, &checking_data, 1, weak_1, &STRATEGY).unwrap();
     ///
     /// let data2 = Z::decode(
     ///     &config,
@@ -355,6 +359,7 @@ commonware_macros::stability_scope!(ALPHA {
         /// the shards you receive from others.
         ///
         /// `namespace` must match the one used in the corresponding `encode` call.
+        /// `strategy` controls how any parallel work is executed.
         #[allow(clippy::type_complexity)]
         fn weaken(
             namespace: &[u8],
@@ -362,6 +367,7 @@ commonware_macros::stability_scope!(ALPHA {
             commitment: &Self::Commitment,
             index: u16,
             shard: Self::StrongShard,
+            strategy: &impl Strategy,
         ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error>;
 
         /// Check the integrity of a weak shard, producing a checked shard.
@@ -370,12 +376,14 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// This takes in an index, to make sure that the weak shard you're checking
         /// is associated with the participant you expect it to be.
+        /// `strategy` controls how any parallel work is executed.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             checking_data: &Self::CheckingData,
             index: u16,
             weak_shard: Self::WeakShard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Decode the data from shards received from other participants.
@@ -456,9 +464,10 @@ commonware_macros::stability_scope!(ALPHA {
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error> {
             let (checking_data, checked_shard, _) =
-                P::weaken(b"", config, commitment, index, shard.clone())
+                P::weaken(b"", config, commitment, index, shard.clone(), strategy)
                     .map_err(PhasedAsSchemeError::Scheme)?;
             Ok(PhasedCheckedShard {
                 checking_data,
@@ -571,7 +580,7 @@ mod test {
                 if !selected.contains(&(i as u16)) {
                     continue;
                 }
-                let checked = S::check(config, &commitment, i as u16, &shard).unwrap();
+                let checked = S::check(config, &commitment, i as u16, &shard, &Sequential).unwrap();
                 checked_shards.push(checked);
             }
 
@@ -589,8 +598,8 @@ mod test {
             let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
             let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
 
-            let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
-            let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
+            let checked_a = S::check(config, &commitment_a, 0, &shards_a[0], &Sequential).unwrap();
+            let checked_b = S::check(config, &commitment_b, 1, &shards_b[1], &Sequential).unwrap();
 
             let result = S::decode(
                 config,
@@ -728,6 +737,7 @@ mod test {
                 &commitment,
                 owner,
                 shards[owner as usize].clone(),
+                &Sequential,
             )
             .unwrap();
             let mut checked_shards = vec![own_checked];
@@ -741,13 +751,21 @@ mod test {
                     &commitment,
                     index,
                     shards[index as usize].clone(),
+                    &Sequential,
                 )
                 .unwrap();
                 let decoded_weak =
                     S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
                 assert_eq!(decoded_weak, weak_shard);
-                let checked =
-                    S::check(config, &commitment, &checking_data, index, decoded_weak).unwrap();
+                let checked = S::check(
+                    config,
+                    &commitment,
+                    &checking_data,
+                    index,
+                    decoded_weak,
+                    &Sequential,
+                )
+                .unwrap();
                 checked_shards.push(checked);
             }
 
@@ -771,12 +789,33 @@ mod test {
             let (commitment_a, shards_a) = S::encode(b"", config, data_a, &Sequential).unwrap();
             let (commitment_b, shards_b) = S::encode(b"", config, data_b, &Sequential).unwrap();
 
-            let (checking_data_a, checked_a, _) =
-                S::weaken(b"", config, &commitment_a, 0, shards_a[0].clone()).unwrap();
-            let (checking_data_b, checked_b, weak_b) =
-                S::weaken(b"", config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+            let (checking_data_a, checked_a, _) = S::weaken(
+                b"",
+                config,
+                &commitment_a,
+                0,
+                shards_a[0].clone(),
+                &Sequential,
+            )
+            .unwrap();
+            let (checking_data_b, checked_b, weak_b) = S::weaken(
+                b"",
+                config,
+                &commitment_b,
+                1,
+                shards_b[1].clone(),
+                &Sequential,
+            )
+            .unwrap();
 
-            let check_result = S::check(config, &commitment_a, &checking_data_a, 1, weak_b);
+            let check_result = S::check(
+                config,
+                &commitment_a,
+                &checking_data_a,
+                1,
+                weak_b,
+                &Sequential,
+            );
             assert!(
                 check_result.is_err(),
                 "check must reject weak shards derived from a different commitment"

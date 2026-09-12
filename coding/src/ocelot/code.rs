@@ -40,7 +40,37 @@
 
 use super::transform::{Shards, Transform};
 use commonware_math::algebra::{Additive, Field, Ring};
+use commonware_parallel::Strategy;
+use std::ops::Range;
 use thiserror::Error;
+
+/// Target width of independently scheduled shard stripes.
+///
+/// This is large enough to amortize scheduling and transform setup while
+/// exposing parallelism for large shards. The actual width is rounded down to
+/// an element boundary, or raised to one element for unusually wide fields.
+const STRIPE_BYTES: usize = 16 * 1024;
+
+pub(super) fn stripe_bytes<I: Impl>() -> usize {
+    (STRIPE_BYTES / I::ALIGN).max(1) * I::ALIGN
+}
+
+/// Split shard-major output buffers into disjoint mutable columns, one per
+/// stripe. Tasks write these slices directly, without gathering stripe results.
+fn stripe_columns(outputs: &mut [Vec<u8>], stripe_bytes: usize) -> Vec<Vec<&mut [u8]>> {
+    let stripes = outputs
+        .first()
+        .map_or(0, |output| output.len().div_ceil(stripe_bytes));
+    let mut columns: Vec<_> = (0..stripes)
+        .map(|_| Vec::with_capacity(outputs.len()))
+        .collect();
+    for output in outputs {
+        for (column, stripe) in columns.iter_mut().zip(output.chunks_mut(stripe_bytes)) {
+            column.push(stripe);
+        }
+    }
+    columns
+}
 
 /// A concrete implementation of Ocelot's arithmetic over one field.
 ///
@@ -93,7 +123,7 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// `dst -= c * src`, elementwise.
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element);
 
-    /// Compute independent randomized linear checksums of `shard`.
+    /// Compute the contribution of `range` to the randomized checksums of `shard`.
     ///
     /// `coefficients` is uniformly sampled random input. Implementations should
     /// use it directly to select the checksum map; it does not need to be
@@ -109,8 +139,15 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// probability 2^-8 per output code symbol. Output symbols use the code
     /// field's canonical byte representation.
     ///
-    /// `shard` and `out` must both be aligned to [`Self::ALIGN`].
-    fn checksum(self, shard: &[u8], coefficients: &[u8], out: &mut [u8]);
+    /// `shard` and `coefficients` are the complete buffers. Overwrite `out`
+    /// with the projection of `shard` with all symbols outside `range` set to
+    /// zero. Adding contributions from a disjoint partition with
+    /// [`Self::add_into`] must yield the full-shard checksum. An empty range
+    /// must write zero.
+    ///
+    /// `shard`, `out`, and both endpoints of `range` must be aligned to
+    /// [`Self::ALIGN`], with `range.start <= range.end <= shard.len()`.
+    fn checksum_range(self, shard: &[u8], coefficients: &[u8], range: Range<usize>, out: &mut [u8]);
 
     /// The forward butterfly: `x += c * y`, then `y += x`.
     ///
@@ -151,7 +188,7 @@ impl<I: Impl> Encoder<I> {
         }
     }
 
-    /// Produce `recovery` shards from the `original` shards.
+    /// Produce `recovery` shards from the `original` shards using `strategy`.
     ///
     /// # Panics
     ///
@@ -160,7 +197,12 @@ impl<I: Impl> Encoder<I> {
     /// - Shard lengths are not a multiple of [`Impl::ALIGN`].
     /// - The total shard count exceeds [`Impl::ORDER`] after rounding the
     ///   recovery count up to a power of two.
-    pub fn encode(&self, original: &[&[u8]], recovery: usize) -> Vec<Vec<u8>> {
+    pub fn encode(
+        &self,
+        original: &[&[u8]],
+        recovery: usize,
+        strategy: &impl Strategy,
+    ) -> Vec<Vec<u8>> {
         let k = original.len();
         assert!(k > 0, "no original shards");
         let m = recovery
@@ -183,34 +225,60 @@ impl<I: Impl> Encoder<I> {
         if len == 0 {
             return vec![Vec::new(); recovery];
         }
-        let mut acc = Shards::new(m, len);
-        let mut tmp = (k > m).then(|| Shards::new(m, len));
-        for (i, block) in original.chunks(m).enumerate() {
-            let shift = m * (i + 1);
-            let work = if i == 0 {
-                &mut acc
-            } else {
-                tmp.as_mut().expect("multiple original blocks")
-            };
-            for (j, shard) in work.shards_mut().enumerate() {
-                match block.get(j) {
-                    Some(data) => shard.copy_from_slice(data),
-                    None => shard.fill(0),
+        let stripe_bytes = stripe_bytes::<I>();
+        let work_bytes = stripe_bytes.min(len);
+        let mut output = vec![vec![0; len]; recovery];
+        let columns = stripe_columns(&mut output, stripe_bytes);
+        strategy.map_init_collect_vec_with_multiplier(
+            columns.into_iter().enumerate(),
+            work_bytes.saturating_mul(k + m),
+            || {
+                (
+                    Shards::new(m, work_bytes),
+                    (k > m).then(|| Shards::new(m, work_bytes)),
+                )
+            },
+            |(acc, tmp), (stripe, column)| {
+                let width = column[0].len();
+                let start = stripe * stripe_bytes;
+                let end = start + width;
+                acc.data.resize(m * width, 0);
+                acc.len = width;
+                if let Some(tmp) = tmp {
+                    tmp.data.resize(m * width, 0);
+                    tmp.len = width;
                 }
-            }
-            self.transform.ifft(work, block.len(), shift);
-            if i != 0 {
-                for (a, t) in acc
-                    .shards_mut()
-                    .zip(tmp.as_ref().expect("multiple original blocks").shards())
-                {
-                    self.transform.imp.add_into(a, t);
-                }
-            }
-        }
-        self.transform.fft(&mut acc, recovery);
 
-        acc.shards().take(recovery).map(<[u8]>::to_vec).collect()
+                for (i, block) in original.chunks(m).enumerate() {
+                    let shift = m * (i + 1);
+                    let work = if i == 0 {
+                        &mut *acc
+                    } else {
+                        tmp.as_mut().expect("multiple original blocks")
+                    };
+                    for (j, shard) in work.shards_mut().enumerate() {
+                        match block.get(j) {
+                            Some(data) => shard.copy_from_slice(&data[start..end]),
+                            None => shard.fill(0),
+                        }
+                    }
+                    self.transform.ifft(work, block.len(), shift);
+                    if i != 0 {
+                        for (a, t) in acc
+                            .shards_mut()
+                            .zip(tmp.as_ref().expect("multiple original blocks").shards())
+                        {
+                            self.transform.imp.add_into(a, t);
+                        }
+                    }
+                }
+                self.transform.fft(acc, recovery);
+                for (dst, src) in column.into_iter().zip(acc.shards()) {
+                    dst.copy_from_slice(src);
+                }
+            },
+        );
+        output
     }
 }
 
@@ -257,7 +325,8 @@ impl<I: Impl> Decoder<I> {
         }
     }
 
-    /// Recover missing originals from borrowed original and recovery shards.
+    /// Recover missing originals from borrowed original and recovery shards
+    /// using `strategy`.
     ///
     /// The slice lengths must match the counts used for encoding. Each entry
     /// corresponds to its encoder index; `None` marks an erasure. All present
@@ -280,11 +349,14 @@ impl<I: Impl> Decoder<I> {
     /// For `n` padded codeword positions and `e` erasures (including unused
     /// recovery positions), locator evaluation takes `O(n * e)` scalar field
     /// operations. Shard transforms take `O(n log n)` operations on whole
-    /// shards and use one workspace of `n` shards, plus the returned data.
+    /// shards. Work is split into aligned byte stripes; each strategy partition
+    /// reuses one workspace of `n` stripe shards and writes directly into a
+    /// disjoint range of the returned data.
     pub fn decode(
         &self,
         original: &[Option<&[u8]>],
         recovery: &[Option<&[u8]>],
+        strategy: &impl Strategy,
     ) -> Result<Vec<(usize, Vec<u8>)>, Error> {
         let k = original.len();
         let m = if recovery.is_empty() {
@@ -371,7 +443,7 @@ impl<I: Impl> Decoder<I> {
         }
 
         let imp = self.transform.imp;
-        let mut work = Shards::new(n, len);
+        let mut inputs = Vec::with_capacity(k);
         let mut nonzero = 0;
         for (i, shard) in recovery
             .iter()
@@ -380,27 +452,48 @@ impl<I: Impl> Decoder<I> {
             .chain(original.iter().enumerate().map(|(i, shard)| (m + i, shard)))
         {
             if let Some(shard) = shard {
-                imp.mul_add(&mut work.data[i * len..(i + 1) * len], shard, locator[i]);
+                inputs.push((i, *shard, locator[i]));
                 nonzero = i + 1;
             }
         }
-        self.transform.ifft(&mut work, nonzero, 0);
-        derivative(imp, &mut work.data, len);
-        self.transform
-            .fft(&mut work, m + missing.last().unwrap() + 1);
+        let inverses: Vec<_> = missing.iter().map(|&i| locator[m + i].inv()).collect();
+        let needed = m + missing.last().unwrap() + 1;
+        let stripe_bytes = stripe_bytes::<I>();
+        let work_bytes = stripe_bytes.min(len);
+        let mut output = vec![vec![0; len]; missing.len()];
+        let columns = stripe_columns(&mut output, stripe_bytes);
+        strategy.map_init_collect_vec_with_multiplier(
+            columns.into_iter().enumerate(),
+            n * work_bytes,
+            || Shards::new(n, work_bytes),
+            |work, (stripe, column)| {
+                let width = column[0].len();
+                let start = stripe * stripe_bytes;
+                let end = start + width;
+                work.data.resize(n * width, 0);
+                work.data.fill(0);
+                work.len = width;
+                for &(i, shard, coefficient) in &inputs {
+                    imp.mul_add(
+                        &mut work.data[i * width..(i + 1) * width],
+                        &shard[start..end],
+                        coefficient,
+                    );
+                }
+                self.transform.ifft(work, nonzero, 0);
+                derivative(imp, &mut work.data, width);
+                self.transform.fft(work, needed);
+                for ((dst, &i), &inverse) in column.into_iter().zip(&missing).zip(&inverses) {
+                    imp.mul_add(
+                        dst,
+                        &work.data[(m + i) * width..(m + i + 1) * width],
+                        inverse,
+                    );
+                }
+            },
+        );
 
-        Ok(missing
-            .into_iter()
-            .map(|i| {
-                let mut data = vec![0; len];
-                imp.mul_add(
-                    &mut data,
-                    &work.data[(m + i) * len..(m + i + 1) * len],
-                    locator[m + i].inv(),
-                );
-                (i, data)
-            })
-            .collect())
+        Ok(missing.into_iter().zip(output).collect())
     }
 }
 
@@ -425,6 +518,7 @@ pub mod test_suites {
     use super::{Decoder, Encoder, Error, Impl};
     use arbitrary::Unstructured;
     use commonware_math::algebra::{Additive, Field, Ring};
+    use commonware_parallel::Sequential;
 
     fn point<I: Impl>(i: usize) -> I::Element {
         I::basis()
@@ -503,7 +597,7 @@ pub mod test_suites {
             }
         };
         assert_eq!(
-            decoder.decode(&vec![None; k], &vec![None; r]),
+            decoder.decode(&vec![None; k], &vec![None; r], &Sequential),
             Err(expected)
         );
         Ok(())
@@ -520,7 +614,10 @@ pub mod test_suites {
         check_basis::<I>(u)?;
         let encoder = Encoder::new(imp);
         let decoder = Decoder::new(imp);
-        assert_eq!(encoder.encode(&[&[], &[]], 3), vec![Vec::<u8>::new(); 3]);
+        assert_eq!(
+            encoder.encode(&[&[], &[]], 3, &Sequential),
+            vec![Vec::<u8>::new(); 3]
+        );
         check_invalid_counts(u, &decoder)?;
         let limit = I::ORDER.min(256);
         let r: usize = u.int_in_range(0..=limit / 2)?;
@@ -538,10 +635,10 @@ pub mod test_suites {
         let erased = u.int_in_range(0..=k + r)?;
 
         let refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
-        let recovery = encoder.encode(&refs, r);
+        let recovery = encoder.encode(&refs, r, &Sequential);
         assert_eq!(recovery.len(), r);
         assert!(recovery.iter().all(|s| s.len() == len));
-        assert_eq!(encoder.encode(&refs, r), recovery);
+        assert_eq!(encoder.encode(&refs, r, &Sequential), recovery);
         if m + k <= 32 {
             assert_eq!(recovery, encode_reference(imp, &refs, r));
         }
@@ -557,14 +654,16 @@ pub mod test_suites {
             let mut input = input.clone();
             input[0] = Some(&malformed);
             assert_eq!(
-                decoder.decode(&input[..k], &input[k..]),
+                decoder.decode(&input[..k], &input[k..], &Sequential),
                 Err(Error::InvalidShardLength)
             );
         }
 
         // Recovery from parity alone must work when enough parity is present.
         if r >= k {
-            let recovered = decoder.decode(&vec![None; k], &input[k..]).unwrap();
+            let recovered = decoder
+                .decode(&vec![None; k], &input[k..], &Sequential)
+                .unwrap();
             assert_eq!(
                 recovered,
                 original.iter().cloned().enumerate().collect::<Vec<_>>()
@@ -578,7 +677,7 @@ pub mod test_suites {
             for &i in &positions[..count] {
                 input[i] = None;
             }
-            let result = decoder.decode(&input[..k], &input[k..]);
+            let result = decoder.decode(&input[..k], &input[k..], &Sequential);
             if count > r {
                 assert_eq!(
                     result,
@@ -603,9 +702,41 @@ pub mod test_suites {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decoder, Encoder, Impl};
+    use super::{Decoder, Encoder, Impl, STRIPE_BYTES};
     use crate::ocelot::{Impl8, field::gf8::GF8, kernel::portable::Portable};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
+    use rand::Rng as _;
+    use std::{
+        ops::Range,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn recovers_across_stripe_boundary() {
+        const OCELOT8: Impl8<Portable> = Impl8::new(Portable);
+        let mut rng = test_rng();
+        let mut original = vec![vec![0; 2 * STRIPE_BYTES + 1]; 3];
+        for shard in &mut original {
+            rng.fill_bytes(shard);
+        }
+        let original_refs: Vec<_> = original.iter().map(Vec::as_slice).collect();
+        let recovery = Encoder::new(OCELOT8).encode(&original_refs, 2, &Sequential);
+        let encoded_original = [None, Some(original[1].as_slice()), None];
+        let encoded_recovery: Vec<_> = recovery
+            .iter()
+            .map(|shard| Some(shard.as_slice()))
+            .collect();
+
+        let recovered = Decoder::new(OCELOT8)
+            .decode(&encoded_original, &encoded_recovery, &Sequential)
+            .unwrap();
+
+        assert_eq!(
+            recovered,
+            vec![(0, original[0].clone()), (2, original[2].clone())]
+        );
+    }
 
     #[test]
     fn decode_ignores_surplus_recovery_shards() {
@@ -641,8 +772,14 @@ mod tests {
                 OCELOT8.mul_sub(dst, src, c);
             }
 
-            fn checksum(self, shard: &[u8], coefficients: &[u8], out: &mut [u8]) {
-                OCELOT8.checksum(shard, coefficients, out);
+            fn checksum_range(
+                self,
+                shard: &[u8],
+                coefficients: &[u8],
+                range: Range<usize>,
+                out: &mut [u8],
+            ) {
+                OCELOT8.checksum_range(shard, coefficients, range, out);
             }
 
             fn fft_butterfly(self, x: &mut [u8], y: &mut [u8], c: Self::Element) {
@@ -656,7 +793,7 @@ mod tests {
 
         let original = [[1; 16], [2; 16], [3; 16]];
         let original_refs: Vec<_> = original.iter().map(<[u8; 16]>::as_slice).collect();
-        let recovery = Encoder::new(OCELOT8).encode(&original_refs, 4);
+        let recovery = Encoder::new(OCELOT8).encode(&original_refs, 4, &Sequential);
         let original = [Some(original[0].as_slice()), None, None];
         let recovery: Vec<_> = recovery
             .iter()
@@ -665,7 +802,7 @@ mod tests {
 
         MUL_ADDS.store(0, Ordering::Relaxed);
         let recovered = Decoder::new(CountingImpl)
-            .decode(&original, &recovery)
+            .decode(&original, &recovery, &Sequential)
             .unwrap();
 
         assert_eq!(recovered, vec![(1, vec![2; 16]), (2, vec![3; 16])]);
