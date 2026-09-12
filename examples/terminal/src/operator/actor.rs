@@ -2,13 +2,13 @@
 
 use super::store::{
     AcceptedBatch, CloseRejected, EpochData, ExternalPayoutEvidence, IncomingPayment,
-    MutationFailed, RETAINED_EPOCHS, SendVerdict, StagedDeposit, StagedWithdrawal, Staging, Store,
-    StoreStatus, StoredCloseOutcome, WithdrawalEvidence,
+    MutationFailed, SendVerdict, StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus,
+    StoredCloseOutcome, WithdrawalEvidence,
 };
 #[cfg(test)]
-use super::store::{AccountView, Endpoint, StoreSnapshot};
+use super::store::{AccountView, Endpoint, RETAINED_EPOCHS, StoreSnapshot};
 #[cfg(test)]
-use crate::protocol::{MAX_DESTINATION_BYTES, Wallet, wallets};
+use crate::protocol::{INITIAL_BALANCE, MAX_DESTINATION_BYTES, Wallet, wallets};
 use crate::{
     chain::{
         node::Pipeline,
@@ -16,10 +16,9 @@ use crate::{
         tx::{AdmitRequest, RegisterEpochRequest},
     },
     protocol::{
-        AccountCache, AccountIdentity, Ack, DepositEvent, Entry, EpochRegistration,
-        INITIAL_BALANCE, Key, PreparedEpoch, Protocol, SettlementResult,
-        ensure_amount_withdrawal_horizon, ensure_balance_intake_horizon, ensure_close_horizon,
-        external_identity, identities, openable_epoch_after, short_digest,
+        AccountIdentity, Ack, DepositEvent, Entry, EpochRegistration, Key, PreparedEpoch, Protocol,
+        SettlementResult, ensure_amount_withdrawal_horizon, ensure_balance_intake_horizon,
+        ensure_close_horizon, external_identity, identities, openable_epoch_after, short_digest,
     },
     store::CommitUnknown,
 };
@@ -28,15 +27,15 @@ use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::{HigherEntryLookup, StateOpening, higher_entry_lookup},
+    challenge::{HigherEntryLookup, higher_entry_lookup},
     commitment::{VectorKind, VectorRoot},
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorSendBody},
-    state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
+    qmdb::{StateOpening, StateRoot},
     transition::{
-        BatchId, ChallengeIndex, ExternalPayoutClaim, OperatorSignature, OperatorVariant,
+        BatchId, ChallengeIndex, ExternalPayoutClaim, OperatorSignature, OperatorVariant, Terminal,
         WithdrawalClaim,
     },
-    vector::{OutEntry, OutVector, TransposeEntry},
+    vector::{OutEntry, OutVector},
 };
 use commonware_codec::Encode as _;
 #[cfg(test)]
@@ -51,7 +50,7 @@ use std::sync::mpsc::SyncSender;
 #[cfg(test)]
 use std::time::Duration;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     num::NonZeroUsize,
     path::Path,
     sync::{
@@ -74,8 +73,8 @@ pub(crate) struct CloseStarted {
 
 pub(crate) struct PaymentHead {
     pub(crate) context: PaymentContext<Key, Digest>,
-    pub(crate) state: AccountState,
-    pub(crate) root: VectorRoot<Digest>,
+    pub(crate) balance: u64,
+    pub(crate) root: StateRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
@@ -83,15 +82,7 @@ pub(crate) struct PaymentHead {
 pub(crate) enum SendOutcome {
     /// The send, or its exact replay, is committed with its acceptance.
     Accepted(AcceptedBatch),
-    /// Corrective rejection: the send binds a payment context this operator has moved
-    /// past, or an endpoint that does not extend the payer's accepted state, so its
-    /// exact bytes can never be accepted. The verdict carries the live context and the
-    /// payer's accepted endpoint as this operator sees it: its cumulative debit, its
-    /// epoch-local batch sequence, and its cumulative out vector, so the payer can
-    /// adopt, merge, re-sign, and retry locally instead of re-reading the head. The
-    /// claim is unauthenticated by design: a payer signs cumulative debit endpoints,
-    /// and two sends at one endpoint under different contexts can never both debit, so
-    /// adopting a false endpoint only produces a send that never commits.
+    /// An unauthenticated hint about the operator's current epoch endpoint.
     Stale {
         context: PaymentContext<Key, Digest>,
         cumulative_debit: u64,
@@ -112,7 +103,7 @@ impl SendOutcome {
 }
 
 pub(crate) struct WithdrawalOpening {
-    pub(crate) root: VectorRoot<Digest>,
+    pub(crate) root: StateRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
@@ -130,7 +121,7 @@ pub(crate) struct CloseFinished {
     pub(crate) epoch: u64,
     pub(crate) header_digest: String,
     pub(crate) rows: usize,
-    pub(crate) slices: usize,
+    pub(crate) dealing_bytes: usize,
     pub(crate) payout_total: u64,
     pub(crate) header_bytes: usize,
     pub(crate) certificate_bytes: usize,
@@ -167,16 +158,11 @@ pub(crate) struct Operator {
     /// Close pipeline over the operator node's DA channel and local chain
     /// backend. `None` runs the in-process harness certification instead.
     pipeline: Option<Pipeline>,
-    genesis_root: VectorRoot<Digest>,
+    genesis_root: StateRoot<Digest>,
     registration: EpochRegistration,
-    /// Predecessor state commitment retained for the current epoch.
-    ///
-    /// Payments, deposits, and withdrawals mutate only `current_*` account state, so the
-    /// predecessor set is immutable between rotations. Head reads, openings, and registration
-    /// openings serve this cache instead of replaying the epoch from SQLite.
-    predecessor: AccountCache,
+    balances: super::qmdb::Handle,
     active_close: Option<ActiveClose>,
-    recovery_predecessor_root: Option<VectorRoot<Digest>>,
+    recovering: bool,
     store_fault: Option<String>,
     close_fault: Option<String>,
     #[cfg(test)]
@@ -229,13 +215,19 @@ impl Operator {
         pipeline: Option<Pipeline>,
     ) -> Result<Self> {
         let protocol = Arc::new(protocol);
-        let configured_genesis_root = genesis_root(&protocol, &identities)?;
+        let balances = super::qmdb::Handle::open(
+            &store.database_path(),
+            &identities,
+            protocol.clone(),
+            store.epoch_reader(),
+            pipeline.as_ref().map(Pipeline::genesis),
+        )?;
+        let configured_genesis_root = balances.root(0)?;
         let current = store.load_current()?;
         let registration = registration_for(&protocol, &current)?;
         store.ensure_current_context(registration.context.payment())?;
-        let predecessor = validate_epoch_data(&protocol, &current, &registration)
+        validate_epoch_data(&protocol, &current, &registration)
             .context("validate current SQLite epoch")?;
-        let current_predecessor_root = predecessor.root();
         ensure!(
             projected_liability(&current)? == store.current_liability()?,
             "stored live liability differs from the projected account state"
@@ -251,11 +243,7 @@ impl Operator {
             "stored close backlog exceeds its {MAX_PENDING_CLOSES}-epoch bound"
         );
         let pending_close = pending_close_count != 0;
-        let recovery_predecessor_root = if close_fault.is_none() && pending_close {
-            Some(current_predecessor_root)
-        } else {
-            None
-        };
+        let recovering = close_fault.is_none() && pending_close;
         if close_fault.is_none() && !pending_close {
             let (expected_epoch, expected_root) = match store.latest_finalized_root()? {
                 Some((epoch, root)) => (
@@ -269,10 +257,21 @@ impl Operator {
                 "current epoch does not extend the finalized settlement tip"
             );
             ensure!(
-                current_predecessor_root == expected_root,
+                balances.root(current.epoch)? == expected_root,
                 "current predecessor root does not extend the finalized settlement tip"
             );
         }
+        if !pending_close && close_fault.is_none() {
+            balances.check(
+                current.epoch,
+                current
+                    .accounts
+                    .iter()
+                    .map(|account| (account.key.clone(), account.predecessor))
+                    .collect(),
+            )?;
+        }
+
         let mut operator = Self {
             store,
             protocol,
@@ -283,9 +282,9 @@ impl Operator {
             pipeline,
             genesis_root: configured_genesis_root,
             registration,
-            predecessor,
+            balances,
             active_close: None,
-            recovery_predecessor_root,
+            recovering,
             store_fault: None,
             close_fault,
             #[cfg(test)]
@@ -325,8 +324,12 @@ impl Operator {
         } else {
             self.wallets[receiver_index].public_key()
         };
-        let head = self.payment_head(&self.wallets[payer].public_key())?;
-        ensure!(head.state.balance > 0, "selected payer has no balance");
+        let balance = self
+            .store
+            .current_account(&self.wallets[payer].public_key())?
+            .context("selected payer is not registered")?
+            .current;
+        ensure!(balance > 0, "selected payer has no balance");
         let (authorization, entries) = self.sign_send(payer, &[(receiver, amount)])?;
         match self.accept_send(authorization, entries)? {
             SendOutcome::Accepted(accepted) => Ok(accepted),
@@ -361,18 +364,17 @@ impl Operator {
             .store
             .current_account(account)?
             .context("payer is not in the current live state")?;
-        ensure!(
-            state.current.active,
-            "payer is not in the current live state"
-        );
+        ensure!(state.current > 0, "payer is not in the current live state");
         let payer_opening = self
-            .predecessor
-            .opening(account)
+            .balances
+            .opening(self.registration.context.payment().epoch(), account)
             .context("open payer recovery state")?;
         Ok(PaymentHead {
             context: self.registration.context.payment().clone(),
-            state: state.current,
-            root: self.predecessor.root(),
+            balance: state.current,
+            root: self
+                .balances
+                .root(self.registration.context.payment().epoch())?,
             opening: payer_opening,
         })
     }
@@ -410,19 +412,12 @@ impl Operator {
         self.store.incoming_payments(receiver, after, limit)
     }
 
-    /// Finalized epochs whose closes [`Self::committed_entry`] still reconstructs exactly,
-    /// counted back from the latest finalized epoch: the receiver reconciliation contract.
+    /// Finalized epochs retained in the operational SQL history.
+    #[cfg(test)]
     pub(crate) const RETAINED_EPOCHS: u64 = RETAINED_EPOCHS;
 
-    /// Reconstructs the committed public terminal entry for one (payer, recipient) edge of
-    /// a retained epoch.
-    ///
-    /// The close is rebuilt from the retained acknowledgment log with the same lookup
-    /// constructor the challenge tests use, so the served [`HigherEntryLookup`] opens
-    /// against the reconstructed close's own change root. Retention is bounded: a finalized
-    /// epoch reconstructs exactly until [`Self::RETAINED_EPOCHS`] further epochs finalize and
-    /// may not afterwards, which a receiver reports as unavailability rather than
-    /// withholding.
+    /// Opens a finalized epoch's retained activity evidence for a payer-recipient edge.
+    /// Close evidence is stored independently of the operational account history.
     pub(crate) fn committed_entry(
         &self,
         payer: &Key,
@@ -430,12 +425,8 @@ impl Operator {
         epoch: u64,
     ) -> Result<CommittedEntry> {
         self.ensure_store_usable()?;
-        let data = self.store.load_at(epoch)?;
-        let registration = registration_for(&self.protocol, &data)?;
-        let prepared = prepare_epoch(&self.protocol, data, registration)
-            .context("reconstruct committed close for entry evidence")?;
-        let close = prepared.close();
-        let index = ChallengeIndex::new::<Sha256>(prepared.close_context(), close)
+        let (context, close) = self.balances.evidence(epoch)?;
+        let index = ChallengeIndex::new::<Sha256>(&context, &close)
             .context("index committed close for entry evidence")?;
 
         // A changed payer has a row and an aligned out vector (empty for a credit-only
@@ -649,7 +640,9 @@ impl Operator {
         );
         let request = SignedWithdrawal::sign(
             self.protocol.deployment(),
-            self.predecessor.root().digest,
+            self.balances
+                .root(self.registration.context.payment().epoch())?
+                .digest,
             destination,
             action,
             deadline,
@@ -662,10 +655,12 @@ impl Operator {
         self.ensure_operating()?;
         self.ensure_close_horizon()?;
         Ok(WithdrawalOpening {
-            root: self.predecessor.root(),
+            root: self
+                .balances
+                .root(self.registration.context.payment().epoch())?,
             opening: self
-                .predecessor
-                .opening(account)
+                .balances
+                .opening(self.registration.context.payment().epoch(), account)
                 .context("open withdrawing account")?,
         })
     }
@@ -777,7 +772,7 @@ impl Operator {
         // that exact context with settlement before it releases the successor's first receipt.
         let scheduling: Result<bool> = (|| {
             self.registration = successor;
-            self.reload_predecessor()?;
+            self.validate_current_epoch()?;
             let queued = self.active_close.is_some();
             if !queued {
                 self.spawn_close(payment_context)?;
@@ -836,7 +831,7 @@ impl Operator {
                 epoch,
                 header_digest: short_digest(close.header.digest()),
                 rows: close.rows,
-                slices: close.slices,
+                dealing_bytes: close.dealing_bytes,
                 payout_total: close.payout_total,
                 header_bytes: close.header_bytes,
                 certificate_bytes: close.certificate_bytes,
@@ -897,6 +892,10 @@ impl Operator {
                 self.verify_recovered_predecessor()?;
             }
             Err(error) => {
+                if error.downcast_ref::<super::qmdb::Unavailable>().is_some() {
+                    self.store_fault = Some(format!("{error:#}"));
+                    return Err(error);
+                }
                 self.record_failed_close(epoch, format!("{error:#}"))?;
             }
         }
@@ -912,8 +911,7 @@ impl Operator {
             .as_deref()
             .or(self.close_fault.as_deref())
             .or(self
-                .recovery_predecessor_root
-                .is_some()
+                .recovering
                 .then_some("authenticating recovered settlement ancestry"))
     }
 
@@ -960,8 +958,8 @@ impl Operator {
             .requests()
             .iter()
             .map(|request| {
-                self.predecessor
-                    .opening(request.account())
+                self.balances
+                    .opening(epoch, request.account())
                     .context("open carried withdrawal account")
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1048,10 +1046,10 @@ impl Operator {
         Ok(())
     }
 
-    /// Rebuilds the retained predecessor commitment after the durable epoch advanced.
-    fn reload_predecessor(&mut self) -> Result<()> {
+    /// Audits the operational successor after its durable epoch transition.
+    fn validate_current_epoch(&mut self) -> Result<()> {
         let current = self.store.load_current()?;
-        self.predecessor = validate_epoch_data(&self.protocol, &current, &self.registration)
+        validate_epoch_data(&self.protocol, &current, &self.registration)
             .context("validate rotated SQLite epoch")?;
         Ok(())
     }
@@ -1144,6 +1142,7 @@ impl Operator {
         let epoch = payment_context.epoch();
         let protocol = Arc::clone(&self.protocol);
         let reader = self.store.epoch_reader();
+        let balances = self.balances.clone();
         let pipeline = self.pipeline.clone();
         #[cfg(test)]
         let close_gate = self.close_gate.take();
@@ -1164,62 +1163,50 @@ impl Operator {
                 #[cfg(test)]
                 assert!(!panic_close_worker, "injected close worker panic");
 
-                let prepared = reader.load(epoch).and_then(|data| {
-                    let registration = registration_for(&protocol, &data)?;
-                    ensure!(
-                        payment_context == *registration.context.payment(),
-                        "frozen epoch context differs from its durable close job"
-                    );
-                    prepare_epoch(&protocol, data, registration)
-                });
-                #[cfg(test)]
-                let mut rng = commonware_utils::TestRng::new(epoch);
-                #[cfg(not(test))]
-                let mut rng = rand::rng();
-                let result = prepared
-                    .and_then(|prepared| {
-                        // Without a pipeline (the test and harness path) the
-                        // close certifies through the in-process simulation
-                        // and completes locally.
-                        let Some(pipeline) = &pipeline else {
-                            return protocol.complete(prepared, &mut rng);
-                        };
-
-                        // Distributed certification: assemble and disseminate
-                        // the per-validator dealings over the DA channel,
-                        // assemble the exact-quorum certificate from the
-                        // returned votes, then submit the certified close and
-                        // complete once the local certified state finalized
-                        // the exact batch.
-                        let deal_start = Instant::now();
-                        let slices = protocol.slices(&prepared)?;
-                        let dealings = protocol.dealings(&prepared, &slices)?;
-                        let deal_micros = deal_start.elapsed().as_micros();
-                        let seal_start = Instant::now();
-                        let dealing_slices = dealings.iter().map(Vec::len).sum();
-                        let header = prepared.close().header;
-                        let roots = prepared.close().roots;
-                        let certificate = pipeline.certify(epoch, header, roots, dealings)?;
-                        let seal_micros = seal_start.elapsed().as_micros();
-                        let result = protocol.certify(
-                            prepared,
-                            slices.len(),
-                            dealing_slices,
-                            certificate,
-                            deal_micros,
-                            seal_micros,
-                        )?;
+                let result = (|| {
+                    let result = if let Some(result) = balances.stored_result(epoch)? {
+                        ensure!(
+                            result.payment_context == payment_context,
+                            "retained close has the wrong context"
+                        );
+                        result
+                    } else {
+                        let data = reader.load(epoch)?;
+                        let registration = registration_for(&protocol, &data)?;
+                        ensure!(
+                            payment_context == *registration.context.payment(),
+                            "frozen epoch context differs from its durable close job"
+                        );
+                        let prepared = prepare_epoch(&balances, data, registration)?;
+                        match &pipeline {
+                            None => balances.complete(prepared, epoch)?,
+                            Some(pipeline) => {
+                                let deal_start = Instant::now();
+                                let dealing = prepared.encoded().clone();
+                                let deal_micros = deal_start.elapsed().as_micros();
+                                let seal_start = Instant::now();
+                                let certificate =
+                                    pipeline.certify(epoch, prepared.close().header, dealing)?;
+                                let (result, candidate) = protocol.certify(
+                                    prepared,
+                                    certificate,
+                                    deal_micros,
+                                    seal_start.elapsed().as_micros(),
+                                )?;
+                                balances.apply(result, candidate)?
+                            }
+                        }
+                    };
+                    if let Some(pipeline) = &pipeline {
                         pipeline.admit(
                             AdmitRequest::from(&result),
                             result.finalized,
                             result.roots.change,
                         )?;
-                        Ok(result)
-                    })
-                    .map(|mut result| {
-                        result.release_dealings();
-                        result
-                    });
+                    }
+                    Ok(result)
+                })()
+                .map_err(super::qmdb::classify);
                 let _ = sender.send(result);
             })
             .context("spawn asynchronous close worker")?;
@@ -1306,7 +1293,7 @@ impl Operator {
             "the operator is fenced after a failed predecessor close"
         );
         ensure!(
-            self.recovery_predecessor_root.is_none(),
+            !self.recovering,
             "the operator is authenticating recovered settlement ancestry"
         );
         Ok(())
@@ -1346,9 +1333,9 @@ impl Operator {
     }
 
     fn verify_recovered_predecessor(&mut self) -> Result<()> {
-        let Some(expected) = self.recovery_predecessor_root else {
+        if !self.recovering {
             return Ok(());
-        };
+        }
         if self.close_fault.is_some()
             || self.active_close.is_some()
             || self.store.next_closing_epoch()?.is_some()
@@ -1361,13 +1348,22 @@ impl Operator {
             .context("recovered close chain has no finalized state root")?;
         let current_epoch = self.registration.context.payment().epoch();
         let expected_epoch = epoch.checked_add(1).context("settlement epoch overflow")?;
-        if current_epoch != expected_epoch || actual != expected {
+        if current_epoch != expected_epoch || actual != self.balances.root(current_epoch)? {
             let message =
                 "recovered current predecessor root does not extend the finalized settlement tip";
             self.close_fault = Some(message.to_string());
             anyhow::bail!(message);
         }
-        self.recovery_predecessor_root = None;
+        let current = self.store.load_current()?;
+        self.balances.check(
+            current_epoch,
+            current
+                .accounts
+                .iter()
+                .map(|account| (account.key.clone(), account.predecessor))
+                .collect(),
+        )?;
+        self.recovering = false;
         Ok(())
     }
 
@@ -1378,7 +1374,7 @@ impl Operator {
     pub(crate) fn complete_close(&mut self, seed: u64) -> Result<SettlementResult> {
         let epoch = self.registration.context.payment().epoch();
         let data = self.store.load_current()?;
-        let prepared = prepare_epoch(&self.protocol, data, self.registration.clone())?;
+        let prepared = prepare_epoch(&self.balances, data, self.registration.clone())?;
         let next_epoch = self.next_openable_epoch()?;
         let successor = self.protocol.registration(
             next_epoch,
@@ -1392,10 +1388,8 @@ impl Operator {
             &successor.context,
         )?;
         self.registration = successor;
-        self.reload_predecessor()?;
-        let result = self
-            .protocol
-            .complete(prepared, &mut commonware_utils::TestRng::new(seed))?;
+        self.validate_current_epoch()?;
+        let result = self.balances.complete(prepared, seed)?;
         self.store.finish_close(&result, self.genesis_root)?;
         Ok(result)
     }
@@ -1406,13 +1400,13 @@ impl Operator {
         prepared: PreparedEpoch,
         rng: &mut R,
     ) -> Result<CloseFinished> {
-        let result = self.protocol.complete(prepared, rng)?;
+        let result = self.balances.complete(prepared, rng.next_u64())?;
         self.store.finish_close(&result, self.genesis_root)?;
         Ok(CloseFinished {
             epoch: result.epoch,
             header_digest: short_digest(result.header.digest()),
             rows: result.rows,
-            slices: result.slices,
+            dealing_bytes: result.dealing_bytes,
             payout_total: result.finalized.payout_total,
             header_bytes: result.header.encode_size(),
             certificate_bytes: result.certificate.encode_size(),
@@ -1421,26 +1415,6 @@ impl Operator {
             seal_micros: result.seal_micros,
         })
     }
-}
-
-fn genesis_root(protocol: &Protocol, identities: &[AccountIdentity]) -> Result<VectorRoot<Digest>> {
-    let mut leaves = identities
-        .iter()
-        .map(|identity| StateLeaf {
-            account: identity.key.clone(),
-            state: AccountState {
-                balance: INITIAL_BALANCE,
-                active: true,
-                ..AccountState::default()
-            },
-        })
-        .collect::<Vec<_>>();
-    leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-    Ok(
-        AccountCache::new_with_strategy::<Sha256>(leaves, protocol.strategy())
-            .context("commit configured genesis state")?
-            .root(),
-    )
 }
 
 /// Folds deposit events into their canonical per-account aggregate batch.
@@ -1572,10 +1546,10 @@ fn registration_with_withdrawal(
 fn predecessor_liability(data: &EpochData) -> Result<u64> {
     data.accounts
         .iter()
-        .filter(|account| account.predecessor.active)
+        .filter(|account| account.predecessor > 0)
         .try_fold(0_u64, |total, account| {
             total
-                .checked_add(account.predecessor.balance)
+                .checked_add(account.predecessor)
                 .context("predecessor liability overflow")
         })
 }
@@ -1583,7 +1557,7 @@ fn predecessor_liability(data: &EpochData) -> Result<u64> {
 fn projected_liability(data: &EpochData) -> Result<u64> {
     data.accounts.iter().try_fold(0_u64, |total, account| {
         total
-            .checked_add(account.current.balance)
+            .checked_add(account.current)
             .context("projected liability overflow")
     })
 }
@@ -1592,19 +1566,10 @@ fn projected_liability(data: &EpochData) -> Result<u64> {
 struct AccountActivity {
     debit: u64,
     credit: u64,
-    receipts: u64,
 }
 
-struct EpochAssembly {
-    predecessor: Vec<StateLeaf<Key>>,
-    rows: Vec<AccountRow<Key, Digest>>,
-    /// Out vectors aligned one-for-one with `rows`.
-    vectors: Vec<OutVector<Key>>,
-    /// Aggregable operator countersignatures aligned one-for-one with `rows`.
-    signatures: Vec<Option<OperatorSignature>>,
-    /// The global recipient-major transpose.
-    transpose: Vec<TransposeEntry<Key>>,
-    successor: Vec<StateLeaf<Key>>,
+pub(super) struct EpochAssembly {
+    pub(super) terminals: Vec<Terminal<Key, Digest>>,
 }
 
 /// Signs `deltas` from `wallet` against `endpoint`, merging them into its cumulative
@@ -1670,7 +1635,7 @@ fn close_tail(predecessor: u64, deposit: u64, credit: u64, debit: u64) -> Result
 }
 
 fn prepare_epoch(
-    protocol: &Protocol,
+    balances: &super::qmdb::Handle,
     data: EpochData,
     registration: EpochRegistration,
 ) -> Result<PreparedEpoch> {
@@ -1678,36 +1643,19 @@ fn prepare_epoch(
         !data.acks.is_empty() || !data.deposits.is_empty() || !data.withdrawals.is_empty(),
         "there are no payments, deposits, or withdrawals to close"
     );
-    let assembled = assemble_epoch(protocol, &data, &registration)?;
-
-    // The completion rehearsal must stage the full deposit set, deferred aggregates
-    // included, to reproduce the authoritative chain's boundary and custody exactly.
-    let mut events = data.deposits;
-    events.extend(data.carried);
-    protocol.prepare(
-        registration,
-        events,
-        assembled.predecessor,
-        assembled.rows,
-        assembled.vectors,
-        assembled.signatures,
-        assembled.transpose,
-        assembled.successor,
-    )
+    balances.prepare(data, registration)
 }
 
-/// Replays and validates one stored epoch, returning its committed predecessor state.
 fn validate_epoch_data(
     protocol: &Protocol,
     data: &EpochData,
     registration: &EpochRegistration,
-) -> Result<AccountCache> {
-    let assembled = assemble_epoch(protocol, data, registration)?;
-    AccountCache::new_with_strategy::<Sha256>(assembled.predecessor, protocol.strategy())
-        .context("commit recovered predecessor state")
+) -> Result<()> {
+    assemble_epoch(protocol, data, registration)?;
+    Ok(())
 }
 
-fn assemble_epoch(
+pub(super) fn assemble_epoch(
     protocol: &Protocol,
     data: &EpochData,
     registration: &EpochRegistration,
@@ -1733,7 +1681,7 @@ fn assemble_epoch(
     );
 
     // Replay the acknowledgment chain in canonical database order: contiguous epoch-local
-    // sequences per payer, a strictly advancing lifetime debit endpoint, and both
+    // sequences per payer, a strictly advancing epoch debit endpoint, and both
     // countersignatures on every accepted body. These checks bind every mutable cache
     // field back to the immutable acknowledgment log before any recovered operator action
     // is allowed.
@@ -1743,9 +1691,10 @@ fn assemble_epoch(
     for stored in &data.acks {
         let body = stored.ack.body();
         let payer = body.payer().clone();
-        let account = accounts
-            .get(&payer)
-            .context("stored acknowledgment payer is not registered")?;
+        ensure!(
+            accounts.contains_key(&payer),
+            "stored acknowledgment payer is not registered"
+        );
         stored
             .ack
             .verify(context)
@@ -1757,10 +1706,7 @@ fn assemble_epoch(
             &stored.aggregate,
         )
         .map_err(|_| anyhow::anyhow!("stored aggregate countersignature is invalid"))?;
-        let (prior_seq, prior_debit) = endpoints
-            .get(&payer)
-            .copied()
-            .unwrap_or((0, account.predecessor.cumulative_debit));
+        let (prior_seq, prior_debit) = endpoints.get(&payer).copied().unwrap_or((0, 0));
         let expected_seq = prior_seq
             .checked_add(1)
             .context("batch sequence overflow")?;
@@ -1849,12 +1795,9 @@ fn assemble_epoch(
         );
     }
 
-    // Collate per-account activity, per-payer outgoing vectors, and per-recipient
-    // transpose groups from the replayed edges. Payer-major iteration keeps every
-    // outgoing vector recipient-sorted and every incoming group payer-sorted.
+    // Derive balance deltas and canonical payer vectors from authenticated edges.
     let mut activity = BTreeMap::<Key, AccountActivity>::new();
     let mut outgoing = BTreeMap::<Key, Vec<OutEntry<Key>>>::new();
-    let mut incoming = BTreeMap::<Key, Vec<TransposeEntry<Key>>>::new();
     for ((payer, recipient), (cumulative, count)) in &edges {
         let payer_activity = activity.entry(payer.clone()).or_default();
         payer_activity.debit = payer_activity
@@ -1866,35 +1809,19 @@ fn assemble_epoch(
             .credit
             .checked_add(*cumulative)
             .context("receiver credit overflow")?;
-        receiver_activity.receipts = receiver_activity
-            .receipts
-            .checked_add(*count)
-            .context("receiver receipt count overflow")?;
         outgoing.entry(payer.clone()).or_default().push(OutEntry {
             recipient: recipient.clone(),
             cumulative: *cumulative,
             count: *count,
         });
-        incoming
-            .entry(recipient.clone())
-            .or_default()
-            .push(TransposeEntry {
-                recipient: recipient.clone(),
-                payer: payer.clone(),
-                cumulative: *cumulative,
-                count: *count,
-            });
     }
 
     // Every terminal endpoint must equal its replayed edge total, and every debiting
     // account must hold a terminal acknowledgment.
     for (payer, (_, debit)) in &endpoints {
         let advance = activity.get(payer).map_or(0, |totals| totals.debit);
-        let account = accounts
-            .get(payer)
-            .context("stored acknowledgment payer is not registered")?;
         ensure!(
-            Some(*debit) == account.predecessor.cumulative_debit.checked_add(advance),
+            *debit == advance,
             "stored acknowledgment endpoint differs from its edges"
         );
     }
@@ -1909,17 +1836,6 @@ fn assemble_epoch(
 
     // Reconcile the materialized account table with the replayed payments and staged deposits.
     for account in accounts.values() {
-        if account.predecessor.active {
-            ensure!(
-                account.predecessor.balance > 0,
-                "predecessor live account has zero balance"
-            );
-        } else {
-            ensure!(
-                account.predecessor == AccountState::default(),
-                "absent predecessor account is not canonical"
-            );
-        }
         let totals = activity.get(&account.key).cloned().unwrap_or_default();
         let deposit = registration.deposits.amount_for(&account.key);
         let withdrawal = registration.withdrawals.request_for(&account.key);
@@ -1928,9 +1844,8 @@ fn assemble_epoch(
             withdrawal == stored_withdrawal.map(|stored| &stored.request),
             "registration withdrawal differs from SQLite"
         );
-        let available = u128::from(account.predecessor.balance)
-            + u128::from(deposit)
-            + u128::from(totals.credit);
+        let available =
+            u128::from(account.predecessor) + u128::from(deposit) + u128::from(totals.credit);
         let expected_balance = match withdrawal.map(|request| request.body().action()) {
             Some(WithdrawalAction::Amount(amount)) => available
                 .checked_sub(u128::from(amount.get()))
@@ -1938,12 +1853,7 @@ fn assemble_epoch(
                 .and_then(|value| u64::try_from(value).ok())
                 .context("account withdrawal exceeds available balance")?,
             Some(WithdrawalAction::Close) => {
-                let tail = close_tail(
-                    account.predecessor.balance,
-                    deposit,
-                    totals.credit,
-                    totals.debit,
-                )?;
+                let tail = close_tail(account.predecessor, deposit, totals.credit, totals.debit)?;
                 match stored_withdrawal.and_then(|stored| stored.applied_amount) {
                     Some(applied) => {
                         ensure!(applied == tail, "stored Close tail is inconsistent");
@@ -1957,186 +1867,33 @@ fn assemble_epoch(
                 .and_then(|value| u64::try_from(value).ok())
                 .context("account debit exceeds available balance")?,
         };
-        ensure!(
-            account.current.balance == expected_balance,
-            "SQLite balance drift"
-        );
-        ensure!(
-            account.current.cumulative_debit
-                == account
-                    .predecessor
-                    .cumulative_debit
-                    .checked_add(totals.debit)
-                    .context("account debit counter overflow")?,
-            "SQLite debit counter drift"
-        );
-        ensure!(
-            account.current.cumulative_credit
-                == account
-                    .predecessor
-                    .cumulative_credit
-                    .checked_add(totals.credit)
-                    .context("account credit counter overflow")?,
-            "SQLite credit counter drift"
-        );
-        ensure!(
-            account.current.receipt_count
-                == account
-                    .predecessor
-                    .receipt_count
-                    .checked_add(totals.receipts)
-                    .context("account receipt counter overflow")?,
-            "SQLite receipt counter drift"
-        );
+        ensure!(account.current == expected_balance, "SQLite balance drift");
     }
 
-    let mut changed = BTreeSet::<Key>::new();
-    for account in accounts.values() {
-        if account.predecessor != account.current
-            || registration.deposits.amount_for(&account.key) != 0
-            || registration.withdrawals.request_for(&account.key).is_some()
-        {
-            changed.insert(account.key.clone());
-        }
-    }
-    changed.extend(
-        activity
-            .keys()
-            .filter(|key| !accounts.contains_key(*key))
-            .cloned(),
-    );
-
-    // The same replay produces the canonical changed rows, aligned out vectors, aggregable
-    // countersignatures, transpose, and cumulative prefixes consumed by root preparation
-    // and validator dealings.
-    let mut prefix = Prefix::default();
-    let mut rows = Vec::with_capacity(changed.len());
-    let mut vectors = Vec::with_capacity(changed.len());
-    let mut signatures = Vec::with_capacity(changed.len());
-    let mut transpose = Vec::new();
-    for account in changed {
-        let stored = accounts.get(&account).copied();
-        let predecessor = stored.map_or(AccountState::default(), |stored| stored.predecessor);
-        let totals = activity.get(&account).cloned().unwrap_or_default();
-        let successor = stored.map_or(
-            AccountState {
-                cumulative_credit: totals.credit,
-                receipt_count: totals.receipts,
-                ..AccountState::default()
-            },
-            |stored| stored.current,
-        );
-        let out = outgoing.remove(&account).unwrap_or_default();
-        let (vector, outgoing_send, signature) = match terminals.get(&account) {
-            Some((ack, aggregate)) => {
-                let vector = OutVector::new(data.epoch, account.clone(), out)
-                    .context("assemble stored out vector")?;
-                let root = vector
-                    .root::<Sha256, Digest>()
-                    .context("commit stored out vector")?;
-                ensure!(
-                    root == ack.body().send_root(),
-                    "stored out vector does not match its acknowledged root"
-                );
-                let send = SendAuthorization::from_raw_unchecked(
+    let terminals = terminals
+        .into_iter()
+        .map(|(account, (ack, aggregate))| {
+            let vector = OutVector::new(
+                data.epoch,
+                account,
+                outgoing.remove(ack.body().payer()).unwrap_or_default(),
+            )
+            .context("assemble stored out vector")?;
+            ensure!(
+                vector.root::<Sha256, Digest>()? == ack.body().send_root(),
+                "stored out vector does not match its acknowledged root"
+            );
+            Ok(Terminal {
+                authorization: SendAuthorization::from_raw_unchecked(
                     ack.body().clone(),
                     ack.payer_signature().clone(),
-                );
-                (vector, Some(send), Some(*aggregate))
-            }
-            None => (OutVector::empty(data.epoch, account.clone()), None, None),
-        };
-        let group = incoming.remove(&account).unwrap_or_default();
-        let deposit = registration.deposits.amount_for(&account);
-        let withdrawal = registration.withdrawals.request_for(&account);
-        let withdrawal_amount = match withdrawal.map(|request| request.body().action()) {
-            Some(WithdrawalAction::Amount(amount)) => amount.get(),
-            Some(WithdrawalAction::Close) => {
-                close_tail(predecessor.balance, deposit, totals.credit, totals.debit)?
-            }
-            None => 0,
-        };
-        let successor = if matches!(
-            withdrawal.map(|request| request.body().action()),
-            Some(WithdrawalAction::Close)
-        ) {
-            AccountState {
-                balance: 0,
-                active: false,
-                ..successor
-            }
-        } else {
-            successor
-        };
-        let registered = predecessor.active || deposit != 0;
-        let payout = if registered { 0 } else { totals.credit };
-        let output = match withdrawal {
-            Some(_) => SettlementOutput::Withdrawal(withdrawal_amount),
-            None if payout != 0 => SettlementOutput::ExternalPayout(payout),
-            None => SettlementOutput::None,
-        };
-        prefix = prefix
-            .checked_extend(Prefix {
-                debit: totals.debit,
-                credit: totals.credit,
-                payout,
-                deposit,
-                withdrawal: withdrawal_amount,
-                withdrawal_count: u64::from(withdrawal.is_some()),
-                out_count: u64::try_from(vector.entries().len())
-                    .context("out-entry count does not fit u64")?,
-                in_count: u64::try_from(group.len())
-                    .context("transpose entry count does not fit u64")?,
+                ),
+                vector,
+                operator_signature: aggregate,
             })
-            .context("close prefix overflow")?;
-        rows.push(AccountRow {
-            account: account.clone(),
-            predecessor,
-            successor,
-            outgoing: outgoing_send,
-            output,
-            prefix,
-        });
-        vectors.push(vector);
-        signatures.push(signature);
-        transpose.extend(group);
-    }
-
-    let predecessor = data
-        .accounts
-        .iter()
-        .filter(|account| account.predecessor.active)
-        .map(|account| StateLeaf {
-            account: account.key.clone(),
-            state: account.predecessor,
         })
-        .collect::<Vec<_>>();
-    let successor = data
-        .accounts
-        .iter()
-        .filter(|account| {
-            account.current.balance > 0
-                && !matches!(
-                    registration
-                        .withdrawals
-                        .request_for(&account.key)
-                        .map(|request| request.body().action()),
-                    Some(WithdrawalAction::Close)
-                )
-        })
-        .map(|stored| StateLeaf {
-            account: stored.key.clone(),
-            state: stored.current,
-        })
-        .collect::<Vec<_>>();
-    Ok(EpochAssembly {
-        predecessor,
-        rows,
-        vectors,
-        signatures,
-        transpose,
-        successor,
-    })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(EpochAssembly { terminals })
 }
 
 #[cfg(test)]

@@ -14,16 +14,15 @@ documentation = "https://docs.rs/commonware-clearing"
 workspace = true
 
 [dependencies]
-ahash = { workspace = true, features = ["no-rng"] }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec = { workspace = true, default-features = false }
 commonware-cryptography = { workspace = true, default-features = false, features = [ "bls12381" ] }
 commonware-macros.workspace = true
 commonware-parallel = { workspace = true, default-features = false }
+commonware-runtime = { workspace = true, optional = true }
 commonware-storage = { workspace = true, default-features = false }
 commonware-utils = { workspace = true, default-features = false }
-hashbrown.workspace = true
 rand_core.workspace = true
 thiserror.workspace = true
 
@@ -36,19 +35,22 @@ stateright.workspace = true
 
 [features]
 default = [ "std" ]
+bench = [ "commonware-runtime/external", "std" ]
 std = [
-	"ahash/std",
 	"bytes/std",
 	"commonware-codec/std",
 	"commonware-cryptography/std",
 	"commonware-macros/std",
 	"commonware-parallel/std",
+	"commonware-storage/std",
 	"commonware-utils/std",
+	"dep:commonware-runtime",
 	"thiserror/std",
 ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
+	"commonware-runtime?/arbitrary",
 	"commonware-storage/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
@@ -61,8 +63,10 @@ bench = false
 [[example]]
 name = "bajillion_model"
 path = "stateright/explorer.rs"
+required-features = ["std"]
 
 [[bench]]
 name = "bajillion"
 harness = false
 path = "src/bajillion/benches/bench.rs"
+required-features = ["bench"]

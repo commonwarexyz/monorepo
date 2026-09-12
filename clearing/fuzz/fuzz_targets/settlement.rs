@@ -1,31 +1,33 @@
 #![no_main]
 
+mod support;
+
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{Committee, assigned_slice_spans, bls12381, seal},
+    admission::{Committee, bls12381, seal},
     boundary::{
         DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch,
         WithdrawalId,
     },
     challenge::{
-        AckWitness, Challenge, ChallengeKind, EntryWitness, StateOpening, Verdict, account_lookup,
+        AckWitness, Challenge, ChallengeKind, EntryWitness, Verdict, account_lookup,
         higher_entry_lookup,
     },
     commitment::{self, VectorKind, VectorRoot},
     payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
+    qmdb::{State, StateHead, StateOpening, StateRoot, account_key},
     settlement::{
-        BatchStatus, EpochDeadlinePolicy, HardFaultReason, HardFaultSettlement, PendingBatch,
-        SettlementChain, SettlementConfig,
+        BatchStatus, Bounds, EpochDeadlinePolicy, HardFaultReason, HardFaultSettlement,
+        PendingBatch, SettlementChain, SettlementConfig,
     },
-    state::{AccountChange, AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
+    state::{AccountChange, AccountRow, SettlementOutput},
     transition::{
-        Assignment, BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext,
-        ExternalPayout, ExternalPayoutClaim, OperatorKey, OperatorSignature, OperatorVariant,
-        PreparedClose, StateCache, TerminalProof, WithdrawalClaim, WithdrawalOutput,
-        prepare_close_with_strategy, validate_close,
+        BatchId, ChallengeIndex, Close, CloseContext, CloseLimits, ExternalPayout,
+        ExternalPayoutClaim, OperatorKey, OperatorSignature, OperatorVariant, PreparedClose,
+        Terminal, WithdrawalClaim, WithdrawalOutput, prepare_close_with_strategy,
     },
-    vector::{OutEntry, OutTipLookup, OutVector, TransposeEntry},
+    vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{
@@ -41,13 +43,14 @@ use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_parallel::Sequential;
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::test_rng;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
 };
+use support::TestState;
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_ACCOUNTS: usize = 4;
@@ -62,23 +65,50 @@ const MAXIMUM_WITHDRAWAL_NOTICE: u64 = 1_000;
 const MAX_DEPOSIT_IDS: usize = 4;
 const MAX_RETAINED_CLAIM_BATCHES: usize = MAX_ACTIONS;
 
-type TestCache = StateCache<VerifyingKey, Digest>;
+#[derive(Clone, Debug)]
+struct BalanceEntry {
+    account: VerifyingKey,
+    balance: u64,
+}
+
+// The four-account model is independent of QMDB's mutation and proof implementation.
+#[derive(Clone, Debug)]
+struct TestCache {
+    head: StateHead<Digest>,
+    leaves: Vec<BalanceEntry>,
+}
+impl TestCache {
+    fn root(&self) -> StateRoot<Digest> {
+        self.head.root()
+    }
+    fn liability(&self) -> u64 {
+        self.leaves.iter().map(|entry| entry.balance).sum()
+    }
+    fn leaves(&self) -> &[BalanceEntry] {
+        &self.leaves
+    }
+    fn len(&self) -> usize {
+        self.leaves.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
+    }
+    fn balance(&self, account: &VerifyingKey) -> u64 {
+        self.leaves
+            .iter()
+            .find(|entry| &entry.account == account)
+            .map_or(0, |entry| entry.balance)
+    }
+}
 type TestChain = SettlementChain<Sha256, VerifyingKey>;
 type TestChallenge = Challenge<VerifyingKey, Digest>;
 type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestDeposits = DepositBatch<VerifyingKey>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
-type TestTerminalProof = TerminalProof<Digest>;
 type TestExternalPayoutClaim = ExternalPayoutClaim<VerifyingKey, Digest>;
 type TestWithdrawalClaim = WithdrawalClaim<Digest>;
 type Certificate = bls12381::Certificate;
-type BuiltRow = (
-    AccountRow<VerifyingKey, Digest>,
-    OutVector<VerifyingKey>,
-    Option<OperatorSignature>,
-);
-
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     seed: u64,
@@ -89,6 +119,7 @@ struct FuzzInput {
 
 #[derive(Arbitrary, Debug)]
 enum Action {
+    Restart,
     Deposit {
         tick: u8,
         account: u8,
@@ -171,10 +202,8 @@ struct Prepared {
     withdrawal_outputs: Vec<WithdrawalOutput>,
     external_payout_claims: Vec<TestExternalPayoutClaim>,
     external_payouts: Vec<ExternalPayout<VerifyingKey>>,
-    terminal_proof: TestTerminalProof,
     close: TestClose,
     successor: TestCache,
-    prepared: Arc<PreparedClose<VerifyingKey, Digest>>,
 }
 
 #[derive(Clone)]
@@ -232,12 +261,12 @@ impl Slot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Snapshot {
-    state_root: VectorRoot<Digest>,
+    state_root: StateRoot<Digest>,
     custody: u64,
     claimable: u64,
     deposits: TestDeposits,
     withdrawals: TestWithdrawals,
-    safety_roots: Vec<VectorRoot<Digest>>,
+    safety_roots: Vec<StateRoot<Digest>>,
     batches: Vec<PendingBatch<Digest>>,
     deadlines: Vec<Option<u64>>,
     hard_fault: Option<HardFaultReason<VerifyingKey, Digest>>,
@@ -289,6 +318,10 @@ impl ActionOutcome {
 }
 
 struct Harness {
+    runtime: deterministic::Context,
+    state: Option<TestState>,
+    replica: TestCache,
+    foreign_opening: StateOpening<VerifyingKey, Digest>,
     seed: u64,
     chain: TestChain,
     deployment: Digest,
@@ -322,7 +355,7 @@ struct Harness {
 }
 
 impl Harness {
-    fn new(input: &FuzzInput) -> Self {
+    async fn new(input: &FuzzInput, runtime: deterministic::Context) -> Self {
         let accounts = (0..MAX_ACCOUNTS)
             .map(|index| {
                 SigningKey::from_seed(input.seed.wrapping_add(0x100).wrapping_add(index as u64))
@@ -333,18 +366,43 @@ impl Harness {
             .iter()
             .take(account_count)
             .enumerate()
-            .map(|(index, account)| StateLeaf {
+            .map(|(index, account)| BalanceEntry {
                 account: account.public_key(),
-                state: AccountState {
-                    balance: u64::from(input.balances[index] % 8) + 1,
-                    active: true,
-                    ..AccountState::default()
-                },
+                balance: u64::from(input.balances[index] % 8) + 1,
             })
             .collect::<Vec<_>>();
-        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-        let finalized = StateCache::new::<Sha256>(leaves)
-            .expect("bounded canonical account state must construct");
+        leaves.sort_unstable_by(|a, b| a.account.cmp(&b.account));
+        let state = support::new_state(
+            runtime.child("replica"),
+            "settlement",
+            leaves
+                .iter()
+                .map(|entry| (entry.account.clone(), entry.balance))
+                .collect(),
+        )
+        .await;
+        let finalized = TestCache {
+            head: *state.head(),
+            leaves,
+        };
+        let mut foreign_seed = input.seed.wrapping_add(0x200);
+        let foreign = loop {
+            let candidate = SigningKey::from_seed(foreign_seed).public_key();
+            if accounts
+                .iter()
+                .all(|account| account.public_key() != candidate)
+            {
+                break candidate;
+            }
+            foreign_seed = foreign_seed.wrapping_add(1);
+        };
+        let foreign_state = support::new_state(
+            runtime.child("replica"),
+            "foreign",
+            vec![(foreign.clone(), 1)],
+        )
+        .await;
+        let foreign_opening = foreign_state.opening(foreign).await.unwrap();
         let seed = input.seed.to_be_bytes();
         let deployment = Sha256::hash(&[b"settlement-stateful-fuzz", &seed]);
         let operator = SigningKey::from_seed(input.seed ^ 0xa5a5_a5a5_a5a5_a5a5);
@@ -373,13 +431,17 @@ impl Harness {
             deployment,
             operator.public_key(),
             committee.clone(),
-            &finalized,
+            &(&finalized.head).into(),
             0,
             config,
         )
         .expect("bounded settlement fixture must construct");
         let custody = finalized.liability();
         Self {
+            runtime,
+            state: Some(state),
+            replica: finalized.clone(),
+            foreign_opening,
             seed: input.seed,
             chain,
             deployment,
@@ -413,14 +475,55 @@ impl Harness {
         }
     }
 
-    fn run(mut self, actions: &[Action]) {
+    async fn run(mut self, actions: &[Action]) {
         self.assert_invariants();
         for (step, action) in actions.iter().take(MAX_ACTIONS).enumerate() {
-            self.apply(step as u64, action);
+            self.apply(step as u64, action).await;
         }
     }
 
-    fn apply(&mut self, step: u64, action: &Action) {
+    async fn restart(&mut self) {
+        let before = self.snapshot();
+        let encoded = self.chain.encode();
+        self.chain = TestChain::decode_cfg(
+            encoded.clone(),
+            &Bounds {
+                committee: 4,
+                items: MAX_ACTIONS * MAX_ACCOUNTS,
+                destination: MAX_DESTINATION_BYTES,
+            },
+        )
+        .unwrap();
+        assert_eq!(self.chain.encode(), encoded);
+        let state = self.state.take().unwrap().commit().await.unwrap();
+        let head = *state.head();
+        drop(state);
+        let state = State::<_, Sha256>::open(
+            self.runtime.child("replica"),
+            support::config(&self.runtime, "settlement"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(*state.head(), head);
+        self.state = Some(state);
+        for account in &self.accounts {
+            assert_eq!(
+                self.state
+                    .as_ref()
+                    .unwrap()
+                    .get(&account_key(&account.public_key()).unwrap())
+                    .await
+                    .unwrap()
+                    .map(NonZeroU64::get)
+                    .unwrap_or(0),
+                self.replica.balance(&account.public_key())
+            );
+        }
+        assert_eq!(self.snapshot(), before);
+        self.assert_invariants();
+    }
+
+    async fn apply(&mut self, step: u64, action: &Action) {
         let before = self.snapshot();
         let before_fault = self.hard_fault.clone();
         let before_fence = self.fence;
@@ -430,6 +533,10 @@ impl Harness {
         let was_settled = self.settled;
 
         let outcome = match action {
+            Action::Restart => {
+                self.restart().await;
+                ActionOutcome::new(OutcomeClass::Success, None)
+            }
             Action::Deposit {
                 tick,
                 account,
@@ -444,23 +551,26 @@ impl Harness {
                 destination_len,
                 closes_account,
                 mutation,
-            } => self.withdrawal(
-                *tick,
-                *account,
-                *amount,
-                *destination,
-                *destination_len,
-                *closes_account,
-                *mutation,
-            ),
-            Action::Register { tick, mutated } => self.register(*tick, *mutated),
+            } => {
+                self.withdrawal(
+                    *tick,
+                    *account,
+                    *amount,
+                    *destination,
+                    *destination_len,
+                    *closes_account,
+                    *mutation,
+                )
+                .await
+            }
+            Action::Register { tick, mutated } => self.register(*tick, *mutated).await,
             Action::RegisterPayout {
                 tick,
                 payer,
                 amount,
                 mutated,
-            } => self.register_payout(*tick, *payer, *amount, *mutated),
-            Action::Admit { tick, mutated } => self.admit(*tick, *mutated),
+            } => self.register_payout(*tick, *payer, *amount, *mutated).await,
+            Action::Admit { tick, mutated } => self.admit(*tick, *mutated).await,
             Action::Finalize { tick, early } => self.finalize(*tick, *early),
             Action::FaultUnadmitted {
                 tick,
@@ -479,7 +589,10 @@ impl Harness {
                 slot,
                 encoded,
                 mutation,
-            } => self.challenge(step, *tick, *slot, *encoded, *mutation),
+            } => {
+                self.challenge(step, *tick, *slot, *encoded, *mutation)
+                    .await
+            }
             Action::ClaimPendingDeposit { tick, account } => {
                 self.claim_pending_deposit(*tick, *account)
             }
@@ -495,7 +608,7 @@ impl Harness {
             } => self.claim_external_payout(step, *batch, *claim, *mutation),
             Action::BeginHardFaultSettlement => self.begin_hard_fault_settlement(),
             Action::ClaimHardFault { account, mutation } => {
-                self.claim_hard_fault(*account, *mutation)
+                self.claim_hard_fault(*account, *mutation).await
             }
         };
 
@@ -576,11 +689,7 @@ impl Harness {
     fn assert_invariants(&self) {
         assert!(self.slots.len() <= MAX_PENDING_EPOCHS);
         assert_eq!(self.chain.pending_epoch_count(), self.slots.len());
-        let expected_state_root = if self.settled {
-            commitment::empty_root::<Sha256>(VectorKind::State)
-        } else {
-            self.finalized.root()
-        };
+        let expected_state_root = self.finalized.root();
         assert_eq!(self.chain.current_state_root(), expected_state_root);
         assert_eq!(self.chain.custody_balance(), self.custody);
         assert_eq!(self.chain.claimable_balance(), self.claimable);
@@ -640,12 +749,7 @@ impl Harness {
         assert_eq!(self.chain.admission_fence_epoch(), self.fence);
         assert_eq!(self.chain.invalid_from(), self.invalid_from);
         assert_eq!(self.chain.hard_fault_is_settled(), self.settled);
-        assert!(
-            self.finalized
-                .leaves()
-                .iter()
-                .all(|leaf| leaf.state.active && leaf.state.balance > 0)
-        );
+        assert!(self.finalized.leaves().iter().all(|leaf| leaf.balance > 0));
 
         let expected_batches = self
             .slots
@@ -653,6 +757,7 @@ impl Harness {
             .map(|slot| PendingBatch {
                 header: slot.header,
                 roots: slot.close.roots,
+                amounts: slot.close.amounts,
                 certificate: slot.certificate.clone(),
                 successor_liability: slot.successor.liability(),
                 status: slot.status.clone(),
@@ -680,14 +785,11 @@ impl Harness {
             assert_eq!(slot.context.predecessor_liability(), predecessor_liability);
             assert_eq!(slot.close.roots.successor, slot.successor.root());
             assert_eq!(
-                slot.close
-                    .rows
-                    .last()
-                    .map_or(0, |row| row.prefix.withdrawal),
+                slot.close.amounts.withdrawal,
                 output_total(&slot.withdrawal_outputs)
             );
             assert_eq!(
-                slot.close.rows.last().map_or(0, |row| row.prefix.payout),
+                slot.close.amounts.payout,
                 payout_total(&slot.external_payouts)
             );
             predecessor_root = slot.successor.root();
@@ -763,10 +865,10 @@ impl Harness {
                 .iter()
                 .find(|leaf| &leaf.account == account)
                 .expect("staged withdrawal account remains live")
-                .state;
-            assert!(tail.active);
+                .balance;
+            assert!(tail > 0);
             if let WithdrawalAction::Amount(amount) = request.body().action() {
-                assert!(amount.get() <= tail.balance);
+                assert!(amount.get() <= tail);
             }
         }
         if self.settled {
@@ -960,7 +1062,7 @@ impl Harness {
             .leaves()
             .iter()
             .filter(|leaf| !self.claimed_hard_fault_accounts.contains(&leaf.account))
-            .try_fold(0_u64, |total, leaf| total.checked_add(leaf.state.balance))
+            .try_fold(0_u64, |total, leaf| total.checked_add(leaf.balance))
             .expect("authenticated state liability fits active custody")
     }
 
@@ -995,7 +1097,7 @@ impl Harness {
         self.now.saturating_add(2).max(tail.saturating_add(1))
     }
 
-    fn make_context(
+    async fn make_context(
         &self,
         epoch: u64,
         cache: &TestCache,
@@ -1004,41 +1106,52 @@ impl Harness {
         admission_deadline: u64,
         challenge_deadline: u64,
     ) -> TestContext {
-        EpochContext::new::<Sha256>(
+        assert_eq!(cache.root(), self.state.as_ref().unwrap().root());
+        support::close_context(
             self.deployment,
             epoch,
             self.operator.public_key(),
+            self.state.as_ref().unwrap(),
             deposits,
             withdrawals,
-            cache.liability(),
             admission_deadline,
             challenge_deadline,
-            CloseLimits::protocol_maximum(),
-            Assignment::new(self.committee_digest, 0).unwrap(),
+            CloseLimits::new(4, 5, 4, 4, 16, u64::MAX, u64::MAX, u64::MAX),
+            self.committee_digest,
         )
-        .and_then(|epoch| epoch.bind::<Sha256>(cache, deposits, withdrawals))
-        .expect("sanitized close context must be valid")
+        .await
     }
 
-    fn make_prepared(&self) -> Prepared {
-        let cache = self.tail_cache();
+    async fn make_prepared(&self) -> Prepared {
+        let cache = &self.replica;
         let deposits = self.deposit_batch();
         let withdrawals = self.withdrawal_batch();
-        let admission_deadline = self.fixture_admission_deadline();
-        let challenge_deadline = admission_deadline.saturating_add(CHALLENGE_DURATION);
-        let context = self.make_context(
-            self.next_epoch(),
-            cache,
+        let admission = self.fixture_admission_deadline();
+        let context = self
+            .make_context(
+                self.next_epoch(),
+                cache,
+                &deposits,
+                &withdrawals,
+                admission,
+                admission.saturating_add(CHALLENGE_DURATION),
+            )
+            .await;
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            self.state.as_ref().unwrap(),
+            &context,
             &deposits,
             &withdrawals,
-            admission_deadline,
-            challenge_deadline,
-        );
-        let (prepared, successor) = boundary_close(cache, &context, &deposits, &withdrawals);
-        self.finish_prepared(cache, context, deposits, withdrawals, prepared, successor)
+            Vec::new(),
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        self.finish_prepared(cache, context, deposits, withdrawals, prepared)
+            .await
     }
 
-    fn make_payout_prepared(&self, payer_selector: u8, raw_amount: u8) -> Option<Prepared> {
+    async fn make_payout_prepared(&self, payer_selector: u8, raw_amount: u8) -> Option<Prepared> {
         if !self.staged_deposits.is_empty() || self.staged_withdrawals.len() > 1 {
             return None;
         }
@@ -1048,7 +1161,7 @@ impl Harness {
         {
             return None;
         }
-        let cache = self.tail_cache();
+        let cache = &self.replica;
         let leaf = match close_request {
             Some(request) => cache
                 .leaves()
@@ -1058,7 +1171,7 @@ impl Harness {
                 let candidates = cache
                     .leaves()
                     .iter()
-                    .filter(|leaf| leaf.state.balance > 1)
+                    .filter(|leaf| leaf.balance > 1)
                     .collect::<Vec<_>>();
                 candidates
                     .get(usize::from(payer_selector) % candidates.len().max(1))
@@ -1082,18 +1195,20 @@ impl Harness {
         let withdrawals = self.withdrawal_batch();
         let admission_deadline = self.fixture_admission_deadline();
         let challenge_deadline = admission_deadline.saturating_add(CHALLENGE_DURATION);
-        let context = self.make_context(
-            self.next_epoch(),
-            cache,
-            &deposits,
-            &withdrawals,
-            admission_deadline,
-            challenge_deadline,
-        );
+        let context = self
+            .make_context(
+                self.next_epoch(),
+                cache,
+                &deposits,
+                &withdrawals,
+                admission_deadline,
+                challenge_deadline,
+            )
+            .await;
         let maximum = if close_request.is_some() {
-            leaf.state.balance
+            leaf.balance
         } else {
-            leaf.state.balance.checked_sub(1)?
+            leaf.balance.checked_sub(1)?
         };
         let amount = u64::from(raw_amount).wrapping_rem(maximum) + 1;
         let epoch = context.payment().epoch();
@@ -1111,130 +1226,48 @@ impl Harness {
             context.payment(),
             leaf.account.clone(),
             1,
-            leaf.state
-                .cumulative_debit
-                .checked_add(amount)
-                .expect("bounded payout debit cannot overflow"),
+            amount,
             out_vector
                 .root::<Sha256, Digest>()
                 .expect("bounded payout vector commits"),
         );
         let operator_signature = bls_ack(&self.operator_ack, &body);
         let outgoing = SendAuthorization::sign(body.clone(), payer);
-        let transpose = vec![TransposeEntry {
-            recipient: recipient.clone(),
-            payer: leaf.account.clone(),
-            cumulative: amount,
-            count: 1,
-        }];
-        let mut payer_successor = leaf.state;
-        payer_successor.cumulative_debit = body.cumulative_debit();
-        if close_request.is_some() {
-            payer_successor.balance = 0;
-            payer_successor.active = false;
-        } else {
-            payer_successor.balance -= amount;
-        }
-        let recipient_successor = AccountState {
-            cumulative_credit: amount,
-            receipt_count: 1,
-            ..AccountState::default()
-        };
-        let mut pairs: Vec<BuiltRow> = vec![
-            (
-                AccountRow {
-                    account: leaf.account.clone(),
-                    predecessor: leaf.state,
-                    successor: payer_successor,
-                    outgoing: Some(outgoing),
-                    output: SettlementOutput::None,
-                    prefix: Prefix::default(),
-                },
-                out_vector,
-                Some(operator_signature),
-            ),
-            (
-                AccountRow {
-                    account: recipient,
-                    predecessor: AccountState::default(),
-                    successor: recipient_successor,
-                    outgoing: None,
-                    output: SettlementOutput::None,
-                    prefix: Prefix::default(),
-                },
-                OutVector::empty(epoch, self.external_account()),
-                None,
-            ),
-        ];
-        pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-        let mut prefix = Prefix::default();
-        for (row, vector, _) in &mut pairs {
-            let (debit, credit, receipts) = row
-                .checked_deltas()
-                .expect("constructed payout counters are monotonic");
-            let closes_payer = close_request.is_some() && row.account == leaf.account;
-            let withdrawal = if closes_payer {
-                row.predecessor
-                    .balance
-                    .checked_sub(debit)
-                    .expect("constructed close payment is affordable")
-            } else {
-                0
-            };
-            let payout = if row.predecessor.active { 0 } else { credit };
-            row.output = if closes_payer {
-                SettlementOutput::Withdrawal(withdrawal)
-            } else if payout != 0 {
-                SettlementOutput::ExternalPayout(payout)
-            } else {
-                SettlementOutput::None
-            };
-            prefix = prefix
-                .checked_extend(Prefix {
-                    debit,
-                    credit,
-                    withdrawal,
-                    payout,
-                    withdrawal_count: u64::from(closes_payer),
-                    out_count: u64::try_from(vector.entries().len())
-                        .expect("bounded entry count fits in u64"),
-                    in_count: receipts,
-                    ..Prefix::default()
-                })
-                .expect("bounded payout prefixes cannot overflow");
-            row.prefix = prefix;
-        }
-        let prepared = build_prepared(cache, &context, &deposits, &withdrawals, pairs, transpose);
-        let successor = successor_cache(cache, prepared.close());
-        Some(self.finish_prepared(cache, context, deposits, withdrawals, prepared, successor))
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            self.state.as_ref().unwrap(),
+            &context,
+            &deposits,
+            &withdrawals,
+            vec![Terminal {
+                authorization: outgoing,
+                vector: out_vector,
+                operator_signature,
+            }],
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        Some(
+            self.finish_prepared(cache, context, deposits, withdrawals, prepared)
+                .await,
+        )
     }
 
-    fn finish_prepared(
+    async fn finish_prepared(
         &self,
         predecessor: &TestCache,
         context: TestContext,
         deposits: TestDeposits,
         withdrawals: TestWithdrawals,
         prepared: PreparedClose<VerifyingKey, Digest>,
-        successor: TestCache,
     ) -> Prepared {
-        prepared
-            .validate::<Sha256, PaymentBatchVerifier, _>(
-                &context,
-                &self.operator_bls,
-                &deposits,
-                &withdrawals,
-                &mut test_rng(),
-                &Sequential,
-            )
-            .expect("sanitized close must validate before deriving settlement outputs");
         let close = prepared.close().clone();
         let withdrawal_claims = withdrawals
             .requests()
             .iter()
             .map(|request| {
                 let claim = prepared
-                    .withdrawal_claim(&withdrawals, request.account())
+                    .withdrawal_claim(request.account())
                     .expect("validated withdrawal has a canonical claim");
                 let output = claim
                     .verify::<Sha256>(&close.roots.withdrawal_outputs)
@@ -1250,10 +1283,19 @@ impl Harness {
                         assert_eq!(output.amount(), expected.get());
                     }
                     WithdrawalAction::Close => {
-                        let (debit, credit, _) = row
-                            .checked_deltas()
-                            .expect("validated close counters are monotonic");
-                        let available = u128::from(row.predecessor.balance)
+                        let debit = close
+                            .out_vectors
+                            .iter()
+                            .find(|vector| vector.payer() == &row.account)
+                            .map_or(0, |vector| vector.totals().unwrap().0);
+                        let credit: u64 = close
+                            .out_vectors
+                            .iter()
+                            .flat_map(|vector| vector.entries())
+                            .filter(|entry| entry.recipient == row.account)
+                            .map(|entry| entry.cumulative)
+                            .sum();
+                        let available = u128::from(predecessor.balance(&row.account))
                             + u128::from(deposits.amount_for(&row.account))
                             + u128::from(credit);
                         let expected = u64::try_from(
@@ -1263,8 +1305,7 @@ impl Harness {
                         )
                         .expect("validated close tail fits in u64");
                         assert_eq!(output.amount(), expected);
-                        assert!(!row.successor.active);
-                        assert_eq!(row.successor.balance, 0);
+                        assert_eq!(row.successor, 0);
                     }
                 }
                 claim
@@ -1274,29 +1315,11 @@ impl Harness {
             .iter()
             .map(|claim| claim.output().clone())
             .collect::<Vec<_>>();
-        let terminal = close
-            .rows
-            .last()
-            .map_or(Prefix::default(), |row| row.prefix);
-        assert_eq!(
-            terminal.withdrawal_count,
-            u64::try_from(withdrawals.len()).expect("bounded withdrawal count fits in u64")
-        );
-        assert!(terminal.withdrawal >= withdrawals.total());
-        assert_eq!(terminal.withdrawal, output_total(&withdrawal_outputs));
-        let terminal_proof = prepared
-            .terminal_proof()
-            .expect("sanitized close has a canonical terminal proof");
-        let totals = terminal_proof
-            .verify::<Sha256, VerifyingKey>(
-                &context,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-            )
-            .expect("sanitized terminal proof verifies");
-        let external_payouts = expected_external_payouts(&close, &deposits, &withdrawals);
+        assert_eq!(withdrawal_outputs.len(), withdrawals.len());
+        assert!(close.amounts.withdrawal >= withdrawals.total());
+        assert_eq!(close.amounts.withdrawal, output_total(&withdrawal_outputs));
+        let external_payouts =
+            expected_external_payouts(predecessor, &close, &deposits, &withdrawals);
         let external_payout_claims = external_payouts
             .iter()
             .map(|payout| {
@@ -1312,8 +1335,15 @@ impl Harness {
                 claim
             })
             .collect::<Vec<_>>();
-        assert_eq!(totals.withdrawal, output_total(&withdrawal_outputs));
-        assert_eq!(totals.payout, payout_total(&external_payouts));
+        assert_eq!(close.amounts.withdrawal, output_total(&withdrawal_outputs));
+        assert_eq!(close.amounts.payout, payout_total(&external_payouts));
+        let successor = successor_snapshot(
+            predecessor,
+            &deposits,
+            &withdrawals,
+            &close,
+            *prepared.state().head(),
+        );
         Prepared {
             predecessor: predecessor.clone(),
             context,
@@ -1323,55 +1353,32 @@ impl Harness {
             withdrawal_outputs,
             external_payout_claims,
             external_payouts,
-            terminal_proof,
             close,
             successor,
-            prepared: Arc::new(prepared),
         }
     }
 
-    fn certificate(&self, prepared: &Prepared) -> Certificate {
-        validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &prepared.context,
-            &self.operator_bls,
-            &prepared.deposits,
-            &prepared.withdrawals,
-            &prepared.close,
-            &mut test_rng(),
-        )
-        .expect("sanitized close must validate");
-        let spans = assigned_slice_spans::<Sha256, _>(
-            self.validator.committee(),
-            prepared.context.assignment(),
-            self.validator.me().expect("validator can sign"),
-        )
-        .expect("committee-bound assignment must derive");
-        let assigned = prepared
-            .prepared
-            .assemble_slices(&prepared.predecessor, &spans, &Sequential)
-            .expect("sanitized close slices must build");
-        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+    async fn certificate(
+        &self,
+        prepared: &Prepared,
+    ) -> (Certificate, PreparedClose<VerifyingKey, Digest>) {
+        let before = *self.state.as_ref().unwrap().head();
+        let (vote, candidate) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             &self.validator,
+            self.state.as_ref().unwrap(),
             &prepared.context,
             &self.operator_bls,
             &prepared.deposits,
             &prepared.withdrawals,
-            &prepared.close.header,
-            &prepared.close.roots,
-            assigned,
+            prepared.close.encoded().clone(),
             &mut test_rng(),
             &Sequential,
         )
-        .expect("complete validated assignment must sign");
-        assert!(sealed.slices().iter().all(|slice| {
-            slice
-                .span
-                .clone()
-                .all(|index| sealed.serve(index).is_some())
-        }));
-        self.validator
-            .assemble_exact([vote])
-            .expect("one-validator exact quorum must assemble")
+        .await
+        .unwrap();
+        assert_eq!(*self.state.as_ref().unwrap().head(), before);
+        assert_eq!(candidate.close().header, prepared.close.header);
+        (self.validator.assemble_exact([vote]).unwrap(), candidate)
     }
 
     fn deposit(
@@ -1487,7 +1494,7 @@ impl Harness {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn withdrawal(
+    async fn withdrawal(
         &mut self,
         tick: u8,
         account_selector: u8,
@@ -1587,7 +1594,7 @@ impl Harness {
             SignedWithdrawal::sign(deployment, root, destination, action, deadline, &key)
         });
         let account = request.account().clone();
-        let mut openings = self.safety_openings(&account).unwrap_or_default();
+        let mut openings = self.safety_openings(&account).await.unwrap_or_default();
         if variant == 9 && !openings.is_empty() {
             openings.pop();
         }
@@ -1635,28 +1642,36 @@ impl Harness {
                         .leaves()
                         .iter()
                         .find(|leaf| leaf.account == account)
-                        .map(|leaf| leaf.state)
+                        .map(|leaf| leaf.balance)
                 })
                 .collect::<Option<Vec<_>>>()?;
-            if states
-                .iter()
-                .any(|state| !state.active || state.balance == 0)
-            {
+            if states.contains(&0) {
                 return None;
             }
-            let minimum = states.iter().map(|state| state.balance).min()?;
+            let minimum = *states.iter().min()?;
             Some((key.clone(), minimum))
         })
     }
 
-    fn safety_openings(
+    async fn safety_openings(
         &self,
         account: &VerifyingKey,
     ) -> Option<Vec<StateOpening<VerifyingKey, Digest>>> {
-        std::iter::once(&self.finalized)
-            .chain(self.slots.iter().map(|slot| &slot.successor))
-            .map(|cache| cache.opening(account).ok())
-            .collect()
+        let state = self.state.as_ref().unwrap();
+        let before = *state.head();
+        let mut proofs = Vec::new();
+        for cache in
+            std::iter::once(&self.finalized).chain(self.slots.iter().map(|slot| &slot.successor))
+        {
+            let proof = state
+                .opening_at(cache.root(), cache.head.operations(), account.clone())
+                .await
+                .ok()?;
+            assert!(proof.verify::<Sha256>(&cache.root()).is_ok());
+            proofs.push(proof);
+        }
+        assert_eq!(*state.head(), before);
+        Some(proofs)
     }
 
     fn withdrawal_would_succeed(
@@ -1710,45 +1725,62 @@ impl Harness {
             return false;
         }
 
-        let Some(expected_openings) = self.safety_openings(request.account()) else {
-            return false;
-        };
-        if expected_openings != openings {
+        let snapshots = std::iter::once(&self.finalized)
+            .chain(self.slots.iter().map(|slot| &slot.successor))
+            .collect::<Vec<_>>();
+        if snapshots.len() != openings.len() {
             return false;
         }
-        expected_openings.iter().all(|opening| {
-            opening.leaf.state.active
+        snapshots.iter().zip(openings).all(|(snapshot, opening)| {
+            let balance = snapshot.balance(request.account());
+            balance > 0
+                && opening.account == *request.account()
+                && opening.balance.get() == balance
+                && opening.verify::<Sha256>(&snapshot.root()).is_ok()
                 && match body.action() {
-                    WithdrawalAction::Amount(amount) => amount.get() <= opening.leaf.state.balance,
+                    WithdrawalAction::Amount(amount) => amount.get() <= balance,
                     WithdrawalAction::Close => true,
                 }
         })
     }
 
-    fn register(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
-        let prepared = self.make_prepared();
-        self.register_prepared(tick, mutated, prepared)
+    async fn register(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
+        let prepared = self.make_prepared().await;
+        self.register_prepared(tick, mutated, prepared).await
     }
 
-    fn register_payout(&mut self, tick: u8, payer: u8, amount: u8, mutated: bool) -> ActionOutcome {
-        let (prepared, unavailable) = self.make_payout_prepared(payer, amount).map_or_else(
-            || (self.make_prepared(), true),
-            |prepared| (prepared, false),
-        );
+    async fn register_payout(
+        &mut self,
+        tick: u8,
+        payer: u8,
+        amount: u8,
+        mutated: bool,
+    ) -> ActionOutcome {
+        let (prepared, unavailable) = match self.make_payout_prepared(payer, amount).await {
+            Some(prepared) => (prepared, false),
+            None => (self.make_prepared().await, true),
+        };
         self.register_prepared(tick, mutated || unavailable, prepared)
+            .await
     }
 
-    fn register_prepared(&mut self, tick: u8, mutated: bool, prepared: Prepared) -> ActionOutcome {
+    async fn register_prepared(
+        &mut self,
+        tick: u8,
+        mutated: bool,
+        prepared: Prepared,
+    ) -> ActionOutcome {
         let now = self.advance(tick);
         let context = if mutated {
             self.make_context(
                 prepared.context.payment().epoch() + 1,
-                self.tail_cache(),
+                &self.replica,
                 &prepared.deposits,
                 &prepared.withdrawals,
                 prepared.context.admission_deadline(),
                 prepared.context.challenge_deadline(),
             )
+            .await
         } else {
             prepared.context.clone()
         };
@@ -1794,14 +1826,13 @@ impl Harness {
         ActionOutcome::new(expected, Some(&observation))
     }
 
-    fn admit(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
+    async fn admit(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
         let now = self.advance(tick);
-        let prepared = self
-            .registered
-            .clone()
-            .unwrap_or_else(|| self.make_prepared());
-        let terminal_proof = prepared.terminal_proof.clone();
-        let certificate = self.certificate(&prepared);
+        let prepared = match self.registered.clone() {
+            Some(prepared) => prepared,
+            None => self.make_prepared().await,
+        };
+        let (certificate, candidate) = self.certificate(&prepared).await;
         let retained_certificate = certificate.clone();
         let mut header = prepared.close.header;
         let mut roots = prepared.close.roots;
@@ -1810,6 +1841,7 @@ impl Harness {
             header = commonware_clearing::bajillion::transition::Header::new::<Sha256, _>(
                 &prepared.context,
                 &roots,
+                &prepared.close.amounts,
             );
         }
         let observation = self.predict_observation(now);
@@ -1826,7 +1858,7 @@ impl Harness {
         };
         let result = self
             .chain
-            .admit(now, header, roots, terminal_proof, certificate);
+            .admit(now, header, roots, prepared.close.amounts, certificate);
         assert_eq!(OutcomeClass::of(&result), expected);
         if expected == OutcomeClass::Success {
             let batch_id = result
@@ -1836,6 +1868,24 @@ impl Harness {
         }
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
+            let (state, validated) = candidate.apply(self.state.take().unwrap()).await.unwrap();
+            self.state = Some(state.commit().await.unwrap());
+            assert_eq!(validated.header, prepared.close.header);
+            self.replica = prepared.successor.clone();
+            assert_eq!(*self.state.as_ref().unwrap().head(), self.replica.head);
+            for account in &self.accounts {
+                assert_eq!(
+                    self.state
+                        .as_ref()
+                        .unwrap()
+                        .get(&account_key(&account.public_key()).unwrap())
+                        .await
+                        .unwrap()
+                        .map(NonZeroU64::get)
+                        .unwrap_or(0),
+                    self.replica.balance(&account.public_key())
+                );
+            }
             let registered = self
                 .registered
                 .take()
@@ -2104,7 +2154,7 @@ impl Harness {
         &self,
         family: u8,
         context: &TestContext,
-        predecessor: &TestCache,
+        _predecessor: &TestCache,
         close: &TestClose,
     ) -> (TestChallenge, ChallengeKind) {
         let index = ChallengeIndex::new::<Sha256>(context, close)
@@ -2115,16 +2165,9 @@ impl Harness {
             .rows
             .binary_search_by(|candidate| candidate.account.cmp(&payer))
             .ok();
-        let terminal_debit = row.map_or_else(
-            || {
-                predecessor
-                    .leaves()
-                    .iter()
-                    .find(|leaf| leaf.account == payer)
-                    .map_or(0, |leaf| leaf.state.cumulative_debit)
-            },
-            |position| close.rows[position].successor.cumulative_debit,
-        );
+        let terminal_debit = row
+            .and_then(|position| close.rows[position].outgoing.as_ref())
+            .map_or(0, |send| send.body().cumulative_debit());
         let seq = row
             .and_then(|position| close.rows[position].outgoing.as_ref())
             .map_or(0, |send| send.body().seq());
@@ -2173,7 +2216,7 @@ impl Harness {
                 Challenge::HigherAckDebit {
                     ack: Box::new(AckWitness::from_ack(&ack(seq + 1, above))),
                     payer: Box::new(
-                        account_lookup::<Sha256, _, _>(&index, predecessor, &payer)
+                        account_lookup::<Sha256, _, _>(&index, &payer)
                             .expect("validated close has canonical payer evidence"),
                     ),
                 },
@@ -2224,7 +2267,7 @@ impl Harness {
         }
     }
 
-    fn challenge(
+    async fn challenge(
         &mut self,
         step: u64,
         tick: u8,
@@ -2247,15 +2290,17 @@ impl Harness {
                     )
                 })
         };
-        let (context, batch, predecessor, close) = selected.unwrap_or_else(|| {
-            let prepared = self.make_prepared();
+        let (context, batch, predecessor, close) = if let Some(selected) = selected {
+            selected
+        } else {
+            let prepared = self.make_prepared().await;
             (
                 prepared.context,
                 prepared.close.header.batch_id::<Sha256>(),
                 prepared.predecessor,
                 prepared.close,
             )
-        });
+        };
         let family = mutation % 3;
         let variant = (mutation / 4) % 4;
         let submitted_batch = if variant == 1 || (!encoded && variant != 0) {
@@ -2899,8 +2944,8 @@ impl Harness {
         ActionOutcome::new(expected, None)
     }
 
-    fn claim_hard_fault(&mut self, account_selector: u8, mutation: u8) -> ActionOutcome {
-        let (opening, selected) = self.hard_fault_opening(account_selector, mutation);
+    async fn claim_hard_fault(&mut self, account_selector: u8, mutation: u8) -> ActionOutcome {
+        let (opening, selected) = self.hard_fault_opening(account_selector, mutation).await;
         let canonical = mutation.is_multiple_of(4);
         let expected = if self.hard_fault.is_some()
             && self.hard_fault_settlement.is_some()
@@ -2929,11 +2974,11 @@ impl Harness {
                 request
                     .as_ref()
                     .map_or(0, |request| match request.body().action() {
-                        WithdrawalAction::Amount(amount) if amount.get() <= leaf.state.balance => {
+                        WithdrawalAction::Amount(amount) if amount.get() <= leaf.balance => {
                             amount.get()
                         }
                         WithdrawalAction::Amount(_) => 0,
-                        WithdrawalAction::Close => leaf.state.balance,
+                        WithdrawalAction::Close => leaf.balance,
                     });
             let release = result.expect("the oracle predicted a terminal state release");
             assert_eq!(release.account, leaf.account);
@@ -2945,8 +2990,8 @@ impl Harness {
                 (None, None) => {}
                 _ => panic!("hard-fault withdrawal output must match the queued request"),
             }
-            assert_eq!(release.residual, leaf.state.balance - withdrawal_amount);
-            assert_eq!(release.released_custody, leaf.state.balance);
+            assert_eq!(release.residual, leaf.balance - withdrawal_amount);
+            assert_eq!(release.released_custody, leaf.balance);
 
             assert!(
                 self.claimed_hard_fault_accounts
@@ -2957,54 +3002,43 @@ impl Harness {
             }
             self.custody = self
                 .custody
-                .checked_sub(leaf.state.balance)
+                .checked_sub(leaf.balance)
                 .expect("authenticated state claims are held in active custody");
             self.finish_hard_fault_if_drained();
         }
         ActionOutcome::new(expected, None)
     }
 
-    fn hard_fault_opening(
-        &self,
+    async fn hard_fault_opening(
+        &mut self,
         account_selector: u8,
         mutation: u8,
-    ) -> (
-        StateOpening<VerifyingKey, Digest>,
-        Option<StateLeaf<VerifyingKey>>,
-    ) {
+    ) -> (StateOpening<VerifyingKey, Digest>, Option<BalanceEntry>) {
         let selected = (!self.finalized.is_empty()).then(|| {
             self.finalized.leaves()[usize::from(account_selector) % self.finalized.len()].clone()
         });
-        let mut opening = if let Some(leaf) = &selected {
-            self.finalized
-                .opening(&leaf.account)
-                .expect("a selected finalized leaf has an opening")
+        let mut opening = if let Some(entry) = &selected {
+            self.state
+                .as_ref()
+                .unwrap()
+                .opening_at(
+                    self.finalized.root(),
+                    self.finalized.head.operations(),
+                    entry.account.clone(),
+                )
+                .await
+                .unwrap()
         } else {
-            let fallback = wrong_cache(&self.finalized);
-            fallback
-                .opening(&fallback.leaves()[0].account)
-                .expect("the fallback cache has one live leaf")
+            self.foreign_opening.clone()
         };
-
         match mutation % 4 {
             0 => {}
-            1 => {
-                opening.leaf.state.balance = if opening.leaf.state.balance == u64::MAX {
-                    u64::MAX - 1
-                } else {
-                    opening.leaf.state.balance + 1
-                };
-            }
-            2 => opening.leaf.state.active = false,
+            1 => opening.balance = NonZeroU64::new(opening.balance.get() + 1).unwrap(),
+            2 => opening.account = self.external_account(),
             _ => {
-                let malformed = wrong_cache(&self.finalized);
-                let account = selected.as_ref().map_or_else(
-                    || malformed.leaves()[0].account.clone(),
-                    |leaf| leaf.account.clone(),
-                );
-                opening = malformed
-                    .opening(&account)
-                    .expect("a root-mutated cache retains the selected account");
+                let account = opening.account.clone();
+                opening = self.foreign_opening.clone();
+                opening.account = account;
             }
         }
         (opening, selected)
@@ -3054,16 +3088,13 @@ fn synthetic_external_payout_claim() -> TestExternalPayoutClaim {
     let account = SigningKey::from_seed(u64::MAX - 1).public_key();
     let row = AccountRow {
         account: account.clone(),
-        predecessor: AccountState::default(),
-        successor: AccountState::default(),
+        predecessor: 0,
+        successor: 0,
         outgoing: None,
         output: SettlementOutput::ExternalPayout(1),
-        prefix: Prefix::default(),
     };
-    let leaf = AccountChange::from_row::<Sha256>(
-        &row,
-        commitment::empty_root::<Sha256>(VectorKind::OutEntry),
-    );
+    let leaf =
+        AccountChange::from_row(&row, commitment::empty_root::<Sha256>(VectorKind::OutEntry));
     let guard = leaf.guard::<Sha256>();
     let mut builder = commitment::Builder::<Sha256>::new(VectorKind::Change, 1)
         .expect("one synthetic change guard is bounded");
@@ -3100,36 +3131,30 @@ fn output_total(outputs: &[WithdrawalOutput]) -> u64 {
 }
 
 fn expected_external_payouts(
+    predecessor: &TestCache,
     close: &TestClose,
     deposits: &TestDeposits,
     withdrawals: &TestWithdrawals,
 ) -> Vec<ExternalPayout<VerifyingKey>> {
-    assert_eq!(close.rows.len(), close.out_vectors.len());
-    close
-        .rows
-        .iter()
-        .filter_map(|row| {
-            if row.predecessor != AccountState::default()
-                || row.successor.active
-                || row.successor.balance != 0
-                || row.outgoing.is_some()
-                || deposits.amount_for(&row.account) != 0
-                || withdrawals.request_for(&row.account).is_some()
-            {
-                return None;
-            }
-
-            let (debit, credit, receipts) = row
-                .checked_deltas()
-                .expect("validated payout row counters are monotonic");
-            assert_eq!(debit, 0);
-            assert!(credit > 0);
-            assert!(receipts > 0);
-            assert_eq!(row.output, SettlementOutput::ExternalPayout(credit));
-            Some(ExternalPayout {
-                recipient: row.account.clone(),
-                amount: credit,
-            })
+    let mut credits = BTreeMap::<VerifyingKey, u64>::new();
+    for entry in close.out_vectors.iter().flat_map(|vector| vector.entries()) {
+        *credits.entry(entry.recipient.clone()).or_default() += entry.cumulative;
+    }
+    credits
+        .into_iter()
+        .filter(|(account, _)| {
+            predecessor.balance(account) == 0
+                && deposits.amount_for(account) == 0
+                && withdrawals.request_for(account).is_none()
+        })
+        .map(|(recipient, amount)| {
+            let row = close
+                .rows
+                .iter()
+                .find(|row| row.account == recipient)
+                .unwrap();
+            assert_eq!(row.output, SettlementOutput::ExternalPayout(amount));
+            ExternalPayout { recipient, amount }
         })
         .collect()
 }
@@ -3149,173 +3174,190 @@ fn bls_ack(private: &Private, body: &VectorSendBody<VerifyingKey, Digest>) -> Op
     )
 }
 
-fn build_prepared(
-    cache: &TestCache,
-    context: &TestContext,
+// Derive balances from input vectors and boundaries, then compare every public activity row.
+fn successor_snapshot(
+    predecessor: &TestCache,
     deposits: &TestDeposits,
     withdrawals: &TestWithdrawals,
-    rows: Vec<BuiltRow>,
-    transpose: Vec<TransposeEntry<VerifyingKey>>,
-) -> PreparedClose<VerifyingKey, Digest> {
-    let mut split_rows = Vec::with_capacity(rows.len());
-    let mut vectors = Vec::with_capacity(rows.len());
-    let mut signatures = Vec::with_capacity(rows.len());
-    for (row, vector, signature) in rows {
-        split_rows.push(row);
-        vectors.push(vector);
-        signatures.push(signature);
-    }
-    let partials = vectors
+    close: &TestClose,
+    head: StateHead<Digest>,
+) -> TestCache {
+    let mut expected = predecessor
+        .leaves
         .iter()
-        .map(OutVector::accumulator)
+        .map(|entry| (entry.account.clone(), entry.balance))
+        .collect::<BTreeMap<_, _>>();
+    for record in deposits.records() {
+        *expected.entry(record.account().clone()).or_default() += record.amount();
+    }
+    let mut credits = BTreeMap::<VerifyingKey, u64>::new();
+    for vector in &close.out_vectors {
+        let debit = vector
+            .entries()
+            .iter()
+            .map(|entry| entry.cumulative)
+            .sum::<u64>();
+        if debit != 0 {
+            *expected.get_mut(vector.payer()).unwrap() -= debit;
+        }
+        for entry in vector.entries() {
+            *credits.entry(entry.recipient.clone()).or_default() += entry.cumulative;
+        }
+    }
+    for (account, credit) in credits {
+        if let Some(balance) = expected.get_mut(&account) {
+            *balance += credit;
+        }
+    }
+    for request in withdrawals.requests() {
+        let balance = expected.get_mut(request.account()).unwrap();
+        match request.body().action() {
+            WithdrawalAction::Amount(amount) => *balance -= amount.get(),
+            WithdrawalAction::Close => *balance = 0,
+        }
+    }
+    for row in &close.rows {
+        assert_eq!(row.predecessor, predecessor.balance(&row.account));
+        assert_eq!(
+            row.successor,
+            expected.get(&row.account).copied().unwrap_or(0)
+        );
+    }
+    let leaves = expected
+        .into_iter()
+        .filter(|(_, balance)| *balance > 0)
+        .map(|(account, balance)| BalanceEntry { account, balance })
         .collect::<Vec<_>>();
-    prepare_close_with_strategy::<Sha256, _, _>(
-        cache,
-        context,
-        deposits,
-        withdrawals,
-        split_rows,
-        vectors,
-        &partials,
-        &signatures,
-        transpose,
-        &Sequential,
-    )
-    .expect("sanitized close must prepare")
+    assert!(leaves.len() <= MAX_ACCOUNTS);
+    let snapshot = TestCache { head, leaves };
+    assert_eq!(snapshot.root(), close.roots.successor);
+    assert_eq!(snapshot.liability(), head.liability());
+    assert_eq!(snapshot.len() as u64, head.live_accounts());
+    snapshot
 }
 
-fn boundary_close(
-    cache: &TestCache,
-    context: &TestContext,
-    deposits: &TestDeposits,
-    withdrawals: &TestWithdrawals,
-) -> (PreparedClose<VerifyingKey, Digest>, TestCache) {
-    let mut changed = BTreeSet::new();
-    changed.extend(
-        deposits
-            .records()
-            .iter()
-            .map(|record| record.account().clone()),
-    );
-    changed.extend(
-        withdrawals
-            .requests()
-            .iter()
-            .map(|request| request.account().clone()),
-    );
-
-    let mut prefix = Prefix::default();
-    let mut rows: Vec<BuiltRow> = Vec::with_capacity(changed.len());
-    for account in changed {
-        let predecessor = cache
-            .leaves()
-            .iter()
-            .find(|leaf| leaf.account == account)
-            .map_or_else(AccountState::default, |leaf| leaf.state);
-        let deposit = deposits.amount_for(&account);
-        let withdrawal = withdrawals.request_for(&account);
-        let applied = withdrawal.map_or(0, |request| match request.body().action() {
-            WithdrawalAction::Amount(amount) => amount.get(),
-            WithdrawalAction::Close => predecessor
-                .balance
-                .checked_add(deposit)
-                .expect("bounded successor balance"),
-        });
-        let mut successor = predecessor;
-        successor.balance = predecessor
-            .balance
-            .checked_add(deposit)
-            .and_then(|balance| balance.checked_sub(applied))
-            .expect("sanitized boundary remains affordable");
-        successor.active = successor.balance > 0;
-        let output = withdrawal.map_or(SettlementOutput::None, |_| {
-            SettlementOutput::Withdrawal(applied)
-        });
-        prefix = prefix
-            .checked_extend(Prefix {
-                deposit,
-                withdrawal: applied,
-                withdrawal_count: u64::from(withdrawal.is_some()),
-                ..Prefix::default()
-            })
-            .expect("bounded close totals cannot overflow");
-        let vector = OutVector::empty(context.payment().epoch(), account.clone());
-        rows.push((
-            AccountRow {
-                account,
-                predecessor,
-                successor,
-                outgoing: None,
-                output,
-                prefix,
-            },
-            vector,
-            None,
-        ));
+// A causal trace reaches retained-root intake and account replay after a restart on every probe.
+async fn lifecycle_probe(mut input: FuzzInput, runtime: deterministic::Context) {
+    input.account_count = 1;
+    input.balances = [7; MAX_ACCOUNTS];
+    let mut harness = Harness::new(&input, runtime).await;
+    let actions = [
+        Action::RegisterPayout {
+            tick: 0,
+            payer: 0,
+            amount: 1,
+            mutated: false,
+        },
+        Action::Admit {
+            tick: 0,
+            mutated: false,
+        },
+        Action::Withdrawal {
+            tick: 0,
+            account: 0,
+            amount: 0,
+            destination: input.seed,
+            destination_len: 3,
+            closes_account: false,
+            mutation: 9,
+        },
+        Action::Withdrawal {
+            tick: 0,
+            account: 0,
+            amount: 0,
+            destination: input.seed,
+            destination_len: 3,
+            closes_account: false,
+            mutation: 0,
+        },
+        Action::Register {
+            tick: 0,
+            mutated: false,
+        },
+        Action::Admit {
+            tick: 0,
+            mutated: false,
+        },
+        Action::Restart,
+        Action::Finalize {
+            tick: 0,
+            early: false,
+        },
+        Action::Withdrawal {
+            tick: 0,
+            account: 1,
+            amount: 0,
+            destination: input.seed,
+            destination_len: 3,
+            closes_account: false,
+            mutation: 0,
+        },
+        Action::Challenge {
+            tick: 0,
+            slot: 0,
+            encoded: true,
+            mutation: 0,
+        },
+        Action::BeginHardFaultSettlement,
+        Action::ClaimHardFault {
+            account: 0,
+            mutation: 0,
+        },
+        Action::Restart,
+        Action::ClaimHardFault {
+            account: 0,
+            mutation: 0,
+        },
+        Action::ClaimHardFault {
+            account: 1,
+            mutation: 0,
+        },
+        Action::ClaimExternalPayout {
+            batch: 0,
+            claim: 0,
+            mutation: 0,
+        },
+        Action::ClaimExternalPayout {
+            batch: 0,
+            claim: 0,
+            mutation: 0,
+        },
+    ];
+    for (step, action) in actions.iter().enumerate() {
+        harness.apply(step as u64, action).await;
+        match step {
+            1 => assert_eq!(harness.slots.len(), 1),
+            2 => assert!(harness.outstanding.is_empty()),
+            3 => assert_eq!(harness.outstanding.len(), 1),
+            5 => assert_eq!(harness.slots.len(), 2),
+            7 => assert_eq!(harness.slots.len(), 1),
+            8 => assert_eq!(harness.outstanding.len(), 2),
+            9 => assert!(harness.hard_fault.is_some()),
+            11 | 13 => assert_eq!(harness.claimed_hard_fault_accounts.len(), 1),
+            14 => assert!(harness.settled),
+            15 | 16 => assert_eq!(harness.claimable, 0),
+            _ => {}
+        }
     }
-    let prepared = build_prepared(cache, context, deposits, withdrawals, rows, Vec::new());
-    let successor = successor_cache(cache, prepared.close());
-    (prepared, successor)
-}
-
-fn successor_cache(cache: &TestCache, close: &TestClose) -> TestCache {
-    let changed = close
-        .rows
-        .iter()
-        .map(|row| row.account.clone())
-        .collect::<BTreeSet<_>>();
-    let mut leaves = cache
-        .leaves()
-        .iter()
-        .filter(|leaf| !changed.contains(&leaf.account))
-        .cloned()
-        .collect::<Vec<_>>();
-    leaves.extend(
-        close
-            .rows
-            .iter()
-            .filter(|row| row.successor.active)
-            .map(|row| StateLeaf {
-                account: row.account.clone(),
-                state: row.successor,
-            }),
-    );
-    leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-    let successor =
-        StateCache::new::<Sha256>(leaves).expect("successor live state remains canonical");
-    assert_eq!(successor.root(), close.roots.successor);
-    successor
-}
-
-fn wrong_cache(cache: &TestCache) -> TestCache {
-    let mut leaves = cache.leaves().to_vec();
-    if let Some(leaf) = leaves.first_mut() {
-        leaf.state.balance = if leaf.state.balance == u64::MAX {
-            u64::MAX - 1
-        } else {
-            leaf.state.balance + 1
-        };
-    } else {
-        leaves.push(StateLeaf {
-            account: SigningKey::from_seed(u64::MAX).public_key(),
-            state: AccountState {
-                balance: 1,
-                active: true,
-                ..AccountState::default()
-            },
-        });
-    }
-    let mutated = StateCache::new::<Sha256>(leaves)
-        .expect("a guaranteed-distinct survivor remains structurally valid");
-    assert_ne!(mutated.root(), cache.root());
-    mutated
 }
 
 fuzz_target!(|data: &[u8]| {
     let data = &data[..data.len().min(MAX_INPUT_BYTES)];
+    let Some((&mode, data)) = data.split_first() else {
+        return;
+    };
     let Ok(mut input) = FuzzInput::arbitrary(&mut Unstructured::new(data)) else {
         return;
     };
     input.actions.truncate(MAX_ACTIONS);
-    Harness::new(&input).run(&input.actions);
+    deterministic::Runner::seeded(input.seed).start(|runtime| async move {
+        if mode % 2 == 0 {
+            lifecycle_probe(input, runtime).await;
+        } else {
+            Harness::new(&input, runtime)
+                .await
+                .run(&input.actions)
+                .await;
+        }
+    });
 });

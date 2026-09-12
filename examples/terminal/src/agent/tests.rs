@@ -1,6 +1,7 @@
 use super::{
     custody::{DEPOSIT_ID_NAMESPACE, withdrawal_deadline},
     evidence::Holders,
+    fixtures::StateFixture,
     store::{IncomingSummary, PendingWithdrawalClaim},
     *,
 };
@@ -17,9 +18,9 @@ use crate::{
     },
     operator::{Operator, rpc as operator_rpc},
     protocol::{
-        Acceptance, AcceptedEntry, AccountCache, Ack, DepositEvent, Entry, INITIAL_BALANCE, Key,
-        Protocol, Receipt, SettlementResult, Wallet, deployment, external_identity, identities,
-        operator_key, wallets,
+        Acceptance, AcceptedEntry, Ack, DepositEvent, Entry, INITIAL_BALANCE, Key, Protocol,
+        Receipt, SettlementResult, Wallet, deployment, external_identity, identities, operator_key,
+        wallets,
     },
     rpc,
 };
@@ -27,7 +28,6 @@ use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalAction, WithdrawalBatch},
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE, VectorSendBody},
-    state::{AccountState, StateLeaf},
     transition::BatchId,
     vector::{OutEntry, OutTipLookup, OutVector},
 };
@@ -124,7 +124,7 @@ fn client_with_holders(
 
 /// A verified client over the running chain whose genesis lists each committee
 /// validator at its own address, `base` plus its committee index, so a test
-/// can put a distinct server behind every holder of a slice.
+/// can put a distinct server behind every validator.
 fn client_with_distinct_holders(
     context: &deterministic::Context,
     control: &harness::Control,
@@ -520,20 +520,13 @@ fn open_withdrawal_intent(agent: &mut Agent) {
 }
 
 /// The four-identity genesis account state the chain certifies at its root.
-fn genesis_cache() -> AccountCache {
-    let mut leaves = identities()
-        .into_iter()
-        .map(|identity| StateLeaf {
-            account: identity.key,
-            state: AccountState {
-                balance: INITIAL_BALANCE,
-                active: true,
-                ..AccountState::default()
-            },
-        })
-        .collect::<Vec<_>>();
-    leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-    AccountCache::new::<Sha256>(leaves).unwrap()
+fn genesis_cache() -> StateFixture {
+    StateFixture::new(
+        identities()
+            .into_iter()
+            .map(|identity| (identity.key, INITIAL_BALANCE))
+            .collect(),
+    )
 }
 
 /// A scripted payment head over the certified genesis root: the served state
@@ -541,13 +534,13 @@ fn genesis_cache() -> AccountCache {
 /// genesis row.
 fn payment_head_response(
     context: PaymentContext<Key, Digest>,
-    state: AccountState,
+    balance: u64,
 ) -> operator_rpc::PaymentHeadResponse {
     let account = wallets()[0].public_key();
     let cache = genesis_cache();
     operator_rpc::PaymentHeadResponse {
         context,
-        state,
+        balance,
         root: cache.root(),
         opening: cache.opening(&account).unwrap(),
     }
@@ -574,15 +567,7 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        payment_context.clone(),
-                        AccountState {
-                            balance: 100,
-                            cumulative_debit: 10_000,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(payment_context.clone(), 100).encode(),
                 }
             })
             .await;
@@ -703,358 +688,403 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
 }
 
 #[test]
-fn stale_uncommitted_payment_is_abandoned_on_the_finalized_endpoint_proof() {
-    deterministic::Runner::default().start(|context| async move {
-        let (control, mut chain) = chain(&context).await;
-        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let cut = register(&control, &mut operator).await;
-        let mut listener = context
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The staged send never reaches the operator: the head is served and
-        // the accept request is dropped, so the send stays uncommitted.
-        let staging = context.child("staging").spawn(move |_| async move {
-            relay(&mut listener, &mut operator).await;
-            let (_, _sink, mut stream) = listener.accept().await.unwrap();
-            let request = rpc::recv_request(&mut stream).await.unwrap();
-            assert!(matches!(
-                operator_rpc::decode_request(request).unwrap(),
-                operator_rpc::OperatorRequest::AcceptSend(_)
-            ));
-            (listener, operator)
-        });
-        let mut agent = Agent::new(0).unwrap();
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        let pending = agent.pending_payment.as_ref().unwrap();
-        assert_eq!(pending.authorization.body().epoch(), cut.epoch());
-        assert_eq!(agent.cumulative_debit, 0);
-        let (mut listener, mut operator) = staging.await.unwrap();
-
-        // The epoch is cut and certifiably finalized with unrelated work, so
-        // the wallet's send is provably excluded from the finalized endpoint.
-        operator.pay(1, 2, 1).unwrap();
-        let result = operator.complete_close(2).unwrap();
-        finalize(&control, &result).await;
-        let live = register(&control, &mut operator).await;
-        assert_eq!(live.epoch(), 1);
-
-        // The retry resubmits the staged bytes and earns a corrective rejection
-        // whose claimed endpoint is not the wallet's own, so the wallet refuses to
-        // adopt it and routes through settlement-anchored resolution instead.
-        let live_context = live.clone();
-        let resolution = context.child("resolution").spawn(move |_| async move {
-            respond(&mut listener, |request| {
-                assert!(matches!(
-                    request,
-                    operator_rpc::OperatorRequest::AcceptSend(_)
-                ));
-                rpc::Response::Success {
-                    body: stale_response(&live_context, 3),
-                }
-            })
-            .await;
-
-            // Resolution reads the real head against the certified finalized
-            // root: the verified opening still carries the prior endpoint, so
-            // the wallet abandons on the chain's proof alone, then re-stages
-            // from the re-anchored cache and this send commits for real.
-            relay(&mut listener, &mut operator).await;
-            relay(&mut listener, &mut operator).await;
-        });
-
-        let payment = accepted(
-            agent
-                .pay(&context, &mut chain, operator_address, &[(1, 7)])
+fn unresolved_intent_keeps_exact_bytes_across_hostile_epoch_hints_and_reopen() {
+    for (committed, receipts, zero_net) in [
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let (control, mut chain) = chain(&context).await;
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            let old = register(&control, &mut operator).await;
+            let mut listener = context
+                .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                 .await
-                .unwrap(),
-        );
-        assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
-        assert_eq!(payment.acceptance.ack.body().cumulative_debit(), 7);
-        assert_eq!(agent.cumulative_debit, 7);
-        assert_eq!(agent.receipt_count(), 1);
-        assert!(agent.pending_payment.is_none());
-        assert_eq!(agent.cache.as_ref().unwrap().context.epoch(), live.epoch());
-        resolution.await.unwrap();
-    });
-}
-
-#[test]
-fn committed_payment_resolves_from_the_finalized_endpoint_without_a_verdict() {
-    deterministic::Runner::default().start(|context| async move {
-        let (control, mut chain) = chain(&context).await;
-        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let committed = register(&control, &mut operator).await;
-        let mut listener = context
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The operator commits the batch for real, but its response is lost
-        // before the wallet records it.
-        let staging = context.child("staging").spawn(move |_| async move {
-            relay(&mut listener, &mut operator).await;
-            let recorded = accept_and_drop(&mut listener, &mut operator).await;
-            (listener, operator, recorded)
-        });
-        let mut agent = Agent::new(0).unwrap();
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        assert_eq!(
-            agent
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let staging = context.child("staging").spawn(move |_| async move {
+                relay(&mut listener, &mut operator).await;
+                if committed {
+                    accept_and_drop(&mut listener, &mut operator).await;
+                } else {
+                    let (_, _sink, mut stream) = listener.accept().await.unwrap();
+                    assert!(matches!(
+                        operator_rpc::decode_request(rpc::recv_request(&mut stream).await.unwrap())
+                            .unwrap(),
+                        operator_rpc::OperatorRequest::AcceptSend(_)
+                    ));
+                }
+                (listener, operator)
+            });
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            assert!(
+                agent
+                    .pay(&context, &mut chain, address, &[(1, 7)])
+                    .await
+                    .is_err()
+            );
+            let original = agent
                 .pending_payment
                 .as_ref()
                 .unwrap()
                 .authorization
-                .body()
-                .epoch(),
-            0
+                .clone();
+            drop(agent);
+            let (mut listener, operator) = staging.await.unwrap();
+            let expected = original.clone();
+            let hint = PaymentContext::new(
+                Sha256::hash(&[b"hostile-successor"]),
+                old.epoch() + 1,
+                operator_key(),
+            );
+            let hostile = context
+                .child("hostile_correction")
+                .spawn(move |_| async move {
+                    for _ in 0..3 {
+                        respond(&mut listener, |request| {
+                            let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                                panic!("ambiguous intent requested a fresh head or authorization");
+                            };
+                            assert_eq!(request.authorization.encode(), expected.encode());
+                            rpc::Response::Success {
+                                body: stale_response(&hint, 0),
+                            }
+                        })
+                        .await;
+                    }
+                    (listener, operator)
+                });
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let error = agent
+                .resume_pending_payment(&context, &mut chain, address)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("repeatedly rejected"));
+            assert_eq!(
+                agent.pending_payment.as_ref().unwrap().authorization,
+                original
+            );
+            assert_eq!(agent.store.debits_since(0).unwrap(), 0);
+            drop(agent);
+            let (mut listener, mut operator) = hostile.await.unwrap();
+            if zero_net {
+                operator.pay(1, 0, 7).unwrap();
+            } else if !committed {
+                operator.pay(1, 2, 1).unwrap();
+            }
+            let result = operator.complete_close(31).unwrap();
+            finalize(&control, &result).await;
+            let live = register(&control, &mut operator).await;
+            let hint = live.clone();
+
+            // Unavailable evidence is not authenticated absence and cannot free the slot.
+            let unavailable = context
+                .child("unavailable_activity")
+                .spawn(move |_| async move {
+                    respond(&mut listener, |_| rpc::Response::Success {
+                        body: stale_response(&hint, 0),
+                    })
+                    .await;
+                    (listener, operator)
+                });
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let mut isolated = client_with_holders(&context, &control, UNREACHABLE);
+            assert!(
+                agent
+                    .resume_pending_payment(&context, &mut isolated, address)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                agent
+                    .pending_payment
+                    .as_ref()
+                    .unwrap()
+                    .authorization
+                    .encode(),
+                original.encode()
+            );
+            drop(agent);
+            let (mut listener, mut operator) = unavailable.await.unwrap();
+            let hint = live.clone();
+            let expected = original.clone();
+            let resolution = context
+                .child("authenticated_resolution")
+                .spawn(move |_| async move {
+                    respond(&mut listener, |request| {
+                        let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                            panic!("expected exact retry");
+                        };
+                        assert_eq!(request.authorization, expected);
+                        rpc::Response::Success {
+                            body: stale_response(&hint, 0),
+                        }
+                    })
+                    .await;
+                    if committed {
+                        respond(&mut listener, |request| {
+                            let operator_rpc::OperatorRequest::AcceptedBatch(request) = request
+                            else {
+                                panic!("expected optional receipts");
+                            };
+                            assert_eq!(request.authorization, expected);
+                            if receipts {
+                                operator_rpc::handle_decoded(
+                                    &mut operator,
+                                    operator_rpc::OperatorRequest::AcceptedBatch(request),
+                                )
+                            } else {
+                                rpc::Response::Success {
+                                    body: None::<operator_rpc::AcceptedBatchResponse>.encode(),
+                                }
+                            }
+                        })
+                        .await;
+                    } else {
+                        relay(&mut listener, &mut operator).await;
+                        respond(&mut listener, |request| {
+                            let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                                panic!("expected resolved fresh intent");
+                            };
+                            assert_eq!(request.authorization.body().epoch(), hint.epoch());
+                            assert_eq!(request.authorization.body().seq(), 1);
+                            assert_eq!(request.authorization.body().cumulative_debit(), 7);
+                            operator_rpc::handle_decoded(
+                                &mut operator,
+                                operator_rpc::OperatorRequest::AcceptSend(request),
+                            )
+                        })
+                        .await;
+                    }
+                    (listener, operator)
+                });
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            let outcome = agent
+                .resume_pending_payment(&context, &mut chain, address)
+                .await
+                .unwrap()
+                .unwrap();
+            if committed && !receipts {
+                assert!(matches!(
+                    outcome,
+                    PaymentOutcome::CommittedUnheld { epoch: 0, total: 7 }
+                ));
+            } else {
+                let outcome = accepted(outcome);
+                assert_eq!(
+                    outcome.epoch,
+                    if committed { old.epoch() } else { live.epoch() }
+                );
+            }
+            assert!(agent.pending_payment.is_none());
+            assert_eq!(agent.store.debits_since(0).unwrap(), 7);
+            drop(agent);
+            let (mut listener, mut operator) = resolution.await.unwrap();
+            let next = context
+                .child("next_epoch_payment")
+                .spawn(move |_| async move {
+                    if committed {
+                        relay(&mut listener, &mut operator).await;
+                    }
+                    respond(&mut listener, |request| {
+                        let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                            panic!("expected next payment");
+                        };
+                        assert_eq!(request.authorization.body().epoch(), live.epoch());
+                        assert_eq!(
+                            request.authorization.body().seq(),
+                            1 + u64::from(!committed)
+                        );
+                        assert_eq!(
+                            request.authorization.body().cumulative_debit(),
+                            if committed { 3 } else { 10 }
+                        );
+                        operator_rpc::handle_decoded(
+                            &mut operator,
+                            operator_rpc::OperatorRequest::AcceptSend(request),
+                        )
+                    })
+                    .await;
+                });
+            let mut agent = Agent::open(database.path(), 0).unwrap();
+            accepted(
+                agent
+                    .pay(&context, &mut chain, address, &[(1, 3)])
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(agent.store.debits_since(0).unwrap(), 10);
+            next.await.unwrap();
+        });
+    }
+}
+
+#[test]
+fn immutable_anchor_conflict_releases_only_the_invalid_context() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let registered = registered_context(&control).await;
+        let fake = PaymentContext::new(
+            Sha256::hash(&[b"unregistrable-anchor"]),
+            registered.epoch(),
+            operator_key(),
         );
-        let (mut listener, mut operator, recorded) = staging.await.unwrap();
-
-        // The committed send rides the certifiably finalized close, so the
-        // finalized endpoint carries the staged successor value.
-        let result = operator.complete_close(3).unwrap();
-        finalize(&control, &result).await;
-
-        // The retry resubmits the staged bytes and earns a corrective
-        // rejection claiming the committed endpoint, which is not the endpoint
-        // this wallet stands at (a lossy front: the live operator would
-        // simply replay the committed batch). Such a claim is never adopted
-        // blindly: the wallet resolves from the certified finalized root and
-        // only fetches the receipts through the accepted-batch recovery.
-        let live = operator
-            .payment_head(&wallets()[0].public_key())
-            .unwrap()
-            .context;
-        let expected_ack = recorded.acceptance.ack.clone();
-        let resolution = context.child("resolution").spawn(move |_| async move {
-            respond(&mut listener, |request| {
-                let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
-                    panic!("the retry did not resubmit the staged bytes");
-                };
-                assert_eq!(request.authorization.body(), expected_ack.body());
-                rpc::Response::Success {
-                    body: stale_response(&live, 7),
-                }
-            })
-            .await;
-            relay(&mut listener, &mut operator).await;
-            respond(&mut listener, |request| {
-                let operator_rpc::OperatorRequest::AcceptedBatch(request) = request else {
-                    panic!("the receipts fetch did not name the exact staged bytes");
-                };
-                assert_eq!(request.authorization.body(), expected_ack.body());
-                operator_rpc::handle_decoded(
-                    &mut operator,
-                    operator_rpc::OperatorRequest::AcceptedBatch(request),
+        let mut listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let serving = registered.clone();
+        let server = context
+            .child("corrective_anchor")
+            .spawn(move |_| async move {
+                respond(&mut listener, |_| rpc::Response::Success {
+                    body: payment_head_response(fake.clone(), 100).encode(),
+                })
+                .await;
+                respond(&mut listener, |request| {
+                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
+                        panic!("expected stale authorization");
+                    };
+                    assert_eq!(request.authorization.body().anchor(), fake.anchor());
+                    rpc::Response::Success {
+                        body: stale_response(&serving, 0),
+                    }
+                })
+                .await;
+                respond(&mut listener, |_| rpc::Response::Success {
+                    body: payment_head_response(serving.clone(), 100).encode(),
+                })
+                .await;
+                respond_acceptance(
+                    &mut listener,
+                    &Wallet::from_seed("operator", 1),
+                    &serving,
+                    7,
+                    Vec::new(),
                 )
-            })
-            .await;
-        });
-
-        let payment = accepted(
+                .await;
+            });
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let paid = accepted(
             agent
-                .pay(&context, &mut chain, operator_address, &[(1, 7)])
+                .pay(&context, &mut chain, address, &[(1, 7)])
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.epoch, committed.epoch());
-        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
-        assert_eq!(agent.cumulative_debit, 7);
-        assert_eq!(agent.receipt_count(), 1);
+        assert_eq!(paid.acceptance.ack.body().anchor(), registered.anchor());
+        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
+        drop(agent);
+        let agent = Agent::open(database.path(), 0).unwrap();
         assert!(agent.pending_payment.is_none());
-        resolution.await.unwrap();
+        assert_eq!(
+            agent.store.vector_state(&registered).unwrap().unwrap().seq,
+            1
+        );
+        server.await.unwrap();
     });
 }
 
 #[test]
-fn unfinalized_staged_epoch_keeps_resolution_undecidable() {
+fn received_sequence_zero_is_valid_and_survives_reopen() {
     deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
-        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let cut = register(&control, &mut operator).await;
+        let payment = registered_context(&control).await;
+        let payer = wallets().remove(0);
+        let receiver = wallets()[1].public_key();
+        let mut receipt = issued_receipt(&payment, &payer, &receiver, 7);
+        let body = VectorSendBody::new(
+            &payment,
+            payer.public_key(),
+            0,
+            7,
+            receipt.ack.body().send_root(),
+        );
+        receipt.ack = Ack::sign_by_authorities(
+            body,
+            payer.signer(),
+            Protocol::new(NonZeroUsize::MIN).unwrap().operator(),
+        );
+        let id = Sha256::hash(&[&receipt.ack.body().encode()]);
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The staged send never reaches the operator, so it stays uncommitted.
-        let staging = context.child("staging").spawn(move |_| async move {
-            relay(&mut listener, &mut operator).await;
-            let (_, _sink, mut stream) = listener.accept().await.unwrap();
-            let request = rpc::recv_request(&mut stream).await.unwrap();
-            assert!(matches!(
-                operator_rpc::decode_request(request).unwrap(),
-                operator_rpc::OperatorRequest::AcceptSend(_)
-            ));
-            (listener, operator)
-        });
-        let mut agent = Agent::new(0).unwrap();
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
+        let address = listener.local_addr().unwrap();
+        let server = context
+            .child("zero_sequence_receipt")
+            .spawn(move |_| async move {
+                respond(&mut listener, |_| rpc::Response::Success {
+                    body: incoming_response(&[(receipt, 1)]).encode(),
+                })
+                .await;
+            });
+        let mut agent = Agent::open(database.path(), 1).unwrap();
+        agent
+            .intake_incoming(&context, &mut chain, address)
             .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        let staged = agent
-            .pending_payment
-            .as_ref()
-            .unwrap()
-            .authorization
-            .clone();
-        assert_eq!(staged.body().epoch(), cut.epoch());
-        let (mut listener, mut operator) = staging.await.unwrap();
-
-        // The epoch is cut locally but the chain never admits its close, so
-        // no certified finalization covers the staged epoch.
-        operator.pay(1, 2, 1).unwrap();
-        let _unadmitted = operator.complete_close(4).unwrap();
-        let live = operator
-            .payment_head(&wallets()[0].public_key())
-            .unwrap()
-            .context;
-
-        // The retry earns a corrective rejection claiming an endpoint the
-        // wallet does not recognize, so it resolves from the chain. Nothing
-        // has certifiably finalized, so commitment is not decidable and
-        // everything is kept.
-        let live_context = live.clone();
-        let resolution = context.child("resolution").spawn(move |_| async move {
-            respond(&mut listener, |request| {
-                assert!(matches!(
-                    request,
-                    operator_rpc::OperatorRequest::AcceptSend(_)
-                ));
-                rpc::Response::Success {
-                    body: stale_response(&live_context, 7),
-                }
-            })
-            .await;
-            relay(&mut listener, &mut operator).await;
-        });
-
-        // An undecidable resolution must retry, never abandon: the exact staged send
-        // stays pending and the debit endpoint does not advance.
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("not yet decidable"));
+            .unwrap();
         assert_eq!(
             agent
-                .pending_payment
-                .as_ref()
+                .paid(&payer.public_key(), &id)
                 .unwrap()
-                .authorization
-                .encode(),
-            staged.encode()
+                .unwrap()
+                .amount,
+            7
         );
-        assert_eq!(agent.cumulative_debit, 0);
-        assert_eq!(agent.receipt_count(), 0);
-        resolution.await.unwrap();
+        drop(agent);
+        let agent = Agent::open(database.path(), 1).unwrap();
+        assert_eq!(agent.incoming().total, 7);
+        assert_eq!(
+            agent
+                .paid(&payer.public_key(), &id)
+                .unwrap()
+                .unwrap()
+                .amount,
+            7
+        );
+        server.await.unwrap();
     });
 }
 
 #[test]
-fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
+fn zero_balance_then_held_credit_reuses_the_same_epoch_vector_after_reopen() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        register(&control, &mut operator).await;
+        let epoch = register(&control, &mut operator).await;
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The operator commits the batch but its response is lost.
-        let staging = context.child("staging").spawn(move |_| async move {
+        let address = listener.local_addr().unwrap();
+        let staging = context.child("spend_to_zero").spawn(move |_| async move {
             relay(&mut listener, &mut operator).await;
-            let recorded = accept_and_drop(&mut listener, &mut operator).await;
-            (listener, operator, recorded)
-        });
-        let mut agent = Agent::open(database.path(), 0).unwrap();
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        let (mut listener, mut operator, _recorded) = staging.await.unwrap();
-
-        // The committed send rides the certifiably finalized close.
-        let result = operator.complete_close(5).unwrap();
-        finalize(&control, &result).await;
-        let live = register(&control, &mut operator).await;
-
-        // The retry earns a corrective naming the committed endpoint (a lossy
-        // front: the live operator would replay the committed batch), and the
-        // operator then serves no batch for the send: only the certified
-        // finalized endpoint proves the commitment, and the carve-out lets
-        // the next send proceed with the receipts unheld.
-        let stale = operator
-            .payment_head(&wallets()[0].public_key())
-            .unwrap()
-            .context;
-        let resolution = context.child("resolution").spawn(move |_| async move {
-            respond(&mut listener, |request| {
-                assert!(matches!(
-                    request,
-                    operator_rpc::OperatorRequest::AcceptSend(_)
-                ));
-                rpc::Response::Success {
-                    body: stale_response(&stale, 7),
-                }
-            })
-            .await;
             relay(&mut listener, &mut operator).await;
-            respond(&mut listener, |request| {
-                assert!(matches!(
-                    request,
-                    operator_rpc::OperatorRequest::AcceptedBatch(_)
-                ));
-                rpc::Response::Success {
-                    body: None::<operator_rpc::AcceptedBatchResponse>.encode(),
-                }
-            })
-            .await;
             (listener, operator)
         });
-        let outcome = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            PaymentOutcome::CommittedUnheld { epoch: 0, total: 7 }
-        ));
-        assert_eq!(agent.cumulative_debit, 7);
-        assert_eq!(agent.receipt_count(), 0);
-        assert!(agent.pending_payment.is_none());
-        drop(agent);
-        let (mut listener, mut operator) = resolution.await.unwrap();
-
-        // The unheld commit is durable: the endpoint survives restart without any
-        // retained receipts, and the next send debits its exact successor from
-        // local state alone.
-        let successor = context.child("successor").spawn(move |_| async move {
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        accepted(
+            agent
+                .pay(&context, &mut chain, address, &[(1, 100)])
+                .await
+                .unwrap(),
+        );
+        let (mut listener, mut operator) = staging.await.unwrap();
+        operator.pay(1, 0, 7).unwrap();
+        let receiving = context.child("fund_and_spend").spawn(move |_| async move {
+            relay(&mut listener, &mut operator).await;
             respond(&mut listener, |request| {
                 let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
-                    panic!("expected the successor send");
+                    panic!("held credit should fund the local fast path without a head read");
                 };
-                assert_eq!(request.authorization.body().cumulative_debit(), 10);
+                assert_eq!(request.authorization.body().seq(), 2);
+                assert_eq!(request.authorization.body().cumulative_debit(), 107);
                 operator_rpc::handle_decoded(
                     &mut operator,
                     operator_rpc::OperatorRequest::AcceptSend(request),
@@ -1062,286 +1092,207 @@ fn finalized_endpoint_commits_without_receipts_when_the_fetch_fails() {
             })
             .await;
         });
-        let mut recovered = Agent::open(database.path(), 0).unwrap();
-        assert_eq!(recovered.cumulative_debit, 7);
-        assert_eq!(recovered.receipt_count(), 0);
-        assert!(recovered.pending_payment.is_none());
-        let payment = accepted(
-            recovered
-                .pay(&context, &mut chain, operator_address, &[(1, 3)])
+        agent
+            .intake_incoming(&context, &mut chain, address)
+            .await
+            .unwrap();
+        assert_eq!(agent.incoming().total, 7);
+        drop(agent);
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        accepted(
+            agent
+                .pay(&context, &mut chain, address, &[(1, 7)])
                 .await
                 .unwrap(),
         );
-        assert_eq!(payment.total, 3);
-        assert_eq!(payment.acceptance.entries[0].cumulative, 3);
-        assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(recovered.cumulative_debit, 10);
-        successor.await.unwrap();
+        let retained = agent.store.vector_state(&epoch).unwrap().unwrap();
+        assert_eq!(retained.seq, 2);
+        assert_eq!(retained.entries[0].cumulative, 107);
+        assert_eq!(retained.entries[0].count, 2);
+        receiving.await.unwrap();
     });
 }
 
 #[test]
-fn forged_resolution_opening_fails_verification_and_retries() {
+fn finalized_zero_balance_preserves_accepted_epoch_state() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        let epoch = register(&control, &mut operator).await;
+        let mut listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = context.child("spend_balance").spawn(move |_| async move {
+            relay(&mut listener, &mut operator).await;
+            relay(&mut listener, &mut operator).await;
+            operator
+        });
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        accepted(
+            agent
+                .pay(&context, &mut chain, address, &[(1, 100)])
+                .await
+                .unwrap(),
+        );
+        let mut operator = server.await.unwrap();
+        let result = operator.complete_close(34).unwrap();
+        finalize(&control, &result).await;
+        assert_eq!(
+            agent
+                .balance(&context, &mut chain, UNREACHABLE)
+                .await
+                .unwrap(),
+            0
+        );
+        drop(agent);
+        let agent = Agent::open(database.path(), 0).unwrap();
+        let retained = agent.store.vector_state(&epoch).unwrap().unwrap();
+        assert_eq!(retained.seq, 1);
+        assert_eq!(retained.cumulative_debit, 100);
+    });
+}
+
+#[test]
+fn withdrawal_escalation_proves_every_pending_successor_balance() {
+    deterministic::Runner::default().start(|context| async move {
+        let (control, mut chain) = chain(&context).await;
+        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+        for epoch in 0..2 {
+            register(&control, &mut operator).await;
+            operator.pay(1, 2, 1).unwrap();
+            let result = operator.complete_close(35 + epoch).unwrap();
+            applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
+        }
+        assert!(status(&control).await.last_finalized.is_none());
+        let mut agent = Agent::new(0).unwrap();
+        let action = WithdrawalAction::Amount(NonZeroU64::new(25).unwrap());
+        let outcome = agent
+            .withdraw(&context, &mut chain, UNREACHABLE, action)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, WithdrawalOutcome::Signed { .. }));
+        let request = agent
+            .escalate_withdrawal(&context, &mut chain)
+            .await
+            .unwrap();
+        assert_eq!(
+            chain.withdrawal(&context, agent.account()).await.unwrap(),
+            Some(request)
+        );
+    });
+}
+
+#[test]
+fn finalized_activity_requires_its_actual_batch_root_and_account() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         register(&control, &mut operator).await;
-        let mut listener = context
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        operator.pay(0, 1, 7).unwrap();
+        let result = operator.complete_close(32).unwrap();
+        finalize(&control, &result).await;
+        let admitted = chain.admitted(&context, 0).await.unwrap().unwrap();
+        let account = wallets()[0].public_key();
+        let lookup = Holders::default()
+            .committed_account(&context, &chain, &admitted, &account)
             .await
             .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        let staging = context.child("staging").spawn(move |_| async move {
-            relay(&mut listener, &mut operator).await;
-            let recorded = accept_and_drop(&mut listener, &mut operator).await;
-            (listener, operator, recorded)
-        });
-        let mut agent = Agent::new(0).unwrap();
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        let staged = agent
-            .pending_payment
-            .as_ref()
-            .unwrap()
-            .authorization
-            .clone();
-        let (mut listener, mut operator, _recorded) = staging.await.unwrap();
-
-        let result = operator.complete_close(6).unwrap();
-        finalize(&control, &result).await;
-        let alice = wallets()[0].public_key();
-
-        // The retry earns a corrective naming the committed endpoint (a lossy
-        // front: the live operator would replay the committed batch), and the
-        // resolution head serves the wallet's row under the certified
-        // finalized root but with a corrupted Merkle proof, which must be
-        // rejected before anything is concluded.
-        let stale = operator.payment_head(&alice).unwrap().context;
-        let resolution = context.child("resolution").spawn(move |_| async move {
-            respond(&mut listener, |request| {
-                assert!(matches!(
-                    request,
-                    operator_rpc::OperatorRequest::AcceptSend(_)
-                ));
-                rpc::Response::Success {
-                    body: stale_response(&stale, 7),
-                }
-            })
-            .await;
-            let mut head = operator.payment_head(&alice).unwrap();
-            respond(&mut listener, move |request| {
-                assert!(matches!(
-                    request,
-                    operator_rpc::OperatorRequest::PaymentHead(_)
-                ));
-                head.opening.proof.proof.leaf_count = 2;
-                head.opening
-                    .proof
-                    .proof
-                    .siblings
-                    .push(Sha256::hash(&[b"invalid-payer-opening"]));
-                rpc::Response::Success {
-                    body: operator_rpc::PaymentHeadResponse {
-                        context: head.context.clone(),
-                        state: head.state,
-                        root: head.root,
-                        opening: head.opening.clone(),
-                    }
-                    .encode(),
-                }
-            })
-            .await;
-        });
-
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("verify payer state opening"));
-        assert_eq!(
-            agent
-                .pending_payment
-                .as_ref()
+        assert!(
+            lookup
+                .resolve::<Sha256>(&admitted.change, &account)
                 .unwrap()
-                .authorization
-                .encode(),
-            staged.encode()
+                .1
+                .is_some()
         );
-        assert_eq!(agent.cumulative_debit, 0);
-        assert_eq!(agent.receipt_count(), 0);
-        resolution.await.unwrap();
+        assert!(
+            lookup
+                .resolve::<Sha256>(&admitted.change, &wallets()[1].public_key())
+                .is_err()
+        );
+        let forged_address = SocketAddr::from(([127, 0, 0, 1], 9_703));
+        let forged = garbage_holder(
+            &context,
+            forged_address,
+            rpc::Response::Success {
+                body: EvidenceResponse::Served(Evidence::Close {
+                    header: result.header,
+                    roots: result.roots,
+                    body: crate::chain::query::EvidenceBody::Account(lookup.clone()),
+                })
+                .encode(),
+            },
+        )
+        .await;
+        let forged_chain = client_with_holders(&context, &control, forged_address);
+        let mut wrong_batch = admitted;
+        wrong_batch.batch_id = BatchId::new(Sha256::hash(&[b"wrong-batch"]));
+        assert!(
+            Holders::default()
+                .committed_account(&context, &forged_chain, &wrong_batch, &account)
+                .await
+                .is_err()
+        );
+        assert!(forged.load(Ordering::Relaxed) > 0);
+        let mut wrong = admitted.change;
+        wrong.digest = Sha256::hash(&[b"wrong-activity-root"]);
+        assert!(lookup.resolve::<Sha256>(&wrong, &account).is_err());
     });
 }
 
-/// The registration singleton keeps naming an epoch after its close is
-/// admitted, until finalization retires it. Inside that window the staged
-/// epoch is dead (the close is fixed), so a resolution that cannot read the
-/// operator's head must not take the record as proof of liveness and resubmit
-/// the dead bytes: the admitted mark makes it wait for finalization, and the
-/// finalized endpoint then decides from the slice holders' opening alone.
 #[test]
-fn admitted_staged_epoch_is_not_live_without_the_operator_head() {
+fn unfinalized_activity_cannot_resolve_an_ambiguous_intent() {
     deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let admitted = register(&control, &mut operator).await;
+        let old = register(&control, &mut operator).await;
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The operator commits the batch but its response is lost.
+        let address = listener.local_addr().unwrap();
         let staging = context.child("staging").spawn(move |_| async move {
             relay(&mut listener, &mut operator).await;
             accept_and_drop(&mut listener, &mut operator).await;
             (listener, operator)
         });
-        let mut agent = Agent::new(0).unwrap();
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        let staged = agent
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        assert!(
+            agent
+                .pay(&context, &mut chain, address, &[(1, 7)])
+                .await
+                .is_err()
+        );
+        let expected = agent
             .pending_payment
             .as_ref()
             .unwrap()
             .authorization
             .clone();
-        assert_eq!(staged.body().epoch(), admitted.epoch());
         let (mut listener, mut operator) = staging.await.unwrap();
-
-        // The close carrying the send is admitted but not finalized, and no
-        // successor is registered: the registration singleton still names the
-        // staged epoch and anchor, now marked admitted.
-        let result = operator.complete_close(8).unwrap();
+        let result = operator.complete_close(33).unwrap();
         applied(&control, &SettlementTx::Admit(AdmitRequest::from(&result))).await;
-        let registration = registration_record(&control).await;
-        assert_eq!(registration.epoch, admitted.epoch());
-        assert_eq!(registration.anchor, *admitted.anchor());
-        assert!(registration.admitted.is_some());
-        assert!(status(&control).await.last_finalized.is_none());
-
-        // The operator goes dark for everything but the corrective: each retry
-        // earns a rejection naming the committed endpoint (a lossy front) and
-        // the head is refused, so liveness is decided from the chain alone. No
-        // send follows a refused head, because an admitted epoch is not live:
-        // the next request after each head is the second retry's corrective
-        // and then the receipts fetch, never the staged bytes again.
-        let stale = operator
-            .payment_head(&wallets()[0].public_key())
-            .unwrap()
-            .context;
-        let expected = staged.clone();
-        let resolution = context.child("resolution").spawn(move |_| async move {
-            for _ in 0..2 {
-                let stale = stale.clone();
-                let expected = expected.clone();
-                respond(&mut listener, move |request| {
-                    let operator_rpc::OperatorRequest::AcceptSend(request) = request else {
-                        panic!("the retry did not resubmit the staged bytes");
-                    };
-                    assert_eq!(request.authorization.body(), expected.body());
-                    rpc::Response::Success {
-                        body: stale_response(&stale, 7),
-                    }
-                })
-                .await;
-                assert!(matches!(
-                    refuse(&mut listener).await,
-                    operator_rpc::OperatorRequest::PaymentHead(_)
-                ));
-            }
-            assert!(matches!(
-                refuse(&mut listener).await,
-                operator_rpc::OperatorRequest::AcceptedBatch(_)
-            ));
+        let response = context.child("pending_close").spawn(move |_| async move {
+            respond(&mut listener, |_| rpc::Response::Success {
+                body: stale_response(&old, 7),
+            })
+            .await;
         });
-
-        // Admitted but unfinalized, the commitment is not yet decidable: the
-        // exact bytes stay pending and the endpoint does not move.
         let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
+            .resume_pending_payment(&context, &mut chain, address)
             .await
             .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("not yet decidable"),
-            "{error:#}"
-        );
-        assert_eq!(
-            agent
-                .pending_payment
-                .as_ref()
-                .unwrap()
-                .authorization
-                .encode(),
-            staged.encode()
-        );
-        assert_eq!(agent.cumulative_debit, 0);
-        assert_eq!(agent.receipt_count(), 0);
-
-        // Finalization retires the registration and releases the close's
-        // dealing, so the finalized head opens from the holders only once the
-        // successor close is admitted: its predecessor state is the same root,
-        // retained through its own window.
-        let deadline = result.epoch_context.challenge_deadline();
-        let height = control.advance(0).await;
-        if height <= deadline {
-            control.advance(deadline - height + 1).await;
-        }
-        assert!(
-            control
-                .record(registration_key(&deployment()))
-                .await
-                .is_none()
-        );
-        register(&control, &mut operator).await;
-        operator.pay(1, 2, 1).unwrap();
-        let successor = operator.complete_close(9).unwrap();
-        applied(
-            &control,
-            &SettlementTx::Admit(AdmitRequest::from(&successor)),
-        )
-        .await;
-        let head = status(&control).await;
-        assert_eq!(head.last_finalized, Some(admitted.epoch()));
-        assert_eq!(head.state_root, result.finalized.successor_root);
-
-        // The holder-served endpoint carries the staged successor, so the send
-        // committed, and the refused receipts fetch leaves it unheld.
-        let outcome = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            PaymentOutcome::CommittedUnheld { epoch: 0, total: 7 }
-        ));
-        assert_eq!(agent.cumulative_debit, 7);
-        assert_eq!(agent.receipt_count(), 0);
-        assert!(agent.pending_payment.is_none());
-        assert!(
-            agent
-                .store
-                .recovery_opening(&head.state_root)
-                .unwrap()
-                .is_some()
-        );
-        resolution.await.unwrap();
+        assert!(format!("{error:#}").contains("has not finalized"));
+        drop(agent);
+        let agent = Agent::open(database.path(), 0).unwrap();
+        assert_eq!(agent.pending_payment.unwrap().authorization, expected);
+        response.await.unwrap();
     });
 }
 
-/// Without the operator's head the signing context is the chain's
-/// registration, which keeps naming an epoch after its close is admitted
-/// until the successor registers or finalization retires it. That epoch is
-/// dead (the close is fixed), so a fresh send is never staged under it: the
-/// wallet refuses until the successor registers, which the chain allows inside
-/// the window, and then signs under the successor over the same genesis root.
 #[test]
 fn admitted_registration_is_not_stageable_without_the_operator_head() {
     deterministic::Runner::default().start(|context| async move {
@@ -1386,7 +1337,7 @@ fn admitted_registration_is_not_stageable_without_the_operator_head() {
         );
         assert!(agent.pending_payment.is_none());
         assert!(agent.cache.is_none());
-        assert_eq!(agent.cumulative_debit, 0);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 0);
         refusing.await.unwrap();
 
         // The successor registers inside the window. The head is still
@@ -1422,269 +1373,10 @@ fn admitted_registration_is_not_stageable_without_the_operator_head() {
                 .unwrap(),
         );
         assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(agent.cumulative_debit, 7);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
         assert!(agent.pending_payment.is_none());
         assert_eq!(agent.cache.as_ref().unwrap().context, live);
         paying.await.unwrap();
-    });
-}
-
-/// A resolution decided from the slice holders' opening, with the operator's
-/// head refused, proves the staged context cut but is served no live successor
-/// to re-cache. The cached signing context is that cut one, so it goes with the
-/// abandoned send: the fresh stage asks the chain instead, which refuses while
-/// the registered successor is admitted and signs under the next epoch once it
-/// registers. No send is ever signed under the dead epoch.
-#[test]
-fn holder_served_abandonment_drops_the_cut_signing_context() {
-    deterministic::Runner::default().start(|context| async move {
-        let (control, mut chain) = chain(&context).await;
-        let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let cut = register(&control, &mut operator).await;
-        let mut listener = context
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The head is served and cached, and the staged send never reaches the
-        // operator, so it stays uncommitted.
-        let staging = context.child("staging").spawn(move |_| async move {
-            relay(&mut listener, &mut operator).await;
-            let (_, _sink, mut stream) = listener.accept().await.unwrap();
-            let request = rpc::recv_request(&mut stream).await.unwrap();
-            assert!(matches!(
-                operator_rpc::decode_request(request).unwrap(),
-                operator_rpc::OperatorRequest::AcceptSend(_)
-            ));
-            (listener, operator)
-        });
-        let mut agent = Agent::new(0).unwrap();
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        assert_eq!(agent.cache.as_ref().unwrap().context, cut);
-        let (mut listener, mut operator) = staging.await.unwrap();
-
-        // The staged epoch finalizes with unrelated work, excluding the send,
-        // and the successor close is admitted but not finalized: the holders
-        // open the finalized root from its predecessor state, and the
-        // registration names the admitted successor, so no epoch is live.
-        operator.pay(1, 2, 1).unwrap();
-        let result = operator.complete_close(11).unwrap();
-        finalize(&control, &result).await;
-        register(&control, &mut operator).await;
-        operator.pay(1, 2, 1).unwrap();
-        let successor = operator.complete_close(12).unwrap();
-        applied(
-            &control,
-            &SettlementTx::Admit(AdmitRequest::from(&successor)),
-        )
-        .await;
-        assert!(registration_record(&control).await.admitted.is_some());
-        let finalized_root = status(&control).await.state_root;
-        assert_eq!(finalized_root, result.finalized.successor_root);
-
-        // The retry earns a corrective claiming an unrecognized endpoint and
-        // the head is refused, so the holders' opening decides: the send is
-        // abandoned. The stage that follows must not sign under the cached cut
-        // context. With the head refused again it asks the chain, whose
-        // admitted registration is no live context, so nothing is staged. The
-        // listener goes with the task, so a send staged in error is refused at
-        // the wire instead of waiting on a listener nobody serves.
-        let stale = operator
-            .payment_head(&wallets()[0].public_key())
-            .unwrap()
-            .context;
-        let resolution = context.child("resolution").spawn(move |_| async move {
-            respond(&mut listener, |request| {
-                assert!(matches!(
-                    request,
-                    operator_rpc::OperatorRequest::AcceptSend(_)
-                ));
-                rpc::Response::Success {
-                    body: stale_response(&stale, 3),
-                }
-            })
-            .await;
-            for _ in 0..2 {
-                assert!(matches!(
-                    refuse(&mut listener).await,
-                    operator_rpc::OperatorRequest::PaymentHead(_)
-                ));
-            }
-        });
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 7)])
-            .await
-            .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("no live payment context"),
-            "{error:#}"
-        );
-        assert!(agent.pending_payment.is_none());
-        assert!(agent.cache.is_none());
-        assert_eq!(agent.cumulative_debit, 0);
-        assert!(
-            agent
-                .store
-                .recovery_opening(&finalized_root)
-                .unwrap()
-                .is_some()
-        );
-        resolution.await.unwrap();
-
-        // The next epoch registers inside the successor's window. The head is
-        // still refused, and the fresh send signs under the new epoch and
-        // anchor with the holders' finalized opening as its floor.
-        let live = register(&control, &mut operator).await;
-        assert_ne!(live.epoch(), cut.epoch());
-        let mut listener = context
-            .bind(SocketAddr::from(([127, 0, 0, 1], 1)))
-            .await
-            .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-        let expected = live.clone();
-        let paying = context.child("paying").spawn(move |_| async move {
-            assert!(matches!(
-                refuse(&mut listener).await,
-                operator_rpc::OperatorRequest::PaymentHead(_)
-            ));
-            respond(&mut listener, |request| {
-                let operator_rpc::OperatorRequest::AcceptSend(send) = &request else {
-                    panic!("the stage did not submit a send");
-                };
-                assert_eq!(send.authorization.body().epoch(), expected.epoch());
-                assert_eq!(send.authorization.body().anchor(), expected.anchor());
-                operator_rpc::handle_decoded(&mut operator, request)
-            })
-            .await;
-        });
-        let payment = accepted(
-            agent
-                .pay(&context, &mut chain, operator_address, &[(1, 7)])
-                .await
-                .unwrap(),
-        );
-        assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(agent.cumulative_debit, 7);
-        assert!(agent.pending_payment.is_none());
-        assert_eq!(agent.cache.as_ref().unwrap().context, live);
-        paying.await.unwrap();
-    });
-}
-
-#[test]
-fn finalized_endpoint_below_the_committed_endpoint_is_reported_not_healed() {
-    deterministic::Runner::default().start(|context| async move {
-        let database = TempDatabase::new();
-        let (control, mut chain) = chain(&context).await;
-
-        // Two operators share one genesis and one registered epoch-0 context:
-        // the honest one acknowledges the wallet's sends, and the Byzantine
-        // one finalizes a close omitting them.
-        let mut honest = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let mut byzantine = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        register(&control, &mut honest).await;
-        let record = registration_record(&control).await;
-        byzantine.adopt_registration(&record).unwrap();
-        let mut listener = context
-            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let operator_address = listener.local_addr().unwrap();
-
-        // The first payment completes and holds its receipt. The second is
-        // acknowledged but its response is lost.
-        let staging = context.child("staging").spawn(move |_| async move {
-            relay(&mut listener, &mut honest).await;
-            relay(&mut listener, &mut honest).await;
-            let dropped = accept_and_drop(&mut listener, &mut honest).await;
-            (listener, honest, dropped)
-        });
-        let mut agent = Agent::open(database.path(), 0).unwrap();
-        let payment = accepted(
-            agent
-                .pay(&context, &mut chain, operator_address, &[(1, 7)])
-                .await
-                .unwrap(),
-        );
-        assert_eq!(payment.acceptance.entries[0].cumulative, 7);
-        assert_eq!(agent.cumulative_debit, 7);
-        let error = agent
-            .pay(&context, &mut chain, operator_address, &[(1, 3)])
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("submit payment"));
-        let (mut listener, _honest, _dropped) = staging.await.unwrap();
-
-        // The Byzantine close finalizes with only unrelated work, leaving the
-        // certified endpoint below the wallet's committed endpoint.
-        byzantine.pay(1, 2, 1).unwrap();
-        let result = byzantine.complete_close(7).unwrap();
-        finalize(&control, &result).await;
-        let live = byzantine
-            .payment_head(&wallets()[0].public_key())
-            .unwrap()
-            .context;
-
-        for pass in 0..2 {
-            let live_context = live.clone();
-            let mut server = byzantine;
-            let resolution = context.child("resolution").spawn(move |_| async move {
-                respond(&mut listener, |request| {
-                    assert!(matches!(
-                        request,
-                        operator_rpc::OperatorRequest::AcceptSend(_)
-                    ));
-                    rpc::Response::Success {
-                        body: stale_response(&live_context, 0),
-                    }
-                })
-                .await;
-                relay(&mut listener, &mut server).await;
-                (listener, server)
-            });
-
-            // The finalized endpoint (0) matches neither the committed endpoint (7)
-            // nor the staged successor (10): report loudly, never heal.
-            let error = agent
-                .pay(&context, &mut chain, operator_address, &[(1, 3)])
-                .await
-                .unwrap_err();
-            assert!(
-                format!("{error:#}").contains("omitted an acknowledged send"),
-                "unexpected error on pass {pass}: {error:#}"
-            );
-            assert_eq!(agent.cumulative_debit, 7);
-            assert_eq!(agent.receipt_count(), 1);
-            assert!(agent.pending_payment.is_some());
-            let staged = agent
-                .pending_payment
-                .as_ref()
-                .unwrap()
-                .authorization
-                .encode();
-            (listener, byzantine) = resolution.await.unwrap();
-
-            // The restarted wallet reports the same contradiction from its
-            // durable state.
-            drop(agent);
-            agent = Agent::open(database.path(), 0).unwrap();
-            assert_eq!(agent.cumulative_debit, 7);
-            assert_eq!(agent.receipt_count(), 1);
-            assert_eq!(
-                agent
-                    .pending_payment
-                    .as_ref()
-                    .unwrap()
-                    .authorization
-                    .encode(),
-                staged
-            );
-        }
     });
 }
 
@@ -1706,14 +1398,7 @@ fn deterministically_rejected_sends_are_never_staged() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        head_context.clone(),
-                        AccountState {
-                            balance: 100,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(head_context.clone(), 100).encode(),
                 }
             })
             .await;
@@ -1809,14 +1494,7 @@ fn steady_state_payments_sign_from_local_state_without_head_reads() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        server_context.clone(),
-                        AccountState {
-                            balance: 100,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(server_context.clone(), 100).encode(),
                 }
             })
             .await;
@@ -1852,7 +1530,7 @@ fn steady_state_payments_sign_from_local_state_without_head_reads() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(agent.cumulative_debit, 10);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 10);
         drop(agent);
 
         // The cache is durable, so the restarted wallet also signs locally.
@@ -1863,7 +1541,7 @@ fn steady_state_payments_sign_from_local_state_without_head_reads() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(recovered.cumulative_debit, 12);
+        assert_eq!(recovered.store.debits_since(0).unwrap(), 12);
         assert_eq!(recovered.receipt_count(), 3);
         operator_server.await.unwrap();
 
@@ -1895,14 +1573,7 @@ fn fresh_wallet_falls_back_to_one_head_read_and_caches_the_context() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        server_context.clone(),
-                        AccountState {
-                            balance: 100,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(server_context.clone(), 100).encode(),
                 }
             })
             .await;
@@ -1930,11 +1601,11 @@ fn fresh_wallet_falls_back_to_one_head_read_and_caches_the_context() {
 }
 
 #[test]
-fn epoch_roll_corrective_rejection_teaches_the_new_context() {
+fn finalized_activity_exclusion_allows_a_new_epoch_intent() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        let old = register(&control, &mut operator).await;
+        let _old = register(&control, &mut operator).await;
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -1954,7 +1625,7 @@ fn epoch_roll_corrective_rejection_teaches_the_new_context() {
                 .await
                 .unwrap(),
         );
-        assert_eq!(agent.cumulative_debit, 7);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
         let (mut listener, mut operator) = staging.await.unwrap();
 
         // The epoch rolls: the close finalizes certifiably and the successor
@@ -1964,13 +1635,11 @@ fn epoch_roll_corrective_rejection_teaches_the_new_context() {
         let live = register(&control, &mut operator).await;
         assert_eq!(live.epoch(), 1);
 
-        // The locally signed send earns the real corrective rejection naming
-        // the live context and the payer's own endpoint, the wallet adopts it
-        // and retries the same intent once, and the next payment stays local.
+        // The old epoch excludes the new staged authorization. The fresh epoch starts at zero.
         let rolling = context.child("rolling").spawn(move |_| async move {
-            relay(&mut listener, &mut operator).await;
-            relay(&mut listener, &mut operator).await;
-            relay(&mut listener, &mut operator).await;
+            for _ in 0..4 {
+                relay(&mut listener, &mut operator).await;
+            }
         });
         let payment = accepted(
             agent
@@ -1979,13 +1648,13 @@ fn epoch_roll_corrective_rejection_teaches_the_new_context() {
                 .unwrap(),
         );
         assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(agent.cumulative_debit, 10);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 10);
         assert!(agent.pending_payment.is_none());
 
         // Adoption moved the signing context forward and kept the verified floor.
         let cache = agent.cache.as_ref().unwrap();
         assert_eq!(cache.context, live);
-        assert_eq!(cache.epoch, old.epoch());
+        assert_eq!(cache.epoch, live.epoch());
 
         let payment = accepted(
             agent
@@ -1994,7 +1663,7 @@ fn epoch_roll_corrective_rejection_teaches_the_new_context() {
                 .unwrap(),
         );
         assert_eq!(payment.epoch, live.epoch());
-        assert_eq!(agent.cumulative_debit, 12);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 12);
         assert_eq!(agent.receipt_count(), 3);
         rolling.await.unwrap();
     });
@@ -2019,14 +1688,7 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        server_context.clone(),
-                        AccountState {
-                            balance: 100,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(server_context.clone(), 100).encode(),
                 }
             })
             .await;
@@ -2041,14 +1703,7 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        server_context.clone(),
-                        AccountState {
-                            balance: 93,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(server_context.clone(), 93).encode(),
                 }
             })
             .await;
@@ -2079,7 +1734,7 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
             .unwrap_err();
         assert!(format!("{error:#}").contains("insufficient available balance"));
         assert!(agent.pending_payment.is_none());
-        assert_eq!(agent.cumulative_debit, 7);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
 
         let payment = accepted(
             agent
@@ -2089,7 +1744,7 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
         );
         assert_eq!(payment.total, 3);
         assert_eq!(payment.acceptance.entries[0].cumulative, 10);
-        assert_eq!(agent.cumulative_debit, 10);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 10);
         operator_server.await.unwrap();
     });
 }
@@ -2298,15 +1953,7 @@ fn withdrawal_uses_only_the_exact_retained_head_when_the_operator_is_unreachable
         let (control, mut chain) = chain(&context).await;
         let account = wallets()[0].public_key();
         let current = genesis_cache();
-        let stale = AccountCache::new::<Sha256>(vec![StateLeaf {
-            account: account.clone(),
-            state: AccountState {
-                balance: 99,
-                active: true,
-                ..AccountState::default()
-            },
-        }])
-        .unwrap();
+        let stale = StateFixture::new(vec![(account.clone(), 99)]);
         let current_root = current.root();
         let current_opening = current.opening(&account).unwrap();
         let stale_root = stale.root();
@@ -2346,7 +1993,7 @@ fn withdrawal_uses_only_the_exact_retained_head_when_the_operator_is_unreachable
         assert_eq!(agent.pending_withdrawal.as_ref(), Some(&request));
 
         // A wallet holding only a mismatched retained head must fetch one from
-        // the operator or the slice holders, and refuses to sign when neither
+        // the operator or the validators, and refuses to sign when neither
         // answers.
         let mut dead_holders = client_with_holders(&context, &control, UNREACHABLE);
         let mut wrong_only = Agent::new(0).unwrap();
@@ -2391,15 +2038,7 @@ fn forged_head_operator_is_rejected_before_staging() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        payment_context,
-                        AccountState {
-                            balance: 100,
-                            cumulative_debit: 50_000,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(payment_context, 100).encode(),
                 }
             })
             .await;
@@ -2414,7 +2053,7 @@ fn forged_head_operator_is_rejected_before_staging() {
         drop(agent);
 
         let recovered = Agent::open(database.path(), 0).unwrap();
-        assert_eq!(recovered.cumulative_debit, 0);
+        assert_eq!(recovered.store.debits_since(0).unwrap(), 0);
         assert!(recovered.pending_payment.is_none());
         operator_server.await.unwrap();
     });
@@ -2424,7 +2063,7 @@ fn forged_head_operator_is_rejected_before_staging() {
 enum PaymentHeadGateCase {
     MismatchedStateRoot,
     WrongAccount,
-    InactivePayer,
+    ForgedBalance,
     ZeroBalance,
     InvalidProof,
     HardFaulted,
@@ -2436,7 +2075,7 @@ impl PaymentHeadGateCase {
     const ALL: [Self; 6] = [
         Self::MismatchedStateRoot,
         Self::WrongAccount,
-        Self::InactivePayer,
+        Self::ForgedBalance,
         Self::ZeroBalance,
         Self::InvalidProof,
         Self::HardFaulted,
@@ -2446,7 +2085,7 @@ impl PaymentHeadGateCase {
         match self {
             Self::MismatchedStateRoot => "mismatched_state_root",
             Self::WrongAccount => "wrong_account",
-            Self::InactivePayer => "inactive_payer",
+            Self::ForgedBalance => "forged_balance",
             Self::ZeroBalance => "zero_balance",
             Self::InvalidProof => "invalid_proof",
             Self::HardFaulted => "hard_faulted",
@@ -2457,8 +2096,9 @@ impl PaymentHeadGateCase {
         match self {
             Self::MismatchedStateRoot => "payer opening is not the exact settlement head",
             Self::WrongAccount => "payer opening belongs to another account",
-            Self::InactivePayer | Self::ZeroBalance => "payer opening is not live",
-            Self::InvalidProof => "verify payer state opening",
+            Self::ForgedBalance => "verify payer Current state opening",
+            Self::ZeroBalance => "insufficient available balance",
+            Self::InvalidProof => "verify payer Current state opening",
             Self::HardFaulted => "settlement is permanently hard-faulted",
         }
     }
@@ -2471,15 +2111,7 @@ impl PaymentHeadGateCase {
                 // A verifiable opening over a root that is not the certified
                 // settlement head.
                 let account = wallets()[0].public_key();
-                let forked = AccountCache::new::<Sha256>(vec![StateLeaf {
-                    account: account.clone(),
-                    state: AccountState {
-                        balance: 100,
-                        active: true,
-                        ..AccountState::default()
-                    },
-                }])
-                .unwrap();
+                let forked = StateFixture::new(vec![(account.clone(), 100)]);
                 head.root = forked.root();
                 head.opening = forked.opening(&account).unwrap();
             }
@@ -2488,15 +2120,12 @@ impl PaymentHeadGateCase {
                 let cache = genesis_cache();
                 head.opening = cache.opening(&account).unwrap();
             }
-            Self::InactivePayer => head.opening.leaf.state.active = false,
-            Self::ZeroBalance => head.opening.leaf.state.balance = 0,
+            Self::ForgedBalance => {
+                head.opening.balance = NonZeroU64::new(head.opening.balance.get() + 1).unwrap()
+            }
+            Self::ZeroBalance => head.balance = 0,
             Self::InvalidProof => {
-                head.opening.proof.proof.leaf_count = 2;
-                head.opening
-                    .proof
-                    .proof
-                    .siblings
-                    .push(Sha256::hash(&[b"invalid-payer-opening"]));
+                head.opening.proof.proof.chunk[0] ^= 1;
             }
             Self::HardFaulted => {}
         }
@@ -2524,13 +2153,7 @@ fn adversarial_payment_heads_are_rejected_before_send_or_persistence() {
                 7,
                 operator_key(),
             );
-            let mut head = payment_head_response(
-                payment_context,
-                AccountState {
-                    balance: 100,
-                    ..AccountState::default()
-                },
-            );
+            let mut head = payment_head_response(payment_context, 100);
             case.corrupt(&mut head);
             let rejected_root = head.root;
             let base_port = u16::try_from(case_index).unwrap();
@@ -2567,7 +2190,7 @@ fn adversarial_payment_heads_are_rejected_before_send_or_persistence() {
             server.await.unwrap();
 
             let recovered = Agent::open(database.path(), 0).unwrap();
-            assert_eq!(recovered.cumulative_debit, 0, "{case:?}");
+            assert_eq!(recovered.store.debits_since(0).unwrap(), 0, "{case:?}");
             assert!(recovered.pending_payment.is_none(), "{case:?}");
             assert_eq!(recovered.receipt_count(), 0, "{case:?}");
             assert!(
@@ -2668,7 +2291,7 @@ fn unregistered_valid_payment_context_does_not_commit() {
         let error = format!("{error:#}");
         assert!(error.contains("confirm payment registration"));
         assert!(error.contains("another anchor is registered"));
-        assert_eq!(agent.cumulative_debit, 0);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 0);
         assert_eq!(agent.receipt_count(), 0);
         let pending = agent.pending_payment.as_ref().unwrap();
         assert!(
@@ -2689,7 +2312,7 @@ fn unregistered_valid_payment_context_does_not_commit() {
         let error = format!("{error:#}");
         assert!(error.contains("confirm payment registration"));
         assert!(error.contains("another anchor is registered"));
-        assert_eq!(agent.cumulative_debit, 0);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 0);
         assert_eq!(agent.receipt_count(), 0);
         assert!(agent.pending_payment.is_some());
         operator_server.await.unwrap();
@@ -2717,15 +2340,7 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        payment_context.clone(),
-                        AccountState {
-                            balance: 100,
-                            cumulative_debit: 50_000,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(payment_context.clone(), 100).encode(),
                 }
             })
             .await;
@@ -2782,7 +2397,7 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                 .unwrap(),
         );
         assert_eq!(payment.acceptance.entries[0].cumulative, 7);
-        assert_eq!(recovered.cumulative_debit, 7);
+        assert_eq!(recovered.store.debits_since(0).unwrap(), 7);
         assert_eq!(recovered.receipt_count(), 1);
         assert!(recovered.pending_payment.is_none());
         drop(recovered);
@@ -2815,15 +2430,7 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(
-                        payment_context.clone(),
-                        AccountState {
-                            balance: 100,
-                            cumulative_debit: 10_000,
-                            ..AccountState::default()
-                        },
-                    )
-                    .encode(),
+                    body: payment_head_response(payment_context.clone(), 100).encode(),
                 }
             })
             .await;
@@ -2849,7 +2456,7 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
         drop(agent);
 
         let mut recovered = Agent::open(database.path(), 0).unwrap();
-        assert_eq!(recovered.cumulative_debit, 7);
+        assert_eq!(recovered.store.debits_since(0).unwrap(), 7);
         assert_eq!(recovered.receipt_count(), 1);
         recovered
             .pay(&context, &mut chain, operator_address, &[(1, 3)])
@@ -2858,7 +2465,7 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
         drop(recovered);
 
         let recovered = Agent::open(database.path(), 0).unwrap();
-        assert_eq!(recovered.cumulative_debit, 10);
+        assert_eq!(recovered.store.debits_since(0).unwrap(), 10);
         assert_eq!(recovered.receipt_count(), 2);
         operator_server.await.unwrap();
     });
@@ -3799,7 +3406,7 @@ fn released_evidence_is_immutable_until_acknowledged() {
 }
 
 #[test]
-fn endpoint_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
+fn activity_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
@@ -3852,7 +3459,6 @@ fn endpoint_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
                 }
             })
             .await;
-            relay(&mut listener, &mut operator).await;
             respond(&mut listener, |request| {
                 assert!(matches!(
                     request,
@@ -4010,7 +3616,7 @@ fn withdrawal_is_refused_while_a_prior_claim_is_unfinished() {
         assert!(matches!(first, WithdrawalOutcome::Applied { .. }));
         let (mut listener, mut operator) = applying.await.unwrap();
 
-        // Its close is admitted but not finalized: the slice holders serve the
+        // Its close is admitted but not finalized: the validators serve the
         // claim inside the window and the wallet caches it, but settlement
         // cannot release it yet, so the claim stays unfinished with its
         // evidence pinned. The operator is not asked.
@@ -4130,13 +3736,7 @@ fn balance_poll_retains_the_head_for_hard_fault_recovery() {
         // The registered epoch later expires unadmitted, freezing the
         // deployment at the genesis head the balance poll retained.
         let payment_context = registered_context(&control).await;
-        let head = payment_head_response(
-            payment_context,
-            AccountState {
-                balance: 100,
-                ..AccountState::default()
-            },
-        );
+        let head = payment_head_response(payment_context, 100);
         let frozen_root = head.root;
 
         let mut listener = context
@@ -4192,7 +3792,10 @@ fn balance_poll_retains_the_head_for_hard_fault_recovery() {
 /// a deposit to a bystander and omits Bob, while Bob holds an operator-signed
 /// receipt crediting him), and admits it, so its inclusive challenge window
 /// is open until the assigned absolute deadline.
-async fn admit_omitting(control: &harness::Control) -> crate::protocol::OmittingClose {
+async fn admit_omitting(
+    context: &deterministic::Context,
+    control: &harness::Control,
+) -> crate::protocol::OmittingClose {
     let (deposit, deposits) = crate::protocol::omitting_boundary().unwrap();
     applied(
         control,
@@ -4222,11 +3825,27 @@ async fn admit_omitting(control: &harness::Control) -> crate::protocol::Omitting
     )
     .await;
     let record = registration_record(control).await;
-    let fixture = crate::protocol::omitting_close(
+    let runtime = context.child("omitting_state");
+    let config = crate::protocol::state_config(
+        "omitting",
+        &runtime,
+        commonware_parallel::Rayon::new(NonZeroUsize::MIN).unwrap(),
+    );
+    let state =
+        commonware_clearing::bajillion::qmdb::State::<_, Sha256, commonware_parallel::Rayon>::init(
+            runtime,
+            config,
+            crate::protocol::genesis_balances(&crate::protocol::deployments()[0]).unwrap(),
+        )
+        .await
+        .unwrap();
+    let fixture = Box::pin(crate::protocol::omitting_close(
+        state,
         &mut TestRng::new(7),
         record.admission_deadline,
         record.challenge_deadline,
-    )
+    ))
+    .await
     .unwrap();
     applied(
         control,
@@ -4288,14 +3907,14 @@ fn later_payer() -> Wallet {
 
 /// (c) THE POINT: a receiver holding a verified receipt convicts a close that omits its
 /// credit, end to end through a real challenge transaction whose proven verdict is read
-/// back certified, and the close is invalidated. With the slice holders dead, the
+/// back certified, and the close is invalidated. With the validators dead, the
 /// operator's own served lookup is what convicts it.
 #[test]
 fn omitted_credit_is_convicted_by_the_held_receipt() {
     deterministic::Runner::default().start(|context| async move {
         let (control, _) = chain(&context).await;
         let mut chain = client_with_holders(&context, &control, UNREACHABLE);
-        let fixture = admit_omitting(&control).await;
+        let fixture = Box::pin(admit_omitting(&context, &control)).await;
         let bob_receipt = fixture.held_receipt.clone();
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
@@ -4440,7 +4059,7 @@ fn multi_edge_understatement_convicts_once() {
     deterministic::Runner::default().start(|context| async move {
         let (control, _) = chain(&context).await;
         let mut chain = client_with_holders(&context, &control, UNREACHABLE);
-        let fixture = admit_omitting(&control).await;
+        let fixture = Box::pin(admit_omitting(&context, &control)).await;
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let lookup = fixture.held_lookup.clone();
@@ -4508,7 +4127,7 @@ fn unresolvable_lookup_is_a_soft_refusal_not_an_abort() {
     deterministic::Runner::default().start(|context| async move {
         let (control, _) = chain(&context).await;
         let mut chain = client_with_holders(&context, &control, UNREACHABLE);
-        let fixture = admit_omitting(&control).await;
+        let fixture = Box::pin(admit_omitting(&context, &control)).await;
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let bob_receipt = fixture.held_receipt.clone();
@@ -4587,8 +4206,9 @@ fn unresolvable_lookup_is_a_soft_refusal_not_an_abort() {
 #[test]
 fn finalized_understatement_alarms() {
     deterministic::Runner::default().start(|context| async move {
-        let (control, mut chain) = chain(&context).await;
-        let fixture = admit_omitting(&control).await;
+        let (control, _) = chain(&context).await;
+        let mut chain = client_with_holders(&context, &control, UNREACHABLE);
+        let fixture = Box::pin(admit_omitting(&context, &control)).await;
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let lookup = fixture.held_lookup.clone();
@@ -4656,8 +4276,9 @@ fn finalized_understatement_alarms() {
 #[test]
 fn withheld_evidence_past_finalization_alarms_once() {
     deterministic::Runner::default().start(|context| async move {
-        let (control, mut chain) = chain(&context).await;
-        let fixture = admit_omitting(&control).await;
+        let (control, _) = chain(&context).await;
+        let mut chain = client_with_holders(&context, &control, UNREACHABLE);
+        let fixture = Box::pin(admit_omitting(&context, &control)).await;
         let batch_id = admitted_batch(&fixture);
         let change_root = fixture.result.roots.change;
         let lookup = fixture.held_lookup.clone();
@@ -4752,7 +4373,8 @@ fn withheld_evidence_past_finalization_alarms_once() {
 fn verified_incoming_reconciles_and_survives_restart() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
-        let (control, mut chain) = chain(&context).await;
+        let (control, _) = chain(&context).await;
+        let mut chain = client_with_holders(&context, &control, UNREACHABLE);
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
@@ -4827,20 +4449,15 @@ fn verified_incoming_reconciles_and_survives_restart() {
     });
 }
 
-/// A finalized epoch whose committed evidence aged out of the operator's retention window
-/// before the receiver reconciled it is decided as unavailable, never alarmed as withheld: the
-/// honest operator legitimately no longer reconstructs the close, so the epoch is recorded
-/// durably instead of retried.
 #[test]
-fn evidence_past_the_retention_window_is_unavailable_not_withheld() {
+fn retained_evidence_retries_after_old_epoch_withholding_and_reopen() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
-        let (control, mut chain) = chain(&context).await;
+        let (control, _) = chain(&context).await;
+        let mut chain = client_with_holders(&context, &control, UNREACHABLE);
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
 
-        // Bob's credit lands in epoch 0, and its payer keeps moving in every later epoch, so
-        // finalizing the epoch that closes the window shadows and prunes the versions
-        // reconstructing epoch 0 needs.
+        // Operational balance versions are pruned while authenticated close evidence remains.
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
         let held = operator.complete_close(50).unwrap();
@@ -4859,7 +4476,7 @@ fn evidence_past_the_retention_window_is_unavailable_not_withheld() {
         assert!(
             operator
                 .committed_entry(&wallets()[0].public_key(), &wallets()[1].public_key(), 0)
-                .is_err()
+                .is_ok()
         );
 
         let mut operator_listener = context
@@ -4868,13 +4485,20 @@ fn evidence_past_the_retention_window_is_unavailable_not_withheld() {
             .unwrap();
         let operator_address = operator_listener.local_addr().unwrap();
         let operator_server = context.child("operator").spawn(move |_| async move {
-            for _ in 0..2 {
-                relay(&mut operator_listener, &mut operator).await;
-            }
+            relay(&mut operator_listener, &mut operator).await;
+            respond(&mut operator_listener, |request| {
+                assert!(matches!(
+                    request,
+                    operator_rpc::OperatorRequest::CommittedEntry(_)
+                ));
+                rpc::Response::Error {
+                    error: Bytes::from_static(b"withheld"),
+                }
+            })
+            .await;
+            relay(&mut operator_listener, &mut operator).await;
         });
 
-        // The served receipt still anchors to the epoch-0 registration, but the committed
-        // side is gone: the epoch is decided as unavailable, durably and without a retry.
         let mut bob = Agent::open(database.path(), 1).unwrap();
         bob.intake_incoming(&context, &mut chain, operator_address)
             .await
@@ -4884,10 +4508,17 @@ fn evidence_past_the_retention_window_is_unavailable_not_withheld() {
             .reconcile(&context, &mut chain, operator_address)
             .await
             .unwrap();
-        assert_eq!(summary.unavailable, [0]);
-        assert!(summary.withheld.is_empty() && summary.unenforceable.is_empty());
+        assert_eq!(summary.withheld, [0]);
         assert!(summary.reconciled.is_empty() && summary.convicted.is_empty());
-        assert_eq!(bob.last_reconciled_epoch(), None);
+        assert_eq!(bob.store.unreconciled_incoming_epochs().unwrap(), [0]);
+        drop(bob);
+        let mut bob = Agent::open(database.path(), 1).unwrap();
+        let summary = bob
+            .reconcile(&context, &mut chain, operator_address)
+            .await
+            .unwrap();
+        assert_eq!(summary.reconciled, [0]);
+        assert_eq!(bob.last_reconciled_epoch(), Some(0));
         assert!(bob.store.unreconciled_incoming_epochs().unwrap().is_empty());
         drop(bob);
         let recovered = Agent::open(database.path(), 1).unwrap();
@@ -5074,7 +4705,7 @@ fn payer_flow_is_unaffected_by_receiver_state() {
         assert_eq!(payer.last_reconciled_epoch(), None);
         drop(payer);
 
-        // The additive schema leaves the reopened payer's empty receiver ledger intact.
+        // The reopened payer retains its empty receiver ledger.
         let recovered = Agent::open(database.path(), 0).unwrap();
         assert_eq!(recovered.incoming(), IncomingSummary::default());
         assert_eq!(recovered.last_reconciled_epoch(), None);
@@ -5082,12 +4713,12 @@ fn payer_flow_is_unaffected_by_receiver_state() {
 }
 
 /// With the operator unreachable, the balance poll and the withdrawal open the
-/// wallet's leaf through its slice holders, verified against the certified
+/// wallet's leaf through its validators, verified against the certified
 /// head. Before any close finalizes that is the genesis state. After one
 /// finalizes, the holders have released its dealing, and the same root is
 /// opened from the admitted successor's predecessor state instead.
 #[test]
-fn head_and_withdrawal_use_slice_holders_with_operator_unreachable() {
+fn head_and_withdrawal_use_validators_with_operator_unreachable() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
@@ -5173,17 +4804,15 @@ fn head_and_withdrawal_use_slice_holders_with_operator_unreachable() {
         operator.pay(0, 1, 5).unwrap();
         let result = operator.complete_close(60).unwrap();
         finalize(&control, &result).await;
-        let released = format!(
-            "{:#}",
+        assert_eq!(
             agent
                 .balance(&context, &mut chain, UNREACHABLE)
                 .await
-                .unwrap_err()
+                .unwrap(),
+            INITIAL_BALANCE - 7 - 5
         );
-        assert!(released.contains("released the dealing"), "{released}");
 
-        // Once the successor close is admitted, its predecessor state is the same
-        // finalized root, retained through its own window.
+        // Finalized balance evidence remains available when another close is admitted.
         register(&control, &mut operator).await;
         operator.pay(1, 2, 1).unwrap();
         let successor = operator.complete_close(61).unwrap();
@@ -5213,13 +4842,13 @@ fn head_and_withdrawal_use_slice_holders_with_operator_unreachable() {
 
 /// THE POINT of validator-served evidence: the operator refuses every lookup,
 /// and the receiver still files the `HigherAckEntry` challenge from the payer's
-/// slice holders' committed entry, which the chain proves. The operator is not
+/// validators' committed entry, which the chain proves. The operator is not
 /// on the enforcement path at all.
 #[test]
 fn reconcile_convicts_with_validator_served_lookup_while_operator_withholds() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
-        let fixture = admit_omitting(&control).await;
+        let fixture = Box::pin(admit_omitting(&context, &control)).await;
         let batch_id = admitted_batch(&fixture);
         let bob_receipt = fixture.held_receipt.clone();
 
@@ -5279,7 +4908,7 @@ fn reconcile_convicts_with_validator_served_lookup_while_operator_withholds() {
     });
 }
 
-/// Claim evidence is fetched from the slice holders inside the challenge
+/// Claim evidence is fetched from the validators inside the challenge
 /// window, verified against the admitted roots and cached, and the claim
 /// completes after finalization with no operator anywhere. A wallet that
 /// missed the window finds the dealing released and waits for the operator.
@@ -5376,7 +5005,7 @@ fn garbage_holder_is_skipped_and_next_holder_serves() {
         let mut chain = client_with_distinct_holders(&context, &control, 9_700);
         let account = wallets()[0].public_key();
         let order = Holders::default().order(&chain, &account).unwrap();
-        assert_eq!(order.len(), 3);
+        assert_eq!(order.len(), 4);
 
         let garbage = garbage_holder(
             &context,
@@ -5387,7 +5016,7 @@ fn garbage_holder_is_skipped_and_next_holder_serves() {
         )
         .await;
         let mut forged = genesis_cache().opening(&account).unwrap();
-        forged.leaf.state.balance += 1;
+        forged.balance = NonZeroU64::new(forged.balance.get() + 1).unwrap();
         let forger = garbage_holder(
             &context,
             order[1],
@@ -5433,9 +5062,9 @@ fn only_the_last_holder_answers() {
         let mut chain = client_with_distinct_holders(&context, &control, 9_700);
         let account = wallets()[0].public_key();
         let order = Holders::default().order(&chain, &account).unwrap();
-        assert_eq!(order.len(), 3);
+        assert_eq!(order.len(), 4);
 
-        let last = forwarding_holder(&context, order[2]).await;
+        let last = forwarding_holder(&context, *order.last().unwrap()).await;
         let mut agent = Agent::new(0).unwrap();
         assert_eq!(
             agent
@@ -5463,7 +5092,7 @@ fn only_the_last_holder_answers() {
 }
 
 /// A wallet passive across the final finalization has no opening retained at
-/// the frozen root. Recovery opens it through the slice holders, verified
+/// the frozen root. Recovery opens it through the validators, verified
 /// against the frozen state root, and claims. Dead holders leave the claim
 /// unsubmitted.
 #[test]
@@ -5522,7 +5151,7 @@ fn hard_fault_recovery_fetches_the_frozen_root_opening() {
 /// The operator-dark walkthrough: the operator accepts sends and refuses
 /// everything else. The wallet still withdraws through settlement over a
 /// holder-served opening, pays under the chain-registered context with a
-/// holder-served floor, and claims the finalized withdrawal from the slice
+/// holder-served floor, and claims the finalized withdrawal from the validators
 /// holders' evidence, with the refused acknowledgement holding nothing open.
 #[test]
 fn operator_dark_wallet_escalates_pays_and_claims_through_validators() {
@@ -5604,7 +5233,7 @@ fn operator_dark_wallet_escalates_pays_and_claims_through_validators() {
                 .unwrap(),
         );
         assert_eq!(payment.total, 7);
-        assert_eq!(agent.cumulative_debit, 7);
+        assert_eq!(agent.store.debits_since(0).unwrap(), 7);
         assert!(agent.cache.is_none());
         let (mut listener, mut operator) = paying.await.unwrap();
 
@@ -5644,7 +5273,7 @@ fn operator_dark_wallet_escalates_pays_and_claims_through_validators() {
         drop(agent);
 
         let recovered = Agent::open(database.path(), 0).unwrap();
-        assert_eq!(recovered.cumulative_debit, 7);
+        assert_eq!(recovered.store.debits_since(0).unwrap(), 7);
         assert!(recovered.pending_withdrawal_claim.is_none());
     });
 }

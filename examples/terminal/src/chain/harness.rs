@@ -8,22 +8,13 @@
 //! immediately into their own block, and a background ticker seals empty
 //! blocks so deadlines and finalization progress while clients poll.
 //!
-//! Evidence is served the way validators serve it: from the sealed dealings
-//! the in-process simulation retains ([`crate::protocol::retained_closes`],
-//! the simulation standing in for every committee validator) through the
-//! same [`SpanIndex`] path and the same wire types, with the same release
-//! advice (a close the simulation no longer retains, or whose challenge
-//! deadline the chain height passed, is `Pruned` when the chain finalized
-//! it and `Unsealed` otherwise). The harness genesis lists every clearing
-//! committee key at the harness address, so every slice's quorum resolves to
-//! the harness.
-//!
-//! The scripted walkthrough uses it as the fraud arc's throwaway deployment,
-//! and the wallet and operator tests use it as the settlement side.
+//! Balance evidence comes from canonical QMDB replay of the validated closes retained by
+//! the in-process committee. Activity and claims use the same complete-close index and wire
+//! types as networked validators. Historical proof material is retained without pruning.
 
 use crate::{
     chain::{
-        da::{answer, genesis_cache, genesis_range, live_set, slice_ranges},
+        da::answer,
         ingress::Submission,
         query::{
             CertifiedRead, Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse,
@@ -31,21 +22,17 @@ use crate::{
             Submitted,
         },
         setup::{Genesis, ValidatorEntry},
-        state::{Advice, Record, advise, claim_roots_key, execute},
+        state::{Advice, Record, admitted_key, advise, execute},
         tx::SettlementTx,
         types::{Block, Database, MAX_TX_BYTES, StateKey, now},
         validator::{NAMESPACE, SHARING_MODE, Scheme, db_config},
     },
     protocol::{
-        Deployment, Key, MAX_SLICES, SLICE_BITS, Timing, committee, deployments, retained_closes,
+        Deployment, Timing, committee, deployments, genesis_balances, retained_closes, state_config,
     },
     rpc::{self, error_response},
 };
-use commonware_clearing::bajillion::{
-    retained::Interval,
-    serve::SpanIndex,
-    transition::{BatchId, StateCache, account_slice},
-};
+use commonware_clearing::bajillion::qmdb::{State, StateLookup, StateOpening, account_key};
 use commonware_codec::{Decode as _, Encode as _, EncodeSize as _};
 use commonware_consensus::{
     simplex::types::{Context, Finalization, Finalize, Proposal},
@@ -199,8 +186,8 @@ struct Node {
     scheme: Scheme,
     leader: ed25519::PublicKey,
     deployments: Vec<Deployment>,
-    /// Each configured deployment's genesis state, keyed by digest.
-    genesis: BTreeMap<Digest, StateCache<Key, Digest>>,
+    /// Each configured deployment's account owner and next canonical epoch.
+    genesis: BTreeMap<Digest, (State<deterministic::Context, Sha256>, u64)>,
     latest: Option<Latest>,
     reads: u64,
     submissions: u64,
@@ -305,118 +292,168 @@ impl Node {
 
     /// Serves one evidence request from the closes the in-process simulation
     /// retains, exactly as a validator serves from its sealed dealings.
-    async fn evidence(&self, request: &EvidenceRequest) -> EvidenceResponse {
-        let Some(genesis) = self.genesis.get(&request.deployment) else {
+    async fn evidence(&mut self, request: &EvidenceRequest) -> EvidenceResponse {
+        let Some((mut state, mut next)) = self.genesis.remove(&request.deployment) else {
             return EvidenceResponse::Unknown;
         };
-        let height = self.latest.as_ref().map_or(0, |latest| latest.height);
         let retained = retained_closes();
-        let retained = retained
+        let relevant = retained
             .iter()
-            .filter(|close| close.context.deployment() == &request.deployment);
-        let span = 0..MAX_SLICES as u16;
-        match &request.lookup {
-            EvidenceLookup::GenesisState { account } => genesis
-                .opening(account)
-                .map_or(EvidenceResponse::Absent, |opening| {
-                    EvidenceResponse::Served(Evidence::Genesis(opening))
-                }),
-            EvidenceLookup::Interval { root, slice } => {
-                if !span.contains(slice) {
-                    return EvidenceResponse::NotHolder { spans: vec![span] };
+            .filter(|close| close.context.deployment() == &request.deployment)
+            .collect::<Vec<_>>();
+        loop {
+            let admitted = {
+                let db = self.db.read().await;
+                match db
+                    .get(&admitted_key(&request.deployment, next))
+                    .await
+                    .unwrap()
+                {
+                    Some(Record::Admitted(admitted)) => admitted,
+                    _ => break,
                 }
-                if *root == genesis.root() {
-                    let ranges =
-                        slice_ranges(&genesis_range(genesis), genesis.leaves(), &span, SLICE_BITS)
-                            .expect("the genesis range narrows to every slice");
-                    return EvidenceResponse::Served(Evidence::Interval(
-                        ranges[usize::from(*slice)].clone(),
-                    ));
-                }
-                for close in retained.filter(|close| close.roots.successor == *root) {
-                    let Some(proof) = close
-                        .dealings
-                        .iter()
-                        .find_map(|dealing| dealing.serve(*slice))
-                    else {
-                        continue;
-                    };
-                    let members = live_set(&proof.unchanged, &proof.changes.rows, true);
-                    let ranges = slice_ranges(&proof.successor, &members, &proof.span, SLICE_BITS)
-                        .expect("the sealed successor range narrows to every slice");
-                    let offset = slice
-                        .checked_sub(proof.span.start)
-                        .expect("serve(slice) returned a slice inside its span");
-                    return EvidenceResponse::Served(Evidence::Interval(
-                        ranges[usize::from(offset)].clone(),
-                    ));
-                }
-                EvidenceResponse::Unsealed
-            }
-            lookup => {
-                let batch = lookup.batch().expect("close-bound lookups name a batch");
-                let account = lookup
-                    .account()
-                    .expect("close-bound lookups name an account");
-
-                // The validators' retention rule: a dealing the simulation
-                // no longer retains, or whose challenge window closed at the
-                // chain height, is released advice.
-                let Some(close) = retained
-                    .into_iter()
-                    .find(|close| close.header.batch_id::<Sha256>().into_digest() == *batch)
-                    .filter(|close| close.context.challenge_deadline() >= height)
-                else {
-                    return self.released(&request.deployment, batch).await;
-                };
-                let slice = account_slice(account, SLICE_BITS)
-                    .expect("account keys are fixed-size and partition");
-                let Some(proof) = close
-                    .dealings
+            };
+            let Some(close) = relevant.iter().find(|close| {
+                close.context.payment().epoch() == next
+                    && *close.context.predecessor_root() == state.root()
+                    && close.header.batch_id::<Sha256>() == admitted.batch_id
+            }) else {
+                break;
+            };
+            let candidate = state
+                .prepare(state.head(), close.mutations.clone())
+                .await
+                .expect("canonical retained mutations");
+            assert_eq!(candidate.root(), close.roots.successor);
+            state = state
+                .apply(candidate)
+                .await
+                .expect("harness balance application");
+            next += 1;
+        }
+        let genesis_head = self
+            .deployments
+            .iter()
+            .find(|d| d.digest() == &request.deployment)
+            .unwrap()
+            .genesis();
+        let response = match &request.lookup {
+            EvidenceLookup::GenesisState { account } => {
+                let root = self
+                    .deployments
                     .iter()
-                    .find_map(|dealing| dealing.serve(slice))
-                else {
-                    return EvidenceResponse::NotHolder {
-                        spans: close
-                            .dealings
-                            .iter()
-                            .flat_map(|dealing| dealing.slices())
-                            .map(|proof| proof.span.clone())
-                            .collect(),
-                    };
-                };
-                let interval =
-                    Interval::new(live_set(&proof.unchanged, &proof.changes.rows, false))
-                        .expect("sealed slices yield canonical predecessor intervals");
-                let index = SpanIndex::new::<Sha256>(
-                    proof,
-                    &interval,
-                    &close.context,
-                    &close.roots,
-                    &close.withdrawals,
-                )
-                .expect("sealed slices index against their own predecessor interval");
-                answer(&index, close.header, close.roots, lookup)
-                    .expect("sealed slices serve every close-bound lookup")
+                    .find(|d| d.digest() == &request.deployment)
+                    .unwrap()
+                    .genesis()
+                    .root();
+                match state
+                    .lookup_at(
+                        root,
+                        genesis_head.operations(),
+                        &account_key(account).unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    StateLookup::Present(value) => {
+                        EvidenceResponse::Served(Evidence::Genesis(StateOpening {
+                            account: account.clone(),
+                            balance: value.balance,
+                            proof: value.proof,
+                        }))
+                    }
+                    StateLookup::Absent(proof) => {
+                        EvidenceResponse::Served(Evidence::GenesisAbsent(proof))
+                    }
+                }
             }
-        }
-    }
-
-    /// Classifies a batch with no served dealing exactly as a validator does:
-    /// `Pruned` when the chain finalized it (its claim roots record exists),
-    /// `Unsealed` otherwise.
-    async fn released(&self, deployment: &Digest, batch: &Digest) -> EvidenceResponse {
-        let guard = self.db.read().await;
-        let finalized = guard
-            .get(&claim_roots_key(deployment, &BatchId::new(*batch)))
-            .await
-            .expect("harness state read succeeds")
-            .is_some();
-        if finalized {
-            EvidenceResponse::Pruned
-        } else {
-            EvidenceResponse::Unsealed
-        }
+            EvidenceLookup::Dealing { epoch } => relevant
+                .iter()
+                .find(|retained| retained.context.payment().epoch() == *epoch)
+                .map_or_else(
+                    || EvidenceResponse::Unsealed,
+                    |retained| {
+                        let close = &retained.close;
+                        EvidenceResponse::Served(Evidence::Dealing(Box::new(super::da::Sealed {
+                            context: retained.context.clone(),
+                            header: close.header,
+                            roots: close.roots,
+                            amounts: close.amounts,
+                            deposits: retained.deposits.clone(),
+                            withdrawals: retained.withdrawals.clone(),
+                            dealing: close.encoded().clone(),
+                            evidence: close.encode_evidence(),
+                            mutations: retained.mutations.clone(),
+                            operations: retained.operations,
+                            predecessor_operations: retained.predecessor_operations,
+                        })))
+                    },
+                ),
+            lookup => {
+                let batch = lookup.batch().unwrap();
+                match relevant
+                    .iter()
+                    .find(|close| close.header.batch_id::<Sha256>().into_digest() == *batch)
+                {
+                    None => EvidenceResponse::Unsealed,
+                    Some(retained) => {
+                        let root = match lookup {
+                            EvidenceLookup::PredecessorState { .. } => {
+                                Some(*retained.context.predecessor_root())
+                            }
+                            EvidenceLookup::SuccessorState { .. } => Some(retained.roots.successor),
+                            _ => None,
+                        };
+                        if let Some(root) = root {
+                            {
+                                let account = lookup.account().unwrap().clone();
+                                let operations =
+                                    if matches!(lookup, EvidenceLookup::SuccessorState { .. }) {
+                                        retained.operations
+                                    } else if retained.context.payment().epoch() == 0 {
+                                        genesis_head.operations()
+                                    } else {
+                                        relevant
+                                            .iter()
+                                            .find(|prior| {
+                                                prior.roots.successor == root
+                                                    && prior.context.payment().epoch() + 1
+                                                        == retained.context.payment().epoch()
+                                            })
+                                            .expect("retained predecessor")
+                                            .operations
+                                    };
+                                let body = match state
+                                    .lookup_at(root, operations, &account_key(&account).unwrap())
+                                    .await
+                                    .unwrap()
+                                {
+                                    StateLookup::Present(value) => {
+                                        super::query::EvidenceBody::State(StateOpening {
+                                            account,
+                                            balance: value.balance,
+                                            proof: value.proof,
+                                        })
+                                    }
+                                    StateLookup::Absent(proof) => {
+                                        super::query::EvidenceBody::StateAbsent(proof)
+                                    }
+                                };
+                                EvidenceResponse::Served(Evidence::Close {
+                                    header: retained.header,
+                                    roots: retained.roots,
+                                    body,
+                                })
+                            }
+                        } else {
+                            answer(&retained.close, lookup).expect("retained activity proof")
+                        }
+                    }
+                }
+            }
+        };
+        self.genesis.insert(request.deployment, (state, next));
+        response
     }
 }
 
@@ -441,7 +478,7 @@ pub(crate) fn identity(rng: &mut impl rand_core::CryptoRng) -> Genesis {
 }
 
 /// The clearing committee with every member served at `address`: the harness
-/// answers evidence for every validator, so every slice's quorum resolves to
+/// answers evidence for every validator, so the complete committee resolves to
 /// it.
 fn validators(address: SocketAddr) -> Vec<ValidatorEntry> {
     committee()
@@ -469,8 +506,25 @@ pub(crate) async fn start_with(
     context: &deterministic::Context,
     address: SocketAddr,
     prefix: &str,
-    configured: Vec<Deployment>,
+    mut configured: Vec<Deployment>,
 ) -> Control {
+    let mut balances = BTreeMap::new();
+    for deployment in &mut configured {
+        deployment.generate(context.child("genesis")).await.unwrap();
+        let config = state_config(
+            &format!("{prefix}-balances-{}", deployment.digest()),
+            context,
+            Sequential,
+        );
+        let state = State::<_, Sha256>::init(
+            context.child("balances"),
+            config,
+            genesis_balances(deployment).unwrap(),
+        )
+        .await
+        .unwrap();
+        balances.insert(*deployment.digest(), (state, 0));
+    }
     let mut rng = context.child("harness_rng");
     let signer = ed25519::PrivateKey::from_seed(4_242);
     let players = Set::from_iter_dedup([signer.public_key()]);
@@ -505,10 +559,7 @@ pub(crate) async fn start_with(
         db,
         scheme,
         leader: signer.public_key(),
-        genesis: configured
-            .iter()
-            .map(|deployment| (*deployment.digest(), genesis_cache(deployment)))
-            .collect(),
+        genesis: balances,
         deployments: configured,
         latest: None,
         reads: 0,

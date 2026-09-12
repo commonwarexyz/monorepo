@@ -1,12 +1,7 @@
-//! Validator-served evidence: the wallet's route to the quorum retaining each
-//! account's slice, and the verified fetchers every enforcement flow reads
-//! through when the operator is unreachable or refuses.
+//! Validator-served evidence verified against caller-owned settlement roots.
 //!
-//! Nothing a holder answers is trusted on its own. A served opening is
-//! verified against a certified root the caller already holds (the admitted
-//! record's roots, the finalized status root, the genesis root), and every
-//! other answer, a typed decline, garbage, a timeout, or evidence that fails
-//! verification, moves on to the next holder of the slice.
+//! Every validator retains the full close. Failed, absent, or malformed responses try the
+//! next validator; only authenticated inclusion or exclusion determines account state.
 
 use crate::{
     chain::{
@@ -23,8 +18,8 @@ use crate::{
 use anyhow::{Context as _, Result, bail, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    challenge::{HigherEntryLookup, StateOpening},
-    commitment::{VectorKind, VectorRoot},
+    challenge::{AccountLookup, HigherEntryLookup},
+    qmdb::{StateLookup, StateOpening, StateRoot, account_key},
     transition::{ExternalPayoutClaim, WithdrawalClaim},
 };
 use commonware_codec::{DecodeExt as _, Encode as _};
@@ -39,10 +34,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The wallet's route to validator evidence.
 ///
-/// Every account's slice is retained by an exact quorum of validators, listed
-/// in genesis in ascending committee order. A wallet asks them starting at the
-/// account's hash modulo the quorum size, so wallets spread their reads over
-/// the quorum, and resumes at the holder that last served the account.
+/// Validators appear in genesis committee order. Account hashing spreads the first
+/// request across them, and subsequent reads start with the last successful server.
 #[derive(Default)]
 pub(super) struct Holders {
     /// The holder that last served each account. A routing cache, so it is
@@ -53,12 +46,8 @@ pub(super) struct Holders {
 /// One holder's answer that served nothing usable.
 #[derive(Debug, Error)]
 pub(super) enum Decline {
-    #[error("does not hold the slice")]
-    NotHolder,
     #[error("holds no sealed dealing for the batch")]
     Unsealed,
-    #[error("released the dealing after its challenge window")]
-    Pruned,
     #[error("does not serve the deployment")]
     Unknown,
     #[error("has nothing to open for the lookup")]
@@ -71,7 +60,7 @@ pub(super) enum Decline {
     Failed(anyhow::Error),
 }
 
-/// Every holder of an account's slice declined one lookup.
+/// Every validator declined one lookup.
 #[derive(Debug, Error)]
 #[error("no holder served the evidence ({})", describe(.declines))]
 pub(super) struct Exhausted {
@@ -88,10 +77,10 @@ fn describe(declines: &[(SocketAddr, Decline)]) -> String {
 }
 
 impl Holders {
-    /// The holders of `account`'s slice in the order this wallet asks them.
+    /// The validators in the order this wallet asks them.
     pub(super) fn order(&self, chain: &Client, account: &Key) -> Result<Vec<SocketAddr>> {
         let mut holders = chain.genesis().holders_for_account(account)?;
-        ensure!(!holders.is_empty(), "the account's slice has no holders");
+        ensure!(!holders.is_empty(), "the deployment has no validators");
         let served = self.served.lock().get(account).copied();
         let start = served
             .and_then(|served| holders.iter().position(|holder| *holder == served))
@@ -100,7 +89,7 @@ impl Holders {
         Ok(holders)
     }
 
-    /// Asks the holders of `account`'s slice for `lookup` until one serves
+    /// Asks the validators for `lookup` until one serves
     /// evidence that `accept` verifies, remembering that holder for the
     /// account. Every other answer moves on to the next holder, and
     /// exhausting them is an [`Exhausted`] error naming every holder and its
@@ -125,9 +114,7 @@ impl Holders {
                     }
                     Err(error) => Decline::Unverifiable(error),
                 },
-                Ok(EvidenceResponse::NotHolder { .. }) => Decline::NotHolder,
                 Ok(EvidenceResponse::Unsealed) => Decline::Unsealed,
-                Ok(EvidenceResponse::Pruned) => Decline::Pruned,
                 Ok(EvidenceResponse::Unknown) => Decline::Unknown,
                 Ok(EvidenceResponse::Absent) => Decline::Absent,
                 Err(decline) => decline,
@@ -169,17 +156,17 @@ async fn ask<E: Env>(
 /// Checks that `opening` is `account`'s leaf under `root`.
 pub(super) fn check_opening(
     opening: &StateOpening<Key, Digest>,
-    root: &VectorRoot<Digest>,
+    root: &StateRoot<Digest>,
     account: &Key,
 ) -> Result<()> {
     ensure!(
-        opening.leaf.account == *account,
+        opening.account == *account,
         "payer opening belongs to another account"
     );
     opening
-        .proof
-        .verify::<Sha256>(VectorKind::State, root, opening.leaf.encode().as_ref())
-        .context("verify payer state opening")
+        .verify::<Sha256>(root)
+        .context("verify payer Current state opening")?;
+    Ok(())
 }
 
 /// Names both failed sources when neither the operator nor the validators
@@ -191,43 +178,29 @@ pub(super) fn unusable_head(operator: anyhow::Error, validators: anyhow::Error) 
 }
 
 impl Holders {
-    /// The lookups that can open `account`'s leaf at the certified head
-    /// `status`: the genesis state before any close finalized, else the last
-    /// finalized close's successor state and, once admitted, the next close's
-    /// predecessor state. Both open the same root, and holders retain the
-    /// next close's dealing through its own challenge window after the
-    /// finalized close's dealing is released.
-    async fn head_lookups<E: Env>(
+    /// Selects the retained genesis or finalized successor evidence for the certified head.
+    async fn head_lookup<E: Env>(
         ctx: &E,
         chain: &mut Client,
         account: &Key,
         status: &StatusRecord,
-    ) -> Result<Vec<EvidenceLookup>> {
+    ) -> Result<EvidenceLookup> {
         let Some(finalized) = status.last_finalized else {
-            return Ok(vec![EvidenceLookup::GenesisState {
+            return Ok(EvidenceLookup::GenesisState {
                 account: account.clone(),
-            }]);
+            });
         };
-        let mut lookups = Vec::with_capacity(2);
-        if let Some(admitted) = chain.admitted(ctx, finalized).await? {
-            lookups.push(EvidenceLookup::SuccessorState {
-                batch: admitted.batch_id.into_digest(),
-                account: account.clone(),
-            });
-        }
-        if let Some(next) = finalized.checked_add(1)
-            && let Some(admitted) = chain.admitted(ctx, next).await?
-        {
-            lookups.push(EvidenceLookup::PredecessorState {
-                batch: admitted.batch_id.into_digest(),
-                account: account.clone(),
-            });
-        }
-        Ok(lookups)
+        let admitted = chain
+            .admitted(ctx, finalized)
+            .await?
+            .context("the finalized close has no certified admission record")?;
+        Ok(EvidenceLookup::SuccessorState {
+            batch: admitted.batch_id.into_digest(),
+            account: account.clone(),
+        })
     }
 
-    /// `account`'s leaf at the certified head `status`, served by the slice
-    /// holders and verified against the status root: the head read that needs
+    /// `account`'s leaf at the certified head `status`, served by validators and verified against the status root: the head read that needs
     /// no operator.
     pub(super) async fn validator_opening<E: Env>(
         &self,
@@ -236,44 +209,112 @@ impl Holders {
         account: &Key,
         status: &StatusRecord,
     ) -> Result<StateOpening<Key, Digest>> {
-        let lookups = Self::head_lookups(ctx, chain, account, status).await?;
-        self.state_opening(ctx, chain, account, &status.state_root, lookups)
+        let lookup = Self::head_lookup(ctx, chain, account, status).await?;
+        self.state_opening(ctx, chain, account, &status.state_root, lookup)
+            .await?
+            .context("the account has no positive balance at this root")
+    }
+
+    /// Authenticates a positive balance or exclusion at the certified finalized root.
+    pub(super) async fn validator_balance<E: Env>(
+        &self,
+        ctx: &E,
+        chain: &mut Client,
+        account: &Key,
+        status: &StatusRecord,
+    ) -> Result<Option<StateOpening<Key, Digest>>> {
+        let lookup = Self::head_lookup(ctx, chain, account, status).await?;
+        self.state_opening(ctx, chain, account, &status.state_root, lookup)
             .await
     }
 
-    /// `account`'s leaf opened under `root`, from the first of `lookups` a
-    /// holder serves verifiably.
+    /// Authenticates a pending successor balance for withdrawal safety.
+    pub(super) async fn successor_opening<E: Env>(
+        &self,
+        ctx: &E,
+        chain: &Client,
+        account: &Key,
+        admitted: &AdmittedRootsResponse,
+    ) -> Result<StateOpening<Key, Digest>> {
+        self.state_opening(
+            ctx,
+            chain,
+            account,
+            &admitted.roots.successor,
+            EvidenceLookup::SuccessorState {
+                batch: admitted.batch_id.into_digest(),
+                account: account.clone(),
+            },
+        )
+        .await?
+        .context("the account has no positive balance at a pending root")
+    }
+
+    /// Authenticates the requested account's membership or absence under `root`.
     async fn state_opening<E: Env>(
         &self,
         ctx: &E,
         chain: &Client,
         account: &Key,
-        root: &VectorRoot<Digest>,
-        lookups: Vec<EvidenceLookup>,
-    ) -> Result<StateOpening<Key, Digest>> {
-        let mut failures = Vec::with_capacity(lookups.len());
-        for lookup in lookups {
-            let accept = |evidence: Evidence| {
-                let opening = match evidence {
-                    Evidence::Close {
-                        body: EvidenceBody::State(opening),
-                        ..
-                    }
-                    | Evidence::Genesis(opening) => opening,
-                    _ => bail!("served evidence is not a state opening"),
-                };
-                check_opening(&opening, root, account)?;
-                Ok(opening)
+        root: &StateRoot<Digest>,
+        lookup: EvidenceLookup,
+    ) -> Result<Option<StateOpening<Key, Digest>>> {
+        let accept = |evidence: Evidence| {
+            let opening = match evidence {
+                Evidence::Close {
+                    body: EvidenceBody::State(opening),
+                    ..
+                }
+                | Evidence::Genesis(opening) => opening,
+                Evidence::Close {
+                    body: EvidenceBody::StateAbsent(proof),
+                    ..
+                }
+                | Evidence::GenesisAbsent(proof) => {
+                    StateLookup::Absent(proof)
+                        .resolve::<Sha256>(root, &account_key(account)?)
+                        .context("verify Current balance exclusion")?;
+                    return Ok(None);
+                }
+                _ => bail!("served evidence is not a state opening"),
             };
-            match self.fetch(ctx, chain, account, lookup, accept).await {
-                Ok(opening) => return Ok(opening),
-                Err(error) => failures.push(format!("{error:#}")),
-            }
-        }
-        bail!(
-            "no validator opened the account at the certified root ({})",
-            failures.join("; ")
-        )
+            check_opening(&opening, root, account)?;
+            Ok(Some(opening))
+        };
+        self.fetch(ctx, chain, account, lookup, accept).await
+    }
+
+    /// Authenticates the account's terminal epoch activity, including explicit absence.
+    pub(super) async fn committed_account<E: Env>(
+        &self,
+        ctx: &E,
+        chain: &Client,
+        admitted: &AdmittedRootsResponse,
+        account: &Key,
+    ) -> Result<AccountLookup<Key, Digest>> {
+        let request = EvidenceLookup::Account {
+            batch: admitted.batch_id.into_digest(),
+            account: account.clone(),
+        };
+        let accept = |evidence: Evidence| {
+            let Evidence::Close {
+                header,
+                body: EvidenceBody::Account(lookup),
+                ..
+            } = evidence
+            else {
+                bail!("served evidence is not an activity lookup");
+            };
+            ensure!(
+                header.batch_id::<Sha256>() == admitted.batch_id,
+                "activity belongs to another batch"
+            );
+            lookup
+                .resolve::<Sha256>(&admitted.roots.change, account)
+                .context("verify committed payer activity")?;
+            Ok(lookup)
+        };
+        self.fetch(ctx, chain, account, request, accept).await
     }
 
     /// The payer's committed terminal entry for `recipient` in the admitted

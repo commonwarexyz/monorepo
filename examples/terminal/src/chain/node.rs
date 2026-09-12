@@ -15,7 +15,7 @@
 //! reporter chain and surfaces each finalized block's deposit transactions
 //! toward the operator's staging, holding the block's acknowledgement until
 //! that staging is durable. [`Certifier`] is the close
-//! pipeline actor: it disseminates per-validator dealings over the
+//! pipeline actor: it disseminates one shared complete dealing over the
 //! settlement DA channel, collects and verifies votes, assembles the
 //! exact-quorum certificate, and completes admission against the local
 //! certified state. [`Pipeline`] hands the SQLite close worker a blocking
@@ -51,9 +51,8 @@ use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::{
     admission::{Vote, bls12381},
     commitment::VectorRoot,
-    retained::Wire,
-    settlement::FinalizedBatch,
-    transition::{Header, RootBundle},
+    settlement::{FinalizedBatch, Genesis},
+    transition::Header,
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
 use commonware_consensus::{
@@ -242,53 +241,21 @@ where
     }
 }
 
-/// One validator's dealing addressed by both identities: the clearing
-/// committee participant whose vote it earns and the network peer holding
-/// that dealt key.
-pub(crate) struct Deal {
-    participant: Participant,
-    peer: ed25519::PublicKey,
-    /// The dealing's DA message encoded once, cloned for every resend.
-    message: Bytes,
-}
-
-impl Deal {
-    /// Encodes one validator's dealing: the close header and roots with one
-    /// slice per assigned span in the dealt wire form, without its unchanged
-    /// state and sharing its chunk buffers with every other dealing covering
-    /// the same slices, which the validator hydrates against the key interval
-    /// it retains for that span.
-    pub(crate) fn new(
-        participant: Participant,
-        peer: ed25519::PublicKey,
-        epoch: u64,
-        header: Header<Digest>,
-        roots: RootBundle<Digest>,
-        slices: Vec<Wire>,
-    ) -> Self {
-        let message = DaMessage::Dealing(Dealing {
-            epoch,
-            header,
-            roots,
-            slices,
-        })
-        .encode();
-        Self {
-            participant,
-            peer,
-            message,
-        }
-    }
+/// The clearing participant and network peer receiving the shared dealing.
+pub(crate) struct Route {
+    pub(crate) participant: Participant,
+    pub(crate) peer: ed25519::PublicKey,
 }
 
 /// A message sent to the close pipeline [`Certifier`].
 pub(crate) enum Message {
-    /// Disseminate per-validator dealings and assemble the exact-quorum
+    /// Disseminate the complete dealing and assemble the exact-quorum
     /// certificate from the returned votes.
     Certify {
         epoch: u64,
         header: Header<Digest>,
-        dealings: Vec<Deal>,
+        message: Bytes,
+        routes: Vec<Route>,
         response: oneshot::Sender<bls12381::Certificate>,
     },
     /// Submit the certified close and complete once the local certified
@@ -316,18 +283,26 @@ pub(crate) struct Mailbox {
 }
 
 impl Mailbox {
-    /// Disseminates `dealings` and completes on the exact-quorum certificate.
+    /// Encodes one shared DA packet and completes on the exact-quorum certificate.
     pub(crate) async fn certify(
         &self,
         epoch: u64,
         header: Header<Digest>,
-        dealings: Vec<Deal>,
+        dealing: Bytes,
+        routes: Vec<Route>,
     ) -> Result<bls12381::Certificate> {
+        let message = DaMessage::Dealing(Dealing {
+            epoch,
+            header,
+            bytes: dealing,
+        })
+        .encode();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Certify {
             epoch,
             header,
-            dealings,
+            message,
+            routes,
             response,
         });
         receiver.await.context("the close pipeline stopped")
@@ -357,6 +332,7 @@ impl Mailbox {
 #[derive(Clone)]
 pub(crate) struct Pipeline {
     mailbox: Mailbox,
+    genesis: Genesis<Digest>,
     /// Network identity holding each clearing participant's dealt key, in
     /// committee participant order.
     peers: Vec<ed25519::PublicKey>,
@@ -366,7 +342,11 @@ impl Pipeline {
     /// Builds the pipeline facade, deriving the committee participant to
     /// network identity mapping from the setup convention that validator
     /// directory `i` holds clearing key `i`.
-    pub(crate) fn new(mailbox: Mailbox, participants: &[ed25519::PublicKey]) -> Result<Self> {
+    pub(crate) fn new(
+        mailbox: Mailbox,
+        participants: &[ed25519::PublicKey],
+        genesis: Genesis<Digest>,
+    ) -> Result<Self> {
         let mut peers = vec![None; participants.len()];
         for (index, peer) in participants.iter().enumerate() {
             let participant = dealt_participant(index)?;
@@ -378,6 +358,7 @@ impl Pipeline {
         }
         Ok(Self {
             mailbox,
+            genesis,
             peers: peers
                 .into_iter()
                 .collect::<Option<Vec<_>>>()
@@ -385,34 +366,27 @@ impl Pipeline {
         })
     }
 
-    /// Certifies one close: dealings indexed by committee participant, the
-    /// assembled certificate on exact quorum.
+    pub(crate) const fn genesis(&self) -> Genesis<Digest> {
+        self.genesis
+    }
+
+    /// Certifies one complete close with every configured committee participant.
     pub(crate) fn certify(
         &self,
         epoch: u64,
         header: Header<Digest>,
-        roots: RootBundle<Digest>,
-        dealings: Vec<Vec<Wire>>,
+        dealing: Bytes,
     ) -> Result<bls12381::Certificate> {
-        ensure!(
-            dealings.len() == self.peers.len(),
-            "dealings must cover the exact committee"
-        );
-        let dealings = dealings
-            .into_iter()
+        let routes = self
+            .peers
+            .iter()
             .enumerate()
-            .map(|(index, slices)| {
-                Deal::new(
-                    Participant::from_usize(index),
-                    self.peers[index].clone(),
-                    epoch,
-                    header,
-                    roots,
-                    slices,
-                )
+            .map(|(index, peer)| Route {
+                participant: Participant::from_usize(index),
+                peer: peer.clone(),
             })
             .collect();
-        futures::executor::block_on(self.mailbox.certify(epoch, header, dealings))
+        futures::executor::block_on(self.mailbox.certify(epoch, header, dealing, routes))
     }
 
     /// Submits the certified close and blocks until the local certified
@@ -431,7 +405,8 @@ impl Pipeline {
 struct Outstanding {
     epoch: u64,
     header: Header<Digest>,
-    dealings: Vec<Deal>,
+    message: Bytes,
+    routes: Vec<Route>,
     votes: BTreeMap<Participant, Vote>,
     response: oneshot::Sender<bls12381::Certificate>,
 }
@@ -500,14 +475,15 @@ where
                         return;
                     };
                     match message {
-                        Message::Certify { epoch, header, dealings, response } => {
+                        Message::Certify { epoch, header, message, routes, response } => {
                             // A replaced certification drops the stale
                             // response: its worker observes the closed
                             // channel and fails that close.
                             self.outstanding = Some(Outstanding {
                                 epoch,
                                 header,
-                                dealings,
+                                message,
+                                routes,
                                 votes: BTreeMap::new(),
                                 response,
                             });
@@ -543,10 +519,10 @@ where
         }
     }
 
-    /// Sends every outstanding dealing to its validator, skipping validators
+    /// Sends the shared packet to each validator, skipping validators
     /// that already voted. Dissemination is recoverable off-chain traffic,
     /// so delivery is retried on the resend tick until quorum, resending the
-    /// bytes each deal encoded once.
+    /// same encoded allocation to every destination.
     fn disseminate<Se>(&mut self, sender: &mut Se)
     where
         Se: Sender<PublicKey = ed25519::PublicKey>,
@@ -554,17 +530,17 @@ where
         let Some(outstanding) = &self.outstanding else {
             return;
         };
-        for deal in &outstanding.dealings {
-            if outstanding.votes.contains_key(&deal.participant) {
+        for route in &outstanding.routes {
+            if outstanding.votes.contains_key(&route.participant) {
                 continue;
             }
             let sent = sender.send(
-                Recipients::One(deal.peer.clone()),
-                deal.message.clone(),
+                Recipients::One(route.peer.clone()),
+                outstanding.message.clone(),
                 true,
             );
             if sent.is_empty() {
-                debug!(epoch = outstanding.epoch, peer = ?deal.peer, "failed to send dealing");
+                debug!(epoch = outstanding.epoch, peer = ?route.peer, "failed to send dealing");
             }
         }
     }
@@ -781,13 +757,12 @@ pub(crate) async fn start(
     // The deployment this operator runs, derived from its clearing identity
     // and required to be configured in genesis.
     let deployment = deployment_of(&operator.clearing.public_key());
-    ensure!(
-        genesis
-            .deployments
-            .iter()
-            .any(|configured| configured.digest() == &deployment),
-        "the operator's clearing key names no configured deployment"
-    );
+    let configured_genesis = *genesis
+        .deployments
+        .iter()
+        .find(|configured| configured.digest() == &deployment)
+        .context("the operator's clearing key names no configured deployment")?
+        .genesis();
     let partition_prefix = "operator";
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
@@ -996,7 +971,7 @@ pub(crate) async fn start(
         },
     );
     let certifier_handle = certifier.start(settlement_da_network);
-    let pipeline = Pipeline::new(pipeline_mailbox, &network.participants)?;
+    let pipeline = Pipeline::new(pipeline_mailbox, &network.participants, configured_genesis)?;
 
     Ok((
         node,
@@ -1024,11 +999,53 @@ mod tests {
         protocol::{Protocol, clearing_private, committee},
     };
     use anyhow::bail;
-    use commonware_clearing::bajillion::commitment::VectorRoot;
+    use commonware_actor::Unreliable;
     use commonware_cryptography::{Hasher as _, Sha256, ed25519::PrivateKey};
-    use commonware_p2p::simulated::{Config as NetConfig, Link, Network};
-    use commonware_runtime::{Quota, Runner as _, deterministic};
-    use commonware_utils::{NZU32, NZUsize, probability};
+    use commonware_p2p::{
+        CheckedSender, LimitedSender,
+        simulated::{Config as NetConfig, Link, Network},
+    };
+    use commonware_runtime::{IoBuf, IoBufs, Quota, Runner as _, deterministic};
+    use commonware_utils::{NZU32, NZUsize, probability, sync::Mutex};
+    use std::{sync::Arc, time::SystemTime};
+
+    #[derive(Clone)]
+    struct Recorded<S> {
+        inner: S,
+        messages: Arc<Mutex<Vec<IoBuf>>>,
+    }
+
+    impl<S: LimitedSender> LimitedSender for Recorded<S> {
+        type PublicKey = S::PublicKey;
+        type Checked<'a>
+            = Recorded<S::Checked<'a>>
+        where
+            Self: 'a;
+
+        fn check(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(Recorded {
+                inner: self.inner.check(recipients)?,
+                messages: self.messages.clone(),
+            })
+        }
+    }
+
+    impl<S: CheckedSender> CheckedSender for Recorded<S> {
+        type PublicKey = S::PublicKey;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            self.inner.recipients()
+        }
+
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+            let message = message.into().coalesce();
+            self.messages.lock().push(message.clone());
+            self.inner.send(message, priority)
+        }
+    }
 
     /// A chain backend the certifier test never reads or submits through.
     struct Stub;
@@ -1121,7 +1138,14 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                 },
             );
-            certifier.start(operator_chan);
+            let messages = Arc::new(Mutex::new(Vec::new()));
+            certifier.start((
+                Recorded {
+                    inner: operator_chan.0,
+                    messages: messages.clone(),
+                },
+                operator_chan.1,
+            ));
 
             // A synthetic close header: vote verification binds signatures to
             // it, so no real close is needed to exercise the tally.
@@ -1129,55 +1153,39 @@ mod tests {
                 Sha256::hash(&[b"certifier-header"]).as_ref(),
             )
             .unwrap();
-            let roots = RootBundle {
-                change: VectorRoot {
-                    digest: Sha256::hash(&[b"change"]),
-                },
-                withdrawal_outputs: VectorRoot {
-                    digest: Sha256::hash(&[b"withdrawals"]),
-                },
-                successor: VectorRoot {
-                    digest: Sha256::hash(&[b"successor"]),
-                },
-                coverage: VectorRoot {
-                    digest: Sha256::hash(&[b"coverage"]),
-                },
-                transpose: VectorRoot {
-                    digest: Sha256::hash(&[b"transpose"]),
-                },
-                transpose_len: 0,
-            };
             let deals = validator_keys
                 .iter()
                 .enumerate()
-                .map(|(index, key)| {
-                    Deal::new(
-                        Participant::from_usize(index),
-                        key.clone(),
-                        0,
-                        header,
-                        roots,
-                        Vec::new(),
-                    )
+                .map(|(index, key)| Route {
+                    participant: Participant::from_usize(index),
+                    peer: key.clone(),
                 })
                 .collect::<Vec<_>>();
             let certify = {
                 let mailbox = mailbox.clone();
-                context
-                    .child("certify")
-                    .spawn(move |_| async move { mailbox.certify(0, header, deals).await })
+                context.child("certify").spawn(move |_| async move {
+                    mailbox.certify(0, header, Bytes::new(), deals).await
+                })
             };
 
-            // Every validator receives its dealing.
+            // Every recipient and retry shares one encoded allocation at the transport boundary.
             let schemes = (0..committee.members().len())
                 .map(|index| {
                     bls12381::Scheme::signer(committee.clone(), clearing_private(index).unwrap())
                         .unwrap()
                 })
                 .collect::<Vec<_>>();
-            for chan in &mut validator_chans {
-                let (from, _) = chan.1.recv().await.unwrap();
-                assert_eq!(from, operator_key);
+            for round in 0..2 {
+                for chan in &mut validator_chans {
+                    let (from, _) = chan.1.recv().await.unwrap();
+                    assert_eq!(from, operator_key);
+                }
+                let sent = messages.lock();
+                assert_eq!(sent.len(), (round + 1) * validator_keys.len());
+                assert!(
+                    sent.iter()
+                        .all(|message| message.as_ref().as_ptr() == sent[0].as_ref().as_ptr())
+                );
             }
 
             // Validator 0 returns a vote whose signature does not verify for

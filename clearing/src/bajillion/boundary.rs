@@ -78,7 +78,7 @@ impl<P: PublicKey> Read for DepositRecord<P> {
     }
 }
 
-/// Exact account-sorted deposit boundary for one epoch.
+/// Exact deposit boundary ordered by canonical account bytes for one epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DepositBatch<P: PublicKey> {
     records: Vec<DepositRecord<P>>,
@@ -86,9 +86,9 @@ pub struct DepositBatch<P: PublicKey> {
 }
 
 impl<P: PublicKey> DepositBatch<P> {
-    /// Sorts records by account and constructs a unique positive deposit batch.
+    /// Sorts canonical account bytes and constructs a unique positive deposit batch.
     pub fn new(mut records: Vec<DepositRecord<P>>) -> Result<Self, BoundaryError> {
-        records.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        records.sort_unstable_by(|left, right| left.account.as_ref().cmp(right.account.as_ref()));
         Self::from_sorted(records)
     }
 
@@ -106,7 +106,7 @@ impl<P: PublicKey> DepositBatch<P> {
         }
         if records
             .windows(2)
-            .any(|pair| pair[0].account >= pair[1].account)
+            .any(|pair| pair[0].account.as_ref() >= pair[1].account.as_ref())
         {
             return Err(BoundaryError::NonCanonicalDeposits);
         }
@@ -146,7 +146,7 @@ impl<P: PublicKey> DepositBatch<P> {
     /// Returns the record for an account, if present.
     pub fn record_for(&self, account: &P) -> Option<&DepositRecord<P>> {
         self.records
-            .binary_search_by(|record| record.account.cmp(account))
+            .binary_search_by(|record| record.account.as_ref().cmp(account.as_ref()))
             .ok()
             .map(|index| &self.records[index])
     }
@@ -524,7 +524,7 @@ impl<P: PublicKey, D: Digest> Read for SignedWithdrawal<P, D> {
 /// The first range limits record count and the second limits each destination byte length.
 pub type WithdrawalBatchCfg = (RangeCfg<usize>, RangeCfg<usize>);
 
-/// Exact account-sorted withdrawal boundary for one epoch.
+/// Exact withdrawal boundary ordered by canonical account bytes for one epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawalBatch<P: PublicKey, D: Digest> {
     requests: Vec<SignedWithdrawal<P, D>>,
@@ -532,9 +532,9 @@ pub struct WithdrawalBatch<P: PublicKey, D: Digest> {
 }
 
 impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
-    /// Sorts requests by account and constructs a unique withdrawal boundary.
+    /// Sorts canonical account bytes and constructs a unique withdrawal boundary.
     pub fn new(mut requests: Vec<SignedWithdrawal<P, D>>) -> Result<Self, BoundaryError> {
-        requests.sort_unstable_by(|left, right| left.account.cmp(&right.account));
+        requests.sort_unstable_by(|left, right| left.account.as_ref().cmp(right.account.as_ref()));
         Self::from_sorted(requests)
     }
 
@@ -549,7 +549,7 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
     fn from_sorted(requests: Vec<SignedWithdrawal<P, D>>) -> Result<Self, BoundaryError> {
         if requests
             .windows(2)
-            .any(|pair| pair[0].account >= pair[1].account)
+            .any(|pair| pair[0].account.as_ref() >= pair[1].account.as_ref())
         {
             return Err(BoundaryError::NonCanonicalWithdrawals);
         }
@@ -588,7 +588,7 @@ impl<P: PublicKey, D: Digest> WithdrawalBatch<P, D> {
     /// Returns the request for an account, if present.
     pub fn request_for(&self, account: &P) -> Option<&SignedWithdrawal<P, D>> {
         self.requests
-            .binary_search_by(|request| request.account.cmp(account))
+            .binary_search_by(|request| request.account.as_ref().cmp(account.as_ref()))
             .ok()
             .map(|index| &self.requests[index])
     }
@@ -714,8 +714,9 @@ mod arbitrary_impls {
                     amount: u.arbitrary::<u32>()? as u64 + 1,
                 });
             }
-            records.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-            records.dedup_by(|left, right| left.account == right.account);
+            records
+                .sort_unstable_by(|left, right| left.account.as_ref().cmp(right.account.as_ref()));
+            records.dedup_by(|left, right| left.account.as_ref() == right.account.as_ref());
             Self::from_sorted(records).map_err(|_| arbitrary::Error::IncorrectFormat)
         }
     }
@@ -782,8 +783,9 @@ mod arbitrary_impls {
             for _ in 0..len {
                 requests.push(u.arbitrary()?);
             }
-            requests.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-            requests.dedup_by(|left, right| left.account == right.account);
+            requests
+                .sort_unstable_by(|left, right| left.account.as_ref().cmp(right.account.as_ref()));
+            requests.dedup_by(|left, right| left.account.as_ref() == right.account.as_ref());
             Self::from_sorted(requests).map_err(|_| arbitrary::Error::IncorrectFormat)
         }
     }
@@ -899,17 +901,19 @@ mod tests {
         .unwrap();
         let deposit_root = deposits.root::<Sha256>().unwrap();
         assert_ne!(deposit_root, reversed_amounts.root::<Sha256>().unwrap());
-        let mut state_domain = commitment::Builder::<Sha256>::new(
-            VectorKind::State,
+        let mut activity_domain = commitment::Builder::<Sha256>::new(
+            VectorKind::Change,
             u32::try_from(deposits.records().len()).unwrap(),
         )
         .unwrap();
         for record in deposits.records() {
-            state_domain.add_encoded(record.encode().as_ref()).unwrap();
+            activity_domain
+                .add_encoded(record.encode().as_ref())
+                .unwrap();
         }
         assert_ne!(
             deposit_root,
-            state_domain.build(&Sequential).unwrap().root()
+            activity_domain.build(&Sequential).unwrap().root()
         );
 
         let withdrawals = WithdrawalBatch::new(vec![

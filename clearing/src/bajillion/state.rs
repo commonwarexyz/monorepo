@@ -1,173 +1,23 @@
-//! Account state and canonical changed-account rows.
+//! Epoch activity and its compact challenge and settlement commitments.
 
 use crate::bajillion::{
     commitment::VectorRoot,
-    payment::{SendAuthorization, VectorSendBody},
+    payment::{PaymentContext, SendAuthorization, VectorSendBody},
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 
-const CHANGE_OUTGOING_NONE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_OUTGOING_NONE";
-const CHANGE_OUTGOING_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_OUTGOING";
 const CHANGE_VALUE_HASH_NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_VALUE";
 
-/// Persistent state for one account row side.
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AccountState {
-    /// Funds currently available to the account.
-    pub balance: u64,
-    /// Total value the account has sent through the operator.
-    pub cumulative_debit: u64,
-    /// Total value the operator has promised to the account.
-    pub cumulative_credit: u64,
-    /// Total number of receipts contributing to `cumulative_credit`.
-    pub receipt_count: u64,
-    /// Whether this row side is present in the corresponding live-state vector.
-    pub active: bool,
-}
-
-impl Write for AccountState {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.balance.write(buf);
-        self.cumulative_debit.write(buf);
-        self.cumulative_credit.write(buf);
-        self.receipt_count.write(buf);
-        self.active.write(buf);
-    }
-}
-
-impl FixedSize for AccountState {
-    const SIZE: usize = u64::SIZE * 4 + bool::SIZE;
-}
-
-impl Read for AccountState {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            balance: u64::read(buf)?,
-            cumulative_debit: u64::read(buf)?,
-            cumulative_credit: u64::read(buf)?,
-            receipt_count: u64::read(buf)?,
-            active: bool::read(buf)?,
-        })
-    }
-}
-
-/// One active, positive-balance leaf in a live account-state vector.
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StateLeaf<P: PublicKey> {
-    /// Live account occupying this vector position.
-    pub account: P,
-    /// Account state at this root.
-    pub state: AccountState,
-}
-
-impl<P: PublicKey> Write for StateLeaf<P> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.account.write(buf);
-        self.state.write(buf);
-    }
-}
-
-impl<P: PublicKey> FixedSize for StateLeaf<P> {
-    const SIZE: usize = P::SIZE + AccountState::SIZE;
-}
-
-impl<P: PublicKey> Read for StateLeaf<P> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            account: P::read(buf)?,
-            state: AccountState::read(buf)?,
-        })
-    }
-}
-
-/// Running totals carried by each changed-account row.
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Prefix {
-    /// Gross payment debit through this row.
-    pub debit: u64,
-    /// Gross payment credit through this row.
-    pub credit: u64,
-    /// Receipt value paid externally instead of entering live state.
-    pub payout: u64,
-    /// Deposits through this row.
-    pub deposit: u64,
-    /// Withdrawals through this row.
-    pub withdrawal: u64,
-    /// Withdrawal records through this row.
-    pub withdrawal_count: u64,
-    /// Outgoing vector entries through this row.
-    pub out_count: u64,
-    /// Transpose entries through this row.
-    pub in_count: u64,
-}
-
-impl Prefix {
-    /// Returns the exact successor prefix, or `None` if a field overflows.
-    pub fn checked_extend(self, delta: Self) -> Option<Self> {
-        Some(Self {
-            debit: self.debit.checked_add(delta.debit)?,
-            credit: self.credit.checked_add(delta.credit)?,
-            payout: self.payout.checked_add(delta.payout)?,
-            deposit: self.deposit.checked_add(delta.deposit)?,
-            withdrawal: self.withdrawal.checked_add(delta.withdrawal)?,
-            withdrawal_count: self.withdrawal_count.checked_add(delta.withdrawal_count)?,
-            out_count: self.out_count.checked_add(delta.out_count)?,
-            in_count: self.in_count.checked_add(delta.in_count)?,
-        })
-    }
-}
-
-impl Write for Prefix {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.debit.write(buf);
-        self.credit.write(buf);
-        self.payout.write(buf);
-        self.deposit.write(buf);
-        self.withdrawal.write(buf);
-        self.withdrawal_count.write(buf);
-        self.out_count.write(buf);
-        self.in_count.write(buf);
-    }
-}
-
-impl FixedSize for Prefix {
-    const SIZE: usize = u64::SIZE * 8;
-}
-
-impl Read for Prefix {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            debit: u64::read(buf)?,
-            credit: u64::read(buf)?,
-            payout: u64::read(buf)?,
-            deposit: u64::read(buf)?,
-            withdrawal: u64::read(buf)?,
-            withdrawal_count: u64::read(buf)?,
-            out_count: u64::read(buf)?,
-            in_count: u64::read(buf)?,
-        })
-    }
-}
-
-/// Settlement-visible output authenticated while validating one changed row.
+/// Settlement-visible output authenticated while validating one account's activity.
 ///
 /// `Withdrawal(0)` is distinct from `None` so a compact close claim can authenticate the action
 /// even when no value is released.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SettlementOutput {
-    /// The row creates no independently claimable settlement output.
+    /// The activity creates no independently claimable settlement output.
     #[default]
     None,
     /// A signed withdrawal releases this amount to its requested destination.
@@ -214,105 +64,22 @@ impl Read for SettlementOutput {
     }
 }
 
-/// One and only one row for an account whose authenticated state changes.
+/// One account participating in the epoch, including unchanged balances.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountRow<P: PublicKey, D: Digest> {
-    /// Changed account.
+    /// Canonical account key.
     pub account: P,
-    /// State committed by the predecessor-state root.
-    pub predecessor: AccountState,
-    /// State committed by the successor-state root.
-    pub successor: AccountState,
-    /// Terminal payer-signed vector endpoint, present exactly when debit advanced.
-    ///
-    /// The operator's acceptance reaches the close as one aggregable countersignature per
-    /// proof slice rather than per row.
+    /// Balance at the predecessor root, zero when absent.
+    pub predecessor: u64,
+    /// Derived successor balance, zero when absent.
+    pub successor: u64,
+    /// Terminal authorization for this epoch's outgoing vector.
     pub outgoing: Option<SendAuthorization<P, D>>,
-    /// Claim classification validators recompute from the authenticated local effect.
+    /// Derived settlement output.
     pub output: SettlementOutput,
-    /// Running totals through this row.
-    pub prefix: Prefix,
 }
 
-#[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for AccountRow<P, D>
-where
-    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
-    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-    SendAuthorization<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            account: u.arbitrary()?,
-            predecessor: u.arbitrary()?,
-            successor: u.arbitrary()?,
-            outgoing: u.arbitrary()?,
-            output: u.arbitrary()?,
-            prefix: u.arbitrary()?,
-        })
-    }
-}
-
-impl<P: PublicKey, D: Digest> AccountRow<P, D> {
-    /// Returns the checked debit, credit, and receipt-count advances.
-    pub fn checked_deltas(&self) -> Option<(u64, u64, u64)> {
-        Some((
-            self.successor
-                .cumulative_debit
-                .checked_sub(self.predecessor.cumulative_debit)?,
-            self.successor
-                .cumulative_credit
-                .checked_sub(self.predecessor.cumulative_credit)?,
-            self.successor
-                .receipt_count
-                .checked_sub(self.predecessor.receipt_count)?,
-        ))
-    }
-
-    /// Whether this row actually changes authenticated state.
-    #[must_use]
-    pub fn is_changed(&self) -> bool {
-        self.predecessor != self.successor
-    }
-}
-
-impl<P: PublicKey, D: Digest> Write for AccountRow<P, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.account.write(buf);
-        self.predecessor.write(buf);
-        self.successor.write(buf);
-        self.outgoing.write(buf);
-        self.output.write(buf);
-        self.prefix.write(buf);
-    }
-}
-
-impl<P: PublicKey, D: Digest> EncodeSize for AccountRow<P, D> {
-    fn encode_size(&self) -> usize {
-        P::SIZE
-            + AccountState::SIZE * 2
-            + self.outgoing.encode_size()
-            + self.output.encode_size()
-            + Prefix::SIZE
-    }
-}
-
-impl<P: PublicKey, D: Digest> Read for AccountRow<P, D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            account: P::read(buf)?,
-            predecessor: AccountState::read(buf)?,
-            successor: AccountState::read(buf)?,
-            outgoing: Option::<SendAuthorization<P, D>>::read(buf)?,
-            output: SettlementOutput::read(buf)?,
-            prefix: Prefix::read(buf)?,
-        })
-    }
-}
-
-/// Settlement and challenge projection derived from one fully validated changed row.
+/// Settlement and challenge projection derived from one fully validated activity row.
 ///
 /// Composing the committed [`ChangeValue`] keeps this projection and the guarded compact value
 /// structurally identical, so no field can exist here without being committed by the guard.
@@ -325,17 +92,16 @@ pub struct AccountChange<P: PublicKey, D: Digest> {
 /// Account-relative value for a compact change membership opening.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChangeValue<D: Digest> {
-    core: ChangeValueCore<D>,
+    core: ChangeValueCore,
     send_root: VectorRoot<D>,
 }
 
 /// Change value fields that precede the per-account outgoing-vector root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ChangeValueCore<D: Digest> {
+pub struct ChangeValueCore {
     output: SettlementOutput,
     terminal_debit: u64,
     terminal_seq: u64,
-    outgoing_digest: D,
 }
 
 /// Ordered changed-account key and digest of its compact value.
@@ -373,43 +139,38 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<D> arbitrary::Arbitrary<'_> for ChangeValueCore<D>
-where
-    D: Digest + for<'a> arbitrary::Arbitrary<'a>,
-{
+impl arbitrary::Arbitrary<'_> for ChangeValueCore {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             output: u.arbitrary()?,
             terminal_debit: u.arbitrary()?,
             terminal_seq: u.arbitrary()?,
-            outgoing_digest: u.arbitrary()?,
         })
     }
 }
 
 impl<P: PublicKey, D: Digest> AccountChange<P, D> {
-    /// Derives the compact leaf from one row and its committed outgoing-vector root.
-    pub fn from_row<H: Hasher<Digest = D>>(
-        row: &AccountRow<P, D>,
-        send_root: VectorRoot<D>,
-    ) -> Self {
+    /// Derives the compact leaf from a fully validated row and its outgoing-vector root.
+    ///
+    /// The row and root must describe the same account and epoch.
+    pub fn from_row(row: &AccountRow<P, D>, send_root: VectorRoot<D>) -> Self {
         Self {
             account: row.account.clone(),
             value: ChangeValue {
                 core: ChangeValueCore {
                     output: row.output,
-                    terminal_debit: row.successor.cumulative_debit,
+                    terminal_debit: row
+                        .outgoing
+                        .as_ref()
+                        .map_or(0, |send| send.body().cumulative_debit()),
                     terminal_seq: row.outgoing.as_ref().map_or(0, |send| send.body().seq()),
-                    outgoing_digest: Self::derive_outgoing_digest::<H>(
-                        row.outgoing.as_ref().map(SendAuthorization::body),
-                    ),
                 },
                 send_root,
             },
         }
     }
 
-    /// Returns the changed account.
+    /// Returns the participating account.
     pub const fn account(&self) -> &P {
         &self.account
     }
@@ -426,11 +187,12 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
     }
 
     /// Restores the projection from an already committed compact value.
+    #[cfg(feature = "std")]
     pub(crate) const fn from_value(account: P, value: ChangeValue<D>) -> Self {
         Self { account, value }
     }
 
-    /// Returns the public terminal cumulative debit.
+    /// Returns the public terminal epoch debit.
     pub const fn terminal_debit(&self) -> u64 {
         self.value.core.terminal_debit
     }
@@ -440,9 +202,11 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         self.value.core.terminal_seq
     }
 
-    /// Returns whether the leaf commits a terminal outgoing authorization.
-    pub fn has_outgoing<H: Hasher<Digest = D>>(&self) -> bool {
-        self.value.core.outgoing_digest != Self::derive_outgoing_digest::<H>(None)
+    /// Returns whether this validated activity has a terminal outgoing authorization.
+    ///
+    /// Every nonempty outgoing vector has positive debit; sequence zero is valid.
+    pub const fn has_outgoing(&self) -> bool {
+        self.terminal_debit() != 0
     }
 
     /// Returns the compact per-account outgoing-vector root.
@@ -455,32 +219,35 @@ impl<P: PublicKey, D: Digest> AccountChange<P, D> {
         ChangeGuard::from_value::<H>(self.account.clone(), &self.value)
     }
 
-    /// Returns whether `body` is the exact committed terminal outgoing authorization.
-    pub fn matches_outgoing<H: Hasher<Digest = D>>(&self, body: &VectorSendBody<P, D>) -> bool {
-        self.value.core.outgoing_digest == Self::derive_outgoing_digest::<H>(Some(body))
-    }
-
-    fn derive_outgoing_digest<H: Hasher<Digest = D>>(body: Option<&VectorSendBody<P, D>>) -> D {
-        body.map_or_else(
-            || H::hash(&[CHANGE_OUTGOING_NONE_HASH_NAMESPACE]),
-            |body| {
-                let encoded = body.encode();
-                H::hash(&[CHANGE_OUTGOING_HASH_NAMESPACE, encoded.as_ref()])
-            },
-        )
+    /// Returns whether `body` is the terminal authorization in `context`.
+    ///
+    /// The caller must authenticate this activity and `context` under the same certified close.
+    pub fn matches_outgoing(
+        &self,
+        context: &PaymentContext<P, D>,
+        body: &VectorSendBody<P, D>,
+    ) -> bool {
+        self.has_outgoing()
+            && VectorSendBody::new(
+                context,
+                self.account.clone(),
+                self.terminal_seq(),
+                self.terminal_debit(),
+                self.send_root(),
+            ) == *body
     }
 }
 
 impl<D: Digest> ChangeValue<D> {
     /// Returns the fields that precede the outgoing-vector root, which a child proof reconstructs.
     #[must_use]
-    pub const fn core(&self) -> ChangeValueCore<D> {
+    pub const fn core(&self) -> ChangeValueCore {
         self.core
     }
 
     /// Restores the exact compact value from its prefix fields and typed vector root.
     #[must_use]
-    pub const fn from_core(core: ChangeValueCore<D>, send_root: VectorRoot<D>) -> Self {
+    pub const fn from_core(core: ChangeValueCore, send_root: VectorRoot<D>) -> Self {
         Self { core, send_root }
     }
 
@@ -499,7 +266,7 @@ impl<P: PublicKey, D: Digest> ChangeGuard<P, D> {
         }
     }
 
-    /// Returns the ordered changed account.
+    /// Returns the ordered participating account.
     pub const fn account(&self) -> &P {
         &self.account
     }
@@ -529,22 +296,21 @@ impl<D: Digest> Read for ChangeValue<D> {
     }
 }
 
-impl<D: Digest> Write for ChangeValueCore<D> {
+impl Write for ChangeValueCore {
     fn write(&self, buf: &mut impl BufMut) {
         self.output.write(buf);
         self.terminal_debit.write(buf);
         self.terminal_seq.write(buf);
-        self.outgoing_digest.write(buf);
     }
 }
 
-impl<D: Digest> EncodeSize for ChangeValueCore<D> {
+impl EncodeSize for ChangeValueCore {
     fn encode_size(&self) -> usize {
-        self.output.encode_size() + u64::SIZE * 2 + D::SIZE
+        self.output.encode_size() + u64::SIZE * 2
     }
 }
 
-impl<D: Digest> Read for ChangeValueCore<D> {
+impl Read for ChangeValueCore {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
@@ -552,7 +318,6 @@ impl<D: Digest> Read for ChangeValueCore<D> {
             output: SettlementOutput::read(buf)?,
             terminal_debit: u64::read(buf)?,
             terminal_seq: u64::read(buf)?,
-            outgoing_digest: D::read(buf)?,
         })
     }
 }
@@ -627,41 +392,6 @@ mod tests {
     };
 
     #[test]
-    fn prefix_extension_is_checked_fieldwise() {
-        let prefix = Prefix {
-            debit: 1,
-            credit: 2,
-            payout: 3,
-            deposit: 4,
-            withdrawal: 5,
-            withdrawal_count: 6,
-            out_count: 7,
-            in_count: 8,
-        };
-        assert_eq!(
-            prefix.checked_extend(prefix),
-            Some(Prefix {
-                debit: 2,
-                credit: 4,
-                payout: 6,
-                deposit: 8,
-                withdrawal: 10,
-                withdrawal_count: 12,
-                out_count: 14,
-                in_count: 16,
-            })
-        );
-        assert!(
-            Prefix {
-                debit: u64::MAX,
-                ..prefix
-            }
-            .checked_extend(prefix)
-            .is_none()
-        );
-    }
-
-    #[test]
     fn settlement_output_codec_preserves_zero_withdrawal() {
         for output in [
             SettlementOutput::None,
@@ -674,6 +404,75 @@ mod tests {
     }
 
     #[test]
+    fn outgoing_projection_matches_the_complete_body_and_preserves_sequence_zero() {
+        use crate::bajillion::{
+            payment::PaymentContext,
+            vector::{OutEntry, OutVector},
+        };
+
+        let private = SigningKey::from_seed(1);
+        let account = private.public_key();
+        let recipient = SigningKey::from_seed(2).public_key();
+        let context = PaymentContext::new(ShaDigest::EMPTY, 7, account.clone());
+        let vector = OutVector::new(
+            7,
+            account.clone(),
+            vec![OutEntry {
+                recipient: recipient.clone(),
+                cumulative: 3,
+                count: 1,
+            }],
+        )
+        .unwrap();
+        let root = vector.root::<Sha256, ShaDigest>().unwrap();
+        let body = VectorSendBody::new(&context, account.clone(), 0, 3, root);
+        let mut row = AccountRow {
+            account: account.clone(),
+            predecessor: 10,
+            successor: 10,
+            outgoing: Some(SendAuthorization::sign(body.clone(), &private)),
+            output: SettlementOutput::None,
+        };
+        let leaf = AccountChange::from_row(&row, root);
+        assert!(leaf.has_outgoing());
+        assert_eq!(leaf.terminal_seq(), 0);
+        assert!(leaf.matches_outgoing(&context, &body));
+        let wrong_anchor =
+            PaymentContext::new(Sha256::hash(&[b"other anchor"]), 7, account.clone());
+        let wrong_epoch = PaymentContext::new(ShaDigest::EMPTY, 8, account.clone());
+        for other in [
+            VectorSendBody::new(&wrong_anchor, account.clone(), 0, 3, root),
+            VectorSendBody::new(&wrong_epoch, account.clone(), 0, 3, root),
+            VectorSendBody::new(&context, recipient, 0, 3, root),
+            VectorSendBody::new(&context, account.clone(), 1, 3, root),
+            VectorSendBody::new(&context, account.clone(), 0, 4, root),
+            VectorSendBody::new(
+                &context,
+                account.clone(),
+                0,
+                3,
+                OutVector::empty(7, account.clone())
+                    .root::<Sha256, ShaDigest>()
+                    .unwrap(),
+            ),
+        ] {
+            assert!(!leaf.matches_outgoing(&context, &other));
+        }
+        assert!(!leaf.matches_outgoing(&wrong_anchor, &body));
+        assert!(!leaf.matches_outgoing(&wrong_epoch, &body));
+        row.outgoing = None;
+        let empty = OutVector::empty(7, account.clone())
+            .root::<Sha256, ShaDigest>()
+            .unwrap();
+        let leaf = AccountChange::from_row(&row, empty);
+        assert!(!leaf.has_outgoing());
+        assert!(!leaf.matches_outgoing(
+            &context,
+            &VectorSendBody::new(&context, account, 0, 0, empty)
+        ));
+    }
+
+    #[test]
     fn change_leaf_binds_challenge_and_settlement_projection() {
         let account = SigningKey::from_seed(1).public_key();
         let send_root = crate::bajillion::commitment::empty_root::<Sha256>(
@@ -681,49 +480,35 @@ mod tests {
         );
         let row = AccountRow::<VerifyingKey, ShaDigest> {
             account: account.clone(),
-            predecessor: AccountState {
-                balance: 10,
-                active: true,
-                ..AccountState::default()
-            },
-            successor: AccountState {
-                balance: 4,
-                active: true,
-                ..AccountState::default()
-            },
+            predecessor: 10,
+            successor: 4,
             outgoing: None,
             output: SettlementOutput::Withdrawal(6),
-            prefix: Prefix {
-                withdrawal: 6,
-                withdrawal_count: 1,
-                ..Prefix::default()
-            },
         };
-        let leaf = AccountChange::from_row::<Sha256>(&row, send_root);
+        let leaf = AccountChange::from_row(&row, send_root);
         assert_eq!(leaf.account(), &account);
         assert_eq!(leaf.output(), SettlementOutput::Withdrawal(6));
         assert_eq!(leaf.send_root(), send_root);
         assert_eq!(leaf.terminal_seq(), 0);
-        assert!(!leaf.has_outgoing::<Sha256>());
+        assert!(!leaf.has_outgoing());
 
         let mut changed_output = row.clone();
         changed_output.output = SettlementOutput::ExternalPayout(6);
-        assert_ne!(
-            AccountChange::from_row::<Sha256>(&changed_output, send_root),
-            leaf
-        );
+        assert_ne!(AccountChange::from_row(&changed_output, send_root), leaf);
 
         let mut changed_row = row;
-        changed_row.successor.balance = 5;
-        assert_eq!(
-            AccountChange::from_row::<Sha256>(&changed_row, send_root),
-            leaf
-        );
+        changed_row.successor = 5;
+        assert_eq!(AccountChange::from_row(&changed_row, send_root), leaf);
 
-        changed_row.successor.cumulative_debit = 1;
-        assert_ne!(
-            AccountChange::from_row::<Sha256>(&changed_row, send_root),
-            leaf
-        );
+        let context =
+            crate::bajillion::payment::PaymentContext::new(ShaDigest::EMPTY, 0, account.clone());
+        let payer = SigningKey::from_seed(1);
+        let body = VectorSendBody::new(&context, account, 1, 1, send_root);
+        changed_row.predecessor = 5;
+        changed_row.outgoing = Some(SendAuthorization::sign(body, &payer));
+        let activity = AccountChange::from_row(&changed_row, send_root);
+        assert_eq!(activity.terminal_debit(), 1);
+        assert_eq!(activity.terminal_seq(), 1);
+        assert_ne!(activity.guard::<Sha256>(), leaf.guard::<Sha256>());
     }
 }

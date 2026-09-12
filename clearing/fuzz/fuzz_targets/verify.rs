@@ -1,34 +1,32 @@
 #![no_main]
 
+mod support;
+
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
-    admission::{Committee, assigned_slice_spans, bls12381, seal},
-    boundary::{DepositBatch, DepositRecord, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
+    admission::{Committee, bls12381, seal},
+    boundary::{DepositBatch, DepositRecord, WithdrawalBatch},
     challenge::{
         AccountLookup, AckWitness, Challenge, ChallengeError, ChallengeKind, EntryWitness,
         HigherEntryLookup, Verdict, account_lookup, adjudicate, decode_bounded,
         higher_entry_lookup,
     },
-    commitment::{
-        Builder, MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot, empty_root,
-    },
+    commitment::{Builder, MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot},
     payment::{
         AckError, EntryReceipt, PaymentContext, SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE,
         VECTOR_ACK_SIGNATURE_NAMESPACE, VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck, VectorSendBody,
     },
-    state::{AccountChange, AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
+    posted,
+    qmdb::{State, StateOpening, StateRoot, account_key},
     transition::{
-        Assignment, ChallengeIndex, Close, CloseContext, CloseLimits, EpochContext, Header,
-        OperatorKey, OperatorSignature, OperatorVariant, PreparedClose, ProofSlice, RootBundle,
-        StateCache, TransitionError, prepare_close_with_strategy, validate_close, validate_slice,
+        ChallengeIndex, Close, CloseAmounts, CloseContext, CloseLimits, Header, OperatorKey,
+        OperatorSignature, OperatorVariant, RootBundle, Terminal, prepare_close_with_strategy,
+        validate_close_with_strategy,
     },
-    vector::{
-        Error as VectorError, OutEntry, OutTipLookup, OutVector, TransposeEntry, read_transpose,
-        transpose_encode_size, write_transpose,
-    },
+    vector::{Error as VectorError, OutEntry, OutTipLookup, OutVector},
 };
-use commonware_codec::{Encode, EncodeSize};
+use commonware_codec::{Decode, Encode, EncodeSize};
 use commonware_cryptography::{
     Hasher, Sha256, Signer,
     bls12381::primitives::{
@@ -42,65 +40,20 @@ use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
 use commonware_parallel::Sequential;
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::test_rng;
-use core::ops::Range;
+use core::num::NonZeroU64;
 use libfuzzer_sys::fuzz_target;
+use support::{TestState, close_context};
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 const MAX_VALUES: usize = 8;
 const MAX_VALUE_BYTES: usize = 64;
 const MAX_POSITIONS: usize = 8;
 const MAX_PROOF_DIGESTS: usize = 64;
-const MAX_STATES: usize = 16;
-const MAX_ROWS: usize = 8;
-
-// Bounds each sanitized transition leaf balance so the aggregate liability of
-// every possible leaf count fits u64, keeping cache construction infallible.
-const MAX_LEAF_BALANCE: u64 = u64::MAX / (MAX_STATES + MAX_ROWS) as u64;
-const MAX_BOUNDARY_RECORDS: usize = 8;
-const NON_WITHDRAWAL_SLICE_MUTATIONS: u8 = 37;
-const SLICE_MUTATIONS: u8 = 41;
-
-// Mutation selectors whose target field is populated only by a payment-bearing close.
-const PAYMENT_SLICE_MUTATIONS: [u8; 4] = [31, 34, 35, 36];
-
 type TestContext = PaymentContext<VerifyingKey, Digest>;
 type TestCloseContext = CloseContext<VerifyingKey, Digest>;
 type TestChallenge = Challenge<VerifyingKey, Digest>;
-type BuiltRow = (
-    AccountRow<VerifyingKey, Digest>,
-    OutVector<VerifyingKey>,
-    Option<OperatorSignature>,
-);
-
-#[allow(clippy::too_many_arguments)]
-fn close_context(
-    deployment: Digest,
-    epoch: u64,
-    operator: VerifyingKey,
-    cache: &StateCache<VerifyingKey, Digest>,
-    deposits: &DepositBatch<VerifyingKey>,
-    withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
-    admission_deadline: u64,
-    challenge_deadline: u64,
-    limits: CloseLimits,
-    assignment: Assignment<Digest>,
-) -> Result<TestCloseContext, TransitionError> {
-    EpochContext::new::<Sha256>(
-        deployment,
-        epoch,
-        operator,
-        deposits,
-        withdrawals,
-        cache.liability(),
-        admission_deadline,
-        challenge_deadline,
-        limits,
-        assignment,
-    )
-    .and_then(|epoch| epoch.bind::<Sha256>(cache, deposits, withdrawals))
-}
-
 #[derive(Arbitrary, Debug)]
 struct PaymentCase {
     context: TestContext,
@@ -144,21 +97,16 @@ struct VectorCase {
 
 #[derive(Arbitrary, Debug)]
 struct TransitionCase {
-    deployment: Digest,
-    challenge_deadline: u64,
-    deposits: DepositBatch<VerifyingKey>,
-    withdrawals: WithdrawalBatch<VerifyingKey, Digest>,
-    roots: RootBundle<Digest>,
-    epoch: u64,
-    unchanged: Vec<StateLeaf<VerifyingKey>>,
-    rows: Vec<AccountRow<VerifyingKey, Digest>>,
     seed: u64,
+    amount: u8,
+    mutation: u8,
+    zero_net: bool,
+    delete: bool,
 }
 
 #[derive(Arbitrary, Debug)]
 struct AdmissionCase {
     seed: u64,
-    slice_bits: u8,
     mutation: u8,
     certificate: bls12381::Certificate,
 }
@@ -191,14 +139,6 @@ fn payment_context(seed: u64, operator: &SigningKey) -> TestContext {
     )
 }
 
-fn assignment(seed: u64) -> Assignment<Digest> {
-    Assignment::new(
-        Sha256::hash(&[b"fuzz-committee", &seed.to_be_bytes()]),
-        seed.to_be_bytes()[0] % 9,
-    )
-    .expect("bounded fuzz assignment must be valid")
-}
-
 fn bls_pair(seed: u64) -> (Private, OperatorKey) {
     let private = Private::new(Scalar::from(seed.max(1)));
     let public = compute_public::<OperatorVariant>(&private);
@@ -211,41 +151,6 @@ fn bls_ack(private: &Private, body: &VectorSendBody<VerifyingKey, Digest>) -> Op
         VECTOR_ACK_AGGREGATE_NAMESPACE,
         body.encode().as_ref(),
     )
-}
-
-fn build_prepared(
-    cache: &StateCache<VerifyingKey, Digest>,
-    context: &TestCloseContext,
-    deposits: &DepositBatch<VerifyingKey>,
-    withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
-    rows: Vec<BuiltRow>,
-    transpose: Vec<TransposeEntry<VerifyingKey>>,
-) -> PreparedClose<VerifyingKey, Digest> {
-    let mut split_rows = Vec::with_capacity(rows.len());
-    let mut vectors = Vec::with_capacity(rows.len());
-    let mut signatures = Vec::with_capacity(rows.len());
-    for (row, vector, signature) in rows {
-        split_rows.push(row);
-        vectors.push(vector);
-        signatures.push(signature);
-    }
-    let partials = vectors
-        .iter()
-        .map(OutVector::accumulator)
-        .collect::<Vec<_>>();
-    prepare_close_with_strategy::<Sha256, _, _>(
-        cache,
-        context,
-        deposits,
-        withdrawals,
-        split_rows,
-        vectors,
-        &partials,
-        &signatures,
-        transpose,
-        &Sequential,
-    )
-    .expect("constructed close must prepare")
 }
 
 fn fuzz_payment(case: PaymentCase) {
@@ -379,7 +284,7 @@ fn invalidate_scope(challenge: &mut TestChallenge) {
     match challenge {
         Challenge::HigherAckDebit { payer, .. } => match payer.as_mut() {
             AccountLookup::Present(opening) => opening.proof.proof.leaf_count ^= 1,
-            AccountLookup::Absent { change, .. } => change.opening.proof.leaf_count ^= 1,
+            AccountLookup::Absent(change) => change.opening.proof.leaf_count ^= 1,
         },
         Challenge::HigherAckEntry { sender, .. } => match sender.as_mut() {
             HigherEntryLookup::Present { proof, .. } => proof.proof.leaf_count ^= 1,
@@ -403,14 +308,19 @@ fn forge_entry(challenge: &mut TestChallenge) -> bool {
 
 fn assert_forged_entry_rejected(
     context: &TestCloseContext,
-    header: &Header<Digest>,
-    roots: &RootBundle<Digest>,
+    close: &Close<VerifyingKey, Digest>,
     challenge: &TestChallenge,
 ) {
     let mut forged = challenge.clone();
     if forge_entry(&mut forged) {
         assert!(matches!(
-            adjudicate::<Sha256, _, _>(context, header, roots, &forged),
+            adjudicate::<Sha256, _, _>(
+                context,
+                &close.header,
+                &close.roots,
+                &close.amounts,
+                &forged
+            ),
             Err(ChallengeError::Ack(AckError::InvalidEntryOpening))
         ));
     }
@@ -418,15 +328,20 @@ fn assert_forged_entry_rejected(
 
 fn exercise_challenge(
     context: &TestCloseContext,
-    header: &Header<Digest>,
-    roots: &RootBundle<Digest>,
+    close: &Close<VerifyingKey, Digest>,
     kind: ChallengeKind,
     challenge: &TestChallenge,
     wrong: &SigningKey,
     mutation: u8,
 ) {
+    let Close {
+        header,
+        roots,
+        amounts,
+        ..
+    } = close;
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, challenge),
+        adjudicate::<Sha256, _, _>(context, header, roots, amounts, challenge),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
 
@@ -437,20 +352,20 @@ fn exercise_challenge(
         .expect("canonical bounded challenge must decode");
     assert_eq!(&decoded, challenge);
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, &decoded),
+        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded),
         Ok(Verdict::Proven(actual)) if actual == kind
     ));
 
     let mut unsigned = challenge.clone();
     invalidate_operator_half(&mut unsigned, context, wrong);
-    assert!(adjudicate::<Sha256, _, _>(context, header, roots, &unsigned).is_err());
+    assert!(adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unsigned).is_err());
     let mut unscoped = challenge.clone();
     invalidate_scope(&mut unscoped);
     assert!(!matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, &unscoped),
+        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unscoped),
         Ok(Verdict::Proven(_))
     ));
-    assert_forged_entry_rejected(context, header, roots, challenge);
+    assert_forged_entry_rejected(context, close, challenge);
 
     let mut mutated = encoded.to_vec();
     let maximum = match mutation % 4 {
@@ -470,19 +385,24 @@ fn exercise_challenge(
         _ => mutated.len() - 1,
     };
     if let Ok(decoded) = decode_bounded::<VerifyingKey, Digest>(&mutated, maximum) {
-        let _ = adjudicate::<Sha256, _, _>(context, header, roots, &decoded);
+        let _ = adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded);
     }
 }
 
 fn exercise_no_contradiction(
     context: &TestCloseContext,
-    header: &Header<Digest>,
-    roots: &RootBundle<Digest>,
+    close: &Close<VerifyingKey, Digest>,
     challenge: &TestChallenge,
     wrong: &SigningKey,
 ) {
+    let Close {
+        header,
+        roots,
+        amounts,
+        ..
+    } = close;
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, challenge),
+        adjudicate::<Sha256, _, _>(context, header, roots, amounts, challenge),
         Ok(Verdict::NoContradiction)
     ));
 
@@ -491,64 +411,35 @@ fn exercise_no_contradiction(
         .expect("canonical bounded challenge must decode");
     assert_eq!(&decoded, challenge);
     assert!(matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, &decoded),
+        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &decoded),
         Ok(Verdict::NoContradiction)
     ));
 
     let mut unsigned = challenge.clone();
     invalidate_operator_half(&mut unsigned, context, wrong);
-    assert!(adjudicate::<Sha256, _, _>(context, header, roots, &unsigned).is_err());
+    assert!(adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unsigned).is_err());
     let mut unscoped = challenge.clone();
     invalidate_scope(&mut unscoped);
     assert!(!matches!(
-        adjudicate::<Sha256, _, _>(context, header, roots, &unscoped),
+        adjudicate::<Sha256, _, _>(context, header, roots, amounts, &unscoped),
         Ok(Verdict::Proven(_))
     ));
-    assert_forged_entry_rejected(context, header, roots, challenge);
+    assert_forged_entry_rejected(context, close, challenge);
 }
 
-fn state_of(cache: &StateCache<VerifyingKey, Digest>, account: &VerifyingKey) -> AccountState {
-    cache
-        .leaves()
-        .iter()
-        .find(|leaf| &leaf.account == account)
-        .expect("challenge fixture account is live")
-        .state
-}
-
-fn fuzz_challenge(case: ChallengeCase) {
+async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     let (operator, payer, recipient, other) = private_keys(case.seed);
     let (operator_ack, operator_bls) = bls_pair(case.seed ^ 0x5a5a_5a5a_5a5a_5a5a);
-    let mut leaves = vec![
-        StateLeaf {
-            account: payer.public_key(),
-            state: AccountState {
-                balance: 512,
-                active: true,
-                ..AccountState::default()
-            },
-        },
-        StateLeaf {
-            account: recipient.public_key(),
-            state: AccountState {
-                balance: 256,
-                active: true,
-                ..AccountState::default()
-            },
-        },
-        StateLeaf {
-            account: other.public_key(),
-            state: AccountState {
-                balance: 128,
-                active: true,
-                ..AccountState::default()
-            },
-        },
-    ];
-    leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-    let Ok(cache) = StateCache::<VerifyingKey, Digest>::new::<Sha256>(leaves) else {
-        return;
-    };
+    let cache = support::new_state(
+        runtime,
+        "challenge",
+        vec![
+            (payer.public_key(), 512),
+            (recipient.public_key(), 256),
+            (other.public_key(), 128),
+        ],
+    )
+    .await;
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
     let context = close_context(
@@ -561,14 +452,16 @@ fn fuzz_challenge(case: ChallengeCase) {
         98,
         99,
         CloseLimits::protocol_maximum(),
-        Assignment::new(Sha256::hash(&[b"challenge-fuzz-committee"]), 0)
-            .expect("zero-bit assignment is valid"),
+        Sha256::hash(&[b"challenge-fuzz-committee"]),
     )
-    .expect("bounded challenge context must be valid");
-
-    // Arbitrary adjudication inputs must fail only with typed errors.
-    let _ = adjudicate::<Sha256, _, _>(&context, &case.header, &case.roots, &case.challenge);
-
+    .await;
+    let _ = adjudicate::<Sha256, _, _>(
+        &context,
+        &case.header,
+        &case.roots,
+        &CloseAmounts::default(),
+        &case.challenge,
+    );
     // One acknowledged send from the payer to the recipient forms the certified close.
     let amount = u64::from(case.amount) + 1;
     let epoch = context.payment().epoch();
@@ -594,88 +487,33 @@ fn fuzz_challenge(case: ChallengeCase) {
             .expect("bounded vector commits"),
     );
     let committed_ack = VectorAck::sign_by_authorities(body.clone(), &payer, &operator);
-    let payer_state = state_of(&cache, &payer_public);
-    let recipient_state = state_of(&cache, &recipient_public);
-    let mut entries = vec![
-        (
-            AccountRow {
-                account: payer_public.clone(),
-                predecessor: payer_state,
-                successor: AccountState {
-                    balance: payer_state.balance - amount,
-                    cumulative_debit: amount,
-                    ..payer_state
-                },
-                outgoing: Some(SendAuthorization::from_raw_unchecked(
-                    body,
-                    committed_ack.payer_signature().clone(),
-                )),
-                output: SettlementOutput::None,
-                prefix: Prefix::default(),
-            },
-            out_vector.clone(),
-            Some(bls_ack(&operator_ack, committed_ack.body())),
-        ),
-        (
-            AccountRow {
-                account: recipient_public.clone(),
-                predecessor: recipient_state,
-                successor: AccountState {
-                    balance: recipient_state.balance + amount,
-                    cumulative_credit: amount,
-                    receipt_count: 1,
-                    ..recipient_state
-                },
-                outgoing: None,
-                output: SettlementOutput::None,
-                prefix: Prefix::default(),
-            },
-            OutVector::empty(epoch, recipient_public.clone()),
-            None,
-        ),
-    ];
-    entries.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-    let mut prefix = Prefix::default();
-    for (row, vector, _) in &mut entries {
-        let (debit, credit, receipts) = row
-            .checked_deltas()
-            .expect("bounded challenge fixture counters are monotonic");
-        prefix = prefix
-            .checked_extend(Prefix {
-                debit,
-                credit,
-                out_count: u64::try_from(vector.entries().len())
-                    .expect("bounded entry count fits in u64"),
-                in_count: receipts,
-                ..Prefix::default()
-            })
-            .expect("bounded challenge fixture prefix cannot overflow");
-        row.prefix = prefix;
-    }
-    let transpose = vec![TransposeEntry {
-        recipient: recipient_public.clone(),
-        payer: payer_public.clone(),
-        cumulative: amount,
-        count: 1,
-    }];
-    let prepared = build_prepared(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &cache,
         &context,
         &deposits,
         &withdrawals,
-        entries,
-        transpose,
-    );
-    prepared
-        .validate::<Sha256, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .expect("constructed challenge close must validate");
+        vec![Terminal {
+            authorization: SendAuthorization::sign(body.clone(), &payer),
+            vector: out_vector,
+            operator_signature: bls_ack(&operator_ack, &body),
+        }],
+        &Sequential,
+    )
+    .await
+    .unwrap();
+    let dealing = posted::decode(prepared.encoded().clone(), &context).unwrap();
+    let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+        &cache,
+        &context,
+        &operator_bls,
+        &deposits,
+        &withdrawals,
+        dealing,
+        &mut test_rng(),
+        &Sequential,
+    )
+    .await
+    .unwrap();
     let close = prepared.close();
     let index = ChallengeIndex::new::<Sha256>(&context, close)
         .expect("validated close has a canonical challenge index");
@@ -705,7 +543,7 @@ fn fuzz_challenge(case: ChallengeCase) {
         &payer,
         &operator,
     );
-    let payer_lookup = account_lookup::<Sha256, _, _>(&index, &cache, &payer_public)
+    let payer_lookup = account_lookup::<Sha256, _, _>(&index, &payer_public)
         .expect("validated close has canonical payer evidence");
     let higher_debit = Challenge::HigherAckDebit {
         ack: Box::new(AckWitness::from_ack(&retained_ack)),
@@ -722,7 +560,7 @@ fn fuzz_challenge(case: ChallengeCase) {
     let absent_debit = Challenge::HigherAckDebit {
         ack: Box::new(AckWitness::from_ack(&absent_ack)),
         payer: Box::new(
-            account_lookup::<Sha256, _, _>(&index, &cache, &other_public)
+            account_lookup::<Sha256, _, _>(&index, &other_public)
                 .expect("validated close has canonical absent-payer evidence"),
         ),
     };
@@ -782,8 +620,7 @@ fn fuzz_challenge(case: ChallengeCase) {
     for (offset, (kind, challenge)) in challenges.iter().enumerate() {
         exercise_challenge(
             &context,
-            &close.header,
-            &close.roots,
+            close,
             *kind,
             challenge,
             &wrong,
@@ -797,7 +634,7 @@ fn fuzz_challenge(case: ChallengeCase) {
         ack: Box::new(AckWitness::from_ack(&committed_ack)),
         payer: Box::new(payer_lookup),
     };
-    exercise_no_contradiction(&context, &close.header, &close.roots, &clean_debit, &wrong);
+    exercise_no_contradiction(&context, close, &clean_debit, &wrong);
     let OutTipLookup::Present {
         cumulative,
         count,
@@ -826,12 +663,12 @@ fn fuzz_challenge(case: ChallengeCase) {
             .expect("validated close has canonical composed sender evidence"),
         ),
     };
-    exercise_no_contradiction(&context, &close.header, &close.roots, &clean_entry, &wrong);
+    exercise_no_contradiction(&context, close, &clean_entry, &wrong);
     let clean_fork = Challenge::AckFork {
         left: Box::new(AckWitness::from_ack(&committed_ack)),
         right: Box::new(AckWitness::from_ack(&committed_ack)),
     };
-    exercise_no_contradiction(&context, &close.header, &close.roots, &clean_fork, &wrong);
+    exercise_no_contradiction(&context, close, &clean_fork, &wrong);
 }
 
 fn bounded_values(mut values: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -1036,33 +873,11 @@ fn fuzz_vector(case: VectorCase) {
         );
     }
 
-    // Any entry change moves the edge accumulator.
+    // The vector root authenticates each edge's exact value.
     let mut bumped = vector.entries().to_vec();
     bumped[0].cumulative += 1;
-    let bumped = OutVector::new(7, payer.clone(), bumped).expect("bumped entries remain canonical");
-    assert_ne!(
-        vector.accumulator().checksum(),
-        bumped.accumulator().checksum()
-    );
-
-    // The recipient-grouped transpose wire form round-trips with an exact size.
-    let transpose = vector
-        .entries()
-        .iter()
-        .map(|entry| TransposeEntry {
-            recipient: entry.recipient.clone(),
-            payer: payer.clone(),
-            cumulative: entry.cumulative,
-            count: entry.count,
-        })
-        .collect::<Vec<_>>();
-    let mut encoded = Vec::new();
-    write_transpose(&transpose, &mut encoded);
-    assert_eq!(encoded.len(), transpose_encode_size(&transpose));
-    let decoded = read_transpose::<VerifyingKey>(&mut &encoded[..], transpose.len())
-        .expect("encoded transpose interval decodes");
-    assert_eq!(decoded, transpose);
-    assert!(read_transpose::<VerifyingKey>(&mut &encoded[..], transpose.len() - 1).is_err());
+    let bumped = OutVector::new(7, payer.clone(), bumped).unwrap();
+    assert_ne!(root, bumped.root::<Sha256, Digest>().unwrap());
 
     // Non-canonical and infeasible vectors are rejected.
     let mut reversed = vector.entries().to_vec();
@@ -1084,1091 +899,529 @@ fn fuzz_vector(case: VectorCase) {
     ));
 }
 
-fn bounded_deposits(batch: DepositBatch<VerifyingKey>) -> DepositBatch<VerifyingKey> {
-    DepositBatch::new(
-        batch
-            .records()
-            .iter()
-            .take(MAX_BOUNDARY_RECORDS)
-            .cloned()
-            .collect(),
-    )
-    .unwrap_or_default()
-}
-
-fn bounded_withdrawals(
-    batch: WithdrawalBatch<VerifyingKey, Digest>,
-) -> WithdrawalBatch<VerifyingKey, Digest> {
-    WithdrawalBatch::new(
-        batch
-            .requests()
-            .iter()
-            .take(MAX_BOUNDARY_RECORDS)
-            .cloned()
-            .collect(),
-    )
-    .unwrap_or_default()
-}
-
-/// Deals every slice of `context` as its own span.
-fn single_spans(context: &TestCloseContext) -> Vec<Range<u16>> {
-    (0..context.assignment().slice_count())
-        .map(|slice| slice..slice + 1)
-        .collect()
-}
-
-fn mutate_slice(
-    slice: &ProofSlice<VerifyingKey, Digest>,
-    selector: u8,
-) -> ProofSlice<VerifyingKey, Digest> {
-    let mut mutated = slice.clone();
-    let last = mutated
-        .coverage
-        .boundaries
-        .len()
-        .checked_sub(1)
-        .expect("a coverage range holds at least two boundaries");
-    let marker = Sha256::hash(&[b"transition-slice-mutation", &[selector]]);
-    let live_overlap = mutated.changes.rows.first().map(|row| StateLeaf {
-        account: row.account.clone(),
-        state: AccountState {
-            balance: 1,
-            active: true,
-            ..AccountState::default()
-        },
-    });
-    match selector % SLICE_MUTATIONS {
-        0 => mutated.span = u16::MAX - 1..u16::MAX,
-        1 => mutated.coverage.boundaries[0].predecessor ^= 1,
-        2 => mutated.coverage.boundaries[0].change ^= 1,
-        3 => mutated.coverage.boundaries[0].successor ^= 1,
-        4 => mutated.coverage.boundaries[0].prefix.payout ^= 1,
-        5 => mutated.coverage.boundaries[last].predecessor ^= 1,
-        6 => mutated.coverage.boundaries[last].change ^= 1,
-        7 => mutated.coverage.boundaries[last].successor ^= 1,
-        8 => mutated.coverage.boundaries[last].prefix.payout ^= 1,
-        9 => mutated.coverage.opening.start = u32::MAX,
-        10 => mutated.coverage.opening.proof.leaf_count ^= 1,
-        11 => mutated.coverage.opening.proof.siblings.push(marker),
-        12 => mutated.changes.opening.start = u32::MAX,
-        13 => mutated.changes.opening.proof.leaf_count ^= 1,
-        14 => mutated.changes.opening.proof.siblings.push(marker),
-        15 => {
-            if let Some(row) = mutated.changes.rows.first_mut() {
-                row.prefix.payout ^= 1;
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        16 => {
-            if mutated.out_vectors.is_empty() {
-                mutated.changes.opening.start = u32::MAX;
-            } else {
-                mutated.out_vectors.clear();
-            }
-        }
-        17 => {
-            if let Some(leaf) = live_overlap.clone() {
-                mutated.unchanged.push(leaf);
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        18 => {
-            if let Some(leaf) = live_overlap.clone() {
-                mutated.predecessor.predecessor = Some(leaf);
-            } else {
-                mutated.predecessor.opening.start = u32::MAX;
-            }
-        }
-        19 => {
-            if let Some(leaf) = live_overlap.clone() {
-                mutated.predecessor.successor = Some(leaf);
-            } else {
-                mutated.predecessor.opening.start = u32::MAX;
-            }
-        }
-        20 => mutated.predecessor.opening.start = u32::MAX,
-        21 => mutated.predecessor.opening.proof.leaf_count ^= 1,
-        22 => mutated.predecessor.opening.proof.siblings.push(marker),
-        23 => {
-            if let Some(leaf) = live_overlap.clone() {
-                mutated.successor.predecessor = Some(leaf);
-            } else {
-                mutated.successor.opening.start = u32::MAX;
-            }
-        }
-        24 => {
-            if let Some(leaf) = live_overlap {
-                mutated.successor.successor = Some(leaf);
-            } else {
-                mutated.successor.opening.start = u32::MAX;
-            }
-        }
-        25 => mutated.successor.opening.start = u32::MAX,
-        26 => mutated.successor.opening.proof.leaf_count ^= 1,
-        27 => mutated.successor.opening.proof.siblings.push(marker),
-        28 => {
-            if let Some(row) = mutated.changes.rows.first().cloned() {
-                mutated.changes.rows.push(row);
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        29 => {
-            let guard = mutated
-                .changes
-                .rows
-                .first()
-                .zip(mutated.out_vectors.first())
-                .map(|(row, vector)| {
-                    let send_root = vector
-                        .root::<Sha256, Digest>()
-                        .expect("validated slice vector commits");
-                    AccountChange::from_row::<Sha256>(row, send_root).guard::<Sha256>()
-                });
-            if let Some(guard) = guard {
-                mutated.changes.predecessor = Some(guard);
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        30 => {
-            let guard = mutated
-                .changes
-                .rows
-                .last()
-                .zip(mutated.out_vectors.last())
-                .map(|(row, vector)| {
-                    let send_root = vector
-                        .root::<Sha256, Digest>()
-                        .expect("validated slice vector commits");
-                    AccountChange::from_row::<Sha256>(row, send_root).guard::<Sha256>()
-                });
-            if let Some(guard) = guard {
-                mutated.changes.successor = Some(guard);
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        31 => {
-            if let Some(vector) = mutated.out_vectors.first_mut() {
-                *vector = OutVector::empty(vector.epoch().wrapping_add(1), vector.payer().clone());
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        32 => mutated.out_start.add(b"transition-slice-mutation"),
-        33 => mutated.in_start.add(b"transition-slice-mutation"),
-        34 => {
-            if let Some(aggregate) = mutated
-                .operator_aggregates
-                .iter_mut()
-                .find(|aggregate| aggregate.is_some())
-            {
-                *aggregate = None;
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        35 => {
-            if let Some(entry) = mutated.transpose.first_mut() {
-                entry.cumulative = entry
-                    .cumulative
-                    .checked_add(1)
-                    .expect("bounded fixture edge cannot overflow");
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        36 => {
-            if let Some(opening) = mutated.transpose_opening.as_mut() {
-                opening.start ^= 1;
-            } else {
-                mutated.changes.opening.start = u32::MAX;
-            }
-        }
-        37 => {
-            mutated
-                .withdrawal_opening
-                .as_mut()
-                .expect("withdrawal mutation requires a present output range")
-                .start ^= 1;
-        }
-        38 => {
-            mutated
-                .withdrawal_opening
-                .as_mut()
-                .expect("withdrawal mutation requires a present output range")
-                .proof
-                .leaf_count ^= 1;
-        }
-        39 => {
-            mutated
-                .withdrawal_opening
-                .as_mut()
-                .expect("withdrawal mutation requires a present output range")
-                .proof
-                .siblings
-                .push(marker);
-        }
-        _ => mutated.withdrawal_opening = None,
-    }
-    mutated
-}
-
-#[allow(clippy::too_many_arguments)]
-fn exercise_slice_mutation(
+async fn validate_bytes(
+    state: &TestState,
     context: &TestCloseContext,
     operator: &OperatorKey,
     deposits: &DepositBatch<VerifyingKey>,
     withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
-    close: &Close<VerifyingKey, Digest>,
-    slices: &[ProofSlice<VerifyingKey, Digest>],
-    selector: u8,
-) {
-    let slice = slices
-        .iter()
-        .find(|slice| !slice.changes.rows.is_empty())
-        .expect("a nonempty close has a nonempty proof slice");
-    validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
-        context,
-        operator,
-        deposits,
-        withdrawals,
-        &close.header,
-        &close.roots,
-        slice,
-        &mut test_rng(),
-    )
-    .expect("canonical nonempty slice must validate");
-    let mutated = mutate_slice(slice, selector);
-    assert!(
-        validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
+    encoded: Bytes,
+) -> bool {
+    let before = *state.head();
+    let accepted = match posted::decode(encoded, context) {
+        Ok(dealing) => validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+            state,
             context,
             operator,
             deposits,
             withdrawals,
-            &close.header,
-            &close.roots,
-            &mutated,
+            dealing,
             &mut test_rng(),
+            &Sequential,
+        )
+        .await
+        .is_ok(),
+        Err(_) => false,
+    };
+    assert_eq!(*state.head(), before);
+    accepted
+}
+
+async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) {
+    let (operator, payer, recipient, absent) = private_keys(case.seed);
+    let (ack_key, operator_bls) = bls_pair(case.seed ^ 0x55aa);
+    let amount = u64::from(case.amount) + 1;
+    let balance = if case.delete && !case.zero_net {
+        amount
+    } else {
+        amount + 1
+    };
+    let mut state = support::new_state(
+        runtime.child("replica"),
+        "transition",
+        vec![
+            (payer.public_key(), balance),
+            (recipient.public_key(), balance),
+        ],
+    )
+    .await;
+    let deposits = DepositBatch::empty();
+    let withdrawals = WithdrawalBatch::empty();
+    let context = close_context(
+        Sha256::hash(&[b"transition", &case.seed.to_be_bytes()]),
+        case.seed,
+        operator.public_key(),
+        &state,
+        &deposits,
+        &withdrawals,
+        98,
+        99,
+        CloseLimits::new(4, 4, 4, 4, 8, u64::MAX, u64::MAX, u64::MAX),
+        Sha256::hash(&[b"committee"]),
+    )
+    .await;
+    let mut terminals = Vec::new();
+    for (sender, receiver) in [(&payer, &recipient), (&recipient, &payer)]
+        .into_iter()
+        .take(if case.zero_net { 2 } else { 1 })
+    {
+        let vector = OutVector::new(
+            context.payment().epoch(),
+            sender.public_key(),
+            vec![OutEntry {
+                recipient: receiver.public_key(),
+                cumulative: amount,
+                count: 1,
+            }],
+        )
+        .unwrap();
+        let body = VectorSendBody::new(
+            context.payment(),
+            sender.public_key(),
+            1,
+            amount,
+            vector.root::<Sha256, Digest>().unwrap(),
+        );
+        terminals.push(Terminal {
+            authorization: SendAuthorization::sign(body.clone(), sender),
+            vector,
+            operator_signature: bls_ack(&ack_key, &body),
+        });
+    }
+    terminals.sort_unstable_by(|a, b| {
+        a.authorization
+            .body()
+            .payer()
+            .cmp(b.authorization.body().payer())
+    });
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        &state,
+        &context,
+        &deposits,
+        &withdrawals,
+        terminals.clone(),
+        &Sequential,
+    )
+    .await
+    .unwrap();
+    let encoded = prepared.encoded().clone();
+    assert!(
+        validate_bytes(
+            &state,
+            &context,
+            &operator_bls,
+            &deposits,
+            &withdrawals,
+            encoded.clone()
+        )
+        .await
+    );
+    let mut wrong_terminal = terminals.clone();
+    let original = wrong_terminal[0].authorization.body().clone();
+    wrong_terminal[0].authorization = SendAuthorization::from_raw_unchecked(
+        original.clone(),
+        absent.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &original.encode()),
+    );
+    let bad = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        &state,
+        &context,
+        &deposits,
+        &withdrawals,
+        wrong_terminal,
+        &Sequential,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !validate_bytes(
+            &state,
+            &context,
+            &operator_bls,
+            &deposits,
+            &withdrawals,
+            bad.encoded().clone()
+        )
+        .await
+    );
+    let mut duplicate_terminal = terminals.clone();
+    duplicate_terminal.insert(0, terminals[0].clone());
+    assert!(
+        prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            &state,
+            &context,
+            &deposits,
+            &withdrawals,
+            duplicate_terminal,
+            &Sequential
+        )
+        .await
+        .is_err()
+    );
+    let before = *state.head();
+    assert_eq!(prepared.close().rows.len(), 2);
+    assert_eq!(
+        prepared.state().mutations().len(),
+        if case.zero_net { 0 } else { 2 }
+    );
+    let index = ChallengeIndex::new::<Sha256>(&context, prepared.close()).unwrap();
+    for terminal in &terminals {
+        let account = terminal.authorization.body().payer();
+        let lookup = account_lookup::<Sha256, _, _>(&index, account).unwrap();
+        assert_eq!(
+            lookup
+                .resolve::<Sha256>(&prepared.close().roots.change, account)
+                .unwrap()
+                .0,
+            amount
+        );
+    }
+    assert_eq!(
+        account_lookup::<Sha256, _, _>(&index, &absent.public_key())
+            .unwrap()
+            .resolve::<Sha256>(&prepared.close().roots.change, &absent.public_key())
+            .unwrap(),
+        (0, None)
+    );
+
+    // A complete frame binds the claimed header, canonical keys, signatures and vector data.
+    let second_key = 33
+        + 33
+        + prepared.close().rows[0]
+            .outgoing
+            .as_ref()
+            .map_or(0, |send| 1 + send.payer_signature().encode_size());
+    let mut duplicate = encoded.to_vec();
+    duplicate.copy_within(33..65, second_key);
+    assert!(posted::decode::<VerifyingKey, Digest>(duplicate.into(), &context).is_err());
+    let mut reordered = encoded.to_vec();
+    for offset in 0..32 {
+        reordered.swap(33 + offset, second_key + offset);
+    }
+    assert!(posted::decode::<VerifyingKey, Digest>(reordered.into(), &context).is_err());
+    let vectors_start = second_key
+        + 33
+        + prepared.close().rows[1]
+            .outgoing
+            .as_ref()
+            .map_or(0, |send| 1 + send.payer_signature().encode_size());
+    let sender_vector = vectors_start + usize::from(prepared.close().rows[0].outgoing.is_none());
+    let mut bad_index = encoded.to_vec();
+    bad_index[sender_vector + 1] = 2;
+    assert!(posted::decode::<VerifyingKey, Digest>(bad_index.into(), &context).is_err());
+    let mut duplicate_entry = encoded.to_vec();
+    duplicate_entry[sender_vector] = 2;
+    duplicate_entry.splice(sender_vector + 1..sender_vector + 1, [0, 1, 1]);
+    duplicate_entry[sender_vector + 4] = 0;
+    assert!(posted::decode::<VerifyingKey, Digest>(duplicate_entry.into(), &context).is_err());
+
+    let mut malformed = encoded.to_vec();
+    match case.mutation % 8 {
+        0 => malformed[0] ^= 1,
+        1 => {
+            malformed.pop();
+        }
+        2 => malformed.push(0),
+        3 => malformed[32] = 0x7f,
+        4 => malformed[33] ^= 1,
+        5 => {
+            let position = malformed.len() - 2;
+            malformed[position] ^= 1;
+        }
+        6 => {
+            malformed.insert(33, 0);
+            malformed[32] |= 0x80;
+        }
+        _ => malformed.truncate(32),
+    }
+    assert!(
+        !validate_bytes(
+            &state,
+            &context,
+            &operator_bls,
+            &deposits,
+            &withdrawals,
+            malformed.into()
+        )
+        .await
+    );
+    let wrong = close_context(
+        Sha256::hash(&[b"wrong-context"]),
+        case.seed,
+        operator.public_key(),
+        &state,
+        &deposits,
+        &withdrawals,
+        98,
+        99,
+        *context.limits(),
+        *context.committee(),
+    )
+    .await;
+    assert!(
+        !validate_bytes(
+            &state,
+            &wrong,
+            &operator_bls,
+            &deposits,
+            &withdrawals,
+            encoded.clone()
+        )
+        .await
+    );
+    let (_, wrong_operator) = bls_pair(case.seed ^ 0x33cc);
+    assert!(
+        !validate_bytes(
+            &state,
+            &context,
+            &wrong_operator,
+            &deposits,
+            &withdrawals,
+            encoded.clone()
+        )
+        .await
+    );
+    let close = prepared.close();
+    for which in 0..5 {
+        let mut roots = close.roots;
+        let mut amounts = close.amounts;
+        let changed = Sha256::hash(&[b"wrong-header-field", &[which]]);
+        match which {
+            0 => roots.change.digest = changed,
+            1 => roots.withdrawal_outputs.digest = changed,
+            2 => roots.successor.digest = changed,
+            3 => amounts.withdrawal += 1,
+            _ => amounts.payout += 1,
+        }
+        assert!(!close.header.verify::<Sha256, _>(&context, &roots, &amounts));
+        let header = Header::new::<Sha256, _>(&context, &roots, &amounts);
+        let mut bytes = encoded.to_vec();
+        bytes[..32].copy_from_slice(header.encode().as_ref());
+        assert!(
+            !validate_bytes(
+                &state,
+                &context,
+                &operator_bls,
+                &deposits,
+                &withdrawals,
+                bytes.into()
+            )
+            .await
+        );
+    }
+    assert_eq!(*state.head(), before);
+    let old_opening = state.opening(payer.public_key()).await.unwrap();
+    assert_eq!(
+        old_opening.verify::<Sha256>(&before.root()).unwrap().get(),
+        balance
+    );
+    let mut corrupt = old_opening.clone();
+    corrupt.balance = NonZeroU64::new(balance + 1).unwrap();
+    assert!(corrupt.verify::<Sha256>(&before.root()).is_err());
+    corrupt = old_opening.clone();
+    corrupt.account = absent.public_key();
+    assert!(corrupt.verify::<Sha256>(&before.root()).is_err());
+    let proof_bytes = old_opening.encode();
+    assert_eq!(
+        StateOpening::<VerifyingKey, Digest>::decode_cfg(proof_bytes.clone(), &MAX_PROOF_DIGESTS)
+            .unwrap(),
+        old_opening
+    );
+    assert!(
+        StateOpening::<VerifyingKey, Digest>::decode_cfg(
+            &proof_bytes[..proof_bytes.len() - 1],
+            &MAX_PROOF_DIGESTS
         )
         .is_err()
     );
-}
-
-fn fuzz_transition(mut case: TransitionCase) {
-    case.challenge_deadline = case.challenge_deadline.clamp(1, u64::MAX - 1);
-    let admission_deadline = case.challenge_deadline - 1;
-    let deposits = bounded_deposits(case.deposits);
-    let withdrawals = bounded_withdrawals(case.withdrawals);
-    case.unchanged.truncate(MAX_STATES);
-    case.rows.truncate(MAX_ROWS);
-    let mut leaves = case
-        .unchanged
-        .iter()
-        .cloned()
-        .map(|mut leaf| {
-            leaf.state.active = true;
-            leaf.state.balance = (leaf.state.balance % MAX_LEAF_BALANCE).max(1);
-            leaf
-        })
-        .chain(
-            case.rows
-                .iter()
-                .filter(|row| row.predecessor.active)
-                .map(|row| StateLeaf {
-                    account: row.account.clone(),
-                    state: AccountState {
-                        balance: (row.predecessor.balance % MAX_LEAF_BALANCE).max(1),
-                        ..row.predecessor
-                    },
-                }),
-        )
-        .collect::<Vec<_>>();
-    leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-    leaves.dedup_by(|left, right| left.account == right.account);
-    let cache =
-        StateCache::new::<Sha256>(leaves).expect("sanitized arbitrary opening cache must be valid");
-    let (operator, _, _, _) = private_keys(case.seed);
-    let (_, operator_bls) = bls_pair(case.seed ^ 0x5a5a_5a5a_5a5a_5a5a);
-    let _ = close_context(
-        case.deployment,
-        case.epoch,
-        operator.public_key(),
-        &cache,
-        &deposits,
-        &withdrawals,
-        admission_deadline,
-        case.challenge_deadline,
-        CloseLimits::protocol_maximum(),
-        assignment(case.seed),
-    );
-
-    // An arbitrary corpus under a well-formed header must fail only with typed errors.
-    let empty_deposits = DepositBatch::empty();
-    let empty_withdrawals = WithdrawalBatch::empty();
-    let context = close_context(
-        case.deployment,
-        case.epoch,
-        operator.public_key(),
-        &cache,
-        &empty_deposits,
-        &empty_withdrawals,
-        admission_deadline,
-        case.challenge_deadline,
-        CloseLimits::protocol_maximum(),
-        assignment(case.seed),
-    )
-    .expect("empty sealed boundaries over a valid cache must be valid");
-    let out_vectors = case
-        .rows
-        .iter()
-        .map(|row| OutVector::empty(context.payment().epoch(), row.account.clone()))
-        .collect::<Vec<_>>();
-    let operator_aggregates = vec![None; usize::from(context.assignment().slice_count())];
-    let roots = case.roots;
-    let header = Header::new::<Sha256, _>(&context, &roots);
-    let close = Close {
-        header,
-        roots,
-        unchanged: case.unchanged,
-        rows: case.rows,
-        out_vectors,
-        operator_aggregates,
-    };
-    let _ = validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        &context,
-        &operator_bls,
-        &empty_deposits,
-        &empty_withdrawals,
-        &close,
-        &mut test_rng(),
-    );
-
-    // An empty prepared close validates, deals, and proves its zero terminal.
-    let cache = StateCache::<VerifyingKey, Digest>::new::<Sha256>(Vec::new())
-        .expect("empty state cache must be valid");
-    let deposits = DepositBatch::empty();
-    let withdrawals = WithdrawalBatch::empty();
-    let context = close_context(
-        Sha256::hash(&[b"fuzz-deployment", &case.seed.to_be_bytes()]),
-        case.seed,
-        operator.public_key(),
-        &cache,
-        &deposits,
-        &withdrawals,
-        admission_deadline,
-        case.challenge_deadline,
-        CloseLimits::protocol_maximum(),
-        assignment(case.seed),
-    )
-    .expect("empty close context must be valid");
-    let prepared = build_prepared(
-        &cache,
-        &context,
-        &deposits,
-        &withdrawals,
-        Vec::new(),
-        Vec::new(),
-    );
-    prepared
-        .validate::<Sha256, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .expect("constructed empty close must validate");
-    let close = prepared.close();
-    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        &context,
-        &operator_bls,
-        &deposits,
-        &withdrawals,
-        close,
-        &mut test_rng(),
-    )
-    .expect("constructed empty close must validate from the corpus");
-    let slices = prepared
-        .assemble_slices(&cache, &single_spans(&context), &Sequential)
-        .expect("constructed empty close must split into valid slices");
-    for slice in &slices {
-        validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-            slice,
-            &mut test_rng(),
-        )
-        .expect("constructed slice must validate");
-    }
-    let totals = prepared
-        .terminal_proof()
-        .expect("constructed empty close has a terminal proof")
-        .verify::<Sha256, _>(
-            &context,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-        )
-        .expect("constructed empty terminal proof must verify");
-    assert_eq!(totals.debit, 0);
-    assert_eq!(totals.credit, 0);
-
-    // A deposit-creation close validates, and every slice mutation is rejected.
-    let account = SigningKey::from_seed(case.seed.wrapping_add(10));
-    let cache = StateCache::<VerifyingKey, Digest>::new::<Sha256>(Vec::new())
-        .expect("empty opening cache is valid");
-    let amount = case.seed.to_be_bytes()[0] as u64 + 1;
-    let deposits = DepositBatch::new(vec![
-        DepositRecord::new(account.public_key(), amount)
-            .expect("positive fuzz deposit must be valid"),
-    ])
-    .expect("singleton fuzz deposit batch must be valid");
-    let context = close_context(
-        Sha256::hash(&[b"fuzz-deployment", &case.seed.to_be_bytes()]),
-        case.seed.wrapping_add(1),
-        operator.public_key(),
-        &cache,
-        &deposits,
-        &withdrawals,
-        admission_deadline,
-        case.challenge_deadline,
-        CloseLimits::protocol_maximum(),
-        assignment(case.seed),
-    )
-    .expect("deposit creation close context must be valid");
-    let row = AccountRow {
-        account: account.public_key(),
-        predecessor: AccountState::default(),
-        successor: AccountState {
-            balance: amount,
-            active: true,
-            ..AccountState::default()
-        },
-        outgoing: None,
-        output: SettlementOutput::None,
-        prefix: Prefix {
-            deposit: amount,
-            ..Prefix::default()
-        },
-    };
-    let vector = OutVector::empty(context.payment().epoch(), account.public_key());
-    let prepared = build_prepared(
-        &cache,
-        &context,
-        &deposits,
-        &withdrawals,
-        vec![(row, vector, None)],
-        Vec::new(),
-    );
-    prepared
-        .validate::<Sha256, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .expect("constructed deposit creation must validate");
-    let close = prepared.close();
+    let absent_key = account_key(&absent.public_key()).unwrap();
     assert_eq!(
-        *context.predecessor_root(),
-        empty_root::<Sha256>(VectorKind::State)
+        state
+            .lookup(&absent_key)
+            .await
+            .unwrap()
+            .resolve::<Sha256>(&state.root(), &absent_key)
+            .unwrap(),
+        None
     );
-    assert_ne!(
-        close.roots.successor,
-        empty_root::<Sha256>(VectorKind::State)
-    );
-    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        &context,
-        &operator_bls,
-        &deposits,
-        &withdrawals,
-        close,
-        &mut test_rng(),
-    )
-    .expect("constructed deposit creation must validate from the corpus");
-    let slices = prepared
-        .assemble_slices(&cache, &single_spans(&context), &Sequential)
-        .expect("constructed deposit close must split into valid slices");
-    for slice in &slices {
-        validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-            slice,
-            &mut test_rng(),
-        )
-        .expect("constructed deposit slice must validate");
-    }
-    exercise_slice_mutation(
-        &context,
-        &operator_bls,
-        &deposits,
-        &withdrawals,
-        close,
-        &slices,
-        case.seed.to_be_bytes()[2] % NON_WITHDRAWAL_SLICE_MUTATIONS,
-    );
-
-    // A close-withdrawal empties the single account and its claim verifies.
-    let account = SigningKey::from_seed(case.seed.wrapping_add(20));
-    let opening_balance = case.seed.to_be_bytes()[1] as u64 + 2;
-    let opening = AccountState {
-        balance: opening_balance,
-        active: true,
-        ..AccountState::default()
+    let (next, close) = prepared.apply(state).await.unwrap();
+    state = next.commit().await.unwrap();
+    let expected_payer = if case.zero_net {
+        balance
+    } else {
+        balance - amount
     };
-    let cache = StateCache::<VerifyingKey, Digest>::new::<Sha256>(vec![StateLeaf {
-        account: account.public_key(),
-        state: opening,
-    }])
-    .expect("single active account is a valid opening cache");
-    let deployment = Sha256::hash(&[b"fuzz-withdrawal-deployment", &case.seed.to_be_bytes()]);
-    let authorization_root = cache.root().digest;
-    let withdrawal = SignedWithdrawal::sign(
-        deployment,
-        authorization_root,
-        Bytes::from_static(b"fuzz-destination"),
-        WithdrawalAction::Close,
-        case.challenge_deadline,
-        &account,
-    );
-    let withdrawals = WithdrawalBatch::new(vec![withdrawal])
-        .expect("singleton withdrawal batch must be canonical");
-    let deposits = DepositBatch::empty();
-    let context = close_context(
-        deployment,
-        case.seed.wrapping_add(2),
-        operator.public_key(),
-        &cache,
-        &deposits,
-        &withdrawals,
-        admission_deadline,
-        case.challenge_deadline,
-        CloseLimits::protocol_maximum(),
-        assignment(case.seed),
-    )
-    .expect("covered withdrawal close context must be valid");
-    let row = AccountRow {
-        account: account.public_key(),
-        predecessor: opening,
-        successor: AccountState::default(),
-        outgoing: None,
-        output: SettlementOutput::Withdrawal(opening.balance),
-        prefix: Prefix {
-            withdrawal: opening.balance,
-            withdrawal_count: 1,
-            ..Prefix::default()
-        },
+    let expected_recipient = if case.zero_net {
+        balance
+    } else {
+        balance + amount
     };
-    let vector = OutVector::empty(context.payment().epoch(), account.public_key());
-    let prepared = build_prepared(
-        &cache,
-        &context,
-        &deposits,
-        &withdrawals,
-        vec![(row, vector, None)],
-        Vec::new(),
-    );
-    prepared
-        .validate::<Sha256, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .expect("constructed close withdrawal must validate");
-    let close = prepared.close();
-    assert_eq!(
-        close.roots.successor,
-        empty_root::<Sha256>(VectorKind::State)
-    );
-    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        &context,
-        &operator_bls,
-        &deposits,
-        &withdrawals,
-        close,
-        &mut test_rng(),
-    )
-    .expect("constructed close withdrawal must validate again");
-    let claim = prepared
-        .withdrawal_claim(&withdrawals, &account.public_key())
-        .expect("constructed withdrawal must have a claim");
-    let output = claim
-        .verify::<Sha256>(&close.roots.withdrawal_outputs)
-        .expect("constructed withdrawal claim must verify");
-    assert_eq!(
-        output.destination(),
-        withdrawals.requests()[0].body().destination()
-    );
-    assert_eq!(output.amount(), opening.balance);
-    let slices = prepared
-        .assemble_slices(&cache, &single_spans(&context), &Sequential)
-        .expect("constructed destruction close must split into slices");
-    assert!(slices.iter().all(|slice| {
-        validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-            slice,
-            &mut test_rng(),
-        )
-        .is_ok()
-    }));
-    for selector in NON_WITHDRAWAL_SLICE_MUTATIONS..SLICE_MUTATIONS {
-        exercise_slice_mutation(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            close,
-            &slices,
-            selector,
+    for (account, expected) in [
+        (payer.public_key(), expected_payer),
+        (recipient.public_key(), expected_recipient),
+    ] {
+        let key = account_key(&account).unwrap();
+        assert_eq!(
+            state
+                .get(&key)
+                .await
+                .unwrap()
+                .map(NonZeroU64::get)
+                .unwrap_or(0),
+            expected
+        );
+        assert_eq!(
+            state
+                .lookup(&key)
+                .await
+                .unwrap()
+                .resolve::<Sha256>(&state.root(), &key)
+                .unwrap()
+                .map(NonZeroU64::get)
+                .unwrap_or(0),
+            expected
+        );
+        assert_eq!(
+            state
+                .lookup_at(before.root(), before.operations(), &key)
+                .await
+                .unwrap()
+                .resolve::<Sha256>(&before.root(), &key)
+                .unwrap()
+                .unwrap()
+                .get(),
+            balance
         );
     }
-
-    // An acknowledged send crediting an absent recipient classifies as an external payout.
-    let (payer_ack, payer_bls) = bls_pair(case.seed.wrapping_add(40).max(1));
-    let payer = SigningKey::from_seed(case.seed.wrapping_add(30));
-    let recipient = SigningKey::from_seed(case.seed.wrapping_add(31));
-    let payout = u64::from(case.seed.to_be_bytes()[3]) + 1;
-    let payer_opening = AccountState {
-        balance: payout + 1,
-        active: true,
-        ..AccountState::default()
-    };
-    let cache = StateCache::<VerifyingKey, Digest>::new::<Sha256>(vec![StateLeaf {
-        account: payer.public_key(),
-        state: payer_opening,
-    }])
-    .expect("single live payout payer is a valid opening cache");
-    let deposits = DepositBatch::empty();
-    let withdrawals = WithdrawalBatch::empty();
-    let context = close_context(
-        Sha256::hash(&[b"fuzz-payout-deployment", &case.seed.to_be_bytes()]),
-        case.seed.wrapping_add(3),
-        operator.public_key(),
-        &cache,
-        &deposits,
-        &withdrawals,
-        admission_deadline,
-        case.challenge_deadline,
-        CloseLimits::protocol_maximum(),
-        Assignment::new(Sha256::hash(&[b"fuzz-payout-committee"]), 0)
-            .expect("zero-bit payout assignment is valid"),
-    )
-    .expect("external payout close context must be valid");
-    let epoch = context.payment().epoch();
-    let out_vector = OutVector::new(
-        epoch,
-        payer.public_key(),
-        vec![OutEntry {
-            recipient: recipient.public_key(),
-            cumulative: payout,
-            count: 1,
-        }],
-    )
-    .expect("one positive payout entry is canonical");
-    let body = VectorSendBody::new(
-        context.payment(),
-        payer.public_key(),
-        1,
-        payout,
-        out_vector
-            .root::<Sha256, Digest>()
-            .expect("bounded payout vector commits"),
+    assert_eq!(state.root(), close.roots.successor);
+    assert_eq!(state.liability(), balance * 2);
+    let current = *state.head();
+    let foreign_root = StateRoot::new(Sha256::hash(&[b"unretained"]));
+    assert!(
+        state
+            .lookup_at(foreign_root, before.operations(), &absent_key)
+            .await
+            .is_err()
     );
-    let operator_signature = bls_ack(&payer_ack, &body);
-    let outgoing = SendAuthorization::sign(body, &payer);
-    let transpose = vec![TransposeEntry {
-        recipient: recipient.public_key(),
-        payer: payer.public_key(),
-        cumulative: payout,
-        count: 1,
-    }];
-    let mut pairs = vec![
-        (
-            AccountRow {
-                account: payer.public_key(),
-                predecessor: payer_opening,
-                successor: AccountState {
-                    balance: 1,
-                    cumulative_debit: payout,
-                    ..payer_opening
-                },
-                outgoing: Some(outgoing),
-                output: SettlementOutput::None,
-                prefix: Prefix::default(),
-            },
-            out_vector,
-            Some(operator_signature),
-        ),
-        (
-            AccountRow {
-                account: recipient.public_key(),
-                predecessor: AccountState::default(),
-                successor: AccountState {
-                    cumulative_credit: payout,
-                    receipt_count: 1,
-                    ..AccountState::default()
-                },
-                outgoing: None,
-                output: SettlementOutput::ExternalPayout(payout),
-                prefix: Prefix::default(),
-            },
-            OutVector::empty(epoch, recipient.public_key()),
-            None,
-        ),
-    ];
-    pairs.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-    let mut prefix = Prefix::default();
-    for (row, vector, _) in &mut pairs {
-        let (debit, credit, receipts) = row
-            .checked_deltas()
-            .expect("bounded payout counters are monotonic");
-        let payout_delta = if row.predecessor.active { 0 } else { credit };
-        prefix = prefix
-            .checked_extend(Prefix {
-                debit,
-                credit,
-                payout: payout_delta,
-                out_count: u64::try_from(vector.entries().len())
-                    .expect("bounded entry count fits in u64"),
-                in_count: receipts,
-                ..Prefix::default()
-            })
-            .expect("bounded payout prefixes cannot overflow");
-        row.prefix = prefix;
-    }
-    let prepared = build_prepared(&cache, &context, &deposits, &withdrawals, pairs, transpose);
-    prepared
-        .validate::<Sha256, PaymentBatchVerifier, _>(
-            &context,
-            &payer_bls,
-            &deposits,
-            &withdrawals,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .expect("constructed external payout must validate");
-    let terminal_proof = prepared
-        .terminal_proof()
-        .expect("constructed external payout has a canonical terminal proof");
-    let close = prepared.close();
+    assert_eq!(*state.head(), current);
+    drop(state);
+    let reopened = State::<_, Sha256>::open(
+        runtime.child("replica"),
+        support::config(&runtime, "transition"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*reopened.head(), current);
     assert_eq!(
-        close
-            .rows
-            .last()
-            .expect("payout close has changed rows")
-            .prefix
-            .payout,
-        payout
+        reopened
+            .get(&account_key(&payer.public_key()).unwrap())
+            .await
+            .unwrap()
+            .map(NonZeroU64::get)
+            .unwrap_or(0),
+        expected_payer
     );
-    let totals = terminal_proof
-        .verify::<Sha256, VerifyingKey>(
-            &context,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-        )
-        .expect("constructed terminal proof must verify");
-    assert_eq!(totals.payout, payout);
-    let claim = prepared
-        .external_payout_claim(&recipient.public_key())
-        .expect("constructed external payout must have a claim");
-    let claimed = claim
-        .verify::<Sha256>(&close.roots.change)
-        .expect("constructed external payout claim must verify");
-    assert_eq!(claimed.recipient, recipient.public_key());
-    assert_eq!(claimed.amount, payout);
-    let payout_row = close
-        .rows
-        .iter()
-        .find(|row| row.account == recipient.public_key())
-        .expect("constructed external payout retains its recipient row");
-    assert_eq!(payout_row.predecessor, AccountState::default());
-    assert!(!payout_row.successor.active);
-    assert_eq!(payout_row.successor.balance, 0);
-    assert!(payout_row.outgoing.is_none());
-    assert_eq!(payout_row.checked_deltas(), Some((0, payout, 1)));
-    validate_close::<Sha256, _, _, PaymentBatchVerifier, _>(
-        &context,
-        &payer_bls,
-        &deposits,
-        &withdrawals,
-        close,
-        &mut test_rng(),
-    )
-    .expect("constructed external payout must validate again");
-    let slices = prepared
-        .assemble_slices(&cache, &single_spans(&context), &Sequential)
-        .expect("external payout close must split into slices");
-    assert!(slices.iter().all(|slice| {
-        validate_slice::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &context,
-            &payer_bls,
-            &deposits,
-            &withdrawals,
-            &close.header,
-            &close.roots,
-            slice,
-            &mut test_rng(),
-        )
-        .is_ok()
-    }));
-    for selector in PAYMENT_SLICE_MUTATIONS {
-        exercise_slice_mutation(
-            &context,
-            &payer_bls,
-            &deposits,
-            &withdrawals,
-            close,
-            &slices,
-            selector,
-        );
-    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn assignment_is_rejected(
-    scheme: &bls12381::Scheme,
-    context: &TestCloseContext,
-    operator: &OperatorKey,
-    deposits: &DepositBatch<VerifyingKey>,
-    withdrawals: &WithdrawalBatch<VerifyingKey, Digest>,
-    header: &Header<Digest>,
-    roots: &RootBundle<Digest>,
-    slices: Vec<ProofSlice<VerifyingKey, Digest>>,
-) -> bool {
-    seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-        scheme,
-        context,
-        operator,
-        deposits,
-        withdrawals,
-        header,
-        roots,
-        slices,
-        &mut test_rng(),
-        &Sequential,
-    )
-    .is_err()
-}
-
-fn fuzz_admission(case: AdmissionCase) {
-    let seed = case.seed;
-    let challenge_deadline = seed.clamp(1, u64::MAX - 1);
-    let admission_deadline = challenge_deadline - 1;
+async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
     let validators = (0..4)
-        .map(|offset| Private::new(Scalar::from(seed.wrapping_add(offset).max(1))))
+        .map(|offset| Private::new(Scalar::from(case.seed.wrapping_add(offset).max(1))))
         .collect::<Vec<_>>();
-    let Ok(committee) = Committee::new(
-        validators
-            .iter()
-            .map(compute_public::<MinSig>)
-            .collect::<Vec<_>>(),
-    ) else {
+    let Ok(committee) = Committee::new(validators.iter().map(compute_public::<MinSig>).collect())
+    else {
         return;
     };
-    let operator = SigningKey::from_seed(seed.wrapping_add(100));
-    let (_, operator_bls) = bls_pair(seed.wrapping_add(300));
-    let account = SigningKey::from_seed(seed.wrapping_add(200));
-    let cache = StateCache::<VerifyingKey, Digest>::new::<Sha256>(Vec::new())
-        .expect("empty admission opening cache is valid");
-    let amount = u64::from(case.mutation) + 1;
+    let operator = SigningKey::from_seed(case.seed.wrapping_add(100));
+    let (_, operator_bls) = bls_pair(case.seed.wrapping_add(300));
+    let account = SigningKey::from_seed(case.seed.wrapping_add(200));
+    let state = support::new_state(runtime, "admission", Vec::new()).await;
     let deposits = DepositBatch::new(vec![
-        DepositRecord::new(account.public_key(), amount)
-            .expect("positive admission deposit is valid"),
+        DepositRecord::new(account.public_key(), u64::from(case.mutation) + 1).unwrap(),
     ])
-    .expect("singleton admission deposit is canonical");
+    .unwrap();
     let withdrawals = WithdrawalBatch::empty();
-    let assignment = Assignment::new(committee.commitment::<Sha256>(), case.slice_bits % 3 + 2)
-        .expect("fuzz slice bits are bounded");
     let context = close_context(
-        Sha256::hash(&[b"fuzz-admission-deployment", &seed.to_be_bytes()]),
-        seed,
+        Sha256::hash(&[b"admission"]),
+        case.seed,
         operator.public_key(),
-        &cache,
+        &state,
         &deposits,
         &withdrawals,
-        admission_deadline,
-        challenge_deadline,
+        98,
+        99,
         CloseLimits::protocol_maximum(),
-        assignment,
+        committee.commitment::<Sha256>(),
     )
-    .expect("bounded admission context must be valid");
-    let row = AccountRow {
-        account: account.public_key(),
-        predecessor: AccountState::default(),
-        successor: AccountState {
-            balance: amount,
-            active: true,
-            ..AccountState::default()
-        },
-        outgoing: None,
-        output: SettlementOutput::None,
-        prefix: Prefix {
-            deposit: amount,
-            ..Prefix::default()
-        },
-    };
-    let vector = OutVector::empty(context.payment().epoch(), account.public_key());
-    let prepared = build_prepared(
-        &cache,
+    .await;
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        &state,
         &context,
         &deposits,
         &withdrawals,
-        vec![(row, vector, None)],
         Vec::new(),
-    );
-    prepared
-        .validate::<Sha256, PaymentBatchVerifier, _>(
-            &context,
-            &operator_bls,
-            &deposits,
-            &withdrawals,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .expect("nonempty admission close must validate");
-    let close = prepared.close();
-    let all = prepared
-        .assemble_slices(&cache, &single_spans(&context), &Sequential)
-        .expect("admission slices must build");
-    let nonempty = all
-        .iter()
-        .find(|slice| !slice.changes.rows.is_empty())
-        .expect("deposit creation has one nonempty slice")
-        .span
-        .start;
+        &Sequential,
+    )
+    .await
+    .unwrap();
+    let before = *state.head();
     let mut votes = Vec::new();
-    let mut checked_nonempty_mutation = false;
-    for (validator, private) in validators.iter().enumerate() {
-        let scheme = bls12381::Scheme::signer(committee.clone(), private.clone())
-            .expect("validator belongs to committee");
-        let spans = assigned_slice_spans::<Sha256, _>(
-            &committee,
-            context.assignment(),
-            scheme.me().expect("signer has a committee index"),
-        )
-        .expect("assignment matches committee");
-        let assigned = prepared
-            .assemble_slices(&cache, &spans, &Sequential)
-            .expect("assigned dealing must build");
-        let canonical = assigned.clone();
-        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
+    for private in validators {
+        let scheme = bls12381::Scheme::signer(committee.clone(), private).unwrap();
+        let (vote, validated) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
             &scheme,
+            &state,
             &context,
             &operator_bls,
             &deposits,
             &withdrawals,
-            &close.header,
-            &close.roots,
-            assigned,
+            prepared.encoded().clone(),
             &mut test_rng(),
             &Sequential,
         )
-        .expect("complete valid assignment must sign");
-        assert!(sealed.slices().iter().all(|slice| {
-            slice
-                .span
-                .clone()
-                .all(|index| sealed.serve(index).is_some())
-        }));
-        if validator == 0 {
-            let position = usize::from(case.mutation) % canonical.len();
-            let mut omitted = canonical.clone();
-            omitted.remove(position);
-            assert!(assignment_is_rejected(
+        .await
+        .unwrap();
+        assert_eq!(validated.close().header, prepared.close().header);
+        assert_eq!(validated.encoded(), prepared.encoded());
+        assert!(scheme.verify_vote(&prepared.close().header, &vote));
+        let mut bytes = prepared.encoded().to_vec();
+        bytes[0] ^= 1;
+        assert!(
+            seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
                 &scheme,
+                &state,
                 &context,
                 &operator_bls,
                 &deposits,
                 &withdrawals,
-                &close.header,
-                &close.roots,
-                omitted,
-            ));
-
-            let mut duplicate = canonical.clone();
-            duplicate.insert(position, canonical[position].clone());
-            assert!(assignment_is_rejected(
-                &scheme,
-                &context,
-                &operator_bls,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-                duplicate,
-            ));
-
-            let mut reordered = canonical.clone();
-            let last = reordered.len() - 1;
-            reordered.swap(0, last);
-            assert!(assignment_is_rejected(
-                &scheme,
-                &context,
-                &operator_bls,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-                reordered,
-            ));
-        }
-        if let Some(position) = canonical
-            .iter()
-            .position(|slice| slice.span.contains(&nonempty))
-            .filter(|_| !checked_nonempty_mutation)
-        {
-            let mut malformed = canonical.clone();
-            malformed[position] = mutate_slice(
-                &malformed[position],
-                case.mutation % NON_WITHDRAWAL_SLICE_MUTATIONS,
-            );
-            assert!(assignment_is_rejected(
-                &scheme,
-                &context,
-                &operator_bls,
-                &deposits,
-                &withdrawals,
-                &close.header,
-                &close.roots,
-                malformed,
-            ));
-            checked_nonempty_mutation = true;
-        }
+                bytes.into(),
+                &mut test_rng(),
+                &Sequential
+            )
+            .await
+            .is_err()
+        );
         votes.push(vote);
     }
-    assert!(checked_nonempty_mutation);
+    assert_eq!(*state.head(), before);
     let verifier = bls12381::Scheme::verifier(committee.clone());
-    let _ = verifier.verify_exact(&close.header, &case.certificate);
+    let _ = verifier.verify_exact(&prepared.close().header, &case.certificate);
+    assert!(
+        verifier
+            .assemble_exact(votes.iter().take(committee.quorum() - 1).cloned())
+            .is_err()
+    );
+    assert!(
+        verifier
+            .assemble_exact(vec![votes[0].clone(); committee.quorum()])
+            .is_err()
+    );
     let certificate = verifier
         .assemble_exact(votes.into_iter().take(committee.quorum()))
-        .expect("exact valid quorum must assemble");
-    assert!(verifier.verify_exact(&close.header, &certificate));
+        .unwrap();
+    assert!(verifier.verify_exact(&prepared.close().header, &certificate));
+    let mut amounts = prepared.close().amounts;
+    amounts.payout += 1;
+    let wrong = Header::new::<Sha256, _>(&context, &prepared.close().roots, &amounts);
+    assert!(!verifier.verify_exact(&wrong, &certificate));
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -2176,13 +1429,15 @@ fuzz_target!(|data: &[u8]| {
     let Ok(input) = FuzzInput::arbitrary(&mut Unstructured::new(data)) else {
         return;
     };
-
     match input {
         FuzzInput::Payment(case) => fuzz_payment(*case),
-        FuzzInput::Challenge(case) => fuzz_challenge(*case),
+        FuzzInput::Challenge(case) => deterministic::Runner::seeded(case.seed)
+            .start(|runtime| async move { fuzz_challenge(*case, runtime).await }),
         FuzzInput::Commitment(case) => fuzz_commitment(*case),
         FuzzInput::Vector(case) => fuzz_vector(*case),
-        FuzzInput::Transition(case) => fuzz_transition(*case),
-        FuzzInput::Admission(case) => fuzz_admission(*case),
+        FuzzInput::Transition(case) => deterministic::Runner::seeded(case.seed)
+            .start(|runtime| async move { fuzz_transition(*case, runtime).await }),
+        FuzzInput::Admission(case) => deterministic::Runner::seeded(case.seed)
+            .start(|runtime| async move { fuzz_admission(*case, runtime).await }),
     }
 });

@@ -1,568 +1,210 @@
 //! Clear many-to-many payments with compact, challengeable settlement.
 //!
-//! This module implements the runtime-agnostic protocol objects, verification rules, and bounded
-//! in-memory settlement transitions described by [Bajillion](https://commonware.xyz/blogs/clearing).
-//! Operators, persistence, networking, clocks, and atomic asset-adapter integration are
-//! deliberately left to applications.
+//! Bajillion separates payment acceptance from settlement. Payers sign cumulative payment
+//! vectors, an operator acknowledges them, and validators certify the resulting account activity.
+//! Each validator retains the operator's complete account state in QMDB Current Ordered with MMB.
+//! The operator distributes one identical dealing that every validator checks against that state.
+//!
+//! Payment, boundary, vector, and BMT types support `no_std`. QMDB state, complete-close
+//! validation, challenges, and settlement require `std` and use Commonware runtime traits.
+//! Applications own networking, clocks, operator acceptance, and atomic persistence of protocol
+//! state with votes and asset transfers. The terminal example supplies an application integration.
 //!
 //! # Fault model
 //!
-//! The operator may halt, censor, equivocate, withhold messages, and propose arbitrary closes. It
-//! cannot forge an account's signature. Hashes and signatures are assumed secure, validator
-//! proofs of possession are authenticated before committee construction, and callers of
-//! randomized batch verification must supply fresh cryptographic randomness. Accumulator
-//! comparison assumes `LtHash` collision resistance, and both accumulated edge orderings are
-//! strict sets, so multiplicity wrap is inapplicable.
+//! The operator may halt, censor, equivocate, withhold data, or propose arbitrary closes. It cannot
+//! forge account signatures. Hashes and signatures are assumed secure; committee proofs of
+//! possession must be authenticated at registration. Randomized signature verification requires
+//! fresh cryptographic randomness from its caller.
 //!
-//! ## Certified public relation
+//! A committee has `n = 3f + 1` validators and tolerates at most `f` Byzantine members. Every honest
+//! signer checks the complete dealing and retains its evidence before publishing a vote. An exact
+//! `q = 2f + 1` certificate therefore includes at least `f + 1` honest holders of the entire close.
+//! Certification proves the disclosed public relation. It cannot prove that the operator never
+//! signed an additional private receipt.
 //!
-//! A validator does more than compare aggregate debit and credit. Before voting, it authenticates
-//! its exact assigned [`transition::ProofSlice`] values: their coverage and state ranges, every
-//! changed row, terminal payer-signed vector endpoint, outgoing vector, transpose range,
-//! accumulator transition, boundary contribution, prefix transition, state update, the slice's
-//! combined operator countersignature, and every payer signature. The terminal boundary then
-//! binds the exact vector lengths, boundary totals, payment conservation, the multiset equality
-//! between the two edge orderings, and successor liability.
+//! # Payments and private evidence
 //!
-//! A committee has exactly `n = 3f + 1` validators, every slice has exactly `q = 2f + 1` holders,
-//! and an admission certificate has exactly `q` signers. Assuming at most `f` Byzantine validators
-//! and that each honest signer makes its [`admission::SealedDealing`] durable before releasing
-//! its vote, quorum intersection leaves at least one honest certificate signer retaining every
-//! slice. The honest signer can differ by slice. This proves the selected public corpus satisfies
-//! the encoded relation. It does not prove that the operator never signed another private receipt.
-//! The challenge constructors in this crate ([`transition::ChallengeIndex::new`],
-//! [`challenge::account_lookup`], and [`challenge::higher_entry_lookup`]) require the full posted
-//! corpus and the predecessor state. [`serve::SpanIndex`] derives the same lookups, state
-//! openings, and claims for the accounts in one span from that span's sealed slice and the
-//! holder's retained interval, so a wallet needs one honest holder of its account's slice rather
-//! than the reconstructed corpus.
+//! Each payer maintains one strictly recipient-sorted [`vector::OutVector`] for an immutable
+//! registered epoch. An entry records the cumulative amount and payment count for that recipient.
+//! A [`payment::SendAuthorization`] signs the payer's epoch-local sequence, cumulative debit, and
+//! vector root. Debit starts at zero for each epoch and equals the terminal vector's total.
+//! Each accepted batch advances debit by a positive amount and preserves every earlier entry's
+//! amount and count. Different payers can advance independently, including payments to the same
+//! recipient.
 //!
-//! ## Payer sequencing and private evidence
+//! The operator countersigns the exact body in two distinct roles: the private receipt uses
+//! [`payment::VectorAck`], and a separate aggregable acceptance signature authenticates the
+//! terminal bodies in the close. The committee certificate signs the close commitment. These
+//! signatures bind different messages and use separate domains.
 //!
-//! Each payer account is one linear cumulative-debit sequence over one strictly
-//! recipient-sorted, epoch-cumulative outgoing vector ([`vector::OutVector`]). A batch adds
-//! delta entries to that vector, and the payer authorizes it by signing one
-//! [`payment::VectorSendBody`]: the epoch-local batch sequence number, the lifetime cumulative
-//! debit endpoint, and the vector root ([`payment::SendAuthorization`]). The batch is accepted
-//! or rejected as a whole and advances the sequence by exactly its total. The operator accepts
-//! by countersigning the identical body, once for the dual-signed receipt
-//! ([`payment::VectorAck`]) and once, aggregably, for the close's per-slice countersignatures.
+//! A wallet keeps at most one unacknowledged batch for an account. It stages the exact signed
+//! request, retries those bytes after response loss, verifies the acknowledgment and entry
+//! openings, and durably saves them before signing its next endpoint. A zero spendable balance
+//! does not reset the epoch's accepted sequence, debit, vector, or retry state. Moving to another
+//! epoch does not resolve an ambiguous payment: the wallet must authenticate the old outcome
+//! before authorizing a replacement.
 //!
-//! The base safety guarantee assumes a wallet has at most one unacknowledged batch for that
-//! account: it stages one exact [`payment::SendAuthorization`], retries the same bytes after
-//! response loss, verifies and durably commits its acknowledgment and per-entry openings,
-//! advances its locally owned debit, and only then signs the next endpoint. This serializes one
-//! payer account, not independent payers or recipients.
+//! A [`payment::EntryReceipt`] combines the dual-signed acknowledgment with one opening under
+//! the payer's vector root. The recipient obtains it before relying on the payment. Any holder
+//! can later submit evidence; neither payer nor recipient must remain continuously online. Each
+//! receipt relied upon needs an honest holder that retains it, obtains the public openings, and
+//! gets a challenge included by the inclusive deadline. Validators cannot reconstruct a private
+//! receipt nobody saved.
 //!
-//! Adjudication assumes the operator's acceptance invariants:
+//! # State and account activity
 //!
-//! - at most one acknowledged body per `(payer, seq)`, with consecutive sequence numbers within
-//!   an epoch,
-//! - strictly increasing cumulative debit, so no acknowledged endpoint advances by zero,
-//! - entry-wise non-decreasing `(cumulative, count)` per recipient across a payer's batches,
-//! - the close carries each payer's latest acknowledged body, and
-//! - acknowledgments freeze before dealing.
+//! QMDB maps each canonical 32-byte account key to a positive eight-byte balance. Absence means
+//! the account is not live. Deposits can create accounts; a zero successor balance removes them.
+//! Payment counters belong to their epoch's evidence and are not stored in the balance record.
 //!
-//! A later cumulative endpoint authorizes the entire debit delta up to that endpoint, while a
-//! public account row carries only its terminal endpoint. An authorization alone is not an
-//! accepted payment. The transferable per-edge evidence is one [`payment::EntryReceipt`]: the
-//! dual-signed acknowledgment plus one membership opening of the credited recipient's
-//! cumulative entry under the acknowledged vector root. Challenge submission has no caller
-//! identity requirement, so neither payer nor recipient must remain continuously online. The
-//! actual assumption is per private receipt: at least one honest holder must obtain and retain
-//! the required evidence and get a challenge included by the inclusive deadline. A recipient
-//! that wants an independently enforceable preconfirmation must obtain its entry receipt before
-//! relying on it. The protocol cannot reconstruct a receipt that no independent holder received
-//! or retained.
+//! Each dealing identifies its activity accounts once, with payer authorizations, cumulative
+//! payment entries, and one combined operator acceptance. Every validator derives incoming credit
+//! from the signed payer vectors, applies the registered deposits and withdrawals, and computes
+//! the resulting balances. It checks per-account limits, overflow, spendability, and the exact
+//! boundary/output rules before preparing one canonical QMDB batch. Equal old and new balances
+//! produce no database write. The batch boundary is part of the authenticated history even when
+//! no balances change.
 //!
-//! ## Availability and settlement
+//! The activity BMT includes every disclosed sender, recipient, and boundary/output participant.
+//! Activity that nets to zero still needs terminal evidence, even though it needs no balance
+//! mutation. A compact activity value commits the terminal epoch debit and sequence, outgoing
+//! vector root and settlement output. A separate BMT indexes withdrawal outputs in request order. Payer-vector BMTs remain nested under their signed endpoints.
 //!
-//! Honest validators retain their assigned public slices through the challenge deadline, while the
-//! embedding makes the root bundle, public corpus, and required Merkle openings retrievable. Users
-//! must also retain or obtain later withdrawal, external-payout, and frozen-state claim openings.
-//! The crate does not provide a data-availability network.
+//! `transition::Header` binds the exact registered context and predecessor state, the activity,
+//! withdrawal-output, and successor QMDB roots, and the actual withdrawal and external-payout
+//! totals. Settlement derives successor liability from its registered deposits, predecessor
+//! liability, and these certified outflows. The dealing carries inputs from which validators
+//! reconstruct this header. External settlement additionally receives the roots and outflow totals.
 //!
-//! Deposits do not depend on private receipt availability. Settlement records their refund account,
-//! amount, and inclusion deadline. An expired unadmitted deposit permanently faults the operator
-//! and is directly refundable without an operator or state opening.
+//! `transition::prepare_close_with_strategy` constructs a candidate without installing it.
+//! `admission::seal` decodes and validates the complete dealing against the exact predecessor and
+//! registered committee, returning the vote and owned candidate/evidence. The application durably
+//! retains the evidence and its predecessor state before publishing the vote. Validators advance
+//! their canonical replica to the close selected by settlement. QMDB mutation failures consume
+//! the affected database owner; an embedding must not continue using it.
 //!
-//! A clean close finalizes only after its inclusive challenge window, and a withdrawal becomes
-//! claimable only after the close carrying it reaches the FIFO front and finalizes. A withdrawal's
-//! absolute deadline is a permanent-fault trigger, not a payout timestamp. Safety additionally
-//! assumes a correct and live settlement chain, one authenticated monotonic clock, immutable
-//! deployment policy, and atomic, idempotent persistence of each state mutation with its custody
-//! effect. Hard-fault recovery removes operator cooperation but not these evidence and settlement
-//! assumptions.
+//! Canonical QMDB history and proof material must remain available for predecessor and pending
+//! roots and the last finalized recovery root. Pending roots may outlive their own challenge
+//! deadlines while earlier FIFO entries wait. Historical Current proofs require the activity
+//! bitmap as well as the operation history. The state service retains canonical batches and uses
+//! QMDB replay/rewind for historical proof construction; operation inclusion alone does not prove
+//! that an old balance was current. Retention and seek costs belong to the state owner.
 //!
-//! # State machine
+//! # Registration and settlement
 //!
-//! Bajillion has three coupled state machines: a registered epoch collects payments and constructs
-//! one close, validators certify that close, and settlement admits or rejects its custody
-//! transition. Finalized withdrawal and external-payout reserves form a separate claim ledger.
-//! Certification alone never changes settlement state or releases custody.
+//! One registration fixes the deployment, operator, epoch, deposits, signed withdrawals, opening
+//! liability, deadlines, limits, and committee. The payment anchor and the separately bound exact
+//! predecessor root must match the registered close context before an acknowledgment is released.
+//! An empty registration slot has no heartbeat. Once registered, its inclusive admission deadline
+//! is a one-shot obligation; the context cannot be rebased after it expires.
 //!
-//! [`transition::CloseContext`] owns the predecessor state root. [`transition::RootBundle`] holds
-//! the change, withdrawal-output, successor-state, coverage, and transpose roots plus the exact
-//! transpose leaf count, and [`transition::Header`] binds all of those contextual roles. The
-//! posted corpus ships movers and edges only ([`posted`]): readers hold the previous certified
-//! state as a [`posted::Replica`], live accounts ride as rank gaps, and the transpose,
-//! predecessor states, successor states, and prefixes are all derived rather than shipped.
-//! Dealt slices travel without their unchanged state ([`retained`]): every slice assignee
-//! retains its key interval across closes and hydrates each dealing against it.
-//!
-//! Arrows below are successful transitions. Ordinary validation failure leaves the requested state
-//! unchanged. A call carrying `now` is the exception: it first observes every liveness deadline,
-//! so it can record a permanent fault and then return an error for the requested operation.
-//!
-//! ## Register, construct, certify, and admit
+//! The acknowledged set freezes before dealing. A retry under that registration redistributes the
+//! same corpus and resubmits the same certified header. A genuine certificate may be admitted by
+//! any holder, so releasing two different closes for the same registration can make an honest
+//! operator's later acknowledgments contradict its earlier certified close.
 //!
 //! ```text
-//! SETTLEMENT                                  EPOCH / CERTIFICATION
-//! ----------                                  ---------------------
-//! +-------------------------+
-//! | OPEN registration slot  |  no registration heartbeat
-//! | finalized head (R,L,e)  |
-//! | staged deposits D       |
-//! | staged withdrawals W    |
-//! +------------+------------+
-//!              | EpochContext E commits the payment anchor, D/W roots,
-//!              | predecessor liability L, deadlines, limits, and assignment.
-//!              | register_epoch binds R; register_close accepts an already-bound C.
-//!              v
-//! +-------------------------+                 +-----------------------------+
-//! | REGISTERED              |---------------->| CloseContext C = E + R      |
-//! | exact C; derived D;     |                 | PaymentContext: anchor,e,op |
-//! | W superset; deadline A  |                 +--------------+--------------+
-//! +------+------------------+                                |
-//!        |                                                   | only now may the
-//!        |                                                   | operator release
-//!        |                                                   | accepted Payment
-//!        |                                                   | pairs
-//!        |                                                   v
-//!        |                                    +-----------------------------+
-//!        |                                    | C + predecessor StateCache  |
-//!        |                                    | + exact D/W + rows/vectors  |
-//!        |                                    | prepare_close_with_strategy |
-//!        |                                    v                             |
-//!        |                                    | PreparedClose               |
-//!        |                                    | Header + RootBundle         |
-//!        |                                    | five retained Merkle trees  |
-//!        |                                    +--------------+--------------+
-//!        |                                                   |
-//!        |                                    assemble_slices | + StateCache
-//!        |                                                   v
-//!        |                                    +-----------------------------+
-//!        |                                    | one ProofSlice per span     |
-//!        |                                    +--------------+--------------+
-//!        |                                                   |
-//!        |                                    exact deterministic dealing
-//!        |                                    for each validator
-//!        |                                                   v
-//!        |                                    +-----------------------------+
-//!        |                                    | seal                        |
-//!        |                                    | - authenticate every slice  |
-//!        |                                    |   and its combined operator |
-//!        |                                    |   countersignature          |
-//!        |                                    | - one randomized batch for  |
-//!        |                                    |   every distinct payer      |
-//!        |                                    |   authorization signature   |
-//!        |                                    +------+----------------------+
-//!        |                                           |
-//!        |                              +------------+------------+
-//!        |                              v                         v
-//!        |                    SealedDealing                     Vote
-//!        |                    durable through the                 |
-//!        |                    challenge deadline                  | publish only
-//!        |                                                        | after retention
-//!        |                                                        v
-//!        |                                             exactly 2f+1 votes
-//!        |                                             over one Header
-//!        |                                                        |
-//!        |                                                        v
-//!        |                                             +-------------------+
-//!        |                                             | Certificate       |
-//!        |                                             +---------+---------+
-//!        |                                                       |
-//!        |<----- Header + RootBundle + TerminalProof + Certificate
-//!        |
-//!        | admit while now <= A; consume registration and included boundary
-//!        v
-//! +-------------------------+
-//! | OPEN + Pending(e) tail  |
-//! +-------------------------+
-//!
-//! REGISTERED -- first time observation with now > A --> PERMANENT HARD FAULT
+//! registered context + predecessor QMDB state + terminal payment vectors
+//!                  |
+//!                  v
+//!          prepare one shared dealing
+//!                  |
+//!                  v
+//!       every signer validates the complete close
+//!                  |
+//!       retain state/evidence, then publish votes
+//!                  |
+//!                  v
+//!             exact 2f+1 certificate
+//!                  |
+//!                  v
+//!       admit into the ordered pending queue
+//!                  |
+//!       challenge window ends and earlier closes finalize
+//!                  |
+//!                  v
+//!       advance finalized state and reserve payouts
 //! ```
 //!
-//! [`transition::EpochContext`] is predecessor-state-root-independent, not liability-independent.
-//! This lets the same payment anchor serve while its predecessor closes. [`transition::CloseContext`]
-//! adds the exact root and verifies the already-committed liability. The embedding must release no
-//! operator-signed acknowledgment until that exact context has registered successfully. A
-//! [`payment::EntryReceipt`] is the dual-signed acknowledgment plus one entry opening. A bare
-//! authorization is not accepted payment evidence.
+//! A successor epoch can register against the admitted queue tail while earlier closes remain
+//! challengeable. Registration and admission cannot skip ancestry. Finalization consumes only the
+//! FIFO front and requires time strictly later than its challenge deadline. Certification alone
+//! never changes custody or finalizes payments.
 //!
-//! Registration activates an immutable, one-shot payment context. `max_admission_delay` bounds
-//! that context's publication window. It is not a periodic heartbeat while the slot is `OPEN`.
-//! Failed construction, certification, or admission can retry against the same registration
-//! through its inclusive deadline. Once a dealing for a registration has been released, the
-//! acknowledged set is frozen: further acknowledgments wait for the successor registration, a
-//! retry re-deals the identical corpus, and an admission retry resubmits the same certified
-//! header. `admit` has no caller identity and anyone holding a genuine certificate may admit, so
-//! a re-dealt larger corpus would expose an honest operator to
-//! [`challenge::Challenge::HigherAckDebit`] or [`challenge::Challenge::HigherAckEntry`] against
-//! the smaller certified close. After the deadline the context cannot be rebased because its
-//! deadline is part of the payment anchor, so observing the missed deadline permanently faults
-//! the deployment and retains that exact anchor in the fault reason. Payments from a close that
-//! was never admitted do not enter state. Terminal recovery freezes and settles against the last
-//! root reached by the valid finalized prefix.
+//! A receipt challenge proves an understated terminal debit, an understated recipient amount or
+//! count, or conflicting operator acknowledgments. An activity-absent payer has public epoch debit
+//! zero, so that absence is enough to challenge an omitted accepted payment. Public activity and
+//! payer-vector openings keep challenges to one onchain call. Malformed evidence and a valid
+//! `NoContradiction` verdict do not change batch status.
 //!
-//! [`transition::prepare_close_with_strategy`] constructs the five trees but does not make arbitrary
-//! untrusted rows valid. Call [`transition::PreparedClose::validate`] when the application did not
-//! assemble the corpus from inputs it already validated. Prepared state retains the change,
-//! withdrawal-output, successor-state, coverage, and transpose trees. Dealing still borrows the
-//! predecessor [`transition::StateCache`]. Settlement admission sees the registered context, typed
-//! roots, terminal proof, and certificate, not the full corpus or every slice.
+//! A proven challenge marks its target challenged and invalidates its pending descendants. A
+//! missed admission, deposit, or withdrawal deadline also permanently faults the deployment.
+//! New work stops, but an earlier clean pending prefix can still be challenged or finalized.
+//! The first fault reason and admission fence remain immutable; a later successful challenge can
+//! shorten the surviving prefix. Registration wins a tied fault instant over intake, and a tied
+//! withdrawal wins over a deposit. All monetary obligations remain recoverable.
 //!
-//! "Deal" produces one [`transition::ProofSlice`] per contiguous span of slices a
-//! validator holds. Every slice is held by an exact quorum, whose members are one
-//! window of the validator ring sliding with the slice index
-//! ([`admission::slice_holders`]), so a validator's slices form one contiguous span, or
-//! two when the window wraps past the last slice ([`admission::assigned_slice_spans`]).
-//! Spans overlap heavily, so the operator never materializes a proof slice per span:
-//! [`transition::PreparedClose::deal`] encodes each slice's dealt content once as a chunk
-//! ([`retained::Dealings`]) and ships every span as one witness followed by clones of the
-//! covered chunks ([`retained::Wire`]), one pass over the corpus however many spans there
-//! are. A validator's "dealing" is one proof slice per assigned span. [`admission::seal`] rejects
-//! any other dealing, authenticates its slices, and returns one [`admission::Vote`] plus the
-//! owned [`admission::SealedDealing`]. The dealing must be durable before the vote is
-//! released. The exact-quorum certificate authenticates the shared [`transition::Header`].
-//! The separate [`transition::TerminalProof`] authenticates terminal counts and totals but
-//! does not re-establish certification or full-corpus validity.
+//! Calls taking `now` first observe every expired obligation. The embedding supplies authenticated
+//! monotonic time and persists that observation even when the requested operation subsequently
+//! fails. Time alone does not advance this in-memory settlement state machine.
 //!
-//! ## Authenticate gap-free proof slices
+//! # Withdrawals, custody, and recovery
 //!
-//! For `S` slices, the coverage tree has exactly `S + 1` boundary leaves. Boundary `B[i]`
-//! authenticates positions in the predecessor-state, change, and successor-state vectors together
-//! with a cumulative prefix. A proof slice covering slices `lo..hi` opens every boundary
-//! `B[lo] ..= B[hi]` under one range opening, and neighboring slices open the same boundary,
-//! making local slice checks compose into one global relation.
+//! An exact [`boundary::WithdrawalAction::Amount`] releases its authorized amount when the epoch
+//! tail covers it and otherwise releases zero. An amountless [`boundary::WithdrawalAction::Close`]
+//! sweeps the final balance and removes the account. Credit to an absent account without a deposit
+//! becomes an external payout. Validators derive these outputs from the account equation and
+//! signed authorizations; `Withdrawal(0)` remains distinct from no withdrawal action.
 //!
-//! ```text
-//! CoverageRoot
-//!     |
-//!     +-- B[0] ---- B[1] ---- B[2] ---- ... ---- B[S]
-//!         default     ^          ^                   terminal lengths,
-//!                     |          |                   totals, liability
-//!                     +----------+
-//!                     shared authenticated boundary
+//! A censored withdrawal can be queued onchain while registration is open. Its balance openings
+//! cover the finalized state and every pending successor root selected by settlement. Operator-
+//! carried requests are checked against the registered predecessor and boundary deposits. These
+//! checks keep a withdrawal recoverable across each possible surviving finalized prefix.
 //!
-//! a proof slice covering slices lo..hi opens B[lo] ..= B[hi], then authenticates exactly:
+//! Clean finalization moves aggregate withdrawal and external-payout amounts into independent
+//! reserves. A withdrawal claim opens its certified destination and amount in the output BMT;
+//! an external payout opens the compact activity value. Each consumes its typed `(batch, position)`
+//! once. These reserves remain independently claimable through later faults.
 //!
-//!   predecessor StateRoot  [B[lo].predecessor .. B[hi].predecessor)
-//!   ChangeRoot             [B[lo].change   .. B[hi].change)
-//!   successor StateRoot    [B[lo].successor   .. B[hi].successor)
-//!   WithdrawalOutputRoot   [prefix[lo].withdrawal_count .. prefix[hi].withdrawal_count)
+//! Once the surviving clean prefix drains, hard-fault recovery freezes the last finalized QMDB
+//! root and liability. Each live account proves its positive balance at that root and is consumed
+//! once by account identity. Recovery routes a covered Amount or full Close to its signed
+//! destination and returns any residual to the account. Unadmitted deposits are refunded separately
+//! by account without requiring an operator or state proof. A never-admitted or invalidated close
+//! never debits this frozen state or creates a payout reserve.
 //!
-//! and, at every covered boundary B[j], that the rows and leaves in the slices before j
-//! advance each position exactly as committed, and that the running prefix and both
-//! accumulator checksums equal B[j]'s at the row its change position names.
+//! Active custody, finalized claim reserves, and pending-deposit refunds are disjoint accounting
+//! buckets. Every returned asset transfer must be persisted atomically and idempotently with its
+//! claim consumption. Completion assumes a correct, live settlement chain, available proof
+//! material, and eventual submission of claims.
 //!
-//! Ordered guards prove both sides of each disclosed state/change range.
-//! Typed openings bind root role, vector length, position, and hash domain.
-//! B[hi] is literally the next slice's B[lo], so no certified gap can be hidden.
-//! ```
-//!
-//! The [`transition::CoverageRange`] openings establish adjacency, while the three content roots
-//! and the withdrawal-output root authenticate the slice contents. `B[0]` pins the empty
-//! prefix. `B[S]` pins every vector length, boundary total, conservation total, and successor
-//! liability. This is why local ordered range guards cannot replace the `CoverageRoot`. The
-//! accumulator start states and the range openings ship once per proof slice, however many
-//! slices it covers, so a span costs its holder the rows and edges plus one boundary and one
-//! operator aggregate per covered slice.
-//!
-//! ## Settle pipelined closes
-//!
-//! `OPEN` below means that the single registration slot is empty. It does not mean that the
-//! admitted pipeline is empty. Consequently, epoch `e + 1` can register and become admitted while
-//! epoch `e` remains challengeable. Registration must always name the exact successor of the
-//! pipeline tail (or the finalized head when the pipeline is empty), and finalization consumes the
-//! FIFO front, so neither path can skip an epoch.
-//!
-//! ```text
-//! +------------------------------- OPERATING ---------------------------------+
-//! |                                                                           |
-//! |  +------+ register_close / register_epoch +----------+                    |
-//! |  | OPEN | ----------------------------> | REGISTERED |                    |
-//! |  +--+---+                               +------+-----+                    |
-//! |     ^                                          |                          |
-//! |     | admit certified close, now <= deadline   |                          |
-//! |     | consume registration, append Pending     |                          |
-//! |     +------------------------------------------+                          |
-//! |                                                |                          |
-//! |                         observed now > deadline|                          |
-//! |                                                +-------> HARD FAULT       |
-//! |                                                                           |
-//! |  admitted FIFO pipeline (bounded by max_pending_epochs):                  |
-//! |                                                                           |
-//! |  finalized root -> [Pending e] -> [Pending e+1] -> ... -> [tail]          |
-//! |                       |                         |                         |
-//! |                       | front and now >         | challenge explicit      |
-//! |                       | challenge deadline      | BatchId, now <= target  |
-//! |                       v                         | deadline                |
-//! |                    finalize                     v                         |
-//! |                    advance head;       Proven: target Challenged,         |
-//! |                    create reserves     descendants Invalidated            |
-//! |                                        NoContradiction: no status change  |
-//! |                                                                           |
-//! |  OPEN has no heartbeat. record_deposit and queue_withdrawal are accepted  |
-//! |  only while OPEN; each accepted request owns its separate deadline.       |
-//! +---------------------------------------------------------------------------+
-//!          |                            |                            |
-//!          | proven challenge           | deposit now >= deadline    |
-//!          | to any Pending             | withdrawal now >= deadline |
-//!          +----------------------------+----------------------------+
-//!                                       v
-//! +---------------------- HARD FAULT / PREFIX DRAIN --------------------------+
-//! | New intake, registration, and admission are permanently fenced.           |
-//! | The registration is discarded; its exact deposits/withdrawals stay owned. |
-//! | The exact first reason and admission fence remain immutable.              |
-//! | Only a proven challenge sets invalid_from and invalidates a suffix.       |
-//! | Any earlier Pending prefix may still be challenged or finalized FIFO.     |
-//! | A Challenged/Invalidated suffix never finalizes.                          |
-//! | Staged deposits may already be refunded by account without a state proof. |
-//! +--------------------------------+------------------------------------------+
-//!                                  | begin_hard_fault_settlement once the
-//!                                  | pipeline front is absent or non-Pending
-//!                                  v
-//! +------------------------- HARD FAULT / CLAIMING ---------------------------+
-//! | Freeze the last finalized StateRoot and its liability.                    |
-//! | Drain the remaining suffix; gather staged/suffix deposits and withdrawals.|
-//! | begin_hard_fault_settlement is idempotent while CLAIMING.                 |
-//! | Zero remaining totals make begin transition directly to SETTLED.          |
-//! |                                                                           |
-//! | claim_hard_fault(StateOpening)                                            |
-//! |   - consume each frozen state position once                               |
-//! |   - route Amount or Close to its signed destination                       |
-//! |   - return any residual frozen balance to the account                     |
-//! |                                                                           |
-//! | claim_pending_deposit(account)                                            |
-//! |   - refund the fixed account without operator cooperation or state proof  |
-//! +--------------------------------+------------------------------------------+
-//!                                  | remaining frozen-state liability == 0
-//!                                  | and remaining terminal deposits == 0
-//!                                  v
-//! +-------------------------- HARD FAULT / SETTLED ---------------------------+
-//! | Active state and active custody are empty. The fault remains permanent.   |
-//! | Claim reserves created by earlier clean finalizations remain independent. |
-//! +---------------------------------------------------------------------------+
-//! ```
-//!
-//! A challenge is accepted through its batch's inclusive challenge deadline. FIFO finalization
-//! requires `now` to be strictly later. The three proof-to-fault edges are
-//! [`challenge::Challenge::HigherAckDebit`],
-//! [`challenge::Challenge::HigherAckEntry`], and
-//! [`challenge::Challenge::AckFork`]. There is no interior receipt range to reason about:
-//! every counted value is a terminal opening under a payer-signed vector root.
-//! [`challenge::Verdict::NoContradiction`] and malformed
-//! evidence do not change batch status. A missed registered admission, an expired staged deposit,
-//! an expired queued or admitted-but-unfinalized withdrawal, or a proven challenge permanently
-//! fences the deployment. The first fault reason and admission fence are retained. A later proof
-//! against an earlier Pending prefix may separately move `invalid_from` earlier and shorten the
-//! finalizable prefix. Fault attribution chooses the earliest first-fault instant. Registration
-//! wins a tie with intake so its active payment anchor remains in the permanent reason. Among
-//! intake obligations, a withdrawal wins a tie with a deposit. All tied monetary obligations
-//! remain recoverable regardless of which reason names the fault.
-//!
-//! [`settlement::SettlementConfig`] fixes the admission-delay bound, challenge-duration range,
-//! deposit inclusion timeout, and withdrawal notice range before the deployment accepts funds.
-//! Registration deadlines must remain monotonic and inside that immutable policy.
-//!
-//! Every [`settlement::SettlementChain`] mutation that accepts `now` observes expired registration,
-//! deposit, and withdrawal obligations before performing its requested operation. Time does not
-//! advance the in-memory object by itself: an embedding presents the authenticated monotonic time,
-//! then atomically persists the observation even if the requested operation returns an error.
-//!
-//! ## User-visible money paths
-//!
-//! The diagrams below follow value rather than internal objects. Every edge labeled `HARD FAULT`
-//! is permanent: the operator cannot resume, re-register, or admit another epoch afterward.
-//!
-//! ```text
-//! DEPOSIT
-//! -------
-//! user records (deposit id, account, amount, inclusion deadline)
-//!        |
-//!        +-- included by an admitted close --> Pending
-//!        |                                        |
-//!        |                                        v
-//!        |                              clean FIFO finalization
-//!        |                                        |
-//!        |                                        v
-//!        |                              authenticated epoch tail
-//!        |                                 |                 |
-//!        |                  positive and no Close            +--> zero or Close:
-//!        |                                 |                      account absent;
-//!        |                                 v                      positive withdrawal
-//!        |                             live state                 output, if any,
-//!        |                                                        enters its reserve
-//!        |
-//!        +-- still pending at its deadline --> HARD FAULT --> exact aggregate account refund
-//!                                                          (no state opening needed)
-//!
-//! ACCEPTED PAYMENT
-//! ----------------
-//! payer signs one cumulative vector endpoint (one or more entries)
-//!        |
-//!        v
-//! operator verifies and atomically records the debit and every entry credit
-//!        |
-//!        v
-//! operator countersigns the exact body (receipt and aggregable halves)
-//!        |
-//!        +-- selected in a clean close --> FIFO finalization
-//!        |                                  |              |
-//!        |                                  |              +--> absent predecessor
-//!        |                                  |                   with no deposit:
-//!        |                                  |                   external-payout reserve
-//!        |                                  +--> active predecessor or deposit:
-//!        |                                       canonical row determines successor
-//!        |                                       state and any withdrawal output
-//!        |
-//!        +-- omitted or contradicted --> holder submits both signatures
-//!                                           + typed Merkle evidence
-//!                                                   |
-//!                                                   v
-//!                                             target Challenged
-//!                                             descendants Invalidated
-//!                                                   |
-//!                                                   v
-//!                                        drain only the earlier clean FIFO prefix
-//!                                                   |
-//!                                                   v
-//!                                        freeze the last finalized StateRoot
-//!                                                   |
-//!                                                   v
-//!                                 frozen payer balance is released exactly once
-//!                                 (to the payer or its signed withdrawal route)
-//!
-//! SIGNED WITHDRAWAL
-//! -----------------
-//! account signs destination + Amount(n) or amountless Close + absolute deadline
-//!        |
-//!        +-- admitted and finalized in the clean FIFO prefix
-//!        |         |
-//!        |         v
-//!        |   withdrawal-output reserve
-//!        |         |
-//!        |         v
-//!        |   claim (BatchId, position) once with one typed opening
-//!        |
-//!        +-- still outstanding at deadline --> HARD FAULT
-//!                                                   |
-//!                         +-------------------------+-------------------------+
-//!                         |                                                   |
-//!              an earlier clean close finalizes it                 it remains in frozen state
-//!                         |                                                   |
-//!                         v                                                   v
-//!                 ordinary output claim                       Amount(n): n to destination,
-//!                                                             residual to account
-//!                                                             Close: entire tail to destination
-//! ```
-//!
-//! A missed registered admission window takes the same permanent-fault path. The unadmitted close
-//! contributes no debit, credit, withdrawal reserve, or payout reserve. Recovery therefore starts
-//! from the last root finalized by the clean FIFO prefix. Finalized reserves are outside active
-//! state custody, so each remains independently claimable even if a later epoch faults. These
-//! disjoint buckets ensure that a sender's value is either represented by a finalized transition,
-//! a finalized claim reserve, the frozen survivor state, or a direct pending-deposit refund, never
-//! silently discarded by an operator fault.
-//!
-//! ## Accounts, custody, and claims
-//!
-//! ```text
-//!                         canonical transition row
-//!                 +------------------------------------+
-//!                 | predecessor state + deposit        |
-//!                 | + accepted debit/credit endpoints  |
-//!                 | + queued Amount or Close           |
-//!                 +-----------------+------------------+
-//!                                   |
-//!                                   v
-//!         +-------------------------+--------------------------+
-//!         |                                                    |
-//!         | absent + no deposit + credit -> external payout    |
-//!         | absent + deposit              -> may create LIVE   |
-//!         | LIVE + positive non-close tail -> remains LIVE     |
-//!         | zero tail or Close             -> becomes ABSENT   |
-//!         |                                                    |
-//!         +-------------------------+--------------------------+
-//!                                   |
-//!                                   v
-//!          successor-state projection + compact ChangeRoot entry
-//!              ChangeGuard = account + digest(ChangeValue)
-//! ```
-//!
-//! State roots contain only sorted, active, positive-balance leaves. Zero balances are omitted,
-//! not retained as tombstones. An [`boundary::WithdrawalAction::Amount`] authorizes one exact
-//! positive amount and releases it exactly or not at all: an amount the epoch tail can no longer
-//! cover settles with a zero release, so a payer spending after authorizing a withdrawal cannot
-//! leave the operator without a buildable close. [`boundary::WithdrawalAction::Close`] carries no
-//! amount, permits payment activity through the epoch, then sweeps the authenticated epoch-tail
-//! balance and removes the account. Credit to an absent account without a deposit remains outside
-//! live state and becomes an external payout. Validators derive each compact change value and
-//! withdrawal output while checking the full row and exact signed request. Amount and Close
-//! claims have the same shape: the certified destination and amount plus one withdrawal-output
-//! opening. An external payout
-//! instead uses one compact change opening and never opens a neighboring row.
-//!
-//! ```text
-//! finalize(now) chooses the clean FIFO front
-//!          |
-//!          +--> ClaimableBatch
-//!                 | withdrawal: (BatchId, output position) + output opening
-//!                 | payout:     (BatchId, change position) + change opening
-//!                 v
-//!              consume each typed position once
-//!
-//! active custody ---------------------> hard-fault survivor/refund claims
-//! finalized claim reserves ----------> clean withdrawal/payout claims
-//!                 (independent buckets; either may remain after a hard fault)
-//! ```
-//!
-//! Clean [`settlement::SettlementChain::finalize`] advances the finalized state and moves only the
-//! aggregate withdrawal and external-payout totals from active custody into independent claim
-//! reserves. [`settlement::SettlementChain::claim_withdrawal`] and
-//! [`settlement::SettlementChain::claim_external_payout`] consume positions atomically under the
-//! replay keys shown above and may run in any order without blocking later epochs. A challenged or
-//! invalidated close never creates these reserves. An acknowledged send in an unadmitted or
-//! invalidated close therefore never debits the frozen finalized state: the payer recovers that
-//! finalized balance exactly once. Hard-fault survivor claims and deposit refunds instead drain
-//! active custody. The embedding must atomically and idempotently persist every returned payout
-//! together with its state-machine mutation.
-//!
-//! The crate's executable Stateright model checks finite proof-profile/certification, challenge,
-//! claim-ledger, and settlement machines to completion. Deterministic traces cover the accepted and
-//! rejected user flows shown above, including malicious-operator recovery, exact deadline
-//! boundaries, strict epoch order, and independent finalized reserves. Bounded refinement tests
-//! run every settlement action class through real signed production objects and compare private
-//! state after each step. The exhaustive model still uses ideal cryptography and representative
-//! proof classes. Arbitrary-cardinality and crash-consistency obligations remain with the Rust
-//! tests, fuzz targets, and embedding.
+//! The Stateright model exhausts finite certification, challenge, claim, and settlement instances.
+//! Production refinement exercises real signed objects and verifies the settlement effects after
+//! each action. These checks complement byte-level tests and fuzzing; they are not proofs for
+//! arbitrary cardinalities or substitutes for the embedding's durable crash tests.
 
+#[cfg(feature = "std")]
 pub mod admission;
 pub mod boundary;
+#[cfg(feature = "std")]
 pub mod challenge;
 pub mod commitment;
 pub mod payment;
+#[cfg(feature = "std")]
 pub mod posted;
-pub mod retained;
+#[cfg(feature = "std")]
+pub mod qmdb;
+#[cfg(feature = "std")]
 pub mod serve;
+#[cfg(feature = "std")]
 pub mod settlement;
 pub mod state;
+#[cfg(feature = "std")]
 pub mod transition;
 pub mod vector;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod model;
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests;

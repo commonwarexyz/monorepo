@@ -1301,7 +1301,6 @@ dependencies = [
 name = "commonware-clearing"
 version = "2026.7.0"
 dependencies = [
- "ahash",
  "arbitrary",
  "bytes",
  "commonware-codec",
@@ -1310,10 +1309,10 @@ dependencies = [
  "commonware-cryptography-curve25519",
  "commonware-macros",
  "commonware-parallel",
+ "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
  "criterion",
- "hashbrown 0.17.1",
  "rand_core 0.10.1",
  "stateright",
  "thiserror 2.0.18",
@@ -1330,6 +1329,8 @@ dependencies = [
  "commonware-cryptography",
  "commonware-cryptography-curve25519",
  "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
  "commonware-utils",
  "libfuzzer-sys",
 ]

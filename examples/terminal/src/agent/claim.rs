@@ -53,7 +53,7 @@ trait ClaimChannel {
     /// finalized close it names.
     async fn fetch<E: Env>(account: Key, ctx: &E, operator: SocketAddr) -> Result<Self::Evidence>;
 
-    /// Fetches `wallet`'s evidence for the admitted close from its slice holders,
+    /// Fetches `wallet`'s evidence for the admitted close from its validators,
     /// verified against the admitted roots.
     async fn fetch_window<E: Env>(
         holders: &Holders,
@@ -376,7 +376,7 @@ impl Agent {
     ///
     /// A held copy always gets its submission before any replacement, and the cache exists
     /// to protect a finalized reserve against the operator vanishing after finalization.
-    /// Only self-verified evidence ever enters it. The slice holders are the first source:
+    /// Only self-verified evidence ever enters it. The validators are the first source:
     /// while the close carrying the reserve is inside its challenge window, they serve the
     /// claim verified against the chain's admitted roots, so the evidence is cached before
     /// finalization and the claim completes afterwards with no operator at all. Outside
@@ -508,7 +508,7 @@ impl Agent {
         Ok(release)
     }
 
-    /// Fetches `C`'s evidence from the slice holders for a close still inside its
+    /// Fetches `C`'s evidence from the validators for a close still inside its
     /// challenge window, with the admitted roots it verified against as the claim roots
     /// to bind under. The windows open are the epochs admitted past the finalized head,
     /// up to the registered one. `None` when no open window carries evidence for this

@@ -11,95 +11,74 @@ Stability varies by primitive. See [README](https://github.com/commonwarexyz/mon
 
 Bajillion is **ALPHA**. Its API and wire format may change without a migration path.
 
-The `bajillion` module provides the runtime-agnostic objects and verification rules for Bajillion:
-payer-signed sender-vector endpoints and operator acknowledgment countersignatures, per-payer
-outgoing vectors and the recipient-major transpose, fresh live-state transitions, deterministic
-proof slices for authenticated dissemination, exact-quorum commitment certificates and retained
-dealings, bounded acknowledgment challenges, and a bounded in-memory settlement state machine
-for registration, admission, FIFO finalization, custody accounting, hard-fault fencing, and
-incremental hard-fault claims. Deposits can create accounts, zero balances leave the committed
-state, and sends to absent recipients become certified external payouts. Compact change leaves
-expose the validator-authenticated settlement and challenge projection, allowing independent payout
-claims without opening a neighboring row. `CloseContext` owns the predecessor state root;
-`RootBundle` carries the change, withdrawal-output, successor-state, coverage, and transpose roots
-plus the exact transpose leaf count; and the 32-byte Header binds every contextual role. The
-164-byte RootBundle is public witness data. It is retained by validators and the
-data-availability layer and must be supplied or cached by external settlement operations.
+The `bajillion` module provides payer-signed payment vectors, operator acknowledgments,
+complete-close validation, exact-quorum certificates, receipt challenges, and an in-memory
+settlement state machine. The [terminal example](../examples/terminal) integrates these primitives
+with an operator, wallets, consensus, and persistence.
 
-The posted corpus ships movers and edges only: readers hold the previous certified state as a
-`Replica`, live accounts ride as one-or-two-byte rank gaps, and the transpose, predecessor
-states, successor states, and prefixes are all derived rather than shipped. Dealt slices travel
-without their unchanged state: every slice assignee retains its key interval across closes,
-hydrates each dealing against it, and validates the result against the certified roots. The
-operator encodes each slice's dealt content once, as a chunk whose bytes do not depend on the
-span carrying it, and ships every span as one witness followed by clones of the covered
-chunks, so dealing the whole committee costs one pass over the corpus.
+Every validator retains the operator's complete account state in QMDB Current Ordered with MMB.
+Each canonical 32-byte account key maps to a positive eight-byte balance; absence represents a
+non-live account. A close derives credits from the signed payer vectors and applies one canonical
+batch containing only changed balances. Deposits can create accounts, zero balances remove them,
+and payments to absent recipients become certified external payouts.
 
-Successful epoch registration activates one immutable payment anchor and a bounded obligation to
-admit its certified close. Operator receipts must not be released before that exact registration
-succeeds. The open registration slot has no periodic heartbeat, but the first authenticated-time
-observation after a registered admission deadline permanently faults the deployment; the expired
-anchor cannot be rolled into another epoch. Each cleanly finalized withdrawal is independently
-claimable as its certified destination and amount plus one opening in the withdrawal-output tree.
+The operator sends the same dealing to every validator. It contains account identities, terminal
+payer authorizations, cumulative payment entries, and one combined operator acceptance signature.
+Each validator checks the complete account equations and reconstructs three roots: account
+activity, withdrawal outputs, and successor QMDB state. The activity and output trees provide
+compact BMT openings for challenges and payout claims. Zero-net activity still appears in the
+activity tree even when it needs no QMDB write. Payer-vector BMTs authenticate individual entries.
 
-`seal` authenticates and takes ownership of a validator's dealing before signing the Header. A
-dealing is the complete, canonically ordered set of `ProofSlice` values assigned to one validator:
-each slice is held by one quorum window of the validator ring, the window slides with the slice
-index, so a validator's slices form one contiguous span (two when the window wraps) and its
-dealing is one `ProofSlice` per span. `seal` checks the local row equations and the exact
-state-update, prefix, accumulator, and conservation relations represented by the dealing and
-shared Header, at every covered slice boundary. It verifies each slice's combined operator
-countersignature and every distinct payer authorization in one randomized aggregate batch. The
-embedding must verify each validator's proof of possession when it registers, and the crate
-assumes it. With `n` validators, the BLS MinSig certificate contributes a 48-byte signature and a
-`ceil(n / 8)`-byte signer bitmap on the external chain. For every slice, its `q = 2f + 1`
-holders and an exact certificate quorum of `q` signers intersect in more than `f` validators, so at
-least one honest certificate signer has authenticated and retains that slice. Across all slices,
-the certificate therefore attests to exhaustive honest authentication of the represented
-predicates without requiring any validator to authenticate the complete public corpus. That claim
-does not extend to a relation absent from both an authenticated slice and the shared Header.
+The 32-byte Header binds those roots, actual withdrawal and external-payout totals, and the exact
+registered epoch context. An external settlement chain verifies an exact `2f + 1` certificate for
+`n = 3f + 1` validators. Each honest signer validates the full dealing and durably retains its
+state and evidence before publishing its vote, so the certificate has at least `f + 1` honest
+holders of the entire close. Committee registration must authenticate proofs of possession.
+The certificate proves the disclosed public relation; private receipts remain necessary to
+challenge an operator's omitted or contradictory acknowledgments.
 
-The settlement state machine is a transition primitive, not a durable chain or asset adapter. An
-embedding application must provide an authenticated monotonic clock and atomically persist each
-state mutation with its custody effects. A chain operated by the same validators may persist the
-32-byte Header as its admitted commitment because consensus admission occurs only after those
-validators have seen the RootBundle and authenticated their dealings. This does not remove the
-chain's context, status, custody, or deadline state, and it does not replace RootBundle or
-data-availability retention. The crate does not provide an operator, network service, persistence
-layer, or asset-adapter implementation.
+Payment counters and vectors are scoped to an immutable registered epoch. A wallet saves the
+verified receipt before advancing its endpoint and retries the exact signed request after response
+loss. An unresolved request must be reconciled with its original epoch before a replacement is
+signed. Registration starts an admission deadline; an expired registered epoch cannot be rolled
+forward to avoid that obligation.
+
+Settlement admits certified closes into a FIFO queue and finalizes each after its challenge
+window and predecessors. Finalization reserves withdrawals and external payouts for independent,
+once-only claims. A proven fault or missed deadline stops new work; recovery freezes the last
+finalized QMDB root after the surviving clean prefix drains. Historical Current proofs support
+forced-withdrawal intake and balance recovery, while ordinary withdrawal claims use the output
+BMT. State and proof material must remain available for every pending root and the finalized
+recovery root, including while a close waits behind an earlier deadline.
+
+The payment, boundary, vector, and BMT modules support `no_std`. QMDB state and settlement paths
+require `std` and use generic Commonware runtime traits. Applications supply authenticated time,
+networking, durable storage, and atomic persistence of protocol decisions with votes and asset
+transfers. A database mutation failure consumes the affected state owner; callers must recover
+from durable storage before resuming it.
 
 ## Benchmarks
 
-The benchmark matrix uses one adaptive pool with 16 workers and selects one live-account
-profile per fresh process. The default profile set is a smaller developer matrix with six
-profiles, `0` through `5`. The blog's measured matrix needs `RUSTFLAGS="--cfg full_bench"` and
-has seven profiles: `0` through `3` sweep the live-account count from 1,024 to one million with
-every account sending, and `3` through `6` hold one million live accounts while the sender count
-falls from one million to 1,024. Run one profile per process:
+The [benchmark guide](src/bajillion/benches/README.md) defines each measured stage and its
+workload. Run one profile per process; `sizes` verifies actual encoded dealings and proof payloads:
 
 ```bash
-RUSTFLAGS="--cfg full_bench" \
-COMMONWARE_CLEARING_PROFILE=0 \
-COMMONWARE_CLEARING_BENCH=blog-chain \
-cargo bench -p commonware-clearing --bench bajillion
+COMMONWARE_CLEARING_PROFILE=0 COMMONWARE_CLEARING_BENCH=sizes \
+  cargo bench -p commonware-clearing --features bench --bench bajillion
 ```
 
-The `sizes` group prints exact encoded sizes for the same profiles, including the posted corpus
-against a reader-held replica and the dealt-slice corpus without unchanged state.
+Use `RUSTFLAGS="--cfg full_bench"` for the dense and sparse matrix through one million live
+accounts. The harness uses 100 validators and an adaptive 16-worker pool. `prepare-apply` includes
+construction, encoding, and canonical batch application to one Current database.
+`receive-apply` includes decoding, full validation, signing, and the same application. Historical
+queries reconstruct a native view on demand; that work belongs to the query cost and is excluded
+from head-advancement measurements. These measurements also exclude journal commit/sync. Separate
+receipt, certificate, challenge, and withdrawal-claim groups exercise their complete verifiers.
 
-The harness reports raw encoded sizes and separately times preparing roots, dealing slices, the
-complete validator `seal` path for the byte-largest dealing, repeatable certified-commitment
-validation, bounded challenge decode plus adjudication, and fixed-amount and Close withdrawal
-claims. The protocol accounting distinguishes the 32-byte validator-chain commitment, the external
-MinSig certificate's 48-byte signature plus `ceil(n / 8)`-byte signer bitmap, and the 164-byte
-RootBundle witness. The generic codec adds an eight-byte bitmap-length prefix, so the raw encoded
-Header-plus-certificate package is `88 + ceil(n / 8)` bytes. The harness also preflights the
-corresponding mutating `SettlementChain` admission and challenge paths outside Criterion's timed
-loops.
-
-Ordinary withdrawals authorize an exact positive amount. A close carries no amount and releases
-the account's authenticated epoch-tail balance after that epoch's deposits, credits, and debits.
-A zero tail is valid and removes the account without creating a payout claim.
+With 100 validators, the encoded Header and certificate occupy 101 bytes. The three roots and
+two outflow totals add 112 bytes to the admission package. Dealing, admission, proof, and transport
+costs are reported separately. Local runs validate correctness and encoded sizes; published
+latency comparisons require matched runs on a quiet external machine.
 
 ## Formal model
 
