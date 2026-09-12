@@ -6,13 +6,23 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = [ "mocks" ]
+default = [ "stateful-all" ]
+stateful-all = [
+	"stateful-cert-mock-restarts",
+	"stateful-cert-mock-restarts-db",
+	"stateful-cert-mock-twins",
+	"stateful-probe",
+]
 mocks = [
 	"commonware-consensus/mocks",
 	"commonware-cryptography/mocks",
 	"commonware-p2p/mocks",
 	"commonware-resolver/mocks",
 ]
+stateful-cert-mock-restarts = [ "mocks" ]
+stateful-cert-mock-restarts-db = [ "mocks" ]
+stateful-cert-mock-twins = [ "mocks" ]
+stateful-probe = [ "mocks" ]
 
 [package.metadata]
 cargo-fuzz = true
@@ -45,6 +55,7 @@ tracing.workspace = true
 [[bin]]
 name = "stateful_cert_mock_twins"
 path = "fuzz_targets/stateful_cert_mock_twins.rs"
+required-features = [ "stateful-cert-mock-twins" ]
 test = false
 doc = false
 bench = false
@@ -52,6 +63,23 @@ bench = false
 [[bin]]
 name = "stateful_cert_mock_restarts"
 path = "fuzz_targets/stateful_cert_mock_restarts.rs"
+required-features = [ "stateful-cert-mock-restarts" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_cert_mock_restarts_db"
+path = "fuzz_targets/stateful_cert_mock_restarts_db.rs"
+required-features = [ "stateful-cert-mock-restarts-db" ]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stateful_probe"
+path = "fuzz_targets/stateful_probe.rs"
+required-features = [ "stateful-probe" ]
 test = false
 doc = false
 bench = false

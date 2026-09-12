@@ -10,14 +10,14 @@
 //! including nothing.
 
 use super::{
-    Databases, NAMESPACE, NUM_IDENTITIES, PublicKey, RESTART_DOWNTIME, Scheme,
+    NAMESPACE, NUM_IDENTITIES, PublicKey, RESTART_DOWNTIME, Scheme,
     app::{Block, CorrectApp},
+    backend::Backend,
     invariants::{self, Counts, EngineObservations},
     stack::{ElectorConfig, EngineConfig, register_channels, spawn_engine},
 };
 use commonware_consensus::types::View;
 use commonware_cryptography::Digestible;
-use commonware_glue::stateful::db::DatabaseSet;
 use commonware_p2p::simulated::{
     Config as NetworkConfig, Link, Network as SimulatedNetwork, Oracle,
 };
@@ -27,7 +27,7 @@ use commonware_utils::{
     sync::{Mutex, Once},
 };
 use rand::RngExt as _;
-use std::{collections::BTreeSet, fmt, panic, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fmt, marker::PhantomData, panic, sync::Arc, time::Duration};
 
 /// Environment variable enabling the per-run report.
 const REPORT_ENV: &str = "GLUE_FUZZ_LOG";
@@ -67,6 +67,8 @@ impl fmt::Display for Outcome {
 pub struct RunReport {
     /// The driver that produced this run.
     pub target: &'static str,
+    /// The database backend every node ran.
+    pub database: &'static str,
     /// Why the run stopped.
     pub outcome: Outcome,
     /// How much each check compared.
@@ -74,9 +76,14 @@ pub struct RunReport {
 }
 
 impl RunReport {
-    pub(super) const fn skipped(target: &'static str, outcome: Outcome) -> Self {
+    pub(super) const fn skipped(
+        target: &'static str,
+        database: &'static str,
+        outcome: Outcome,
+    ) -> Self {
         Self {
             target,
+            database,
             outcome,
             counts: Counts {
                 correct_nodes: 0,
@@ -98,9 +105,10 @@ impl fmt::Display for RunReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[{}] outcome={} correct_nodes={} chain_heights={} state_comparisons={} \
+            "[{}] database={} outcome={} correct_nodes={} chain_heights={} state_comparisons={} \
              verdict_comparisons={} restarts={}{}",
             self.target,
+            self.database,
             self.outcome,
             self.counts.correct_nodes,
             self.counts.chain_heights,
@@ -138,31 +146,49 @@ fn install_input_panic_hook() {
     });
 }
 
+/// A run report every driver produces: printable, and able to say whether the
+/// run checked anything.
+pub(super) trait Reportable: fmt::Display {
+    /// Whether the run's checks compared something.
+    fn measured(&self) -> bool;
+
+    /// Whether the run must be reported even when nobody asked for reports.
+    fn unexpected(&self) -> bool {
+        !self.measured()
+    }
+}
+
+impl Reportable for RunReport {
+    fn measured(&self) -> bool {
+        Self::measured(self)
+    }
+}
+
 /// Announce the run in flight and report the result the way a fuzz target does.
-pub(super) fn report(raw_bytes: &[u8], run: impl FnOnce() -> RunReport) {
+pub(super) fn report<R: Reportable>(raw_bytes: &[u8], run: impl FnOnce() -> R) {
     install_input_panic_hook();
     IN_FLIGHT.lock().clear();
     IN_FLIGHT.lock().extend_from_slice(raw_bytes);
     let report = run();
 
-    // A run that measured nothing is always reported, so it is never silently
-    // counted as a run that found nothing.
-    if !report.measured() || std::env::var_os(REPORT_ENV).is_some() {
+    // A run that measured nothing it should have is always reported, so it is
+    // never silently counted as a run that found nothing.
+    if report.unexpected() || std::env::var_os(REPORT_ENV).is_some() {
         eprintln!("{report}");
     }
 }
 
 /// The identities, network, and genesis block every driver starts from.
-pub(super) struct Cluster {
+pub(super) struct Cluster<B: Backend> {
     pub(super) participants: Arc<[PublicKey]>,
     pub(super) schemes: Vec<Scheme>,
     pub(super) oracle: Oracle<PublicKey, deterministic::Context>,
-    pub(super) genesis: Block,
+    pub(super) genesis: Block<B::Commitment>,
 }
 
 /// Derive the identities and their mock schemes, start the simulated network
 /// with every directed link up, and build the shared genesis block.
-pub(super) async fn setup(context: &mut deterministic::Context) -> Cluster {
+pub(super) async fn setup<B: Backend>(context: &mut deterministic::Context) -> Cluster<B> {
     let fixture = commonware_consensus::simplex::mocks::scheme::fixture_with::<false, true, true, _>(
         context,
         NAMESPACE,
@@ -195,8 +221,7 @@ pub(super) async fn setup(context: &mut deterministic::Context) -> Cluster {
     }
 
     // Every engine starts from the same block with no finalized floor.
-    let initial = <Databases as DatabaseSet<deterministic::Context>>::initial_sync_targets();
-    let genesis = Block::genesis(participants[0].clone(), initial.root, initial.range);
+    let genesis = Block::genesis(participants[0].clone(), B::initial());
     Cluster {
         participants,
         schemes: fixture.schemes,
@@ -207,7 +232,7 @@ pub(super) async fn setup(context: &mut deterministic::Context) -> Cluster {
 
 /// One correct identity's engine, retained so a restart can rebuild it on the
 /// same storage partitions under the same key.
-pub(super) struct CorrectEngine<EC> {
+pub(super) struct CorrectEngine<B: Backend, EC> {
     pub(super) engine: usize,
     identity: PublicKey,
     scheme: Scheme,
@@ -215,13 +240,14 @@ pub(super) struct CorrectEngine<EC> {
     partition: String,
     pub(super) observations: EngineObservations,
     handle: Handle<()>,
+    backend: PhantomData<B>,
 }
 
-impl<EC: ElectorConfig> CorrectEngine<EC> {
+impl<B: Backend, EC: ElectorConfig> CorrectEngine<B, EC> {
     /// Start one correct identity's engine.
     pub(super) async fn start(
         context: &deterministic::Context,
-        cluster: &Cluster,
+        cluster: &Cluster<B>,
         engine: usize,
         elector: EC,
         observations: EngineObservations,
@@ -248,6 +274,7 @@ impl<EC: ElectorConfig> CorrectEngine<EC> {
             partition,
             observations,
             handle,
+            backend: PhantomData,
         }
     }
 
@@ -260,7 +287,7 @@ impl<EC: ElectorConfig> CorrectEngine<EC> {
     pub(super) async fn restart(
         &mut self,
         context: &deterministic::Context,
-        cluster: &Cluster,
+        cluster: &Cluster<B>,
         downtime: Duration,
     ) {
         self.handle.abort();
@@ -281,9 +308,9 @@ impl<EC: ElectorConfig> CorrectEngine<EC> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn spawn<EC: ElectorConfig>(
+async fn spawn<B: Backend, EC: ElectorConfig>(
     context: &deterministic::Context,
-    cluster: &Cluster,
+    cluster: &Cluster<B>,
     engine: usize,
     identity: &PublicKey,
     scheme: &Scheme,
@@ -292,7 +319,7 @@ async fn spawn<EC: ElectorConfig>(
     observations: &EngineObservations,
 ) -> Handle<()> {
     let channels = register_channels(&cluster.oracle, identity).await.whole();
-    spawn_engine(
+    spawn_engine::<B, _, _, _, _, _, _, _>(
         context.child("correct").with_attribute("index", engine),
         cluster.oracle.clone(),
         EngineConfig {
@@ -301,7 +328,7 @@ async fn spawn<EC: ElectorConfig>(
             elector: elector.clone(),
             genesis: cluster.genesis.clone(),
             partition_prefix: partition.to_string(),
-            application: CorrectApp::new(cluster.genesis.clone(), observations.clone()),
+            application: CorrectApp::<B>::new(cluster.genesis.clone(), observations.clone()),
             observations: observations.clone(),
         },
         channels,
@@ -338,9 +365,9 @@ pub(super) fn restart_schedule(
 /// would otherwise be free to satisfy a one-height requirement in the first
 /// view and never reach the second or third. A driver that scripts nothing
 /// passes `View::zero()`, and then every applied height counts.
-pub(super) fn waiters<EC>(
+pub(super) fn waiters<B: Backend, EC>(
     context: &deterministic::Context,
-    nodes: &[CorrectEngine<EC>],
+    nodes: &[CorrectEngine<B, EC>],
     required: usize,
     scripted_through: View,
 ) -> Vec<Handle<()>> {
@@ -369,12 +396,12 @@ pub(super) fn waiters<EC>(
 }
 
 /// Check the invariants over the correct nodes and report what was compared.
-pub(super) fn measure<EC>(
+pub(super) fn measure<B: Backend, EC>(
     target: &'static str,
     outcome: Outcome,
-    nodes: &[CorrectEngine<EC>],
+    nodes: &[CorrectEngine<B, EC>],
     observations: &[EngineObservations],
-    genesis: &Block,
+    genesis: &Block<B::Commitment>,
 ) -> RunReport {
     let correct: Vec<(usize, &EngineObservations)> = nodes
         .iter()
@@ -389,6 +416,7 @@ pub(super) fn measure<EC>(
     };
     RunReport {
         target,
+        database: B::NAME,
         outcome,
         counts,
     }
