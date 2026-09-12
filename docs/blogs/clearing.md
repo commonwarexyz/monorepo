@@ -158,6 +158,14 @@ $$
 
 With no boundary flows, $L_{e+1}=L_e=200$.
 
+```{=html}
+<img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
+```
+
+::: {.image-caption}
+Figure 2: A separate epoch with 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
+:::
+
 QMDB Current Ordered with MMB stores each live account's balance under its public key, committed by $\mathsf{StateRoot}$. Presence means the account is live. Deposits can add accounts, while withdrawals and payments can remove them when their balance reaches zero. Payment totals and counts belong to the epoch's evidence.
 
 ## Keep the State, Send the Changes
@@ -175,7 +183,7 @@ The payer vectors are the common source of truth for both sides of every payment
 ```
 
 ::: {.image-caption}
-Figure 2: The close binds the three resulting roots. Each payer's payment tree is nested in its activity record, which remains present even when its payments leave the balance unchanged.
+Figure 3: The close binds the three resulting roots. Each payer's payment tree is nested in its activity record, which remains present even when its payments leave the balance unchanged.
 :::
 
 The settlement chain holds pooled custody and the certified state root. Validators keep the account records and evidence available for challenges and recovery.
@@ -189,7 +197,7 @@ A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Ever
 ```
 
 ::: {.image-caption}
-Figure 3: Each validator checks the same update against its complete prior state. With 100 validators and at most 33 faulty members, a 67-signature certificate includes at least 34 honest validators that checked and retain the entire close.
+Figure 4: Each validator checks the same update against its complete prior state. With 100 validators and at most 33 faulty members, a 67-signature certificate includes at least 34 honest validators that checked and retain the entire close.
 :::
 
 An honest signer retains the close and its predecessor state durably before publishing its vote. It keeps predecessor and successor proofs available while the close is pending and through its challenge deadline $\Delta_e$, and retains the last finalized state for recovery. A new validator replays the retained updates and checks the resulting state root.
@@ -269,7 +277,7 @@ $$
 ```
 
 ::: {.image-caption}
-Figure 4: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
+Figure 5: After predecessor admission and successor registration, the admitted epoch-$e$ balance is $80+\rho_a=85$, while the live epoch-$e+1$ head becomes $80-20+\rho_a-15=50$. Both rails account for the same predecessor credit, $\rho_a=5$. Importing that credit adds to the live head and preserves every successor debit.
 :::
 
 Accounts with boundary operations must resolve their full admitted outcome before spending in the successor epoch.
@@ -320,39 +328,39 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
     <tr><th colspan="5" style="text-align:left;">Operator</th></tr>
     <tr>
       <td>Prepare and apply</td>
-      <td style="text-align:right;">5.40 ms</td>
-      <td style="text-align:right;">30.2 ms</td>
-      <td style="text-align:right;">326 ms</td>
-      <td style="text-align:right;">4.04 s</td>
+      <td style="text-align:right;">5.61 ms</td>
+      <td style="text-align:right;">28.7 ms</td>
+      <td style="text-align:right;">333 ms</td>
+      <td style="text-align:right;">4.09 s</td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
     <tr>
       <td>Decode</td>
-      <td style="text-align:right;">54.5 ms</td>
-      <td style="text-align:right;">531 ms</td>
-      <td style="text-align:right;">5.32 s</td>
-      <td style="text-align:right;">53.3 s</td>
+      <td style="text-align:right;">0.726 ms</td>
+      <td style="text-align:right;">6.73 ms</td>
+      <td style="text-align:right;">74.3 ms</td>
+      <td style="text-align:right;">907 ms</td>
     </tr>
     <tr>
       <td>Verify and sign</td>
-      <td style="text-align:right;">8.67 ms</td>
-      <td style="text-align:right;">46.8 ms</td>
-      <td style="text-align:right;">468 ms</td>
-      <td style="text-align:right;">5.28 s</td>
+      <td style="text-align:right;">6.95 ms</td>
+      <td style="text-align:right;">48.9 ms</td>
+      <td style="text-align:right;">472 ms</td>
+      <td style="text-align:right;">5.36 s</td>
     </tr>
     <tr>
       <td>Apply balances</td>
-      <td style="text-align:right;">0.225 ms</td>
-      <td style="text-align:right;">2.10 ms</td>
-      <td style="text-align:right;">20.6 ms</td>
-      <td style="text-align:right;">266 ms</td>
+      <td style="text-align:right;">0.234 ms</td>
+      <td style="text-align:right;">2.07 ms</td>
+      <td style="text-align:right;">19.7 ms</td>
+      <td style="text-align:right;">275 ms</td>
     </tr>
     <tr>
       <td><strong>Receive and apply</strong></td>
-      <td style="text-align:right;"><strong>63.6 ms</strong></td>
-      <td style="text-align:right;"><strong>583 ms</strong></td>
-      <td style="text-align:right;"><strong>5.81 s</strong></td>
-      <td style="text-align:right;"><strong>58.9 s</strong></td>
+      <td style="text-align:right;"><strong>8.03 ms</strong></td>
+      <td style="text-align:right;"><strong>57.7 ms</strong></td>
+      <td style="text-align:right;"><strong>566 ms</strong></td>
+      <td style="text-align:right;"><strong>6.54 s</strong></td>
     </tr>
     <tr><th colspan="5" style="text-align:left;">Retained between closes</th></tr>
     <tr>
@@ -368,12 +376,12 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
 ```
 
 ::: {.image-caption}
-Figure 5: One signed payment per account, with no boundary flows. Times are medians of ten successive closes after one warmup on an AWS c8a.4xlarge with 16 workers and in-memory storage. Verification includes balance reads and construction of the new QMDB root; the total also includes decoding and application. Durable commit and networking are excluded. Egress assumes 100 direct copies. Account records count 32-byte keys and 8-byte balances, before QMDB indexes, history, and retained evidence.
+Figure 6: One signed payment per account, with no boundary flows. Times are medians of ten successive closes after one warmup on an AWS c8a.4xlarge with 16 workers and in-memory storage. Verification includes balance reads and construction of the new QMDB root; the total also includes decoding and application. Durable commit and networking are excluded. Egress assumes 100 direct copies. Account records count 32-byte keys and 8-byte balances, before QMDB indexes, history, and retained evidence.
 :::
 
-With a million live accounts but only 1,024 senders paying that same recipient pool, the dealing is still 105 KB and takes 64.5 ms to decode, verify, and apply.
+With a million live accounts but only 1,024 senders paying that same recipient pool, the dealing is still 105 KB and takes 8.69 ms to decode, verify, and apply.
 
-On filesystem storage, the same close takes 74.9 ms from decoding through QMDB commit. This uses a 4 MiB page cache with uncontrolled OS caching and excludes the accepted-close journal and networking.
+On filesystem storage, the same close takes 20.5 ms from decoding through QMDB commit. This uses a 4 MiB page cache with uncontrolled OS caching and excludes the accepted-close journal and networking.
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
 
@@ -382,7 +390,7 @@ Repeated payments between the same pairs reuse these settlement records, spreadi
 ```
 
 ::: {.image-caption}
-Figure 6: More unit payments on the same pairs spread the update and certificate cost. Every account pays its next neighbor, and the model includes growing counter widths. Left: one validator's keyed update. Right: the 101-byte commitment and certificate for 100 validators.
+Figure 7: More unit payments on the same pairs spread the update and certificate cost. Every account pays its next neighbor, and the model includes growing counter widths. Left: one validator's keyed update. Right: the 101-byte commitment and certificate for 100 validators.
 :::
 
 ### Proof Sizes and Verification
@@ -406,7 +414,7 @@ Verifying the certified commitment takes 0.672 ms for a 100-validator committee.
 ```
 
 ::: {.image-caption}
-Figure 7: BMT challenges for payers included in the close, with Ed25519 receipts and one-entry vectors. Sizes exclude the separately supplied close and chain transaction framing.
+Figure 8: BMT challenges for payers included in the close, with Ed25519 receipts and one-entry vectors. Sizes exclude the separately supplied close and chain transaction framing.
 :::
 
 A normal withdrawal opens a certified output in its close's BMT. Its proof grows with the number of withdrawal outputs $W$, independently of the live account database.
@@ -442,7 +450,7 @@ A normal withdrawal opens a certified output in its close's BMT. Its proof grows
 ```
 
 ::: {.image-caption}
-Figure 8: Withdrawal outputs with a 21-byte destination and maximum-depth BMT paths. Verification checks inclusion under a supplied root. Chain transaction framing is excluded.
+Figure 9: Withdrawal outputs with a 21-byte destination and maximum-depth BMT paths. Verification checks inclusion under a supplied root. Chain transaction framing is excluded.
 :::
 
 QMDB proofs authenticate balances for forced withdrawal intake and recovery. A recovery claim opens the account's balance at the frozen finalized root.
@@ -464,7 +472,7 @@ QMDB proofs authenticate balances for forced withdrawal intake and recovery. A r
 ```
 
 ::: {.image-caption}
-Figure 9: Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key; recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
+Figure 10: Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key; recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
 :::
 
 Adjust the workload and committee size below to estimate the operator's traffic. Every validator receives the same update; adding validators changes total egress.
@@ -477,7 +485,7 @@ Adjust the workload and committee size below to estimate the operator's traffic.
 ```
 
 ::: {.image-caption}
-Figure 10: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic; certificates, transport, and other messages are excluded.
+Figure 11: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic; certificates, transport, and other messages are excluded.
 
 Each sender signs one batch of unit payments. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits, withdrawals, or external payouts.
 :::
@@ -485,14 +493,6 @@ Each sender signs one batch of unit payments. Recipients per account averages ov
 ## A Bajillion Payments, One Settlement
 
 Repeated payments between the same pairs share settlement records. Each active account settles its net change across all counterparties.
-
-```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
-```
-
-::: {.image-caption}
-Figure 11: The four-account network carrying 100 million payments of \$0.000001, one atomic unit each. Every sender uses its own opening funds. The arrows group independent payments by sender and recipient, with both directions between $b$ and $c$ retained in the close.
-:::
 
 The payer's receipt arrives in one round trip and gives its holder evidence to challenge a dishonest close. Validators keep the state available so users can recover their funds if the operator disappears.
 

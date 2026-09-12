@@ -356,6 +356,15 @@ O’Grady</a></div>
         </span></p>
         <p>With no boundary flows, <span
         class="math inline">L_{e+1}=L_e=200</span>.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
+        <div class="image-caption">
+        <p>Figure 2: A separate epoch with 100 million payments of
+        $0.000001, one atomic unit each. Every sender uses its own
+        opening funds. The arrows group independent payments by sender
+        and recipient, with both directions between <span
+        class="math inline">b</span> and <span
+        class="math inline">c</span> retained in the close.</p>
+        </div>
         <p>QMDB Current Ordered with MMB stores each live account’s
         balance under its public key, committed by <span
         class="math inline">\mathsf{StateRoot}</span>. Presence means
@@ -391,7 +400,7 @@ O’Grady</a></div>
         settlement totals.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="The certified close binds QMDB balances, account activity, and withdrawal outputs. Each payer's payment BMT is nested in its activity record. The running example expands account c: its balance is 26, its terminal debit is 11, and its payment tree contains b with amount 4 and count 1 and d with amount 7 and count 1. Withdrawal leaves show the destination and amount format used when withdrawals are requested.">
         <div class="image-caption">
-        <p>Figure 2: The close binds the three resulting roots. Each
+        <p>Figure 3: The close binds the three resulting roots. Each
         payer’s payment tree is nested in its activity record, which
         remains present even when its payments leave the balance
         unchanged.</p>
@@ -408,7 +417,7 @@ O’Grady</a></div>
         signatures.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same compact update to every validator. Each validator checks it against the balances it retains in QMDB, derives the account activity and balance changes, and signs the resulting commitment. A quorum of signatures forms the certificate.">
         <div class="image-caption">
-        <p>Figure 3: Each validator checks the same update against its
+        <p>Figure 4: Each validator checks the same update against its
         complete prior state. With 100 validators and at most 33 faulty
         members, a 67-signature certificate includes at least 34 honest
         validators that checked and retain the entire close.</p>
@@ -561,7 +570,7 @@ O’Grady</a></div>
           <noscript>After predecessor admission and successor registration, the admitted balance is 80 plus 5, or 85. The live head is 80 minus 20 plus the same 5 minus 15, or 50. Reconciliation adds the remaining credit without installing 85 over the live head.</noscript>
         </div>
         <div class="image-caption">
-        <p>Figure 4: After predecessor admission and successor
+        <p>Figure 5: After predecessor admission and successor
         registration, the admitted epoch-<span
         class="math inline">e</span> balance is <span
         class="math inline">80+\rho_a=85</span>, while the live
@@ -622,39 +631,39 @@ O’Grady</a></div>
             <tr><th colspan="5" style="text-align:left;">Operator</th></tr>
             <tr>
               <td>Prepare and apply</td>
-              <td style="text-align:right;">5.40 ms</td>
-              <td style="text-align:right;">30.2 ms</td>
-              <td style="text-align:right;">326 ms</td>
-              <td style="text-align:right;">4.04 s</td>
+              <td style="text-align:right;">5.61 ms</td>
+              <td style="text-align:right;">28.7 ms</td>
+              <td style="text-align:right;">333 ms</td>
+              <td style="text-align:right;">4.09 s</td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Validator</th></tr>
             <tr>
               <td>Decode</td>
-              <td style="text-align:right;">54.5 ms</td>
-              <td style="text-align:right;">531 ms</td>
-              <td style="text-align:right;">5.32 s</td>
-              <td style="text-align:right;">53.3 s</td>
+              <td style="text-align:right;">0.726 ms</td>
+              <td style="text-align:right;">6.73 ms</td>
+              <td style="text-align:right;">74.3 ms</td>
+              <td style="text-align:right;">907 ms</td>
             </tr>
             <tr>
               <td>Verify and sign</td>
-              <td style="text-align:right;">8.67 ms</td>
-              <td style="text-align:right;">46.8 ms</td>
-              <td style="text-align:right;">468 ms</td>
-              <td style="text-align:right;">5.28 s</td>
+              <td style="text-align:right;">6.95 ms</td>
+              <td style="text-align:right;">48.9 ms</td>
+              <td style="text-align:right;">472 ms</td>
+              <td style="text-align:right;">5.36 s</td>
             </tr>
             <tr>
               <td>Apply balances</td>
-              <td style="text-align:right;">0.225 ms</td>
-              <td style="text-align:right;">2.10 ms</td>
-              <td style="text-align:right;">20.6 ms</td>
-              <td style="text-align:right;">266 ms</td>
+              <td style="text-align:right;">0.234 ms</td>
+              <td style="text-align:right;">2.07 ms</td>
+              <td style="text-align:right;">19.7 ms</td>
+              <td style="text-align:right;">275 ms</td>
             </tr>
             <tr>
               <td><strong>Receive and apply</strong></td>
-              <td style="text-align:right;"><strong>63.6 ms</strong></td>
-              <td style="text-align:right;"><strong>583 ms</strong></td>
-              <td style="text-align:right;"><strong>5.81 s</strong></td>
-              <td style="text-align:right;"><strong>58.9 s</strong></td>
+              <td style="text-align:right;"><strong>8.03 ms</strong></td>
+              <td style="text-align:right;"><strong>57.7 ms</strong></td>
+              <td style="text-align:right;"><strong>566 ms</strong></td>
+              <td style="text-align:right;"><strong>6.54 s</strong></td>
             </tr>
             <tr><th colspan="5" style="text-align:left;">Retained between closes</th></tr>
             <tr>
@@ -668,7 +677,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 5: One signed payment per account, with no boundary
+        <p>Figure 6: One signed payment per account, with no boundary
         flows. Times are medians of ten successive closes after one
         warmup on an AWS c8a.4xlarge with 16 workers and in-memory
         storage. Verification includes balance reads and construction of
@@ -680,8 +689,8 @@ O’Grady</a></div>
         </div>
         <p>With a million live accounts but only 1,024 senders paying
         that same recipient pool, the dealing is still 105 KB and takes
-        64.5 ms to decode, verify, and apply.</p>
-        <p>On filesystem storage, the same close takes 74.9 ms from
+        8.69 ms to decode, verify, and apply.</p>
+        <p>On filesystem storage, the same close takes 20.5 ms from
         decoding through QMDB commit. This uses a 4 MiB page cache with
         uncontrolled OS caching and excludes the accepted-close journal
         and networking.</p>
@@ -690,7 +699,7 @@ O’Grady</a></div>
         payments.</p>
         <img class="clearing-benchmark-plot" src="/imgs/clearing-bytes-per-payment.svg" alt="Two log-log plots show modeled bytes per payment as one million to one billion unit payments pass between fixed pairs. The left shows one validator's keyed update for four account counts, including growing cumulative counters. The right shows the 101-byte commitment and certificate.">
         <div class="image-caption">
-        <p>Figure 6: More unit payments on the same pairs spread the
+        <p>Figure 7: More unit payments on the same pairs spread the
         update and certificate cost. Every account pays its next
         neighbor, and the model includes growing counter widths. Left:
         one validator’s keyed update. Right: the 101-byte commitment and
@@ -717,7 +726,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 7: BMT challenges for payers included in the close,
+        <p>Figure 8: BMT challenges for payers included in the close,
         with Ed25519 receipts and one-entry vectors. Sizes exclude the
         separately supplied close and chain transaction framing.</p>
         </div>
@@ -753,7 +762,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 8: Withdrawal outputs with a 21-byte destination and
+        <p>Figure 9: Withdrawal outputs with a 21-byte destination and
         maximum-depth BMT paths. Verification checks inclusion under a
         supplied root. Chain transaction framing is excluded.</p>
         </div>
@@ -774,7 +783,7 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 9: Current Ordered proofs after the initial insertion
+        <p>Figure 10: Current Ordered proofs after the initial insertion
         batch, using a middle account and a missing key. SHA-256/MMB,
         32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the
         known account key; recovery includes it. All omit the trusted
@@ -789,7 +798,7 @@ O’Grady</a></div>
         </div>
         <script type="module" src="clearing.calculator.js"></script>
         <div class="image-caption">
-        <p>Figure 10: Modeled keyed update per validator, with total
+        <p>Figure 11: Modeled keyed update per validator, with total
         operator egress in parentheses. Dotted: all live account records
         (40 bytes each), before database overhead and retained evidence.
         Both axes are logarithmic; certificates, transport, and other
@@ -805,15 +814,6 @@ O’Grady</a></div>
         <p>Repeated payments between the same pairs share settlement
         records. Each active account settles its net change across all
         counterparties.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-netting.svg" alt="100 million payments across six directed pairs net into balance changes for four active accounts. Account a sends $30 and receives $10, moving from $100 to $80. Account b sends $25 and receives $55, moving from $40 to $70. Account c sends $20 and receives $25, moving from $25 to $30. Account d sends $25 and receives $10, moving from $35 to $20. The close retains six cumulative entries and four account records.">
-        <div class="image-caption">
-        <p>Figure 11: The four-account network carrying 100 million
-        payments of $0.000001, one atomic unit each. Every sender uses
-        its own opening funds. The arrows group independent payments by
-        sender and recipient, with both directions between <span
-        class="math inline">b</span> and <span
-        class="math inline">c</span> retained in the close.</p>
-        </div>
         <p>The payer’s receipt arrives in one round trip and gives its
         holder evidence to challenge a dishonest close. Validators keep
         the state available so users can recover their funds if the
