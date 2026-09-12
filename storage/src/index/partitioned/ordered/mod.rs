@@ -1910,7 +1910,7 @@ mod tests {
             &self,
             _len: usize,
             f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
+        ) -> impl core::future::Future<Output = T> + Send + 'static + use<F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
