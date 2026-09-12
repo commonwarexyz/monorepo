@@ -54,7 +54,7 @@ use core::{
     ops::Index,
     sync::atomic::{AtomicU8, Ordering},
 };
-use hashbrown::HashMap;
+use hashbrown::HashTable;
 
 /// Sentinel used when a policy-owned slot has no neighbor.
 const UNLINKED: usize = usize::MAX;
@@ -448,8 +448,10 @@ struct GhostSlot<K> {
 /// provides exact membership checks, while the linked queue discards the oldest
 /// history when it reaches its bound.
 struct GhostQueue<K> {
-    /// Exact key membership mapped to queue positions.
-    index: HashMap<K, usize, Hasher>,
+    /// Exact key membership represented by queue positions.
+    index: HashTable<usize>,
+    /// Hash builder shared by lookups and table rehashes.
+    hasher: Hasher,
     /// Storage for linked historical entries.
     slots: Vec<GhostSlot<K>>,
     /// Detached positions available for reuse.
@@ -462,11 +464,12 @@ struct GhostQueue<K> {
     capacity: usize,
 }
 
-impl<K: Hash + Eq + Clone> GhostQueue<K> {
+impl<K: Hash + Eq> GhostQueue<K> {
     /// Constructs empty exact history bounded by `capacity`.
     fn new(capacity: usize) -> Self {
         Self {
-            index: HashMap::with_capacity_and_hasher(capacity, Hasher::default()),
+            index: HashTable::with_capacity(capacity),
+            hasher: Hasher::default(),
             slots: Vec::with_capacity(capacity),
             free: Vec::with_capacity(capacity),
             head: None,
@@ -496,20 +499,30 @@ impl<K: Hash + Eq + Clone> GhostQueue<K> {
             slot
         } else {
             let slot = self.tail.expect("full Ghost must have a tail");
+
+            // The table's slot index is valid only while this canonical key is
+            // live. Remove the index entry before unlinking and dropping it.
+            let hash = self.hasher.hash_one(
+                self.slots[slot]
+                    .key
+                    .as_ref()
+                    .expect("linked Ghost entry must have a key"),
+            );
+            self.index
+                .find_entry(hash, |candidate| *candidate == slot)
+                .expect("linked Ghost entry must be indexed")
+                .remove();
             let historical = self.unlink(slot);
-            let removed = self.index.remove(&historical);
-            assert_eq!(removed, Some(slot));
+            drop(historical);
             slot
         };
 
+        let hash = self.hasher.hash_one(&key);
         let old_head = self.head;
         {
             let entry = &mut self.slots[slot];
             assert!(entry.key.is_none());
-
-            // Ghost keeps one key in its hash index and one in its queue slot,
-            // which avoids per-entry shared ownership between the structures.
-            entry.key = Some(key.clone());
+            entry.key = Some(key);
             entry.prev = UNLINKED;
             entry.next = old_head.unwrap_or(UNLINKED);
         }
@@ -519,20 +532,44 @@ impl<K: Hash + Eq + Clone> GhostQueue<K> {
             self.tail = Some(slot);
         }
         self.head = Some(slot);
-        self.index.insert(key, slot);
+
+        // Resident and Ghost keys are disjoint. Every indexed slot owns a live
+        // key, including while insertion rehashes the table.
+        let slots = &self.slots;
+        let hasher = &self.hasher;
+        let _ = self.index.insert_unique(hash, slot, |slot| {
+            hasher.hash_one(
+                slots[*slot]
+                    .key
+                    .as_ref()
+                    .expect("indexed Ghost entry must have a key"),
+            )
+        });
     }
 
     /// Removes exact history for `key` and reports whether it was present.
     #[inline]
     fn discard(&mut self, key: &K) -> bool {
-        let Some(slot) = self.index.remove(key) else {
-            return false;
+        let hash = self.hasher.hash_one(key);
+        let slot = {
+            let slots = &self.slots;
+            let Ok(entry) = self.index.find_entry(hash, |slot| {
+                slots[*slot]
+                    .key
+                    .as_ref()
+                    .expect("indexed Ghost entry must have a key")
+                    == key
+            }) else {
+                return false;
+            };
+            entry.remove().0
         };
-        let _historical = self.unlink(slot);
+        let historical = self.unlink(slot);
 
         // Recycle the position before dropping the key, so a panicking
         // destructor cannot strand the detached slot outside the free list.
         self.free.push(slot);
+        drop(historical);
         true
     }
 
@@ -825,7 +862,8 @@ mod tests {
     use super::*;
     use crate::{NZUsize, cache::Cache, sync::RwLock};
     use std::{
-        collections::HashSet,
+        collections::{HashSet, VecDeque},
+        rc::Rc,
         sync::{Arc, Barrier},
         thread,
     };
@@ -1008,7 +1046,15 @@ mod tests {
                     .key
                     .as_ref()
                     .expect("linked Ghost entry must have a key");
-                assert_eq!(policy.ghost.index.get(key), Some(&slot));
+                assert_eq!(
+                    policy
+                        .ghost
+                        .index
+                        .find(policy.ghost.hasher.hash_one(key), |candidate| {
+                            policy.ghost.slots[*candidate].key.as_ref() == Some(key)
+                        }),
+                    Some(&slot),
+                );
                 assert!(!self.index.contains_key(key));
                 let expected_prev = rank.checked_sub(1).map(|rank| ghost[rank]);
                 let expected_next = ghost.get(rank + 1).copied();
@@ -1464,5 +1510,95 @@ mod tests {
         assert_eq!(cache.main_keys(), main);
         assert_eq!(cache.ghost_keys(), ghost);
         cache.check_invariants();
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct GhostKey {
+        value: u64,
+        owner: Rc<()>,
+    }
+
+    impl Hash for GhostKey {
+        fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+            state.write_u8(0);
+        }
+    }
+
+    fn exercise_colliding_ghost(capacity: usize, reserve: bool) {
+        let owner = Rc::new(());
+        let key = |value| GhostKey {
+            value,
+            owner: Rc::clone(&owner),
+        };
+        let mut ghost = GhostQueue::new(capacity);
+        if !reserve {
+            // Exercise the insertion callback through multiple table growths.
+            ghost.index = HashTable::new();
+        }
+        let mut expected = VecDeque::new();
+        for step in 0..2048u64 {
+            let value = (step * 17 + step / 5) % 127;
+            let position = expected.iter().position(|entry| *entry == value);
+            assert_eq!(ghost.discard(&key(value)), position.is_some());
+            if let Some(position) = position {
+                expected.remove(position);
+            }
+            if step % 5 != 0 {
+                ghost.push(key(value));
+                if capacity != 0 {
+                    expected.push_front(value);
+                    expected.truncate(capacity);
+                }
+            }
+            if step == 777 || step == 1333 {
+                ghost.clear();
+                expected.clear();
+            }
+
+            let mut actual = Vec::new();
+            let mut linked_slots = HashSet::new();
+            let mut previous = None;
+            let mut current = ghost.head;
+            while let Some(slot) = current {
+                assert!(linked_slots.insert(slot));
+                let entry = &ghost.slots[slot];
+                assert_eq!(linked(entry.prev), previous);
+                actual.push(entry.key.as_ref().unwrap().value);
+                previous = current;
+                current = linked(entry.next);
+            }
+            assert_eq!(ghost.tail, previous);
+            assert_eq!(actual, expected.iter().copied().collect::<Vec<_>>());
+            assert_eq!(
+                ghost.index.iter().copied().collect::<HashSet<_>>(),
+                linked_slots
+            );
+            assert_eq!(ghost.index.len(), expected.len());
+            assert_eq!(ghost.index.len() + ghost.free.len(), ghost.slots.len());
+            assert!(ghost.slots.len() <= capacity);
+            let free = ghost.free.iter().copied().collect::<HashSet<_>>();
+            assert_eq!(free.len(), ghost.free.len());
+            for (slot, entry) in ghost.slots.iter().enumerate() {
+                assert_eq!(entry.key.is_some(), linked_slots.contains(&slot));
+                assert_eq!(free.contains(&slot), entry.key.is_none());
+            }
+
+            // GhostKey is not Clone, and each live historical key owns one Rc.
+            assert_eq!(Rc::strong_count(&owner), expected.len() + 1);
+        }
+        drop(ghost);
+        assert_eq!(Rc::strong_count(&owner), 1);
+    }
+
+    #[test]
+    fn test_ghost_collision_churn_and_key_ownership() {
+        for capacity in [0, 1, 2, 31] {
+            exercise_colliding_ghost(capacity, true);
+        }
+    }
+
+    #[test]
+    fn test_ghost_rehash_reads_live_keys() {
+        exercise_colliding_ghost(31, false);
     }
 }
