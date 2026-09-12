@@ -698,7 +698,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let futs = F::nodes_to_pin(loc)
             .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
             .collect::<Vec<_>>();
-        futures::future::try_join_all(futs).await
+        commonware_utils::futures::try_join_all(futs).await
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to

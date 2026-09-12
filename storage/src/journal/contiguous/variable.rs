@@ -38,10 +38,8 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Replay, Writer},
 };
-use futures::{
-    FutureExt as _, Stream,
-    future::{try_join, try_join_all},
-};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, Stream, future::try_join};
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -1960,7 +1958,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         let start_blob = position_to_blob(start_position, items_per_blob);
         let end_blob = position_to_blob(end_position - 1, items_per_blob);
-        futures::future::try_join_all(
+        commonware_utils::futures::try_join_all(
             pending
                 .range_mut(start_blob..=end_blob)
                 .map(|(_, writer)| writer.sync()),

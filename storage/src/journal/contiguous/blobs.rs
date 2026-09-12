@@ -15,10 +15,8 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
-use futures::{
-    FutureExt as _,
-    future::{self, try_join_all},
-};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
