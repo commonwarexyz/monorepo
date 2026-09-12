@@ -40,6 +40,7 @@ commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std", "test-utils"] }
 criterion.workspace = true
+mimalloc.workspace = true
 paste.workspace = true
 rand = { workspace = true, features = ["alloc"] }
 rand_distr.workspace = true
@@ -111,6 +112,12 @@ required-features = ["test-traits"]
 name = "scale"
 harness = false
 path = "src/qmdb/benches/scale.rs"
+required-features = ["test-traits"]
+
+[[bench]]
+name = "trace_replay"
+harness = false
+path = "src/qmdb/benches/trace_replay.rs"
 required-features = ["test-traits"]
 
 [[bench]]
