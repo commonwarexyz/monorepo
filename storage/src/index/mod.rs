@@ -18,6 +18,10 @@ use commonware_runtime::Metrics;
 
 mod storage;
 
+#[cfg(test)]
+#[path = "benches/packed_tests.rs"]
+mod packed_location_experiment;
+
 pub mod ordered;
 pub mod partitioned;
 pub mod unordered;

@@ -16,6 +16,12 @@
 //! For a smaller memory experiment with the same mean partition occupancy as 1B keys at P=3,
 //! use `-- 3906250 partitioned_ordered_2`. Run each variant in a fresh process under a memory
 //! profiler to include allocator fragmentation as well as live allocations.
+//!
+//! For decoded locations and existing-key replacements, explicitly select `locations_u64_2`
+//! or `locations_packed_2` (also available with `_3`). See PACKED_LOCATIONS.md for the experiment.
+
+mod packed;
+mod packed_scale;
 
 use commonware_runtime::{
     Metrics, Name, Supervisor,
@@ -121,6 +127,7 @@ fn main() {
 
     for items in sizes {
         println!("index_scale: items={items}");
+        packed_scale::run(items, &only);
 
         // Each variant is built once; insert is the timed build, lookup re-seeds and reuses the
         // populated index. P=3 ordered SoA (the structure under test) runs first; the flat BTree is
