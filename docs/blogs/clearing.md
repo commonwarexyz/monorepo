@@ -193,7 +193,7 @@ The settlement chain holds pooled custody and the certified state root. Validato
 A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, retains its evidence, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same compact update to every validator. Each validator checks it against the balances it retains in QMDB, derives the account activity and balance changes, and signs the resulting commitment. A quorum of signatures forms the certificate.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends identical bytes to 100 validators, shown as a grid. Green dots mark the 67 signatures forming the certificate. The expanded view shows the running example's four QMDB balances changing after a validator checks the whole close.">
 ```
 
 ::: {.image-caption}
@@ -381,7 +381,7 @@ Figure 6: One signed payment per account, with no boundary flows. Times are medi
 
 With a million live accounts but only 1,024 senders paying that same recipient pool, the dealing is still 105 KB and takes 8.69 ms to decode, verify, and apply.
 
-On filesystem storage, the same close takes 20.5 ms from decoding through QMDB commit. This uses a 4 MiB page cache with uncontrolled OS caching and excludes the accepted-close journal and networking.
+On a 100 GiB EBS gp3 SSD with the default 3,000 IOPS and 125 MiB/s throughput, the same close takes 20.5 ms from decoding through QMDB commit. QMDB's own cache is 4 MiB. The full account dataset fits in the host's 32 GiB of RAM and can remain in the OS page cache, which was not cleared between runs. The accepted-close journal and networking are excluded.
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
 
