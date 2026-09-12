@@ -5,6 +5,7 @@ use crate::{
     qmdb::{self},
 };
 use commonware_cryptography::Digest;
+use commonware_utils::range::NonEmptyRange;
 
 /// Errors from a [`Source`](crate::qmdb::sync::source::Source) when serving a request.
 #[derive(Debug, thiserror::Error)]
@@ -25,11 +26,8 @@ pub enum EngineError<F: Family, D: Digest> {
     #[error("response failed validation and the source accepts no feedback")]
     InvalidResponse,
     /// Invalid target parameters
-    #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]
-    InvalidTarget {
-        lower_bound_pos: Location<F>,
-        upper_bound_pos: Location<F>,
-    },
+    #[error("invalid target bounds [{}, {})", .bounds.start(), .bounds.end())]
+    InvalidTarget { bounds: NonEmptyRange<Location<F>> },
     /// Invalid client state
     #[error("invalid client state")]
     InvalidState,

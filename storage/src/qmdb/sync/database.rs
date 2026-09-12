@@ -1,13 +1,19 @@
 use crate::{
     Context,
     merkle::{Family, Location, full},
-    qmdb::sync::{Journal, Target},
+    qmdb::{
+        Error,
+        operation::Committable,
+        single_operation_root,
+        sync::{EngineError, Journal, Target},
+    },
     translator::Translator,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::range::NonEmptyRange;
-use std::{future::Future, num::NonZeroU64};
+use commonware_utils::{non_empty_range, range::NonEmptyRange};
+use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
@@ -45,9 +51,10 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
     fn journal_config(&self) -> Self::JournalConfig {}
 }
 
+/// A QMDB the sync engine can build.
 pub trait Database: Sized + Send {
     type Family: Family;
-    type Op: Send + Sync;
+    type Op: Committable<Self::Family> + Encode + Send + Sync;
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
@@ -55,6 +62,12 @@ pub trait Database: Sized + Send {
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
+
+    /// Initialize the database from `config`.
+    fn init(
+        context: Self::Context,
+        config: Self::Config,
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -64,15 +77,13 @@ pub trait Database: Sized + Send {
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<Self::Family>>,
         apply_batch_size: NonZeroU64,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 
     /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
     ///
-    /// The engine calls this only after [`Self::root`] matches the requested target. Implementations
+    /// The engine calls this only after the rebuilt root matches the requested target. Implementations
     /// that persist everything in [`Self::from_sync_result`] must explicitly return `Ok(self)`.
-    fn persist_sync_result(
-        self,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+    fn persist_sync_result(self) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 
     /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.
@@ -85,10 +96,44 @@ pub trait Database: Sized + Send {
         config: &Self::Config,
         target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
         journal: &Self::Journal,
-    ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send;
+    ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, Error<Self::Family>>> + Send;
 
-    /// Get the root digest of the database for verification
+    /// Sync target of a freshly initialized database.
+    fn initial_target() -> Target<Self::Family, Self::Digest> {
+        Target {
+            root: single_operation_root::<Self::Family, Self::Hasher>(&Self::Op::initial_commit()),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
+    }
+
+    /// Sync target to get to this database's state.
+    fn target(&self) -> Target<Self::Family, Self::Digest>;
+
+    /// Reject a target this database cannot sync to. The engine checks the initial target and
+    /// every adopted update; the default accepts any target.
+    fn validate_target(
+        _target: &Target<Self::Family, Self::Digest>,
+    ) -> Result<(), EngineError<Self::Family, Self::Digest>> {
+        Ok(())
+    }
+}
+
+/// A merkleized batch atop this database.
+pub trait MerkleizedBatch {
+    type Family: Family;
+    type Digest: Digest;
+    /// Batch rooted at this one, before merkleization.
+    type Unmerkleized<H: Hasher<Digest = Self::Digest>>;
+
+    /// Root the batch commits to.
     fn root(&self) -> Self::Digest;
+
+    /// Create a batch rooted at this one.
+    fn new_batch<H: Hasher<Digest = Self::Digest>>(self: &Arc<Self>) -> Self::Unmerkleized<H>;
+
+    /// Sync target reached once the batch is applied.
+    #[allow(clippy::type_complexity)]
+    fn target(&self) -> Result<Target<Self::Family, Self::Digest>, Error<Self::Family>>;
 }
 
 /// Whether a completed sync journal's `bounds` cover `range`: retained data reaches back to
@@ -111,7 +156,7 @@ pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     config: full::Config<S>,
     target: &Target<F, H::Digest>,
     inactivity_floor: Location<F>,
-) -> Result<Option<Vec<H::Digest>>, crate::qmdb::Error<F>>
+) -> Result<Option<Vec<H::Digest>>, Error<F>>
 where
     F: Family,
     E: Context,

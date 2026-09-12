@@ -13,7 +13,7 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         any::ValueEncoding,
-        operation::{Floored, Key, Operation as OperationTrait},
+        operation::{Committable, Key, Operation as OperationTrait},
     },
 };
 use commonware_codec::Encode;
@@ -46,18 +46,18 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
             Self::Commit(_, _) => None,
         }
     }
+}
 
-    /// Returns true if this is a commit operation.
-    pub const fn is_commit(&self) -> bool {
-        matches!(self, Self::Commit(_, _))
-    }
-
-    /// Returns the inactivity floor location if this is a commit operation.
-    pub const fn has_floor(&self) -> Option<Location<F>> {
+impl<F: Family, K: Key, V: ValueEncoding> Committable<F> for Operation<F, K, V> {
+    fn floor(&self) -> Option<Location<F>> {
         match self {
             Self::Commit(_, loc) => Some(*loc),
             Self::Set(_, _) => None,
         }
+    }
+
+    fn initial_commit() -> Self {
+        Self::Commit(None, Location::new(0))
     }
 }
 
@@ -82,12 +82,6 @@ impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, 
 
     fn is_update(&self) -> bool {
         matches!(self, Self::Set(_, _))
-    }
-}
-
-impl<F: Family, K: Key, V: ValueEncoding> Floored<F> for Operation<F, K, V> {
-    fn has_floor(&self) -> Option<Location<F>> {
-        self.has_floor()
     }
 }
 
@@ -176,22 +170,22 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_has_floor() {
+    fn test_operation_floor() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
         let set_op = VarOp::Set(key, value.clone());
-        assert_eq!(<VarOp as Floored<mmr::Family>>::has_floor(&set_op), None);
+        assert_eq!(<VarOp as Committable<mmr::Family>>::floor(&set_op), None);
 
         let commit_op = VarOp::Commit(Some(value), Location::new(42));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::has_floor(&commit_op),
+            <VarOp as Committable<mmr::Family>>::floor(&commit_op),
             Some(Location::new(42))
         );
 
         let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::has_floor(&commit_op_none),
+            <VarOp as Committable<mmr::Family>>::floor(&commit_op_none),
             Some(Location::new(0))
         );
     }

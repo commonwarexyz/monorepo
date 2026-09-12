@@ -65,7 +65,7 @@ use crate::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
-    qmdb::operation::{Floored, Operation},
+    qmdb::operation::{Committable, Operation},
     translator::Translator,
 };
 use commonware_codec::Encode;
@@ -124,28 +124,24 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
         .expect("a single-leaf Merkle root is always valid")
 }
 
-/// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
-///
-/// `op_count` must be a non-zero commit-boundary historical size: the operation at `op_count - 1`
-/// must itself be a commit op (one for which `floor_of` returns `Some`).
+/// Look up the inactivity floor declared by the commit at `size - 1`, or `None` if that
+/// operation is not a commit.
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
-///   `op_count - 1` is retained but is not a commit op (either because the caller passed a
-///   non-commit-boundary size, or because pruning removed the commit that would have governed this
-///   size).
-/// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero (no preceding commit exists).
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
 pub(crate) async fn find_inactivity_floor_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
-) -> Result<Location<F>, Error<F>>
+    size: Location<F>,
+) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    let Some(last_op) = op_count.checked_sub(1) else {
-        return Err(Error::HistoricalFloorPruned(op_count));
+    let Some(last_op) = size.checked_sub(1) else {
+        return Err(Error::HistoricalFloorPruned(size));
     };
     let last_op = *last_op;
     let bounds = reader.bounds();
@@ -154,32 +150,34 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = op
-        .has_floor()
-        .ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let Some(floor) = op.floor() else {
+        return Ok(None);
+    };
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
         ));
     }
-    Ok(floor)
+    Ok(Some(floor))
 }
 
-/// Compute the inactive peak count for a historical operation count.
+/// Compute the inactive peak count for a historical `size`.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
+    size: Location<F>,
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    if op_count == Location::new(0) {
+    if size == Location::new(0) {
         return Ok(0);
     }
 
-    let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
-    Ok(F::inactive_peaks(op_count, floor))
+    let floor = find_inactivity_floor_at::<F, _>(reader, size)
+        .await?
+        .ok_or(Error::HistoricalFloorPruned(size))?;
+    Ok(F::inactive_peaks(size, floor))
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -315,7 +313,7 @@ where
                     cache.put(loc, key.clone());
                 }
             }
-        } else if op.has_floor().is_some() {
+        } else if op.is_commit() {
             callback(loc == last_commit_loc, None);
         }
     }

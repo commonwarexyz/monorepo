@@ -1,7 +1,8 @@
-//! Stateful adapters for QMDB keyless databases.
+//! [`Qmdb`](crate::stateful::db::qmdb::Qmdb) implementations for
+//! [`qmdb::keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Use [`standard`] for the journaled implementation and [`compact`] for the
 //! compact implementation that retains only current Merkle peaks.
 
-pub mod compact;
-pub mod standard;
+mod compact;
+mod standard;
