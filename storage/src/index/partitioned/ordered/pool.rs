@@ -10,7 +10,7 @@ use std::{
 
 // Keep slabs small enough that a few surviving buffers do not pin large allocations after
 // most partitions have grown into the next size class.
-const SLAB_BYTES: usize = 4 * 1024;
+const SLAB_BYTES: usize = 2 * 1024;
 
 type Available = HashMap<(usize, usize), Vec<Weak<Slab>>>;
 
@@ -34,8 +34,10 @@ impl Pool {
                 continue;
             };
             let mut free = slab.free.lock();
-            let offset = free.pop().expect("available slab has a free slot");
-            if free.is_empty() {
+            assert_ne!(*free, 0, "available slab has a free slot");
+            let offset = free.trailing_zeros() as usize * slot.size();
+            *free &= *free - 1;
+            if *free == 0 {
                 slabs.pop();
             }
             drop(free);
@@ -44,7 +46,7 @@ impl Pool {
             return Allocation { ptr, slab };
         }
 
-        let count = (SLAB_BYTES / slot.size()).max(1);
+        let count = (SLAB_BYTES / slot.size()).clamp(1, u64::BITS as usize);
         let layout = Layout::from_size_align(slot.size() * count, slot.align()).unwrap();
         // SAFETY: layout is nonzero and valid.
         let raw = unsafe { alloc(layout) };
@@ -55,7 +57,8 @@ impl Pool {
             ptr,
             layout,
             slot,
-            free: Mutex::new((1..count).rev().map(|i| i * slot.size()).collect()),
+            // The low count bits describe slots; slot zero belongs to the returned allocation.
+            free: Mutex::new((u64::MAX >> (u64::BITS as usize - count)) & !1),
             pool: self.clone(),
         });
         if count > 1 {
@@ -70,7 +73,7 @@ pub(super) struct Slab {
     ptr: NonNull<u8>,
     layout: Layout,
     slot: Layout,
-    free: Mutex<Vec<usize>>,
+    free: Mutex<u64>,
     pub(super) pool: Arc<Pool>,
 }
 
@@ -103,8 +106,8 @@ impl Drop for Allocation {
         let offset = unsafe { self.ptr.as_ptr().offset_from(self.slab.ptr.as_ptr()) } as usize;
         let was_full = {
             let mut free = self.slab.free.lock();
-            let was_full = free.is_empty();
-            free.push(offset);
+            let was_full = *free == 0;
+            *free |= 1 << (offset / self.slab.slot.size());
             was_full
         };
         if was_full {
@@ -126,9 +129,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_slot_mask_boundaries() {
+        for (size, align, count) in [(1, 1, 64), (32, 8, 64), (56, 8, 36), (512, 8, 4)] {
+            let pool = Arc::new(Pool::default());
+            let layout = Layout::from_size_align(size, align).unwrap();
+            let allocations: Vec<_> = (0..count).map(|_| pool.allocate(layout)).collect();
+            let slab = allocations[0].slab.clone();
+            assert!(allocations.iter().all(|a| Arc::ptr_eq(&a.slab, &slab)));
+            for (i, allocation) in allocations.iter().enumerate() {
+                assert_eq!(
+                    allocation.ptr.as_ptr().addr(),
+                    slab.ptr.as_ptr().addr() + i * size
+                );
+            }
+            let extra = pool.allocate(layout);
+            assert!(!Arc::ptr_eq(&extra.slab, &slab));
+
+            // Return high slots first, exercising bit 63 before eventually making every bit free.
+            for allocation in allocations.into_iter().rev() {
+                let ptr = allocation.ptr;
+                drop(allocation);
+                let reused = pool.allocate(layout);
+                assert_eq!(reused.ptr, ptr);
+                drop(reused);
+            }
+            let weak = Arc::downgrade(&slab);
+            drop(slab);
+            assert!(weak.upgrade().is_none());
+            drop(extra);
+        }
+    }
+
+    #[test]
     fn test_reuse_and_release() {
         let pool = Arc::new(Pool::default());
-        let layout = Layout::from_size_align(1024, 8).unwrap();
+        let layout = Layout::from_size_align(SLAB_BYTES / 4, 8).unwrap();
         let mut allocations: Vec<_> = (0..4).map(|_| pool.allocate(layout)).collect();
         let slab = Arc::downgrade(&allocations[0].slab);
         assert!(
