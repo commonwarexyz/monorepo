@@ -11,10 +11,13 @@
 //! Each backend lives in its own submodule, and [`with_kernel`] selects the
 //! best one available on the current CPU:
 //!
+//! - AVX-512: 64 bytes at a time on x86-64 CPUs with AVX-512F and GFNI.
 //! - [`portable`]: scalar operations on 16 bytes at a time, with no platform
 //!   requirements. This is the fallback when nothing better is available, and
 //!   the reference other backends are tested against.
 
+#[cfg(target_arch = "x86_64")]
+mod avx512;
 pub mod portable;
 
 /// A computation which can run over an arbitrary [`Kernel`].
@@ -37,10 +40,21 @@ pub trait WithKernel {
 /// This is the only way to gain access to a kernel, so that accelerated
 /// kernels are only constructed where their instructions are available.
 pub fn with_kernel<F: WithKernel>(f: F) -> F::Output {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(kernel) = avx512::Avx512::new() {
+        // SAFETY: constructing `kernel` checked every feature enabled by its call method.
+        return unsafe { kernel.call(f) };
+    }
     f.call(portable::Portable)
 }
 
 pub trait Kernel: Copy + Default + Send + Sync + 'static {
+    /// Run a computation with this kernel's target features enabled.
+    #[inline]
+    fn run<F: WithKernel>(self, f: F) -> F::Output {
+        f.call(self)
+    }
+
     /// The type we use to hold several bytes.
     type Vector: Copy + Send + Sync;
 
@@ -48,6 +62,9 @@ pub trait Kernel: Copy + Default + Send + Sync + 'static {
     ///
     /// Operations are performed in parallel on each lane.
     const LANES: usize;
+
+    /// Whether to fuse GF(2^8) butterfly updates into one byte loop.
+    const FUSED_BUTTERFLY: bool = false;
 
     /// A representation of a constant value used in each lane.
     ///

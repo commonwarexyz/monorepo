@@ -574,7 +574,11 @@ mod tests {
     use super::*;
     use crate::{
         Ocelot8, PhasedScheme,
-        ocelot::{Impl8, field::gf8::GF8, kernel::portable::Portable},
+        ocelot::{
+            Impl8,
+            field::gf8::GF8,
+            kernel::{Kernel, WithKernel, portable::Portable, with_kernel},
+        },
     };
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
@@ -672,27 +676,196 @@ mod tests {
         ));
     }
 
+    struct TestChecksumRanges;
+
+    impl WithKernel for TestChecksumRanges {
+        type Output = ();
+
+        fn call<K: Kernel>(self, kernel: K) {
+            let len = if cfg!(miri) {
+                129
+            } else {
+                stripe_bytes::<Impl8<K>>() + 65
+            };
+            let mut rng = test_rng();
+            let mut backing = vec![0; len + K::LANES];
+            rng.fill_bytes(&mut backing);
+            let offset = (K::LANES - backing.as_ptr() as usize % K::LANES) % K::LANES + 1;
+            let shard = &backing[offset..offset + len];
+            let mut coefficients = vec![0; CHECKSUMS * len];
+            rng.fill_bytes(&mut coefficients);
+            let ranges = [
+                0..0,
+                0..63,
+                1..64,
+                0..64,
+                0..65,
+                63..64,
+                63..65,
+                64..65,
+                1..len,
+                len - 65..len,
+                0..len,
+            ];
+            for range in ranges {
+                let mut portable = [255; CHECKSUMS];
+                Impl8::new(Portable).checksum_range(
+                    shard,
+                    &coefficients,
+                    range.clone(),
+                    &mut portable,
+                );
+                let mut actual = [255; CHECKSUMS];
+                Impl8::new(kernel).checksum_range(shard, &coefficients, range.clone(), &mut actual);
+                assert_eq!(actual, portable);
+                for (actual, coefficients) in
+                    actual.iter().zip(coefficients.chunks_exact(shard.len()))
+                {
+                    let expected = shard[range.clone()]
+                        .iter()
+                        .zip(&coefficients[range.clone()])
+                        .fold(GF8::from(0), |sum, (&value, &coefficient)| {
+                            sum + GF8::from(value) * GF8::from(coefficient)
+                        });
+                    assert_eq!(*actual, u8::from(expected));
+                }
+            }
+
+            let shards = [shard, shard];
+            let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+            let portable = OcelotX::<_, Sha256, CHECKSUMS>::new(Impl8::new(Portable))
+                .checksum(&shards, &coefficients, &strategy)
+                .unwrap();
+            let dispatched = OcelotX::<_, Sha256, CHECKSUMS>::new(Impl8::new(kernel))
+                .checksum(&shards, &coefficients, &strategy)
+                .unwrap();
+            assert_eq!(dispatched, portable);
+        }
+    }
+
     #[test]
     fn checksum_ranges_match_scalar_inner_products() {
-        let mut rng = test_rng();
-        let mut shard = [0; 35];
-        rng.fill_bytes(&mut shard);
-        let mut coefficients = vec![0; CHECKSUMS * shard.len()];
-        rng.fill_bytes(&mut coefficients);
-        for range in [0..0, 0..1, 1..20, 20..35, 35..35, 0..35] {
-            let mut actual = [255; CHECKSUMS];
-            Impl8::new(Portable).checksum_range(&shard, &coefficients, range.clone(), &mut actual);
-            for (actual, coefficients) in actual.iter().zip(coefficients.chunks_exact(shard.len()))
-            {
-                let expected = shard[range.clone()]
-                    .iter()
-                    .zip(&coefficients[range.clone()])
-                    .fold(GF8::from(0), |sum, (&value, &coefficient)| {
-                        sum + GF8::from(value) * GF8::from(coefficient)
-                    });
-                assert_eq!(*actual, u8::from(expected));
-            }
+        with_kernel(TestChecksumRanges);
+    }
+
+    struct TestSchemeDifferential;
+
+    impl WithKernel for TestSchemeDifferential {
+        type Output = ();
+
+        fn call<K: Kernel>(self, kernel: K) {
+            let rayon = Rayon::new(NZUsize!(4)).unwrap().manual();
+            assert_scheme_differential(kernel, &Sequential);
+            assert_scheme_differential(kernel, &rayon);
         }
+    }
+
+    fn assert_scheme_differential<K: Kernel>(kernel: K, strategy: &impl Strategy) {
+        let portable = OcelotX::<_, Sha256, CHECKSUMS>::new(Impl8::new(Portable));
+        let dispatched = OcelotX::<_, Sha256, CHECKSUMS>::new(Impl8::new(kernel));
+        let mut rng = test_rng();
+        let mut data = vec![0; 1027];
+        rng.fill_bytes(&mut data);
+        let (portable_commitment, portable_shards) = portable
+            .encode(b"scheme differential", &CONFIG, &data[..], strategy)
+            .unwrap();
+        let (dispatched_commitment, dispatched_shards) = dispatched
+            .encode(b"scheme differential", &CONFIG, &data[..], strategy)
+            .unwrap();
+        assert_eq!(portable_commitment.encode(), dispatched_commitment.encode());
+        assert_eq!(
+            portable_shards
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>(),
+            dispatched_shards
+                .iter()
+                .map(Encode::encode)
+                .collect::<Vec<_>>()
+        );
+
+        let (portable_checking, _, portable_weak) = portable
+            .weaken(
+                b"scheme differential",
+                &CONFIG,
+                &portable_commitment,
+                0,
+                dispatched_shards[0].clone(),
+                strategy,
+            )
+            .unwrap();
+        let (dispatched_checking, _, dispatched_weak) = dispatched
+            .weaken(
+                b"scheme differential",
+                &CONFIG,
+                &dispatched_commitment,
+                0,
+                portable_shards[0].clone(),
+                strategy,
+            )
+            .unwrap();
+        assert_eq!(portable_checking, dispatched_checking);
+        assert_eq!(portable_weak.encode(), dispatched_weak.encode());
+
+        let checked_by_portable: Vec<_> = dispatched_shards
+            .iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                portable
+                    .check(
+                        &CONFIG,
+                        &portable_commitment,
+                        &dispatched_checking,
+                        index as u16,
+                        shard.weak.clone(),
+                        strategy,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let checked_by_dispatched: Vec<_> = portable_shards
+            .iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                dispatched
+                    .check(
+                        &CONFIG,
+                        &dispatched_commitment,
+                        &portable_checking,
+                        index as u16,
+                        shard.weak.clone(),
+                        strategy,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        for indices in [[0, 1, 2], [0, 3, 4]] {
+            let portable_decoded = portable
+                .decode(
+                    &CONFIG,
+                    &portable_commitment,
+                    dispatched_checking.clone(),
+                    indices.iter().map(|&index| &checked_by_dispatched[index]),
+                    strategy,
+                )
+                .unwrap();
+            let dispatched_decoded = dispatched
+                .decode(
+                    &CONFIG,
+                    &dispatched_commitment,
+                    portable_checking.clone(),
+                    indices.iter().map(|&index| &checked_by_portable[index]),
+                    strategy,
+                )
+                .unwrap();
+            assert_eq!(portable_decoded, data);
+            assert_eq!(dispatched_decoded, data);
+        }
+    }
+
+    #[test]
+    fn portable_and_dispatched_schemes_match() {
+        with_kernel(TestSchemeDifferential);
     }
 
     #[test]
