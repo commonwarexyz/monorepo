@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 930" role="img" aria-labelledby="title description">
   <title id="title">The Trees Behind a Close</title>
-  <desc id="description">The certified close binds the QMDB account-state root, an account-activity BMT root, and a withdrawal-output BMT root, together with the epoch, predecessor, and settlement totals. QMDB retains account balances between epochs: a has 85, b 58, c 26, and d 31 in the running example. Each activity record commits the terminal payer position and settlement output, including accounts with no net balance change. Account c's record has debit 11, sequence 2, a signed-body commitment, no output, and the root of its payment BMT. That nested tree contains b with amount 4 and count 1, and d with amount 7 and count 1. Withdrawal outputs, when requested, contain a destination and amount. Lines show commitment relationships and logical contents, not QMDB's physical storage layout.</desc>
+  <desc id="description">The certified close binds the QMDB account-state root, an account-activity BMT root, and a withdrawal-output BMT root, together with the epoch, predecessor, and settlement totals. QMDB retains account balances between epochs: a has 85, b 58, c 26, and d 31 in the running example. Each activity record commits the terminal payer position and settlement output, including accounts with no net balance change. Account c's record has debit 11, sequence 2, no output, and the root of its payment BMT. That nested tree contains b with amount 4 and count 1, and d with amount 7 and count 1. Withdrawal outputs, when requested, contain a destination and amount. Lines show commitment relationships and logical contents, not QMDB's physical storage layout.</desc>
   <rect width="1320" height="930" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -72,7 +72,7 @@
   <rect class="selected" x="468" y="522" width="384" height="136" rx="3"/>
   <text class="label blue" x="490" y="552">c's terminal record</text>
   <text class="label" x="490" y="584">sent 11 · sequence 2</text>
-  <text class="note" x="490" y="614">body commitment · output: none</text>
+  <text class="note" x="490" y="614">output: none</text>
   <text class="label center blue" x="660" y="643">payment root</text>
   <path class="focus" d="M660 658 V709 M660 748 L565 787 M660 748 L755 787"/>
   <rect class="selected" x="553" y="709" width="214" height="39" rx="3"/>

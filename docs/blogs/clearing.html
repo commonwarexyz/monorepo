@@ -101,9 +101,6 @@ years." />
 O’Grady</a></div>
                         <div class="date">August 19th, 2026</div>
         </div>
-        <p><em>Design preview using QMDB Current Ordered with MMB for
-        account state. End-to-end performance has not been
-        measured.</em></p>
         <p><em>Update (9/11/26): Operators can process payments to the
         same recipient in parallel across payers, with one signature
         check covering each payer’s batch. Validators retain the account
@@ -416,20 +413,20 @@ O’Grady</a></div>
         members, a 67-signature certificate includes at least 34 honest
         validators that checked and retain the entire close.</p>
         </div>
-        <p>An honest signer makes the close and its proof-serving state
-        durable before publishing its vote. It keeps predecessor and
+        <p>An honest signer retains the close and its predecessor state
+        durably before publishing its vote. It keeps predecessor and
         successor proofs available while the close is pending and
         through its challenge deadline <span
         class="math inline">\Delta_e</span>, and retains the last
-        finalized state for recovery. A new validator joins from an
-        authenticated database snapshot, then applies the following
-        updates in order.</p>
+        finalized state for recovery. A new validator replays the
+        retained updates and checks the resulting state root.</p>
         <p>The certificate is one 48-byte aggregate signature plus a
         <span class="math inline">\lceil n/8\rceil</span>-byte signer
         bitmap, with proofs of possession checked when the committee
         registered. With the 32-byte commitment and an eight-byte
-        bitmap-length prefix, the 100-validator certified package is 101
-        bytes.</p>
+        bitmap-length prefix, the 100-validator certified commitment is
+        101 bytes. Admission also supplies the three roots and two
+        outflow totals, another 112 bytes.</p>
         <p>The settlement chain admits the certified close into an
         ordered queue. A close can finalize only after its challenge
         deadline <span class="math inline">\Delta_e</span> has passed
@@ -501,11 +498,11 @@ O’Grady</a></div>
         <p><span class="math display">
         \boxed{\Delta_e&lt;t_{\mathrm{finalize}}&lt;T_w.}
         </span></p>
-        <p>An exact withdrawal releases its amount if enough funds
-        remain at the epoch boundary. An account close sweeps that
-        epoch’s final balance. Once the carrying close finalizes, the
-        user claims the certified payout with an opening in that close’s
-        withdrawal-output BMT. Each output can be claimed only once.</p>
+        <p>An exact withdrawal releases its amount if the epoch’s final
+        balance covers it. An account close sweeps that balance. Once
+        the carrying close finalizes, the user claims the certified
+        payout with an opening in that close’s withdrawal-output BMT.
+        Each output can be claimed only once.</p>
         <p>Custody remains onchain throughout. Finalization reserves
         withdrawals and external payouts, and individual claims reduce
         the reserve and the chain’s assets together. A challenged or
@@ -582,12 +579,10 @@ O’Grady</a></div>
         names each active account once, followed by signed endpoints and
         cumulative payment entries. The update never carries the payment
         history.</p>
-        <p>The size model below keeps the signed-payment field widths
-        from <a
-        href="https://github.com/commonwarexyz/monorepo/pull/4664">#4664</a>,
-        with full account keys replacing ranks in the live state. Every
-        account pays its next neighbor once, and each of 100 validators
-        receives the same update.</p>
+        <p>In the <a
+        href="https://github.com/commonwarexyz/monorepo/pull/4747">measured
+        workload</a>, every account sends one unit payment to one of 512
+        recipients. Each of 100 validators receives the same update.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
@@ -605,17 +600,17 @@ O’Grady</a></div>
           <tbody>
             <tr>
               <td>Validator dealing</td>
-              <td style="text-align:right;">106 KB</td>
+              <td style="text-align:right;">105 KB</td>
               <td style="text-align:right;">1.03 MB</td>
-              <td style="text-align:right;">10.4 MB</td>
-              <td style="text-align:right;">104 MB</td>
+              <td style="text-align:right;">10.3 MB</td>
+              <td style="text-align:right;">103 MB</td>
             </tr>
             <tr>
               <td>Total operator egress</td>
-              <td style="text-align:right;">10.6 MB</td>
+              <td style="text-align:right;">10.5 MB</td>
               <td style="text-align:right;">103 MB</td>
-              <td style="text-align:right;">1.04 GB</td>
-              <td style="text-align:right;">10.4 GB</td>
+              <td style="text-align:right;">1.03 GB</td>
+              <td style="text-align:right;">10.3 GB</td>
             </tr>
             <tr>
               <td>Commitment + certificate</td>
@@ -636,17 +631,17 @@ O’Grady</a></div>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 5: Modeled keyed updates, with one signed unit payment
-        per account and no boundary flows. Egress is 100 copies of the
-        dealing, excluding transport and other messages. Account records
-        count 32-byte keys and 8-byte balances; QMDB indexes, history,
-        and retained evidence are additional. Admission supplies roots
-        and totals alongside the commitment and certificate.</p>
+        <p>Figure 5: Measured encoded payloads, with one signed payment
+        per account and no boundary flows. Egress assumes direct
+        delivery of 100 copies, excluding transport and other messages.
+        Account records count 32-byte keys and 8-byte balances; QMDB
+        indexes, history, and retained evidence are additional.</p>
         </div>
-        <p>With 1,024 senders each paying a different recipient outside
-        that group, only 2,048 of a million accounts change and the
-        modeled update is 141 KB. Validators check those senders and
-        payment entries, then update the affected accounts in QMDB.</p>
+        <p>With a million live accounts but only 1,024 senders paying
+        that same recipient pool, the dealing is still 105 KB.
+        Validators check the activity and update the affected balances
+        in QMDB. Latency measurements for this implementation are
+        pending.</p>
         <p>Repeated payments between the same pairs reuse these
         settlement records, spreading their byte cost over more
         payments.</p>
@@ -659,28 +654,26 @@ O’Grady</a></div>
         certificate for 100 validators.</p>
         </div>
         <h3 id="proof-sizes">Proof Sizes</h3>
-        <p>The receipt and per-close claim trees remain BMTs. A debit
-        mismatch for a changed payer, an entry mismatch, and an
-        acknowledgment fork therefore keep their existing proof
-        formats.</p>
+        <p>Receipts and per-close claims use BMTs. The following
+        payloads were encoded and verified against the same closes.</p>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
-            <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Challenge</th><th colspan="4" style="text-align:center;">Changed accounts, all sending</th></tr>
+            <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">Challenge</th><th colspan="4" style="text-align:center;">Active accounts, all sending</th></tr>
             <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
           </thead>
           <tbody>
-            <tr><td>Debit mismatch</td><td style="text-align:right;">620 B</td><td style="text-align:right;">748 B</td><td style="text-align:right;">844 B</td><td style="text-align:right;">940 B</td></tr>
-            <tr><td>Entry mismatch</td><td style="text-align:right;">671 B</td><td style="text-align:right;">799 B</td><td style="text-align:right;">895 B</td><td style="text-align:right;">991 B</td></tr>
+            <tr><td>Debit mismatch</td><td style="text-align:right;">588 B</td><td style="text-align:right;">716 B</td><td style="text-align:right;">812 B</td><td style="text-align:right;">908 B</td></tr>
+            <tr><td>Entry mismatch</td><td style="text-align:right;">639 B</td><td style="text-align:right;">767 B</td><td style="text-align:right;">863 B</td><td style="text-align:right;">959 B</td></tr>
             <tr><td>Acknowledgment fork</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td><td style="text-align:right;">417 B</td></tr>
           </tbody>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 7: Reference BMT challenge payloads for payers
-        included in the close, with Ed25519 receipts and one-entry
-        vectors. They exclude the separately supplied close and chain
-        transaction framing.</p>
+        <p>Figure 7: Measured BMT challenge payloads for payers included
+        in the close, with Ed25519 receipts and one-entry vectors. They
+        exclude the separately supplied close and chain transaction
+        framing.</p>
         </div>
         <p>A normal withdrawal opens a certified output in its close’s
         BMT. Its proof grows with the number of withdrawal outputs <span
@@ -724,23 +717,23 @@ O’Grady</a></div>
         <div class="clearing-benchmark-table">
         <table>
           <thead>
-            <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">QMDB proof payload</th><th colspan="5" style="text-align:center;">Live accounts</th></tr>
-            <tr><th style="text-align:right;">1</th><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
+            <tr><th rowspan="2" style="text-align:left; vertical-align:bottom;">QMDB proof payload</th><th colspan="4" style="text-align:center;">Live accounts</th></tr>
+            <tr><th style="text-align:right;">1,024</th><th style="text-align:right;">10,000</th><th style="text-align:right;">100,000</th><th style="text-align:right;">1,000,000</th></tr>
           </thead>
           <tbody>
-            <tr><td>Account present</td><td style="text-align:right;">207 B</td><td style="text-align:right;">497 B</td><td style="text-align:right;">593 B</td><td style="text-align:right;">691 B</td><td style="text-align:right;">819 B</td></tr>
-            <tr><td>Account absent</td><td style="text-align:right;">240 B</td><td style="text-align:right;">530 B</td><td style="text-align:right;">626 B</td><td style="text-align:right;">724 B</td><td style="text-align:right;">852 B</td></tr>
-            <tr><td>Recovery balance opening</td><td style="text-align:right;">238 B</td><td style="text-align:right;">528 B</td><td style="text-align:right;">624 B</td><td style="text-align:right;">722 B</td><td style="text-align:right;">850 B</td></tr>
+            <tr><td>Account present</td><td style="text-align:right;">497 B</td><td style="text-align:right;">593 B</td><td style="text-align:right;">691 B</td><td style="text-align:right;">819 B</td></tr>
+            <tr><td>Account absent</td><td style="text-align:right;">530 B</td><td style="text-align:right;">626 B</td><td style="text-align:right;">724 B</td><td style="text-align:right;">852 B</td></tr>
+            <tr><td>Recovery balance opening</td><td style="text-align:right;">528 B</td><td style="text-align:right;">624 B</td><td style="text-align:right;">722 B</td><td style="text-align:right;">850 B</td></tr>
           </tbody>
         </table>
         </div>
         <div class="image-caption">
-        <p>Figure 9: Measured Current Ordered proofs after one insertion
-        batch, using the middle key and adjacent absence. SHA-256/MMB,
-        32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the
-        known account key; recovery includes it. All omit the trusted
-        root and chain framing. Sizes vary with history and proof
-        position.</p>
+        <p>Figure 9: Measured Current Ordered proofs after the initial
+        insertion batch, using a middle account and a missing key.
+        SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup
+        rows omit the known account key; recovery includes it. All omit
+        the trusted root and chain framing. Sizes vary with history and
+        proof position.</p>
         </div>
         <p>Adjust the workload and committee size below to estimate the
         operator’s traffic. Every validator receives the same update;

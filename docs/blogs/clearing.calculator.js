@@ -9,8 +9,8 @@ const KEY = 32;
 const AGG = 48;
 const ACCOUNT_RECORD = KEY + 8;
 
-// Header, three roots, and eight certified u64 totals.
-const METADATA = 192;
+// Validators reconstruct the roots and outflow totals bound by this header.
+const METADATA = 32;
 const MAX_VECTOR_LENGTH = 1 << 24;
 
 function byteSize(parts) {
@@ -302,7 +302,7 @@ function mount(root) {
       ['Payer signatures', parts.signatures],
       ['Payment entries', parts.entries],
       ['Operator signature', parts.operator],
-      ['Commitments and totals', parts.metadata],
+      ['Commitment', parts.metadata],
     ];
     fillBreakdown(breakdown, payload, components);
 
