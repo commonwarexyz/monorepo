@@ -1539,24 +1539,21 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.end
     }
 
+    /// See [Journal::prune_boundary].
+    pub(crate) fn prune_boundary(&self, min_position: u64) -> Result<u64, Error> {
+        super::prune_boundary(min_position, &self.bounds, self.items_per_blob.get())
+    }
+
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let items_per_blob = self.items_per_blob.get();
-
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
-
+        let new_boundary = self.prune_boundary(min_position)?;
+        let min_blob = position_to_blob(new_boundary, self.items_per_blob.get());
         if min_blob <= self.blobs.oldest_blob_index() {
             return Ok((self, false));
         }
-
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -2332,6 +2329,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok((self, pruned))
     }
 
+    /// Return the boundary that [`Self::prune`] with `min_position` would establish, without
+    /// pruning anything.
+    pub fn prune_boundary(&self, min_position: u64) -> Result<u64, Error> {
+        self.0.prune_boundary(min_position)
+    }
+
     /// Persist data blobs so committed data survives a crash.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it.
@@ -2458,6 +2461,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
+    }
+
+    fn prune_boundary(&self, min_position: u64) -> Result<u64, Error> {
+        Self::prune_boundary(self, min_position)
     }
 
     async fn rewind(self, size: u64) -> Result<Self, Error> {
@@ -2604,6 +2611,41 @@ mod tests {
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
+
+    /// `prune_boundary` predicts the start `prune` establishes, including the capped and no-op
+    /// cases.
+    #[test_traced]
+    fn test_prune_boundary_matches_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "variable-prune-boundary".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for item in 0..17u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            for target in [0u64, 3, 5, 12, 11, 17, 40] {
+                let predicted = journal.prune_boundary(target).unwrap();
+                (journal, _) = journal.prune(target).await.unwrap();
+                assert_eq!(
+                    crate::journal::contiguous::Contiguous::bounds(&journal).start,
+                    predicted,
+                    "target={target}"
+                );
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
 
     #[test_traced]
     fn test_replay_and_writable_tip_request_dont_cache() {

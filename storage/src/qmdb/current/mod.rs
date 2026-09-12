@@ -2117,7 +2117,7 @@ pub mod tests {
     fn test_current_rewind_recovery_pruned_repeated_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            const COMMITS: u64 = 96;
+            const COMMITS: u64 = 200;
 
             let partition = "current-rewind-pruned-recovery";
             let ctx = context.child("db");
@@ -2144,11 +2144,19 @@ pub mod tests {
                 ));
             }
 
-            // Keep most ops-log history, but force bitmap pruning so rewind uses pinned-node
-            // reconstruction (`pruned_chunks > 0` path).
-            let db = db.prune(Location::new(1)).await.unwrap();
+            // Prune to the chunk boundary below the floor of a commit three rounds back: the log
+            // keeps the last few commits, and the whole chunks below them leave the bitmap, so
+            // rewind must reconstruct pinned nodes (`pruned_chunks > 0` path).
+            const CHUNK_BITS: u64 = 32 * 8;
+            let (_, older_floor, _, _, _) = history[history.len() - 4];
+            let prune_loc = Location::new(*older_floor / CHUNK_BITS * CHUNK_BITS);
+            db = db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
-            assert!(pruned_bits > 0, "expected bitmap pruning for rewind test");
+            assert!(
+                pruned_bits > 0,
+                "expected bitmap pruning for rewind test: prune_loc={prune_loc} bounds={:?}",
+                db.bounds()
+            );
             let bounds = db.bounds();
 
             let (target_size, target_root, target_ops_root, target_value) = history
@@ -3025,63 +3033,129 @@ pub mod tests {
         });
     }
 
+    /// State observed after one generation of [`build_generations`].
+    struct Generation {
+        size: Location<mmr::Family>,
+        floor: Location<mmr::Family>,
+        sync_boundary: Location<mmr::Family>,
+        root: Digest,
+    }
+
+    /// Apply `generations` batches that each rewrite the same 384 keys, so every generation's
+    /// floor advances past the previous one's writes and its sync boundary moves by whole chunks.
+    async fn build_generations(
+        ctx: &Context,
+        partition: &str,
+        generations: u64,
+    ) -> (UnorderedFixedDb, Vec<Generation>) {
+        let mut db: UnorderedFixedDb =
+            UnorderedFixedDb::init(ctx.child("storage"), fixed_config::<OneCap>(partition, ctx))
+                .await
+                .unwrap();
+        let mut history = Vec::new();
+        for generation in 0..generations {
+            let mut batch = db.new_batch();
+            for i in 0..384 {
+                batch = batch.write(key(i), Some(val(generation * 1_000 + i)));
+            }
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            history.push(Generation {
+                size: db.bounds().end,
+                floor: db.inactivity_floor_loc(),
+                sync_boundary: db.sync_boundary(),
+                root: db.root(),
+            });
+        }
+        (db, history)
+    }
+
+    /// A retained commit whose floor precedes the bitmap pruning boundary is not rewindable: its
+    /// active range needs bitmap chunks that are gone even though the log still holds the commit.
     #[test_traced("INFO")]
     fn test_current_rewind_rejects_target_below_bitmap_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            const COMMITS: u64 = 96;
-
-            let partition = "current-rewind-bitmap-floor";
             let ctx = context.child("db");
-            let mut db: UnorderedVariableDb =
-                UnorderedVariableDb::init(ctx.child("storage"), variable_config::<OneCap>(partition, &ctx))
-                    .await
-                    .unwrap();
+            let (db, history) = build_generations(&ctx, "current-rewind-bitmap-floor", 4).await;
+            let target = &history[1];
 
-            let mut history = Vec::new();
-            for round in 0..COMMITS {
-                (db, _) = commit_writes_with_metadata(
-                    db,
-                    [(key(0), Some(val(10_000 + round)))],
-                    None,
-                )
-                .await;
-                history.push((db.bounds().end, db.inactivity_floor_loc()));
-            }
-            assert!(db.inactivity_floor_loc() > Location::new(64));
-
-            // Intentionally prune less than the inactivity floor: log retains older ops, but the
-            // bitmap still prunes to inactivity floor.
-            let prune_loc = Location::new(1);
-            let db = db.prune(prune_loc).await.unwrap();
+            // Prune to just below the target commit: the log keeps the commit, but whole chunks
+            // of its active range fall below the bitmap boundary.
+            let db = db.prune(Location::new(*target.size - 1)).await.unwrap();
             let pruned_bits = db.pruned_bits();
-            assert!(pruned_bits > 0);
-            let retained_start = db.bounds().start;
+            assert!(
+                db.bounds().start < target.size,
+                "target commit must stay in the log"
+            );
+            assert!(
+                *target.floor < pruned_bits,
+                "target floor must fall below the bitmap boundary: floor={:?} pruned_bits={pruned_bits}",
+                target.floor
+            );
 
-            // Pick a historical commit that is still within retained log bounds but whose floor is
-            // below the bitmap pruning boundary.
-            let rewind_target = history
-                .iter()
-                .find_map(|(size, floor)| {
-                    if *size > *retained_start
-                        && *size >= pruned_bits
-                        && *floor >= *retained_start
-                        && *floor < pruned_bits
-                    {
-                        Some(*size)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "expected rewind target below bitmap boundary. retained_start={retained_start:?}, pruned_bits={pruned_bits}, latest_floor={:?}, history={history:?}",
-                        db.inactivity_floor_loc()
-                    )
-                });
-
-            let Err(err) = db.rewind(rewind_target).await else {
+            let Err(err) = db.rewind(target.size).await else {
                 panic!("expected rewind rejection below bitmap floor");
+            };
+            assert!(
+                matches!(
+                    err,
+                    Error::Journal(crate::journal::Error::ItemPruned(loc)) if loc == *target.floor
+                ),
+                "unexpected rewind error: {err:?}"
+            );
+        });
+    }
+
+    /// After a prune, every commit the ops log still retains must remain a rewind target: the
+    /// bitmap must not be pruned past the log even though everything below the sync boundary is
+    /// inactive at the tip.
+    #[test_traced("INFO")]
+    fn test_current_prune_keeps_retained_commits_rewindable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Pruning to H1's boundary keeps both H1 and H2 rewindable, including across reopen.
+            let ctx = context.child("keep");
+            let partition = "current-prune-keeps-rewindable";
+            let (db, history) = build_generations(&ctx, partition, 4).await;
+            let (h1, h2, h3) = (&history[1], &history[2], &history[3]);
+            assert!(
+                h1.sync_boundary > Location::new(0),
+                "the prune must drop history"
+            );
+            assert!(
+                h1.sync_boundary < h2.sync_boundary,
+                "each generation must advance the sync boundary"
+            );
+            let db = db.prune(h1.sync_boundary).await.unwrap();
+            assert!(db.pruned_bits() <= *db.bounds().start);
+            assert_eq!(db.root(), h3.root);
+            let db = db.rewind(h2.size).await.unwrap();
+            assert_eq!(db.root(), h2.root);
+            let db = db.commit().await.unwrap();
+            drop(db);
+            let db: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>(partition, &ctx),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), h2.root);
+            let db = db.rewind(h1.size).await.unwrap();
+            assert_eq!(db.root(), h1.root);
+            db.destroy().await.unwrap();
+
+            // Pruning to H2's boundary keeps H2 rewindable while H1, whose active range is gone,
+            // is refused.
+            let ctx = context.child("window");
+            let (db, history) = build_generations(&ctx, "current-prune-window", 4).await;
+            let (h1, h2) = (&history[1], &history[2]);
+            let db = db.prune(h2.sync_boundary).await.unwrap();
+            assert!(db.pruned_bits() <= *db.bounds().start);
+            let db = db.rewind(h2.size).await.unwrap();
+            assert_eq!(db.root(), h2.root);
+            let Err(err) = db.rewind(h1.size).await else {
+                panic!("expected H1 to be unrewindable after pruning to H2's boundary");
             };
             assert!(
                 matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),

@@ -112,6 +112,10 @@ pub struct Db<
     /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
     /// - CommitFloor: only the current last commit carries bit = 1; earlier commits
     ///   are 0.
+    /// - Pruning never advances `bitmap.pruned_bits()` past `log.bounds().start`, so every commit
+    ///   the log retains after a prune stays rewindable. State sync and recovery from an
+    ///   interrupted `current` prune may leave the bitmap ahead of the log; the bits in between
+    ///   are inactive and stay zero.
     pub(crate) bitmap: Arc<Shared<N>>,
 
     /// Metrics for this database.
@@ -434,10 +438,28 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
-    /// inactivity-floor check.
-    pub(crate) fn prune_bitmap(&mut self, prune_loc: Location<F>) {
-        self.bitmap.write().prune_to_bit(*prune_loc);
+    /// Prune the bitmap to the boundary the operations log lands on when pruned to `prune_loc`,
+    /// and return that boundary. Pruning never advances the bitmap past the retained log:
+    /// rewinding to a commit restores the activity bits within its active range, so every commit
+    /// the log retains after a prune stays a valid rewind target. A bitmap already ahead of the
+    /// log (after state sync or an interrupted `current` prune) is left where it is.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
+    pub(crate) fn prune_bitmap_to_log_boundary(
+        &mut self,
+        prune_loc: Location<F>,
+    ) -> Result<Location<F>, crate::qmdb::Error<F>> {
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(crate::qmdb::Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+        let boundary = self.log.prune_boundary(prune_loc)?;
+        self.bitmap.write().prune_to_bit(*boundary);
+        Ok(boundary)
     }
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
@@ -470,6 +492,9 @@ where
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
+    /// The bitmap is pruned no further than the operations log, so every commit the log retains
+    /// remains a valid target for [`Self::rewind`].
+    ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
     #[tracing::instrument(
@@ -485,8 +510,13 @@ where
     pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
-        let (mut db, actual_pruned) = self.prune_log(prune_loc).await?;
-        db.prune_bitmap(actual_pruned);
+        let mut db = self;
+        let boundary = db.prune_bitmap_to_log_boundary(prune_loc)?;
+        let (db, pruned_to) = db.prune_log(prune_loc).await?;
+        assert_eq!(
+            pruned_to, boundary,
+            "log and bitmap pruned to different boundaries"
+        );
         db.update_metrics();
         Ok(db)
     }
