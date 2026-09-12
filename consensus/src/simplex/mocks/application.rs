@@ -128,13 +128,18 @@ type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Sen
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
-/// Predicate to determine whether a payload should be certified.
-/// Returning true means certify, false means reject.
+/// Handler that takes ownership of a certification response so tests can
+/// decide when it completes.
+type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
+
+/// Behavior used to resolve application certification requests.
 pub enum Certifier<D: Digest> {
     /// Always certify.
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
+    /// Let a test decide when and how to complete each certification request.
+    Controlled(CertificationController<D>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
     /// This simulates scenarios where the automaton cannot determine certification
     /// (e.g., missing verification context in Marshaled).
@@ -365,18 +370,25 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         round: Round,
         payload: H::Digest,
         _contents: Bytes,
-    ) -> Option<bool> {
+        response: oneshot::Sender<bool>,
+    ) {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(self.context.as_mut());
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
-        // Use configured predicate to determine certification
+        // Use the configured behavior to complete or retain the response.
         match &self.should_certify {
-            Certifier::Always => Some(true),
-            Certifier::Custom(func) => Some(func(round, payload)),
-            Certifier::Cancel | Certifier::Pending => None,
+            Certifier::Always => {
+                response.send_lossy(true);
+            }
+            Certifier::Custom(func) => {
+                response.send_lossy(func(round, payload));
+            }
+            Certifier::Controlled(controller) => controller(round, payload, response),
+            Certifier::Cancel => {}
+            Certifier::Pending => self.pending_certifications.push(response),
         }
     }
 
@@ -467,15 +479,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         response,
                     } => {
                         let contents = self.seen.get(&payload).cloned().unwrap_or_default();
-                        if let Some(certified) = self.certify(round, payload, contents).await {
-                            response.send_lossy(certified);
-                        } else if matches!(self.should_certify, Certifier::Pending) {
-                            // Hold the sender alive so the receiver never resolves.
-                            // This simulates a certify that hangs indefinitely (e.g.,
-                            // block never arrives for reconstruction).
-                            self.pending_certifications.push(response);
-                        }
-                        // Cancel: drop sender -> immediate RecvError on receiver.
+                        self.certify(round, payload, contents, response).await;
                     }
                     Message::Broadcast { payload, plan } => {
                         self.broadcast(payload, plan);
