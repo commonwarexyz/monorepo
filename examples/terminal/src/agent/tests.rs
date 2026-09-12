@@ -11,8 +11,8 @@ use crate::{
         harness,
         query::{Evidence, EvidenceResponse},
         state::{
-            Advice, FaultRecord, HardFaultReasonResponse, Record, RegistrationRecord, Reject,
-            admitted_key, deposit_key, fault_key, registration_key, status_key, withdrawal_key,
+            FaultRecord, HardFaultReasonResponse, Record, RegistrationRecord, admitted_key,
+            deposit_key, fault_key, registration_key, status_key, withdrawal_key,
         },
         tx::{AdmitRequest, RegisterEpochRequest, SettlementTx},
     },
@@ -28,15 +28,15 @@ use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{DepositBatch, WithdrawalAction, WithdrawalBatch},
     payment::{PaymentContext, SendAuthorization, VECTOR_ACK_SIGNATURE_NAMESPACE, VectorSendBody},
-    transition::BatchId,
+    transition::{BatchId, EpochContext},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
-use commonware_codec::Encode;
+use commonware_codec::{DecodeExt as _, Encode};
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::{
     Clock as _, Listener as _, Network, Runner as _, Spawner as _, Supervisor as _, deterministic,
 };
-use commonware_utils::TestRng;
+use commonware_utils::{TestRng, sync::Mutex};
 use std::{
     fs,
     net::SocketAddr,
@@ -47,6 +47,32 @@ use std::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
+
+fn signed_deposit(
+    control: &harness::Control,
+    event: DepositEvent,
+) -> crate::chain::tx::DepositRequest {
+    let wallet = wallets()
+        .into_iter()
+        .find(|wallet| wallet.public_key() == event.account)
+        .unwrap();
+    crate::chain::tx::DepositRequest::sign(
+        control.identity().native.chain_id(),
+        deployment(),
+        event,
+        wallet.signer(),
+    )
+}
+
+fn epoch_fee(control: &harness::Control) -> u64 {
+    let native = &control.identity().native;
+    let entry = native
+        .deployments
+        .iter()
+        .find(|entry| entry.deployment.digest() == &deployment())
+        .unwrap();
+    native.epoch_fee * u64::from(entry.max_dealing_bytes).div_ceil(1024)
+}
 
 /// The in-process chain's query address.
 const CHAIN: SocketAddr =
@@ -246,6 +272,8 @@ async fn register(
         .payment_head(&wallets()[0].public_key())
         .unwrap()
         .context
+        .payment()
+        .clone()
 }
 
 /// Admits `result`'s close and drives the chain past its challenge window to
@@ -276,15 +304,22 @@ async fn status(control: &harness::Control) -> crate::chain::state::StatusRecord
 /// Registers an empty epoch-0 boundary and returns the chain-assigned
 /// certified payment context, for scripted operators with no backing state
 /// machine.
-async fn registered_context(control: &harness::Control) -> PaymentContext<Key, Digest> {
+async fn registered_context(control: &harness::Control) -> EpochContext<Key, Digest> {
     let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
     let deposits_root = DepositBatch::<Key>::empty().root::<Sha256>().unwrap();
     let withdrawals = WithdrawalBatch::empty();
-    let signature =
-        protocol.sign_chain_registration(0, 400, &deposits_root, &deposits_root, &withdrawals);
+    let signature = protocol.sign_chain_registration(
+        0,
+        400,
+        &deposits_root,
+        &deposits_root,
+        &withdrawals,
+        epoch_fee(control),
+    );
     applied(
         control,
         &SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: epoch_fee(control),
             deployment: deployment(),
             epoch: 0,
             predecessor_liability: 400,
@@ -308,8 +343,6 @@ async fn registered_context(control: &harness::Control) -> PaymentContext<Key, D
         record.challenge_deadline,
     )
     .unwrap()
-    .payment()
-    .clone()
 }
 
 async fn respond_rpc<L: commonware_runtime::Listener>(
@@ -529,11 +562,25 @@ fn genesis_cache() -> StateFixture {
     )
 }
 
+fn unregistered_context(operator: Key, epoch: u64) -> EpochContext<Key, Digest> {
+    crate::protocol::epoch_context_at(
+        deployment(),
+        operator,
+        epoch,
+        &DepositBatch::empty(),
+        &WithdrawalBatch::empty(),
+        400,
+        100,
+        101,
+    )
+    .unwrap()
+}
+
 /// A scripted payment head over the certified genesis root: the served state
 /// is operator-claimed display data, and the opening is the wallet's genuine
 /// genesis row.
 fn payment_head_response(
-    context: PaymentContext<Key, Digest>,
+    context: EpochContext<Key, Digest>,
     balance: u64,
 ) -> operator_rpc::PaymentHeadResponse {
     let account = wallets()[0].public_key();
@@ -552,7 +599,8 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
         let (control, mut chain) = chain(&context).await;
         let operator = Wallet::from_seed("operator", 1);
         let impostor = Wallet::from_seed("impostor", 1_001);
-        let payment_context = registered_context(&control).await;
+        let payment_context_epoch = registered_context(&control).await;
+        let payment_context = payment_context_epoch.payment().clone();
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -567,7 +615,7 @@ fn payment_debit_is_local_and_advances_only_after_a_verified_receipt() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(payment_context.clone(), 100).encode(),
+                    body: payment_head_response(payment_context_epoch.clone(), 100).encode(),
                 }
             })
             .await;
@@ -926,12 +974,10 @@ fn immutable_anchor_conflict_releases_only_the_invalid_context() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
-        let registered = registered_context(&control).await;
-        let fake = PaymentContext::new(
-            Sha256::hash(&[b"unregistrable-anchor"]),
-            registered.epoch(),
-            operator_key(),
-        );
+        let registered_epoch = registered_context(&control).await;
+        let registered = registered_epoch.payment().clone();
+        let fake_epoch = unregistered_context(operator_key(), registered.epoch());
+        let fake = fake_epoch.payment().clone();
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -942,7 +988,7 @@ fn immutable_anchor_conflict_releases_only_the_invalid_context() {
             .child("corrective_anchor")
             .spawn(move |_| async move {
                 respond(&mut listener, |_| rpc::Response::Success {
-                    body: payment_head_response(fake.clone(), 100).encode(),
+                    body: payment_head_response(fake_epoch, 100).encode(),
                 })
                 .await;
                 respond(&mut listener, |request| {
@@ -956,7 +1002,7 @@ fn immutable_anchor_conflict_releases_only_the_invalid_context() {
                 })
                 .await;
                 respond(&mut listener, |_| rpc::Response::Success {
-                    body: payment_head_response(serving.clone(), 100).encode(),
+                    body: payment_head_response(registered_epoch.clone(), 100).encode(),
                 })
                 .await;
                 respond_acceptance(
@@ -993,7 +1039,8 @@ fn received_sequence_zero_is_valid_and_survives_reopen() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
-        let payment = registered_context(&control).await;
+        let payment_epoch = registered_context(&control).await;
+        let payment = payment_epoch.payment().clone();
         let payer = wallets().remove(0);
         let receiver = wallets()[1].public_key();
         let mut receipt = issued_receipt(&payment, &payer, &receiver, 7);
@@ -1202,14 +1249,14 @@ fn finalized_activity_requires_its_actual_batch_root_and_account() {
             .unwrap();
         assert!(
             lookup
-                .resolve::<Sha256>(&admitted.change, &account)
+                .resolve::<Sha256>(&admitted.roots.change, &account)
                 .unwrap()
                 .1
                 .is_some()
         );
         assert!(
             lookup
-                .resolve::<Sha256>(&admitted.change, &wallets()[1].public_key())
+                .resolve::<Sha256>(&admitted.roots.change, &wallets()[1].public_key())
                 .is_err()
         );
         let forged_address = SocketAddr::from(([127, 0, 0, 1], 9_703));
@@ -1236,7 +1283,7 @@ fn finalized_activity_requires_its_actual_batch_root_and_account() {
                 .is_err()
         );
         assert!(forged.load(Ordering::Relaxed) > 0);
-        let mut wrong = admitted.change;
+        let mut wrong = admitted.roots.change;
         wrong.digest = Sha256::hash(&[b"wrong-activity-root"]);
         assert!(lookup.resolve::<Sha256>(&wrong, &account).is_err());
     });
@@ -1384,8 +1431,7 @@ fn admitted_registration_is_not_stageable_without_the_operator_head() {
 fn deterministically_rejected_sends_are_never_staged() {
     deterministic::Runner::default().start(|context| async move {
         let (_control, mut chain) = chain(&context).await;
-        let head_context =
-            PaymentContext::new(Sha256::hash(&[b"never-staged-context"]), 0, operator_key());
+        let head_context = unregistered_context(operator_key(), 0);
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -1476,7 +1522,8 @@ fn steady_state_payments_sign_from_local_state_without_head_reads() {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
         let operator = Wallet::from_seed("operator", 1);
-        let payment_context = registered_context(&control).await;
+        let payment_context_epoch = registered_context(&control).await;
+        let payment_context = payment_context_epoch.payment().clone();
         let baseline = control.counts().await;
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -1494,7 +1541,7 @@ fn steady_state_payments_sign_from_local_state_without_head_reads() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(server_context.clone(), 100).encode(),
+                    body: payment_head_response(payment_context_epoch.clone(), 100).encode(),
                 }
             })
             .await;
@@ -1559,7 +1606,8 @@ fn fresh_wallet_falls_back_to_one_head_read_and_caches_the_context() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
         let operator = Wallet::from_seed("operator", 1);
-        let payment_context = registered_context(&control).await;
+        let payment_context_epoch = registered_context(&control).await;
+        let payment_context = payment_context_epoch.payment().clone();
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -1573,7 +1621,7 @@ fn fresh_wallet_falls_back_to_one_head_read_and_caches_the_context() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(server_context.clone(), 100).encode(),
+                    body: payment_head_response(payment_context_epoch.clone(), 100).encode(),
                 }
             })
             .await;
@@ -1674,7 +1722,8 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
         let operator = Wallet::from_seed("operator", 1);
-        let payment_context = registered_context(&control).await;
+        let payment_context_epoch = registered_context(&control).await;
+        let payment_context = payment_context_epoch.payment().clone();
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -1688,7 +1737,7 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(server_context.clone(), 100).encode(),
+                    body: payment_head_response(payment_context_epoch.clone(), 100).encode(),
                 }
             })
             .await;
@@ -1703,7 +1752,7 @@ fn unaffordable_by_local_view_is_refused_before_staging() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(server_context.clone(), 93).encode(),
+                    body: payment_head_response(payment_context_epoch.clone(), 93).encode(),
                 }
             })
             .await;
@@ -1776,6 +1825,11 @@ fn deposit_response_loss_preserves_exact_retry_until_recorded() {
     deterministic::Runner::default().start(|context| async move {
         let (control, mut chain) = chain(&context).await;
         let mut agent = Agent::new(0).unwrap();
+        let chain_id = chain.genesis().native.chain_id();
+        let native_before = chain
+            .native_balance(&context, chain_id, agent.account())
+            .await
+            .unwrap();
 
         // The first attempt stages durably, then loses the chain: the
         // outcome is unclassifiable, so the staged event must survive.
@@ -1788,10 +1842,117 @@ fn deposit_response_loss_preserves_exact_retry_until_recorded() {
         // The retry replays the exact staged event and completes on the
         // certified custody record: no second custody moves.
         let applied = agent.deposit(&context, &mut chain, 7).await.unwrap();
-        assert_eq!(applied, event);
+        assert_eq!(applied, event.event);
         assert!(agent.pending_deposit.is_none());
         assert_eq!(agent.deposit_nonce, 1);
+        control.submit(SettlementTx::Deposit(event)).await;
+        assert_eq!(
+            chain
+                .native_balance(&context, chain_id, agent.account())
+                .await
+                .unwrap(),
+            native_before - 7
+        );
         assert_eq!(status(&control).await.custody, 407);
+    });
+}
+
+#[test]
+fn fresh_native_wallet_database_reopens() {
+    let database = TempDatabase::new();
+    let account = {
+        let agent = Agent::open(database.path(), 0).unwrap();
+        agent.account()
+    };
+    let reopened = Agent::open(database.path(), 0).unwrap();
+    assert_eq!(reopened.account(), account);
+    assert!(reopened.pending_deposit.is_none());
+    assert!(reopened.pending_transfer.is_none());
+}
+
+#[test]
+fn native_transfer_survives_restart_and_debits_once() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let chain_id = chain.genesis().native.chain_id();
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let from = agent.account();
+        let to = crate::protocol::operator_key();
+        let before = chain
+            .native_balance(&context, chain_id, from.clone())
+            .await
+            .unwrap();
+        let recipient_before = chain
+            .native_balance(&context, chain_id, to.clone())
+            .await
+            .unwrap();
+        let mut dead = dead_client(&context);
+        agent
+            .transfer_native(&context, &mut dead, to.clone(), 17)
+            .await
+            .unwrap_err();
+        let staged = agent.pending_transfer.clone().unwrap();
+        let exact_bytes = staged.encode();
+        control
+            .submit(SettlementTx::NativeTransfer(staged.clone()))
+            .await;
+        assert_eq!(
+            chain
+                .native_transfer(&context, chain_id, from.clone(), staged.id)
+                .await
+                .unwrap(),
+            Some(staged.clone())
+        );
+        assert_eq!(
+            chain
+                .native_balance(&context, chain_id, from.clone())
+                .await
+                .unwrap(),
+            before - 17
+        );
+        drop(agent);
+        let mut recovered = Agent::open(database.path(), 0).unwrap();
+        assert_eq!(
+            recovered.pending_transfer.as_ref().unwrap().encode(),
+            exact_bytes
+        );
+        let receipt = recovered
+            .transfer_native(&context, &mut chain, to.clone(), 17)
+            .await
+            .unwrap();
+        assert_eq!(receipt, staged);
+        control.submit(SettlementTx::NativeTransfer(staged)).await;
+        assert_eq!(
+            chain
+                .native_balance(&context, chain_id, from)
+                .await
+                .unwrap(),
+            before - 17
+        );
+        assert_eq!(
+            chain.native_balance(&context, chain_id, to).await.unwrap(),
+            recipient_before + 17
+        );
+        assert!(recovered.pending_transfer.is_none());
+        drop(recovered);
+        assert!(
+            Agent::open(database.path(), 0)
+                .unwrap()
+                .pending_transfer
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn deposit_refuses_an_account_absent_from_the_deployment() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut chain = dead_client(&context);
+        let mut agent = Agent::new(4).unwrap();
+        let error = agent.deposit(&context, &mut chain, 7).await.unwrap_err();
+        assert!(format!("{error:#}").contains("account is not configured"));
+        assert!(agent.pending_deposit.is_none());
     });
 }
 
@@ -1825,14 +1986,14 @@ fn foreign_bound_deposit_id_discards_the_staged_event() {
         ]);
         applied(
             &control,
-            &SettlementTx::Deposit(crate::chain::tx::DepositRequest {
-                deployment: deployment(),
-                event: DepositEvent {
+            &SettlementTx::Deposit(signed_deposit(
+                &control,
+                DepositEvent {
                     id,
                     account: account.clone(),
                     amount: 9,
                 },
-            }),
+            )),
         )
         .await;
         assert_eq!(status(&control).await.custody, 409);
@@ -1843,6 +2004,10 @@ fn foreign_bound_deposit_id_discards_the_staged_event() {
         assert!(format!("{error:#}").contains("certifiably bound to another event"));
         assert!(agent.pending_deposit.is_none());
         assert_eq!(status(&control).await.custody, 409);
+
+        let fresh = agent.deposit(&context, &mut chain, 7).await.unwrap();
+        assert_ne!(fresh.id, id);
+        assert_eq!(status(&control).await.custody, 416);
     });
 }
 
@@ -2021,11 +2186,7 @@ fn forged_head_operator_is_rejected_before_staging() {
         let database = TempDatabase::new();
         let mut chain = dead_client(&context);
         let impostor = Wallet::from_seed("impostor", 1_001);
-        let payment_context = PaymentContext::new(
-            Sha256::hash(&[b"forged-head-operator"]),
-            7,
-            impostor.public_key(),
-        );
+        let payment_context = unregistered_context(impostor.public_key(), 7);
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -2060,7 +2221,242 @@ fn forged_head_operator_is_rejected_before_staging() {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum HeadUse {
+    Pay,
+    Balance,
+    Finalized,
+}
+
+#[test]
+fn foreign_deployment_head_cannot_authorize_payment() {
+    foreign_deployment_head_cannot_authorize(HeadUse::Pay);
+}
+
+#[test]
+fn foreign_deployment_balance_cannot_cache_payment_context() {
+    foreign_deployment_head_cannot_authorize(HeadUse::Balance);
+}
+
+#[test]
+fn foreign_deployment_finalized_head_cannot_cache_payment_context() {
+    foreign_deployment_head_cannot_authorize(HeadUse::Finalized);
+}
+
+fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
+    deterministic::Runner::timed(std::time::Duration::from_secs(120)).start(|context| async move {
+        let database = TempDatabase::new();
+        let (control, mut chain) = chain(&context).await;
+        let native = &control.identity().native;
+        let payer = wallets().remove(0);
+        let recipient = wallets().remove(1).public_key();
+        let registration = crate::chain::tx::RegisterDeploymentRequest::sign(
+            native.chain_id(),
+            Sha256::hash(&[b"same-key foreign deployment"]),
+            crate::protocol::operator_ack_key(0),
+            native.deployments[0].network_key.clone(),
+            vec![payer.public_key(), recipient.clone()],
+            1024 * 1024,
+            native.registration_fee,
+            &crate::protocol::operator_signer(0),
+        );
+        let foreign = registration.deployment_id();
+        control
+            .submit(SettlementTx::RegisterDeployment(registration))
+            .await;
+        let mut other =
+            Client::new(control.identity(), foreign, vec![CHAIN], TestRng::new(72)).unwrap();
+        let selected = chain.registered(&context).await.unwrap();
+        let registered = other.registered(&context).await.unwrap();
+        assert_ne!(selected.deployment.digest(), registered.deployment.digest());
+        assert_eq!(selected.deployment.operator, registered.deployment.operator);
+
+        let event = DepositEvent {
+            id: Sha256::hash(&[b"foreign deployment funding"]),
+            account: payer.public_key(),
+            amount: 100,
+        };
+        control
+            .submit(SettlementTx::Deposit(
+                crate::chain::tx::DepositRequest::sign(
+                    native.chain_id(),
+                    foreign,
+                    event.clone(),
+                    payer.signer(),
+                ),
+            ))
+            .await;
+        assert_eq!(other.status(&context).await.unwrap().custody, 100);
+        let protocol = Protocol::with_signer(
+            NonZeroUsize::MIN,
+            foreign,
+            crate::protocol::operator_signer(0),
+            crate::protocol::operator_ack_signer(0),
+        )
+        .unwrap();
+        let deposits = DepositBatch::new(vec![
+            commonware_clearing::bajillion::boundary::DepositRecord::new(payer.public_key(), 100)
+                .unwrap(),
+        ])
+        .unwrap();
+        let root = deposits.root::<Sha256>().unwrap();
+        let withdrawals = WithdrawalBatch::empty();
+        let fee = native.epoch_fee * u64::from(registered.max_dealing_bytes).div_ceil(1024);
+        control
+            .submit(SettlementTx::RegisterEpoch(RegisterEpochRequest {
+                deployment: foreign,
+                epoch: 0,
+                predecessor_liability: 0,
+                deposits_root: root,
+                staged_root: root,
+                withdrawals: withdrawals.clone(),
+                openings: Vec::new(),
+                fee,
+                signature: protocol.sign_chain_registration(0, 0, &root, &root, &withdrawals, fee),
+            }))
+            .await;
+        let registered = other.registration(&context).await.unwrap().unwrap();
+        let epoch = protocol
+            .registration_at(
+                0,
+                deposits,
+                withdrawals,
+                0,
+                registered.admission_deadline,
+                registered.challenge_deadline,
+            )
+            .unwrap();
+        assert_eq!(
+            other.anchor(&context, 0).await.unwrap(),
+            Some(*epoch.context.payment().anchor())
+        );
+        let head = payment_head_response(epoch.context.clone(), 100);
+        let selected_root = head.root;
+        let captured = Arc::new(Mutex::new(None));
+        let observed = captured.clone();
+        let mut listener = context
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        context.child("foreign_head").spawn(move |_| async move {
+            loop {
+                respond(&mut listener, |request| match request {
+                    operator_rpc::OperatorRequest::PaymentHead(_) => rpc::Response::Success {
+                        body: head.encode(),
+                    },
+                    operator_rpc::OperatorRequest::AcceptSend(request) => {
+                        *observed.lock() = Some(request);
+                        rpc::Response::Error {
+                            error: Bytes::from_static(b"response lost"),
+                        }
+                    }
+                    _ => panic!("unexpected wallet request"),
+                })
+                .await;
+            }
+        });
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        match usage {
+            HeadUse::Pay => {}
+            HeadUse::Balance => {
+                let _ = agent.balance(&context, &mut chain, address).await;
+            }
+            HeadUse::Finalized => {
+                let _ = agent.finalized_head(&context, &mut chain, address).await;
+            }
+        }
+        drop(agent);
+        let mut agent = Agent::open(database.path(), 0).unwrap();
+        let _ = agent.pay(&context, &mut chain, address, &[(1, 7)]).await;
+        let send = captured.lock().take();
+        let emitted = send.is_some();
+        if let Some(send) = send {
+            // A captured authorization must settle through B's real funded boundary.
+            let vector = OutVector::new(
+                0,
+                payer.public_key(),
+                vec![OutEntry {
+                    recipient: recipient.clone(),
+                    cumulative: 7,
+                    count: 1,
+                }],
+            )
+            .unwrap();
+            let terminal = commonware_clearing::bajillion::transition::Terminal {
+                operator_signature: protocol.sign_ack_aggregate(send.authorization.body()),
+                authorization: send.authorization,
+                vector,
+            };
+            let state_context = context.child("foreign_balances");
+            let config = crate::protocol::state_config(
+                "foreign-balances",
+                &state_context,
+                protocol.strategy().clone(),
+            );
+            let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256, _>::init(
+                state_context,
+                config,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+            let prepared = protocol
+                .prepare(epoch, vec![event], &state, vec![terminal])
+                .await
+                .unwrap();
+            let (result, prepared) = protocol
+                .complete(prepared, &state, &mut TestRng::new(91))
+                .await
+                .unwrap();
+            let state = state.apply(prepared).await.unwrap().commit().await.unwrap();
+            control
+                .submit(SettlementTx::Admit(AdmitRequest::from(&result)))
+                .await;
+            assert!(other.admitted(&context, 0).await.unwrap().is_some());
+            let height = control.advance(0).await;
+            control
+                .advance(
+                    result
+                        .epoch_context
+                        .challenge_deadline()
+                        .saturating_sub(height)
+                        + 1,
+                )
+                .await;
+            let finalized = other.status(&context).await.unwrap();
+            assert_eq!(finalized.last_finalized, Some(0));
+            assert_eq!(finalized.state_root, state.root());
+            assert_eq!(
+                state
+                    .opening(payer.public_key())
+                    .await
+                    .unwrap()
+                    .balance
+                    .get(),
+                93
+            );
+            assert_eq!(result.external_claims.len(), 1);
+            assert_eq!(result.external_claims[0].recipient(), &recipient);
+            assert_eq!(finalized.claimable, 7);
+            assert_eq!(
+                chain.status(&context).await.unwrap().state_root,
+                selected_root
+            );
+        }
+        assert!(
+            !emitted,
+            "{usage:?} authorized a debit in another registered deployment"
+        );
+        drop(agent);
+        let recovered = Agent::open(database.path(), 0).unwrap();
+        assert!(recovered.pending_payment.is_none());
+        assert!(recovered.cache.is_none());
+    });
+}
+
+#[derive(Clone, Copy, Debug)]
 enum PaymentHeadGateCase {
+    InvalidAnchor,
     MismatchedStateRoot,
     WrongAccount,
     ForgedBalance,
@@ -2072,7 +2468,8 @@ enum PaymentHeadGateCase {
 impl PaymentHeadGateCase {
     /// The hard-faulted case permanently faults the shared chain, so it runs
     /// last.
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
+        Self::InvalidAnchor,
         Self::MismatchedStateRoot,
         Self::WrongAccount,
         Self::ForgedBalance,
@@ -2083,6 +2480,7 @@ impl PaymentHeadGateCase {
 
     const fn actor(self) -> &'static str {
         match self {
+            Self::InvalidAnchor => "invalid_anchor",
             Self::MismatchedStateRoot => "mismatched_state_root",
             Self::WrongAccount => "wrong_account",
             Self::ForgedBalance => "forged_balance",
@@ -2094,6 +2492,7 @@ impl PaymentHeadGateCase {
 
     const fn expected_error(self) -> &'static str {
         match self {
+            Self::InvalidAnchor => "payment context is not bound to this deployment and operator",
             Self::MismatchedStateRoot => "payer opening is not the exact settlement head",
             Self::WrongAccount => "payer opening belongs to another account",
             Self::ForgedBalance => "verify payer Current state opening",
@@ -2107,6 +2506,11 @@ impl PaymentHeadGateCase {
     /// so every corruption lives in the operator's response.
     fn corrupt(self, head: &mut operator_rpc::PaymentHeadResponse) {
         match self {
+            Self::InvalidAnchor => {
+                let mut encoded = head.context.encode().to_vec();
+                encoded[0] ^= 1;
+                head.context = EpochContext::decode(Bytes::from(encoded)).unwrap();
+            }
             Self::MismatchedStateRoot => {
                 // A verifiable opening over a root that is not the certified
                 // settlement head.
@@ -2140,7 +2544,8 @@ fn adversarial_payment_heads_are_rejected_before_send_or_persistence() {
             if matches!(case, PaymentHeadGateCase::HardFaulted) {
                 // Fault the deployment for real: a registered epoch expires
                 // unadmitted past its inclusive deadline.
-                let registered = registered_context(&control).await;
+                let registered_epoch = registered_context(&control).await;
+                let registered = registered_epoch.payment().clone();
                 let height = control.advance(0).await;
                 let deadline = height + 12;
                 control.advance(deadline - height + 1).await;
@@ -2148,11 +2553,7 @@ fn adversarial_payment_heads_are_rejected_before_send_or_persistence() {
                 let _ = registered;
             }
             let database = TempDatabase::new();
-            let payment_context = PaymentContext::new(
-                Sha256::hash(&[b"adversarial-payment-head"]),
-                7,
-                operator_key(),
-            );
+            let payment_context = unregistered_context(operator_key(), 7);
             let mut head = payment_head_response(payment_context, 100);
             case.corrupt(&mut head);
             let rejected_root = head.root;
@@ -2224,21 +2625,28 @@ fn unregistered_valid_payment_context_does_not_commit() {
         let withdrawals = WithdrawalBatch::empty();
         applied(
             &control,
-            &SettlementTx::Deposit(crate::chain::tx::DepositRequest {
-                deployment: deployment(),
-                event: crate::protocol::DepositEvent {
+            &SettlementTx::Deposit(signed_deposit(
+                &control,
+                crate::protocol::DepositEvent {
                     id: Sha256::hash(&[b"other-anchor-deposit"]),
                     account: wallets()[1].public_key(),
                     amount: 1,
                 },
-            }),
+            )),
         )
         .await;
-        let signature =
-            protocol.sign_chain_registration(0, 400, &deposits_root, &deposits_root, &withdrawals);
+        let signature = protocol.sign_chain_registration(
+            0,
+            400,
+            &deposits_root,
+            &deposits_root,
+            &withdrawals,
+            epoch_fee(&control),
+        );
         applied(
             &control,
             &SettlementTx::RegisterEpoch(RegisterEpochRequest {
+                fee: epoch_fee(&control),
                 deployment: deployment(),
                 epoch: 0,
                 predecessor_liability: 400,
@@ -2325,7 +2733,8 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
         let operator = Wallet::from_seed("operator", 1);
-        let payment_context = registered_context(&control).await;
+        let payment_context_epoch = registered_context(&control).await;
+        let payment_context = payment_context_epoch.payment().clone();
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -2340,7 +2749,7 @@ fn response_loss_restart_retries_byte_identical_pending_send() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(payment_context.clone(), 100).encode(),
+                    body: payment_head_response(payment_context_epoch.clone(), 100).encode(),
                 }
             })
             .await;
@@ -2415,7 +2824,8 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
         let operator = Wallet::from_seed("operator", 1);
-        let payment_context = registered_context(&control).await;
+        let payment_context_epoch = registered_context(&control).await;
+        let payment_context = payment_context_epoch.payment().clone();
         let mut listener = context
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -2430,7 +2840,7 @@ fn successful_receipt_commit_survives_restart_and_advances_next_debit() {
                     operator_rpc::OperatorRequest::PaymentHead(_)
                 ));
                 rpc::Response::Success {
-                    body: payment_head_response(payment_context.clone(), 100).encode(),
+                    body: payment_head_response(payment_context_epoch.clone(), 100).encode(),
                 }
             })
             .await;
@@ -3004,10 +3414,27 @@ fn staged_deposit_survives_restart_and_retries_the_same_id() {
         // the submission. The unreachable chain stands in for that crash
         // window.
         let mut agent = Agent::open(database.path(), 0).unwrap();
+        let chain_id = chain.genesis().native.chain_id();
+        let native_before = chain
+            .native_balance(&context, chain_id, agent.account())
+            .await
+            .unwrap();
         let mut dead = dead_client(&context);
         let error = agent.deposit(&context, &mut dead, 7).await.unwrap_err();
         assert!(format!("{error:#}").contains("record settlement deposit"));
         let event = agent.pending_deposit.clone().unwrap();
+        control.submit(SettlementTx::Deposit(event.clone())).await;
+        assert_eq!(
+            chain.deposit(&context, event.event.id).await.unwrap(),
+            Some(event.event.clone())
+        );
+        assert_eq!(
+            chain
+                .native_balance(&context, chain_id, agent.account())
+                .await
+                .unwrap(),
+            native_before - 7
+        );
         drop(agent);
 
         // The restarted wallet restores the exact staged event, so the retry replays
@@ -3016,7 +3443,7 @@ fn staged_deposit_survives_restart_and_retries_the_same_id() {
         assert_eq!(recovered.pending_deposit.as_ref(), Some(&event));
         recovered.deposit_nonce = 41;
         let applied = recovered.deposit(&context, &mut chain, 7).await.unwrap();
-        assert_eq!(applied, event);
+        assert_eq!(applied, event.event);
         assert!(recovered.pending_deposit.is_none());
         assert_eq!(recovered.deposit_nonce, 42);
         drop(recovered);
@@ -3024,18 +3451,33 @@ fn staged_deposit_survives_restart_and_retries_the_same_id() {
         let reopened = Agent::open(database.path(), 0).unwrap();
         assert!(reopened.pending_deposit.is_none());
         assert_eq!(status(&control).await.custody, 407);
+        assert_eq!(
+            chain
+                .native_balance(&context, chain_id, reopened.account())
+                .await
+                .unwrap(),
+            native_before - 7
+        );
     });
 }
 
 #[test]
-fn doomed_deposit_keeps_the_staged_event_and_surfaces_advice() {
+fn unfunded_deposit_keeps_the_exact_staged_request() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
 
-        // The deposit amount exceeds the operator storage domain, so the
-        // chain rejects it, with no effect and no custody taken.
-        let amount = crate::protocol::SQLITE_U64_MAX;
+        // Native funds cannot cover this deposit, so rejection leaves the signed
+        // request available for retry after the account receives more funds.
+        let amount = chain
+            .native_balance(
+                &context,
+                chain.genesis().native.chain_id(),
+                wallets()[0].public_key(),
+            )
+            .await
+            .unwrap()
+            + 1;
 
         // The first attempt cannot be classified: the chain is unreachable, so
         // the staged event must survive for an exact retry.
@@ -3051,28 +3493,19 @@ fn doomed_deposit_keeps_the_staged_event_and_surfaces_advice() {
 
         // The retry replays the exact staged event. The rejection is
         // effect-free and therefore indistinguishable from not-yet-included,
-        // so the staged event survives for an exact retry and the advisory
-        // dry-run answer is surfaced as the diagnosis.
+        // so the staged event survives for an exact retry.
         let error = agent
             .deposit(&context, &mut chain, amount)
             .await
             .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("record settlement deposit"), "{message}");
-        assert!(message.contains("Doomed(Domain)"), "{message}");
         assert!(agent.pending_deposit.is_some());
+        control.submit(SettlementTx::Deposit(staged.clone())).await;
         assert_eq!(
             control
-                .submit(SettlementTx::Deposit(crate::chain::tx::DepositRequest {
-                    deployment: deployment(),
-                    event: staged.clone(),
-                }))
-                .await
-                .1,
-            Advice::Doomed(Reject::Domain)
-        );
-        assert_eq!(
-            control.record(deposit_key(&deployment(), &staged.id)).await,
+                .record(deposit_key(&deployment(), &staged.event.id))
+                .await,
             None
         );
         assert_eq!(status(&control).await.custody, 400);
@@ -3455,7 +3888,7 @@ fn activity_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
                     operator_rpc::OperatorRequest::AcceptSend(_)
                 ));
                 rpc::Response::Success {
-                    body: stale_response(&stale, 7),
+                    body: stale_response(stale.payment(), 7),
                 }
             })
             .await;
@@ -3735,8 +4168,8 @@ fn balance_poll_retains_the_head_for_hard_fault_recovery() {
 
         // The registered epoch later expires unadmitted, freezing the
         // deployment at the genesis head the balance poll retained.
-        let payment_context = registered_context(&control).await;
-        let head = payment_head_response(payment_context, 100);
+        let payment_context_epoch = registered_context(&control).await;
+        let head = payment_head_response(payment_context_epoch, 100);
         let frozen_root = head.root;
 
         let mut listener = context
@@ -3799,20 +4232,24 @@ async fn admit_omitting(
     let (deposit, deposits) = crate::protocol::omitting_boundary().unwrap();
     applied(
         control,
-        &SettlementTx::Deposit(crate::chain::tx::DepositRequest {
-            deployment: deployment(),
-            event: deposit,
-        }),
+        &SettlementTx::Deposit(signed_deposit(control, deposit)),
     )
     .await;
     let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
     let deposits_root = deposits.root::<Sha256>().unwrap();
     let withdrawals = WithdrawalBatch::empty();
-    let signature =
-        protocol.sign_chain_registration(0, 400, &deposits_root, &deposits_root, &withdrawals);
+    let signature = protocol.sign_chain_registration(
+        0,
+        400,
+        &deposits_root,
+        &deposits_root,
+        &withdrawals,
+        epoch_fee(control),
+    );
     applied(
         control,
         &SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            fee: epoch_fee(control),
             deployment: deployment(),
             epoch: 0,
             predecessor_liability: 400,
@@ -4010,7 +4447,8 @@ fn fabricated_anchor_pair_is_refused_at_intake() {
         let invoice = Sha256::hash(&[receipt.ack.body().encode().as_ref()]);
 
         // The chain registered a different anchor for epoch 0 than the operator's forgery.
-        let registered = registered_context(&control).await;
+        let registered_epoch = registered_context(&control).await;
+        let registered = registered_epoch.payment().clone();
         assert_ne!(registered.anchor(), bogus.anchor());
 
         let mut operator_listener = context
@@ -4543,7 +4981,8 @@ fn incoming_intake_is_durable_and_refetch_is_idempotent() {
 
         // The receipt binds the certifiably registered epoch-0 context, so intake
         // anchors it against the chain's own registration record.
-        let registered = registered_context(&control).await;
+        let registered_epoch = registered_context(&control).await;
+        let registered = registered_epoch.payment().clone();
         let alice = &wallets()[0];
         let bob = wallets()[1].public_key();
         let receipt = issued_receipt(&registered, alice, &bob, 5);
@@ -5104,7 +5543,8 @@ fn hard_fault_recovery_fetches_the_frozen_root_opening() {
 
         // A registered epoch expires unadmitted, freezing the deployment at the
         // genesis head.
-        let _registered = registered_context(&control).await;
+        let _registered_epoch = registered_context(&control).await;
+        let _registered = _registered_epoch.payment().clone();
         let height = control.advance(0).await;
         let mut faulted = status(&control).await;
         while !faulted.hard_faulted {
@@ -5154,7 +5594,7 @@ fn hard_fault_recovery_fetches_the_frozen_root_opening() {
 /// holder-served floor, and claims the finalized withdrawal from the validators
 /// holders' evidence, with the refused acknowledgement holding nothing open.
 #[test]
-fn operator_dark_wallet_escalates_pays_and_claims_through_validators() {
+fn operator_dark_wallet_moves_finalized_claim_to_registered_operator() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
@@ -5255,6 +5695,20 @@ fn operator_dark_wallet_escalates_pays_and_claims_through_validators() {
 
         // After finalization the cached claim releases against the certified
         // batch, and the refused acknowledgement holds nothing open.
+        let chain_id = chain.genesis().native.chain_id();
+        let native_before = chain
+            .native_balance(&context, chain_id, agent.account())
+            .await
+            .unwrap();
+        agent
+            .transfer_native(&context, &mut chain, operator_key(), native_before)
+            .await
+            .unwrap();
+        let native_before = chain
+            .native_balance(&context, chain_id, agent.account())
+            .await
+            .unwrap();
+        assert_eq!(native_before, 0);
         finalize(&control, &result).await;
         let acknowledging = context.child("acknowledging").spawn(move |_| async move {
             assert!(matches!(
@@ -5267,9 +5721,98 @@ fn operator_dark_wallet_escalates_pays_and_claims_through_validators() {
             .await
             .unwrap();
         assert_eq!(release.amount, 5);
-        assert_eq!(release.destination.as_ref(), agent.name().as_bytes());
+        assert_eq!(release.destination.as_ref(), agent.account().as_ref());
+        assert_eq!(
+            chain
+                .native_balance(&context, chain.genesis().native.chain_id(), agent.account())
+                .await
+                .unwrap(),
+            native_before + release.amount
+        );
         assert!(agent.pending_withdrawal_claim.is_none());
         acknowledging.await.unwrap();
+
+        // A separate wallet funds registration, so the source can deposit only its
+        // finalized release into the destination's initially empty custody.
+        let destination_operator = Wallet::from_seed("destination operator", 99);
+        let fee = chain.genesis().native.registration_fee;
+        let mut funder = Agent::new(1).unwrap();
+        funder
+            .transfer_native(&context, &mut chain, destination_operator.public_key(), fee)
+            .await
+            .unwrap();
+        let registration = crate::chain::tx::RegisterDeploymentRequest::sign(
+            chain_id,
+            Sha256::hash(&[b"wallet destination deployment"]),
+            crate::protocol::operator_ack_key(99),
+            chain.genesis().native.deployments[0].network_key.clone(),
+            vec![agent.account()],
+            1024,
+            fee,
+            destination_operator.signer(),
+        );
+        let destination = registration.deployment_id();
+        chain
+            .deliver(&context, &SettlementTx::RegisterDeployment(registration))
+            .await
+            .unwrap();
+        let mut destination_chain = Client::new(
+            control.identity(),
+            destination,
+            vec![CHAIN],
+            context.child("destination_chain"),
+        )
+        .unwrap();
+        let registered = destination_chain.registered(&context).await.unwrap();
+        assert_eq!(
+            registered.deployment.operator,
+            destination_operator.public_key()
+        );
+        assert!(
+            registered
+                .deployment
+                .accounts
+                .iter()
+                .all(|account| account.balance == 0)
+        );
+        let mut omitted =
+            Agent::new_for(1, destination, registered.deployment.operator.clone()).unwrap();
+        let error = omitted
+            .deposit(&context, &mut destination_chain, 1)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("account is not configured"));
+        assert!(omitted.pending_deposit.is_none());
+        let destination_database = TempDatabase::new();
+        let mut destination_wallet = Agent::open_for(
+            destination_database.path(),
+            0,
+            destination,
+            registered.deployment.operator,
+        )
+        .unwrap();
+        destination_wallet
+            .deposit(&context, &mut destination_chain, release.amount)
+            .await
+            .unwrap();
+        assert_eq!(
+            destination_chain.status(&context).await.unwrap().custody,
+            release.amount
+        );
+        assert_eq!(
+            chain
+                .native_balance(&context, chain_id, agent.account())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            destination_chain
+                .native_balance(&context, chain_id, agent.account())
+                .await
+                .unwrap(),
+            0
+        );
         drop(agent);
 
         let recovered = Agent::open(database.path(), 0).unwrap();

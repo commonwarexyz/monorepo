@@ -13,13 +13,13 @@ use crate::{
     chain::{
         app::{App, Finalized, initial_sync_target},
         da, ingress, query,
+        registry::{self, RegistryView},
         setup::{NetworkConfig, NodeConfig, read_genesis},
         types::{Block, Database},
     },
-    protocol::{chain_id, committee},
+    protocol::committee,
 };
 use clap::Args;
-use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::admission::bls12381 as clearing_bls;
 use commonware_consensus::{
@@ -47,10 +47,7 @@ use commonware_glue::stateful::{
     Config as StatefulConfig, Stateful, SyncPlan, db::SyncEngineConfig,
 };
 use commonware_macros::boxed;
-use commonware_p2p::{
-    Manager, PeerSetSubscription, Provider, TrackedPeers,
-    authenticated::{self, discovery},
-};
+use commonware_p2p::{Manager, TrackedPeers, authenticated::discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Quota, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{
@@ -123,15 +120,13 @@ pub(crate) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
 /// Buffer size for journal replay and writes.
 pub(crate) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 
-/// Maximum transactions the ingress queue retains for proposals.
-pub(crate) const INGRESS_CAPACITY: NonZeroUsize = NZUsize!(1_024);
+/// Maximum transactions retained in each deployment's ingress class.
+pub(crate) const INGRESS_CAPACITY: NonZeroUsize = NZUsize!(64);
 
-/// Maximum aggregate encoded transaction bytes the ingress queue retains,
-/// about sixteen full blocks.
-pub(crate) const INGRESS_BYTES: NonZeroUsize = NZUsize!(64 * 1024 * 1024);
-
-/// First-seen digests the ingress queue remembers for dedupe.
-pub(crate) const INGRESS_SEEN: NonZeroUsize = NZUsize!(4_096);
+/// Encoded bytes retained per ingress class, sufficient for any one valid
+/// transaction. Two classes per deployment and one native class bound the
+/// aggregate payload to 129 MiB at the 64-deployment registry limit.
+pub(crate) const INGRESS_BYTES: NonZeroUsize = NZUsize!(crate::chain::types::MAX_TX_BYTES);
 
 /// Finalized blocks a drained transaction stays leased before re-offer.
 pub(crate) const INGRESS_LEASE: u64 = 10;
@@ -220,64 +215,6 @@ where
     async fn attach_database(&self, _: Database<E>) {}
 }
 
-/// Peer manager adapter injecting fixed secondaries into every tracked set.
-///
-/// [`TrackedPeers`] semantics make network mechanisms favor the primaries
-/// while still replicating to and answering the secondaries, so wrapping the
-/// oracle handed to peer tracking registers the operator as a non-signing
-/// secondary of every tracked committee.
-#[derive(Clone, Debug)]
-pub(crate) struct WithSecondaries<M: Manager> {
-    manager: M,
-    secondaries: Set<M::PublicKey>,
-}
-
-impl<M: Manager> WithSecondaries<M> {
-    pub(crate) const fn new(manager: M, secondaries: Set<M::PublicKey>) -> Self {
-        Self {
-            manager,
-            secondaries,
-        }
-    }
-}
-
-impl<M: Manager> Provider for WithSecondaries<M> {
-    type PublicKey = M::PublicKey;
-
-    async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        self.manager.peer_set(id).await
-    }
-
-    async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-        self.manager.subscribe().await
-    }
-}
-
-impl<M: Manager> Manager for WithSecondaries<M> {
-    fn track<R>(&mut self, id: u64, peers: R) -> Feedback
-    where
-        R: Into<TrackedPeers<Self::PublicKey>> + Send,
-    {
-        let mut peers = peers.into();
-        peers.secondary = Set::from_iter_dedup(
-            peers
-                .secondary
-                .into_iter()
-                .chain(self.secondaries.iter().cloned()),
-        );
-        self.manager.track(id, peers)
-    }
-}
-
-/// Asserts the launch-configuration parity the sealer's dealing routing
-/// relies on: network operator `i` runs genesis deployment `i`.
-fn ensure_operator_parity(network: &NetworkConfig, genesis: &crate::chain::setup::Genesis) {
-    assert!(
-        network.operators.len() == genesis.deployments.len(),
-        "the network config must list one operator per genesis deployment"
-    );
-}
-
 /// Start a validator node.
 #[derive(Args)]
 pub struct Validator {
@@ -297,27 +234,19 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let partition_prefix = "validator";
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
-    // Every configured operator is a bootstrapper of every validator and a
-    // registered secondary of the tracked committee, so the peer-set limit
-    // covers them all. Operator `i` in the network config runs deployment
-    // `i` in genesis, the mapping the sealer routes dealings by.
-    ensure_operator_parity(&network, &genesis_output);
-    let operators = network
-        .operators
-        .iter()
-        .map(|operator| operator.public_key.clone())
-        .collect::<Vec<_>>();
-    let dealers = operators
-        .iter()
-        .cloned()
-        .zip(genesis_output.deployments.iter().cloned())
-        .collect::<Vec<_>>();
+    let registry = RegistryView::new(genesis_output.native.deployments.clone());
     let mut bootstrappers = network.bootstrappers(&local);
     for operator in &network.operators {
         bootstrappers.push((operator.public_key.clone(), operator.dial.into()));
     }
-    let max_peers_per_set =
-        authenticated::peer_set_limit(network.participants.iter().chain(operators.iter()), &local);
+    let max_peers_per_set = NonZeroUsize::new(
+        network
+            .participants
+            .len()
+            .checked_add(genesis_output.native.max_deployments as usize)
+            .expect("bounded peer capacity"),
+    )
+    .expect("the committee is nonempty");
 
     // The fixed committee signs under one scheme for the life of the chain.
     let scheme = Scheme::signer(
@@ -339,7 +268,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         MAX_MESSAGE_SIZE,
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
-    let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
+    let (mut p2p, mut oracle) = discovery::Network::new(context.child("network"), p2p_config);
     let vote_network = p2p.register(VOTE_CHANNEL, MESSAGE_RATE);
     let certificate_network = p2p.register(CERTIFICATE_CHANNEL, MESSAGE_RATE);
     let resolver_network = p2p.register(RESOLVER_CHANNEL, MESSAGE_RATE);
@@ -348,16 +277,17 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let settlement_tx_network = p2p.register(SETTLEMENT_TX_CHANNEL, MESSAGE_RATE);
     let settlement_da_network = p2p.register(SETTLEMENT_DA_CHANNEL, MESSAGE_RATE);
 
-    // The fixed committee is the one tracked peer set for the life of the
-    // chain, with every operator injected as a secondary: mechanisms favor
-    // the committee but gossip to and answer the operators.
-    let mut manager = WithSecondaries::new(
-        oracle.clone(),
-        Set::from_iter_dedup(operators.iter().cloned()),
-    );
-    let _ = manager.track(
+    let _ = oracle.track(
         0,
-        Set::from_iter_dedup(network.participants.iter().cloned()),
+        TrackedPeers::new(
+            Set::from_iter_dedup(network.participants.iter().cloned()),
+            Set::from_iter_dedup(
+                registry
+                    .entries()
+                    .into_iter()
+                    .map(|entry| entry.network_key),
+            ),
+        ),
     );
     let p2p_handle = p2p.start();
 
@@ -419,7 +349,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     // Genesis block shared by every validator.
     let genesis_block = Block::genesis(
         network.participants[0].clone(),
-        chain_id(&genesis_output.deployments),
+        genesis_output.native.chain_id(),
         genesis_output.timestamp,
         initial_sync_target::<tokio::Context>(),
     );
@@ -457,21 +387,23 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (ingress_actor, ingress_mailbox) = ingress::Actor::new(
         context.child("ingress"),
         ingress::Config {
-            mailbox_size: MAILBOX_SIZE,
+            mailbox_size: NZUsize!(64),
             capacity: INGRESS_CAPACITY,
             bytes: INGRESS_BYTES,
-            seen: INGRESS_SEEN,
             lease: INGRESS_LEASE,
+            retention: INGRESS_LEASE
+                .checked_mul(4)
+                .expect("ingress retention fits u64"),
         },
+        registry.clone(),
     );
-    let ingress_handle = ingress_actor.start(settlement_tx_network);
 
     // Stateful actor wrapping the settlement application.
     let finalized = Finalized::default();
     let application: App<Scheme, ingress::Mailbox> = App::new(
         genesis_block.clone(),
         genesis_output.timing(),
-        genesis_output.deployments.clone(),
+        genesis_output.native.clone(),
         finalized.clone(),
     );
     let (stateful_actor, stateful_mailbox) = Stateful::init(
@@ -504,8 +436,24 @@ pub async fn run(context: tokio::Context, args: Validator) {
     // Sealing actor on the settlement DA channel: the validator's clearing
     // committee identity is the dealt BLS key from setup, separate material
     // from its consensus threshold share. The genesis validator list names
-    // the query servers a missing retained interval is fetched from.
+    // the query servers a missing canonical dealing is fetched from.
     let db: Database<tokio::Context> = stateful_mailbox.subscribe_databases().await;
+    let ingress_handle = ingress_actor.start(
+        settlement_tx_network,
+        db.clone(),
+        finalized.clone(),
+        genesis_output.native.clone(),
+        genesis_output.timing(),
+        Set::from_iter_dedup(network.participants.iter().cloned()),
+    );
+    let registry_handle = registry::watch(
+        context.child("registry"),
+        db.clone(),
+        genesis_output.native.clone(),
+        registry.clone(),
+        oracle.clone(),
+        Set::from_iter_dedup(network.participants.iter().cloned()),
+    );
     let clearing = clearing_bls::Scheme::signer(
         committee().expect("the demo committee is statically valid"),
         node.clearing.clone(),
@@ -515,7 +463,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         context.child("sealer"),
         da::Config {
             scheme: clearing,
-            operators: dealers,
+            registry,
             db: db.clone(),
             partition: format!("{partition_prefix}-dealings"),
             validators: genesis_output.validators.clone(),
@@ -530,7 +478,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
         context.child("query"),
         query::Config {
             address: node.query,
-            deployments: genesis_output.deployments.clone(),
             db,
             finalized,
             marshal: marshal.clone(),
@@ -579,91 +526,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal_handle,
         stateful_handle,
         sealer_handle,
+        registry_handle,
         query_handle,
         engine_handle,
     ])
     .await
     {
         error!(?err, "validator task failed");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_cryptography::Signer as _;
-    use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::channel::mpsc;
-
-    type PublicKey = ed25519::PublicKey;
-
-    /// Tracked sets recorded by the mock manager.
-    type Tracked =
-        std::sync::Arc<commonware_utils::sync::Mutex<Vec<(u64, TrackedPeers<PublicKey>)>>>;
-
-    /// Records every tracked set for inspection.
-    #[derive(Clone, Debug)]
-    struct Recorder {
-        tracked: Tracked,
-    }
-
-    impl Provider for Recorder {
-        type PublicKey = PublicKey;
-
-        async fn peer_set(&mut self, _: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-            None
-        }
-
-        async fn subscribe(&mut self) -> PeerSetSubscription<Self::PublicKey> {
-            let (_, receiver) = mpsc::unbounded_channel();
-            receiver
-        }
-    }
-
-    impl Manager for Recorder {
-        fn track<R>(&mut self, id: u64, peers: R) -> Feedback
-        where
-            R: Into<TrackedPeers<Self::PublicKey>> + Send,
-        {
-            self.tracked.lock().push((id, peers.into()));
-            Feedback::Ok
-        }
-    }
-
-    #[test]
-    fn with_secondaries_injects_the_operator_into_every_tracked_set() {
-        deterministic::Runner::default().start(|_| async move {
-            let key = |seed: u64| ed25519::PrivateKey::from_seed(seed).public_key();
-            let operator = key(100);
-            let inner = Recorder {
-                tracked: std::sync::Arc::default(),
-            };
-            let mut manager =
-                WithSecondaries::new(inner.clone(), Set::from_iter_dedup([operator.clone()]));
-
-            // A primary-only set gains the operator as its secondary, and a
-            // set that already carries secondaries keeps them alongside it.
-            let primary = Set::from_iter_dedup([key(0), key(1)]);
-            let _ = manager.track(0, primary.clone());
-            let extra = key(2);
-            let _ = manager.track(
-                1,
-                TrackedPeers::new(primary.clone(), Set::from_iter_dedup([extra.clone()])),
-            );
-            let tracked = inner.tracked.lock();
-            assert_eq!(tracked.len(), 2);
-            assert_eq!(tracked[0].0, 0);
-            assert_eq!(tracked[0].1.primary, primary);
-            assert_eq!(
-                tracked[0].1.secondary,
-                Set::from_iter_dedup([operator.clone()])
-            );
-            assert_eq!(tracked[1].0, 1);
-            assert_eq!(tracked[1].1.primary, primary);
-            assert_eq!(
-                tracked[1].1.secondary,
-                Set::from_iter_dedup([extra, operator])
-            );
-        });
     }
 }

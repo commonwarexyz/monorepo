@@ -28,7 +28,7 @@ use crate::{
         da::{Ballot, Dealing, Message as DaMessage},
         ingress::Submission,
         light::{self, Verified},
-        query::{ReadRequest, Submitted},
+        query::ReadRequest,
         setup::{NetworkConfig, OperatorConfig, read_genesis},
         tx::{AdmitRequest, SettlementTx},
         types::{Block, Database, now},
@@ -39,7 +39,7 @@ use crate::{
             db_config, sync_config,
         },
     },
-    protocol::{DepositEvent, chain_id, dealt_participant, deployment_of},
+    protocol::{DepositEvent, dealt_participant},
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use bytes::Bytes;
@@ -50,8 +50,6 @@ use commonware_actor::{
 use commonware_broadcast::buffered;
 use commonware_clearing::bajillion::{
     admission::{Vote, bls12381},
-    commitment::VectorRoot,
-    settlement::{FinalizedBatch, Genesis},
     transition::Header,
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
@@ -70,7 +68,6 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
-    Signer as _,
     certificate::{ConstantProvider, Provider as _},
     ed25519,
     sha256::Digest,
@@ -229,15 +226,12 @@ where
     }
 
     /// Submits by sending the transaction to every connected validator on
-    /// the settlement transaction channel. Their ingress actors dedupe,
-    /// queue, and re-gossip it. The p2p path answers no dry-run advice.
-    async fn submit<E2: Env>(&mut self, _: &E2, tx: &SettlementTx) -> Result<Submitted> {
+    /// the settlement transaction channel. Local send success is advisory;
+    /// validators qualify the request before reserving proposal capacity.
+    async fn submit<E2: Env>(&mut self, _: &E2, tx: &SettlementTx) -> Result<Submission> {
         let sent = self.sender.send(Recipients::All, tx.encode(), false);
         ensure!(!sent.is_empty(), "no validator accepted the submission");
-        Ok(Submitted {
-            admission: Submission::Accepted,
-            advice: None,
-        })
+        Ok(Submission::Accepted)
     }
 }
 
@@ -252,6 +246,7 @@ pub(crate) enum Message {
     /// Disseminate the complete dealing and assemble the exact-quorum
     /// certificate from the returned votes.
     Certify {
+        deployment: Digest,
         epoch: u64,
         header: Header<Digest>,
         message: Bytes,
@@ -259,11 +254,9 @@ pub(crate) enum Message {
         response: oneshot::Sender<bls12381::Certificate>,
     },
     /// Submit the certified close and complete once the local certified
-    /// state finalized the exact batch.
+    /// state admitted the exact batch and roots.
     Admit {
         request: Box<AdmitRequest>,
-        expected: FinalizedBatch<Digest>,
-        change: VectorRoot<Digest>,
         response: oneshot::Sender<Result<()>>,
     },
 }
@@ -286,12 +279,14 @@ impl Mailbox {
     /// Encodes one shared DA packet and completes on the exact-quorum certificate.
     pub(crate) async fn certify(
         &self,
+        deployment: Digest,
         epoch: u64,
         header: Header<Digest>,
         dealing: Bytes,
         routes: Vec<Route>,
     ) -> Result<bls12381::Certificate> {
         let message = DaMessage::Dealing(Dealing {
+            deployment,
             epoch,
             header,
             bytes: dealing,
@@ -299,6 +294,7 @@ impl Mailbox {
         .encode();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Certify {
+            deployment,
             epoch,
             header,
             message,
@@ -308,18 +304,11 @@ impl Mailbox {
         receiver.await.context("the close pipeline stopped")
     }
 
-    /// Submits the certified close and completes on certified finalization.
-    pub(crate) async fn admit(
-        &self,
-        request: AdmitRequest,
-        expected: FinalizedBatch<Digest>,
-        change: VectorRoot<Digest>,
-    ) -> Result<()> {
+    /// Submits the certified close and completes on certified admission.
+    pub(crate) async fn admit(&self, request: AdmitRequest) -> Result<()> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Admit {
             request: Box::new(request),
-            expected,
-            change,
             response,
         });
         receiver.await.context("the close pipeline stopped")?
@@ -332,7 +321,7 @@ impl Mailbox {
 #[derive(Clone)]
 pub(crate) struct Pipeline {
     mailbox: Mailbox,
-    genesis: Genesis<Digest>,
+    deployment: Digest,
     /// Network identity holding each clearing participant's dealt key, in
     /// committee participant order.
     peers: Vec<ed25519::PublicKey>,
@@ -345,7 +334,7 @@ impl Pipeline {
     pub(crate) fn new(
         mailbox: Mailbox,
         participants: &[ed25519::PublicKey],
-        genesis: Genesis<Digest>,
+        deployment: Digest,
     ) -> Result<Self> {
         let mut peers = vec![None; participants.len()];
         for (index, peer) in participants.iter().enumerate() {
@@ -358,16 +347,12 @@ impl Pipeline {
         }
         Ok(Self {
             mailbox,
-            genesis,
+            deployment,
             peers: peers
                 .into_iter()
                 .collect::<Option<Vec<_>>>()
                 .context("a clearing committee key has no network identity")?,
         })
-    }
-
-    pub(crate) const fn genesis(&self) -> Genesis<Digest> {
-        self.genesis
     }
 
     /// Certifies one complete close with every configured committee participant.
@@ -386,23 +371,25 @@ impl Pipeline {
                 peer: peer.clone(),
             })
             .collect();
-        futures::executor::block_on(self.mailbox.certify(epoch, header, dealing, routes))
+        futures::executor::block_on(self.mailbox.certify(
+            self.deployment,
+            epoch,
+            header,
+            dealing,
+            routes,
+        ))
     }
 
     /// Submits the certified close and blocks until the local certified
-    /// state finalized the exact batch.
-    pub(crate) fn admit(
-        &self,
-        request: AdmitRequest,
-        expected: FinalizedBatch<Digest>,
-        change: VectorRoot<Digest>,
-    ) -> Result<()> {
-        futures::executor::block_on(self.mailbox.admit(request, expected, change))
+    /// state admitted the exact batch and roots.
+    pub(crate) fn admit(&self, request: AdmitRequest) -> Result<()> {
+        futures::executor::block_on(self.mailbox.admit(request))
     }
 }
 
 /// One close awaiting its exact-quorum certificate.
 struct Outstanding {
+    deployment: Digest,
     epoch: u64,
     header: Header<Digest>,
     message: Bytes,
@@ -475,11 +462,12 @@ where
                         return;
                     };
                     match message {
-                        Message::Certify { epoch, header, message, routes, response } => {
+                        Message::Certify { deployment, epoch, header, message, routes, response } => {
                             // A replaced certification drops the stale
                             // response: its worker observes the closed
                             // channel and fails that close.
                             self.outstanding = Some(Outstanding {
+                                deployment,
                                 epoch,
                                 header,
                                 message,
@@ -489,13 +477,11 @@ where
                             });
                             self.disseminate(&mut sender);
                         }
-                        Message::Admit { request, expected, change, response } => {
+                        Message::Admit { request, response } => {
                             let result = client::admit(
                                 self.context.as_present(),
                                 &mut self.chain,
                                 *request,
-                                &expected,
-                                change,
                             )
                             .await;
                             response.send_lossy(result);
@@ -506,10 +492,19 @@ where
                     let Ok((peer, bytes)) = message else {
                         return;
                     };
+                    let Some(outstanding) = &self.outstanding else { continue; };
+                    if !outstanding.routes.iter().any(|route| route.peer == peer)
+                        || bytes.len() > 1024
+                    {
+                        continue;
+                    }
                     let Ok(DaMessage::Vote(ballot)) = DaMessage::decode(bytes) else {
                         debug!(?peer, "dropping undecodable or unexpected DA message");
                         continue;
                     };
+                    if !outstanding.routes.iter().any(|route| route.peer == peer && route.participant == ballot.vote.signer) {
+                        continue;
+                    }
                     self.tally(ballot);
                 },
                 _ = self.context.sleep(RESEND) => {
@@ -551,7 +546,10 @@ where
         let Some(outstanding) = &mut self.outstanding else {
             return;
         };
-        if ballot.epoch != outstanding.epoch || ballot.header != outstanding.header {
+        if ballot.deployment != outstanding.deployment
+            || ballot.epoch != outstanding.epoch
+            || ballot.header != outstanding.header
+        {
             debug!(epoch = ballot.epoch, "dropping vote for a foreign close");
             return;
         }
@@ -665,11 +663,12 @@ impl Reporter for Observer {
             .transactions
             .iter()
             .filter_map(|tx| match tx {
-                SettlementTx::Deposit(request) if request.deployment == self.deployment => {
-                    Some(request.event.clone())
-                }
+                SettlementTx::Deposit(request) => Some(request),
+                SettlementTx::ClaimDeposit(request) => Some(&request.deposit),
                 _ => None,
             })
+            .filter(|request| request.deployment == self.deployment)
+            .map(|request| request.event.clone())
             .collect::<Vec<_>>();
         if events.is_empty() {
             ack.acknowledge();
@@ -754,15 +753,7 @@ pub(crate) async fn start(
     let genesis = read_genesis(node_dir).context("genesis is required")?;
     let local = operator.public_key();
 
-    // The deployment this operator runs, derived from its clearing identity
-    // and required to be configured in genesis.
-    let deployment = deployment_of(&operator.clearing.public_key());
-    let configured_genesis = *genesis
-        .deployments
-        .iter()
-        .find(|configured| configured.digest() == &deployment)
-        .context("the operator's clearing key names no configured deployment")?
-        .genesis();
+    let deployment = operator.deployment;
     let partition_prefix = "operator";
     let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
 
@@ -866,7 +857,7 @@ pub(crate) async fn start(
     // Genesis block shared with every validator.
     let genesis_block = Block::genesis(
         network.participants[0].clone(),
-        chain_id(&genesis.deployments),
+        genesis.native.chain_id(),
         genesis.timestamp,
         initial_sync_target::<tokio::Context>(),
     );
@@ -905,7 +896,7 @@ pub(crate) async fn start(
     let application: App<Scheme, ()> = App::new(
         genesis_block.clone(),
         genesis.timing(),
-        genesis.deployments.clone(),
+        genesis.native.clone(),
         finalized.clone(),
     );
     let (stateful_actor, stateful_mailbox) = Stateful::init(
@@ -959,9 +950,9 @@ pub(crate) async fn start(
     // The local chain backend and the close pipeline actor.
     let db: Database<tokio::Context> = stateful_mailbox.subscribe_databases().await;
     let node = Node::new(deployment, db, finalized, settlement_tx_network.0);
-    let protocol_verifier = crate::protocol::Protocol::new(NonZeroUsize::MIN)
-        .context("construct protocol for the certifier")?
-        .verifier();
+    let protocol_verifier = bls12381::Scheme::verifier(
+        crate::protocol::committee().context("construct the certifier committee")?,
+    );
     let (certifier, pipeline_mailbox) = Certifier::new(
         context.child("certifier"),
         Config {
@@ -971,7 +962,7 @@ pub(crate) async fn start(
         },
     );
     let certifier_handle = certifier.start(settlement_da_network);
-    let pipeline = Pipeline::new(pipeline_mailbox, &network.participants, configured_genesis)?;
+    let pipeline = Pipeline::new(pipeline_mailbox, &network.participants, deployment)?;
 
     Ok((
         node,
@@ -1000,7 +991,7 @@ mod tests {
     };
     use anyhow::bail;
     use commonware_actor::Unreliable;
-    use commonware_cryptography::{Hasher as _, Sha256, ed25519::PrivateKey};
+    use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519::PrivateKey};
     use commonware_p2p::{
         CheckedSender, LimitedSender,
         simulated::{Config as NetConfig, Link, Network},
@@ -1067,14 +1058,14 @@ mod tests {
             &mut self,
             _: &E,
             _: &crate::chain::tx::SettlementTx,
-        ) -> Result<Submitted> {
+        ) -> Result<Submission> {
             bail!("the stub backend accepts no submissions")
         }
     }
 
     #[test]
     fn certifier_drops_invalid_votes_and_assembles_exact_quorum() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
             let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
             let verifier = protocol.verifier();
             let committee = committee().unwrap();
@@ -1157,14 +1148,17 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, key)| Route {
-                    participant: Participant::from_usize(index),
+                    participant: dealt_participant(index).unwrap(),
                     peer: key.clone(),
                 })
                 .collect::<Vec<_>>();
+            let deployment = protocol.deployment();
             let certify = {
                 let mailbox = mailbox.clone();
                 context.child("certify").spawn(move |_| async move {
-                    mailbox.certify(0, header, Bytes::new(), deals).await
+                    mailbox
+                        .certify(deployment, 0, header, Bytes::new(), deals)
+                        .await
                 })
             };
 
@@ -1200,6 +1194,7 @@ mod tests {
                 )
                 .unwrap();
             let foreign = Ballot {
+                deployment: protocol.deployment(),
                 epoch: 0,
                 header: foreign_header,
                 vote: schemes[0].sign(&foreign_header).unwrap(),
@@ -1211,6 +1206,7 @@ mod tests {
             validator_chans[0].0.send(
                 Recipients::One(operator_key.clone()),
                 ballot(Ballot {
+                    deployment: protocol.deployment(),
                     epoch: 0,
                     header,
                     vote: forged,
@@ -1227,6 +1223,7 @@ mod tests {
                 validator_chans[index].0.send(
                     Recipients::One(operator_key.clone()),
                     ballot(Ballot {
+                        deployment: protocol.deployment(),
                         epoch: 0,
                         header,
                         vote,

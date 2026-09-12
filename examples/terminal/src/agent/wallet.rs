@@ -16,8 +16,7 @@ use crate::{
     },
     operator::rpc as operator_rpc,
     protocol::{
-        AccountIdentity, DepositEvent, Key, Wallet, deployment_of, external_identity,
-        external_wallet, identities, wallets,
+        AccountIdentity, Key, Wallet, external_identity, external_wallet, identities, wallets,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -57,8 +56,7 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// reconciliation later proves every finalized credit was backed by one.
 pub(crate) struct Agent {
     pub(super) wallet: Wallet,
-    /// The clearing key of the one operator this agent is bound to. The
-    /// bound deployment digest derives from it.
+    /// The clearing key authenticated by this deployment's registry entry.
     pub(super) operator: Key,
     /// The deployment this agent transacts on: every settlement expectation
     /// (status deployment, payment-context operator, deposit naming) is
@@ -71,7 +69,8 @@ pub(crate) struct Agent {
     /// verified affordability floor. Absent for a fresh wallet and after invalidation.
     pub(super) cache: Option<ContextCache>,
     pub(super) pending_payment: Option<PendingPayment>,
-    pub(super) pending_deposit: Option<DepositEvent>,
+    pub(super) pending_deposit: Option<crate::chain::tx::DepositRequest>,
+    pub(super) pending_transfer: Option<crate::chain::tx::NativeTransferRequest>,
     pub(super) pending_withdrawal: Option<SignedWithdrawal<Key, Digest>>,
     pub(super) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
     pub(super) pending_payout_claim: Option<PendingPayoutClaim>,
@@ -93,14 +92,17 @@ impl Agent {
     /// An in-memory agent bound to the compiled default deployment.
     #[cfg(test)]
     pub(crate) fn new(identity: usize) -> Result<Self> {
-        Self::new_for(identity, crate::protocol::operator_key())
+        Self::new_for(
+            identity,
+            crate::protocol::deployment(),
+            crate::protocol::operator_key(),
+        )
     }
 
-    /// An in-memory agent bound to `operator`'s deployment.
-    pub(crate) fn new_for(identity: usize, operator: Key) -> Result<Self> {
+    /// An in-memory agent bound to this deployment and its authenticated operator.
+    pub(crate) fn new_for(identity: usize, deployment: Digest, operator: Key) -> Result<Self> {
         let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
-        let deployment = deployment_of(&operator);
         let (store, state) = Store::in_memory(&account, &deployment, &operator)?;
         Ok(Self::from_state(
             wallet,
@@ -116,15 +118,24 @@ impl Agent {
     /// A durable agent bound to the compiled default deployment.
     #[cfg(test)]
     pub(crate) fn open(path: &Path, identity: usize) -> Result<Self> {
-        Self::open_for(path, identity, crate::protocol::operator_key())
+        Self::open_for(
+            path,
+            identity,
+            crate::protocol::deployment(),
+            crate::protocol::operator_key(),
+        )
     }
 
-    /// A durable agent bound to `operator`'s deployment. The store pins the
-    /// binding, so reopening under another operator fails.
-    pub(crate) fn open_for(path: &Path, identity: usize, operator: Key) -> Result<Self> {
+    /// A durable agent bound to this deployment and its authenticated operator.
+    /// The store rejects reopening under a different binding.
+    pub(crate) fn open_for(
+        path: &Path,
+        identity: usize,
+        deployment: Digest,
+        operator: Key,
+    ) -> Result<Self> {
         let (wallet, receivers) = Self::identity(identity)?;
         let account = wallet.public_key();
-        let deployment = deployment_of(&operator);
         let (store, state) = Store::open(path, &account, &deployment, &operator)?;
         Ok(Self::from_state(
             wallet,
@@ -169,6 +180,7 @@ impl Agent {
             cache: state.cache,
             pending_payment: state.pending_payment,
             pending_deposit: state.pending_deposit,
+            pending_transfer: state.pending_transfer,
             pending_withdrawal: None,
             pending_withdrawal_claim: state.pending_withdrawal_claim,
             pending_payout_claim: state.pending_payout_claim,
@@ -218,6 +230,11 @@ impl Agent {
 
     pub(crate) const fn receipt_count(&self) -> u64 {
         self.receipt_count
+    }
+
+    /// Rejects further work after a failed wallet storage mutation.
+    pub(crate) fn ensure_store_usable(&self) -> Result<()> {
+        self.store.ensure_usable()
     }
 
     /// Returns the receiver's verified incoming ledger summary.
@@ -285,6 +302,20 @@ impl Agent {
             .await
             .map_err(|error| unusable_head(operator_error, error))?;
         Ok(opening.map_or(0, |opening| opening.balance.get()))
+    }
+
+    /// Returns the operator-served account opening verified against the certified
+    /// finalized root, together with the status that authenticates that root.
+    pub(crate) async fn finalized_head<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        operator: SocketAddr,
+    ) -> Result<(StatusRecord, StateOpening<Key, Digest>)> {
+        let head = operator_head(ctx, operator, self.account(), &self.operator).await?;
+        let status = settlement_status(ctx, chain, self.deployment).await?;
+        self.verify_head(&head, &status)?;
+        Ok((status, head.opening))
     }
 
     /// This wallet's leaf at the certified head, opened by the validators,

@@ -18,7 +18,7 @@ use commonware_clearing::bajillion::{
     commitment::VectorRoot,
     payment::{PaymentContext, SendAuthorization},
     qmdb::{StateOpening, StateRoot},
-    transition::{BatchId, ExternalPayoutClaim, WithdrawalClaim},
+    transition::{BatchId, EpochContext, ExternalPayoutClaim, WithdrawalClaim},
     vector::OutEntry,
 };
 use commonware_codec::{
@@ -283,7 +283,7 @@ impl Read for StatusResponse {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PaymentHeadResponse {
-    pub(crate) context: PaymentContext<Key, Digest>,
+    pub(crate) context: EpochContext<Key, Digest>,
     pub(crate) balance: u64,
     pub(crate) root: StateRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
@@ -312,7 +312,7 @@ impl Read for PaymentHeadResponse {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let response = Self {
-            context: PaymentContext::read(buf)?,
+            context: EpochContext::read(buf)?,
             balance: u64::read(buf)?,
             root: StateRoot::read(buf)?,
             opening: StateOpening::read_cfg(buf, &MAX_STATE_PROOF_DIGESTS)?,
@@ -1670,7 +1670,7 @@ mod tests {
         let withdrawal = SignedWithdrawal::sign(
             protocol.deployment(),
             opening.root.digest,
-            Bytes::from_static(b"wallet-destination"),
+            payer_key.encode(),
             WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
             100,
             payer.signer(),
@@ -1705,7 +1705,7 @@ mod tests {
         let close = SignedWithdrawal::sign(
             protocol.deployment(),
             close_opening.root.digest,
-            Bytes::from_static(b"close-destination"),
+            close_account.encode(),
             WithdrawalAction::Close,
             100,
             wallets[0].signer(),
@@ -1752,7 +1752,7 @@ mod tests {
         assert_eq!(accepted.epoch, 0);
         assert_eq!(accepted.total, 5);
         assert_eq!(accepted.acceptance.entries[0].cumulative, 5);
-        accepted.acceptance.verify(&head.context).unwrap();
+        accepted.acceptance.verify(head.context.payment()).unwrap();
 
         let started = StartCloseResponse::decode(success_body(handle(
             &mut operator,
@@ -1805,7 +1805,7 @@ mod tests {
         assert_eq!(evidence.claim.output().amount(), 7);
         assert_eq!(
             evidence.claim.output().destination().as_ref(),
-            b"wallet-destination"
+            payer_key.as_ref()
         );
     }
 
@@ -1921,7 +1921,7 @@ mod tests {
         .unwrap();
         assert!(matches!(accepted, AcceptSendResponse::Accepted(_)));
         let stale = AcceptSendResponse::Stale {
-            context: head.context,
+            context: head.context.payment().clone(),
             cumulative_debit: 7,
             seq: 2,
             entries: vec![OutEntry {

@@ -7,20 +7,19 @@ Run `commonware-clearing` through three independently owned roles:
   submit-then-prove. Each agent owns one wallet key, verifies returned entry receipts, holds
   as a receiver the receipts crediting it, reconciles them against certified admitted closes,
   and provides the Ratatui UI.
-- `terminal-operator` owns one SQLite ledger, accepts signed sends, issues acknowledgments
+- `terminal-operator` owns a SQLite ledger and a QMDB balance replica, accepts signed sends, issues acknowledgments
   and entry receipts, and constructs closes. It runs the validator stack without a consensus engine, as a registered
   p2p secondary of the committee: settlement reads come from its own verified finalized state,
   transaction submission goes out on the settlement transaction channel, and its close pipeline
   disseminates dealings, collects votes, and assembles the admission certificate over the
   settlement DA channel. Several operators run concurrently, each owning one DEPLOYMENT (its
   clearing identity's own accounts, epochs, custody, and fault domain) on the shared chain.
-- `terminal-chain` runs the settlement chain: a static committee of validators executing one
-  clearing `SettlementChain` per configured deployment as a `glue::stateful` application, with
-  block height as the only timer. Execution routes every transaction to exactly one
-  deployment's machine and no transaction reads or writes another deployment's records, so one
-  operator's fault never touches another's epochs. Each validator seals the dealings it
-  receives from any configured operator over the DA channel durably before voting back to that
-  operator, and serves deployment-scoped certified reads over its applied state.
+- `terminal-chain` runs the settlement chain: a fixed committee maintains a native asset,
+  an operator registry, and one clearing `SettlementChain` per deployment. Operators can
+  register while the network runs. Deposits debit native accounts; finalized claims credit
+  them or atomically fund another deployment. Each deployment has independent custody,
+  epochs, deadlines, and faults. Validators retain each validated dealing before voting and
+  serve certified state and authenticated evidence.
 
 Agents exchange one bounded request and response per connection using canonical
 `commonware-codec` messages over Commonware's runtime networking traits, with no p2p stack of
@@ -32,9 +31,11 @@ numbered channel. There is no HTTP, protobuf, or generated RPC layer.
 
 The chain has one trusted constant: the genesis threshold identity dealt to the committee at
 setup. Everything a wallet or an operator relies on is proven against it. The genesis also
-fixes the deployment list (one operator clearing key with its configured accounts and initial
-balances per deployment; each deployment's digest derives from its operator key) and one
-chain-wide epoch timing policy applied to every deployment.
+fixes the native supply, initial deployments, fee and resource policy, and chain-wide timing.
+Initial deployment identities bind that configuration and the fresh consensus identity.
+Later registrations bind their chain, keys, account roster, and resource reservation.
+Their empty QMDB genesis comes from trusted network policy, and they start with zero custody.
+Each deployment's registered configuration is immutable.
 
 - Every settlement read is a certified read: a finalization certificate over a block, the block
   bytes, and a presence or exclusion proof against that block's canonical state root, verified
@@ -46,22 +47,18 @@ chain-wide epoch timing policy applied to every deployment.
   recency threshold, sized from the block cadence plus the bounded timestamp drift validators
   vote under. The client's clock is the recency reference, deadlines remain block heights, and
   a stalled chain is detected as staleness rather than misread as a live tip.
-- Mutations are submit-then-prove-by-effect: submission acceptance and the typed dry-run
-  advice it carries are both advisory, and a transaction completes only on a certified read
-  of its effect record (a deposit's custody record, the registration record, the admitted
-  record, a claim's release record, the fault record). Domain-keyed effects are provable;
-  rejections are effect-free and diagnosed via the advisory dry-run, so an effect-free
-  rejection is indistinguishable from not-yet-included and clients retry the exact bytes
-  until the effect appears or a bounded budget ends.
+- Mutations complete through certified effects. Ingress qualification and queue acceptance
+  are advisory; execution checks the transaction again. A wallet completes a transfer,
+  deposit, registration, or claim only after proving its exact effect record. An absent
+  effect leaves the intent unresolved, so retries use the same signed bytes.
 - The operator's follower node verifies every finalization itself before applying it, so its
   local reads carry the same guarantee and its own tip is an honest tip.
 
-Block height is the settlement clock. Every deadline is an absolute block height opened by
-the chain at the inclusion of the operator submission that triggers it: a registration's
-inclusion assigns its admission and challenge deadlines, an admission opens the challenge
-window and the successor epoch's registration eligibility, and deposits and withdrawals carry
-their signed deadlines in height units. The registration deadline geometry is fixed at
-deployment creation in `genesis.json` (admission offset and challenge duration), execution
+Block height is the settlement clock. Registration inclusion assigns admission and challenge
+deadlines; deposit inclusion assigns its obligation deadline. Withdrawals carry a signed deadline
+in height units. Admission enables challenges and the successor epoch's registration.
+The registration deadline geometry is fixed at
+the chain's `genesis.json` (admission offset and challenge duration), execution
 assigns the instance heights at inclusion, and the operator chooses nothing about timing,
 only when to submit, so it can never squeeze the enforcement window per epoch. A deadline
 bounds lateness only, so satisfying an obligation early is always allowed, while finalization
@@ -69,9 +66,9 @@ still waits for real heights past the inclusive challenge deadline. An idle depl
 live obligations and can never fault by idling. Block timestamps never feed a deadline: they
 serve query recency and display alone.
 
-The example is educational rather than a production operator or asset adapter. Wallet keys,
-the operator's clearing key, and the validators' clearing committee keys are deterministically
-derived demo identities, and setup generates fresh network keys. The SQLite operator and its
+The example uses an internal native asset. Wallet keys, initial operator keys, and clearing
+committee keys are deterministic demo identities. Network keys and keys for newly registered
+operators are fresh. The SQLite operator and its
 close queue survive restarts. Each wallet's cumulative debit, pending signed send,
 authenticated receipts, cached payment context, and the exact state-root openings observed on
 head reads and before withdrawal authorization are SQLite-backed. Openings are retained by
@@ -83,9 +80,8 @@ restart. Replay protection is domain state rather than a history of transaction 
 transaction carries a natural idempotence key (a deposit id, an account queue slot, an epoch,
 a claim position), so no account nonces exist, a duplicate inclusion lands on its variant's
 guard as a no-op or typed conflict, and response-loss retries complete on the same effect
-record. The returned releases model an asset adapter decision, not an external transfer. A
-production embedding must durably and atomically commit each transfer with its
-replay-protection mutation.
+record. Claims credit native balances in the same chain transition that consumes their replay
+identity. An external asset bridge would need its own transfer and finality contract.
 
 ## User flows
 
@@ -257,7 +253,7 @@ send's context proves settlement registered exactly that payment context. A rece
 context the chain never registered has no close to adjudicate against and is never recorded.
 
 Each wallet flow draws on four sources: the operator's RPC (the fast path, never trusted on its
-own), the validators' query servers (certified reads and submit-then-prove effects), the committee' evidence (openings and claims from the validators retaining a close's sealed dealing
+own), the validators' query servers (certified reads and submit-then-prove effects), the committee's evidence (openings and claims from the validators retaining a close's sealed dealing
 through its challenge window, every one verified against a certified root before use), and the
 wallet's own SQLite state. The operator may answer first, and every enforcement flow completes
 without it.
@@ -271,6 +267,8 @@ without it.
 | Claims | `withdrawal_evidence` or `external_payout_evidence` only when no admitted close is inside its window, then a courtesy `acknowledge_*` the claim never waits on | `status`, `registration`, and `admitted` for the open windows, `claim_roots`, `deliver` claim, `withdrawal_release` or `payout_release` record | the withdrawal output or external payout claim from the admitted close's holders inside its window, verified against the admitted roots and cached | cached evidence and the claim intent slot |
 | Receipt intake | `incoming_payments` | `anchor` per receipt epoch | none | held receipts and the durable cursor |
 | Reconcile | `committed_entry` only when every holder declines | `status`, `admitted`, `deliver` Challenge, `fault` record | the payer's committed terminal entry from the committee, verified against the admitted change root | held receipts, the durable per-epoch outcome |
+| Native balance and transfer | none | native balance, `deliver` transfer, and the exact transfer effect | none | the staged signed transfer |
+| Operator selection | none | the selected immutable registry entry | none | full deployment ID and deployment-scoped wallet database |
 | Deposit, refund, hard-fault claim | none | `deliver` plus the `deposit`, `refund`, `fault`, and `hard_fault` records | the wallet's leaf at the frozen root when none is retained | the staged deposit, and for the hard-fault claim an opening retained for the frozen root |
 | Registration and settlement status | none (the operator status panel is the operator's own uncertified report) | `registration`, `status` | none | none |
 
@@ -283,6 +281,11 @@ these commitments from the keyed inputs and their own predecessor state, then va
 whole dealing before voting. Balance storage contains only positive current balances;
 zero balances are authenticated absence. The separate settlement-record QMDB continues to
 certify chain custody, admissions, deadlines, and claims.
+
+DA messages identify the full deployment. Validators check the authenticated peer and
+registered byte reservation before decoding the dealing. One network peer may host several
+deployments; each has its own balance replica and evidence archives. A pending recovery for
+one deployment leaves the actor free to handle the others.
 
 Each validator durably records the validated dealing, canonical mutations, and evidence
 before returning its vote. Votes and chain-selected history have separate archives: signing
@@ -311,8 +314,9 @@ QMDB files. Followers consume that configuration without creating a separate gen
 database. Live balance replicas check their prepared genesis against the configured
 commitment before exposing it.
 
-The operator persists the completed close and its mutations before committing its own QMDB
-state, then submits admission and waits for the exact certified batch. It can accept
+The operator persists the completed close, certificate, and mutations before committing its
+QMDB state, then waits for the exact certified admission. Its existing journal supplies the
+result for retries after restart. It can accept
 root-independent payments for the next epoch while closing the prior epoch; a successor
 balance opening becomes available once that predecessor close has been applied. Every
 validator partition is scoped by the full deployment digest, so concurrent deployments
@@ -325,8 +329,8 @@ keep independent balance and evidence ownership.
 | Consensus threshold share (BLS) | each validator's `node.json` | signs simplex votes and certificates under the genesis threshold identity every certified read verifies against |
 | Clearing committee key (BLS) | each validator's `node.json` | seals dealings and signs close-admission votes |
 | Operator network key (ed25519) | each `operator-<index>/node.json` | authenticates that operator as a registered p2p secondary |
-| Operator clearing key (curve25519) | each `operator-<index>/node.json` (a fixed demo protocol constant) | signs the curve25519 half of that operator's receipts and its epoch registrations, and its digest names the deployment the operator runs |
-| Operator acknowledgment key (BLS MinSig) | each `operator-<index>/node.json` (a fixed demo protocol constant whose public key `genesis.json` fixes per deployment) | signs the aggregable half of every acknowledgment, combined into one countersignature per sender in the close and verified by every sealer against the genesis-fixed key |
+| Operator clearing key (curve25519) | operator `node.json` | signs the curve25519 half of receipts and epoch registrations; the registered configuration binds it to the deployment |
+| Operator acknowledgment key (BLS MinSig) | operator `node.json` | signs the aggregable half of acknowledgments, verified against the registered public key |
 | Wallet key (curve25519) | one per agent | signs sends and withdrawal authorizations, and names the account custody and claims resolve to |
 
 ## Run
@@ -380,8 +384,8 @@ cargo run --release -p commonware-terminal --bin terminal-operator -- \
 
 **4. Start wallet agents.** `--identity` picks the wallet (`0` Alice, `1` Bob, `2` Carol, `3` Dave,
 `4` Eve, who is unregistered and only receives), `--operator` names the operator's RPC address,
-and `--deployment` must be that operator's index in the genesis list (operator N runs deployment
-N). `--query` takes one or more validator query servers; one suffices and more give failover.
+and `--deployment` selects its genesis index or full registered deployment ID.
+`--query` takes one or more validator query servers; one suffices and more give failover.
 The defaults are operator `127.0.0.1:7001`, deployment `0`, identity `0`, and the genesis at
 `data/validator-0/genesis.json`, so the smallest command is the first one below. Run Alice and
 Bob on the same deployment to watch a payment land on the receiving side, and a wallet on
@@ -460,20 +464,18 @@ and records a refund path, and the wallet is done. The operator observes the cha
 ramp: its follower surfaces every finalized block's deposit transactions, confirms each against
 the applied custody record, and stages the credit durably before acknowledging the block, so a
 crash between finalization and staging re-delivers the block and the deposit-id dedupe makes the
-replay a no-op. Nothing depends on the depositor telling the operator anything, which also
-removes the unreported-mint griefing lever: a third party's deposit to a configured account is
-staged automatically and rides the next close's boundary instead of wedging the registration.
-Demo deposits are effectively mints: the chain models the custody ledger but no funding asset,
-so a `Deposit` transaction conjures custody for one of the four configured identities (any other
-account is chain-rejected), no faucet is needed, and crediting an account can only help it, so
-permissionless submission is harmless. In a real deployment this arm is where the asset ramp
-plugs in: a deposit becomes the execution environment's observation of an actual transfer into
-the deployment's custody rather than a self-declared credit. A withdrawal is authorized against
-the settlement state root, carried by the operator, and included in an epoch close.
-Deposits and fresh withdrawal authorizations are accepted only while no payment context is
-registered: the epoch's first payment registers the context, and later requests are rejected
-until the close's admission opens the successor epoch's eligibility, while its challenge
-window still runs. Every validator derives the exact
+replay a no-op. The depositor needs no separate notification to the operator.
+
+Genesis allocates finite native balances to demo wallets and initial operators. A deposit
+signs its chain, deployment, event ID, account, and amount. Execution debits native
+funds and records custody atomically. Finalized withdrawal and payout claims, deposit refunds,
+and hard-fault releases return funds to that native ledger.
+
+A withdrawal is authorized against a certified state root and carried into an epoch close.
+The operator durably freezes new withdrawal intake before publishing its registration;
+exact retries remain possible. Deposits confirmed before registration still enter that
+boundary. Admission opens the successor registration slot while the predecessor remains
+challengeable. Every validator derives the exact
 destination and amount at the request's position under the withdrawal-output root. A finalized
 output is independently claimed with that destination, amount, and one Merkle opening. A Close
 stays pending and leaves the account usable for the rest of the epoch. Its output is the
@@ -516,8 +518,8 @@ so a lost response cannot cut the active successor. Finalization can prune obsol
 projections; the independent QMDB history and close evidence remain available for proofs and
 receiver reconciliation.
 
-The scripted walkthrough deposits and waits for the operator's observed credit to show in the verified
-balance, hands the operator a withdrawal to carry, pays an internal receiver,
+The scripted walkthrough deposits and waits for that credit to enter finalized state,
+hands the operator a withdrawal to carry, pays an internal receiver,
 pays a two-receiver batch under one signature, and pays an external receiver. A receiver then
 durably intakes and settlement-anchors its incoming pairs and gates service on that held evidence
 before the epoch is cut, the walkthrough starts an asynchronous close certified by the live
@@ -532,10 +534,54 @@ challenge transaction, and the proven verdict, the fault record, and the hard-fa
 read back certified through the light client. The operator binary stays honest, and the fraud is
 assembled only in the scripted walkthrough.
 
+## Add an operator to the running network
+
+Prepare a directory using the running chain's configuration:
+
+```bash
+cargo run --release -p commonware-terminal --bin terminal-chain -- operator \
+  --node-dir ./data/operator-new --genesis ./data/validator-0/genesis.json \
+  --network ./data/validator-0/network.json --listen 127.0.0.1:3500
+```
+
+The command creates fresh keys, saves the signed registration, and prints the deployment ID,
+funding account, and fees. Fund that account from a demo wallet, then register and start it:
+
+```bash
+cargo run --release -p commonware-terminal --bin terminal-agent -- \
+  --query 127.0.0.1:3200 --transfer-to <printed-native-account> --amount 1000000
+cargo run --release -p commonware-terminal --bin terminal-chain -- register \
+  --node-dir ./data/operator-new
+cargo run --release -p commonware-terminal --bin terminal-operator -- \
+  --node-dir ./data/operator-new --bind 127.0.0.1:7003 \
+  --database terminal-operator-new.sqlite
+```
+
+Validators discover the immutable registration in certified chain state and authorize its
+network key. A bounded directory lists deployments; wallets prove the selected configuration
+through its own record. Retrying registration uses the saved request and completes from the
+exact certified entry.
+
+Select the new operator with `--deployment <printed-deployment-ID>` and
+`--operator 127.0.0.1:7003`. It starts with the demo account roster and no clearing balances.
+Deposit native funds with `d`; the operator observes the finalized deposit and closes the
+funding epoch. Payments become available after that credit enters finalized account state.
+
+To change operators, claim a finalized withdrawal into the native account, then deposit at
+the destination. `--native-balance` reads the certified native balance without contacting the
+operator. Wallet databases remain scoped to a deployment because its receipts and recovery
+evidence belong there. The chain also supports an atomic finalized-claim-and-deposit
+transaction; a rejected destination leaves the source claim available. Optimistic receipts
+do not authorize destination funding.
+
 ## Limits
 
 The demo cuts corners a production deployment must not:
 
+- A forced withdrawal needs an open registration boundary and current safety proofs.
+  Continuous registrations can leave no intake window; permissionless submission alone
+  does not guarantee eventual intake. Finalized claims and timely challenges remain
+  independent of that boundary.
 - Setup is a trusted dealer writing plaintext threshold shares and clearing keys into
   `node.json`, which is demo-grade key handling. Continuous resharing and a real DKG bootstrap
   are drop-ins from the reshare example: replace the constant scheme provider and the direct

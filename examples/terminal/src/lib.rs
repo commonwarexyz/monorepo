@@ -20,15 +20,20 @@ use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
 
 /// Entry points for the settlement chain binary.
 #[doc(hidden)]
+#[commonware_macros::stability(ALPHA)]
 pub mod chain_main {
     pub use crate::chain::{
-        setup::{Setup, run as run_setup},
+        setup::{
+            OperatorSetup, RegisterOperator, Setup, prepare_operator, register_operator,
+            run as run_setup,
+        },
         validator::{Validator, run as run_validator},
     };
 }
 
 /// Runs the SQLite-backed operator role as a follower node of the chain.
 #[doc(hidden)]
+#[commonware_macros::stability(ALPHA)]
 pub fn run_operator(
     bind: SocketAddr,
     node_dir: PathBuf,
@@ -39,19 +44,30 @@ pub fn run_operator(
 }
 
 /// Runs one wallet-owning Ratatui agent as a chain client, bound to one
-/// operator and its genesis-configured deployment.
+/// operator and its authenticated registered deployment.
 #[doc(hidden)]
+#[commonware_macros::stability(ALPHA)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     operator: SocketAddr,
     genesis: PathBuf,
     queries: Vec<SocketAddr>,
-    database: PathBuf,
+    database: Option<PathBuf>,
     identity: usize,
-    deployment: usize,
+    deployment: String,
     scripted: bool,
+    native_balance: bool,
+    transfer: Option<(String, u64)>,
 ) -> Result<()> {
     service::run_agent(
-        operator, genesis, queries, database, identity, deployment, scripted,
+        operator,
+        genesis,
+        queries,
+        database,
+        identity,
+        deployment,
+        scripted,
+        native_balance,
+        transfer,
     )
 }

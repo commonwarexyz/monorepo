@@ -3,7 +3,7 @@
 //! Each validator validates the complete dealing against its own balance replica and the
 //! chain's registered context. Candidate mutations and evidence become durable before voting.
 //! Consensus selects the canonical history; its records precede state application and commit.
-//! A restart replays that history without treating an unselected vote as branch authority.
+//! Restart applies only accepted closes beyond the recovered native head.
 
 use crate::{
     chain::{
@@ -11,6 +11,7 @@ use crate::{
             Evidence, EvidenceBody, EvidenceLookup, EvidenceRequest, EvidenceResponse,
             METHOD_EVIDENCE,
         },
+        registry::RegistryView,
         setup::ValidatorEntry,
         state::{Machine, Record, admitted_key, machine_key, status_key},
         types::Database,
@@ -44,7 +45,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    ContextCell, Handle, Metrics, Network, Spawner, buffer::paged::CacheRef, spawn_cell,
+    ContextCell, Handle, IoBuf, Metrics, Network, Spawner, buffer::paged::CacheRef, spawn_cell,
 };
 use commonware_storage::{
     Context as StorageContext,
@@ -55,19 +56,22 @@ use commonware_utils::{
     NZU64,
     channel::{fallible::OneshotExt as _, oneshot},
 };
+use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use rand_core::CryptoRng;
-use std::{collections::VecDeque, pin::pin, time::Duration};
+use std::{collections::VecDeque, time::Duration};
 use tracing::{debug, error, warn};
 
 /// One immutable complete dealing, shared by every validator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Dealing {
+    pub(crate) deployment: Digest,
     pub(crate) epoch: u64,
     pub(crate) header: Header<Digest>,
     pub(crate) bytes: Bytes,
 }
 impl Write for Dealing {
     fn write(&self, buf: &mut impl BufMut) {
+        self.deployment.write(buf);
         self.epoch.write(buf);
         self.header.write(buf);
         self.bytes.write(buf);
@@ -75,13 +79,17 @@ impl Write for Dealing {
 }
 impl EncodeSize for Dealing {
     fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.header.encode_size() + self.bytes.encode_size()
+        self.deployment.encode_size()
+            + self.epoch.encode_size()
+            + self.header.encode_size()
+            + self.bytes.encode_size()
     }
 }
 impl Read for Dealing {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
+            deployment: Digest::read(buf)?,
             epoch: u64::read(buf)?,
             header: Header::read(buf)?,
             bytes: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
@@ -90,12 +98,14 @@ impl Read for Dealing {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Ballot {
+    pub(crate) deployment: Digest,
     pub(crate) epoch: u64,
     pub(crate) header: Header<Digest>,
     pub(crate) vote: Vote,
 }
 impl Write for Ballot {
     fn write(&self, buf: &mut impl BufMut) {
+        self.deployment.write(buf);
         self.epoch.write(buf);
         self.header.write(buf);
         self.vote.write(buf);
@@ -103,13 +113,17 @@ impl Write for Ballot {
 }
 impl EncodeSize for Ballot {
     fn encode_size(&self) -> usize {
-        self.epoch.encode_size() + self.header.encode_size() + self.vote.encode_size()
+        self.deployment.encode_size()
+            + self.epoch.encode_size()
+            + self.header.encode_size()
+            + self.vote.encode_size()
     }
 }
 impl Read for Ballot {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
+            deployment: Digest::read(buf)?,
             epoch: u64::read(buf)?,
             header: Header::read(buf)?,
             vote: Vote::read(buf)?,
@@ -391,20 +405,23 @@ async fn recover<E: StorageContext + Spawner>(
 
 pub(crate) struct Config<E: Spawner + StorageContext> {
     pub(crate) scheme: bls12381::Scheme,
-    pub(crate) operators: Vec<(ed25519::PublicKey, Deployment)>,
+    pub(crate) registry: RegistryView,
     pub(crate) db: Database<E>,
     pub(crate) partition: String,
     pub(crate) validators: Vec<ValidatorEntry>,
     pub(crate) fetch_timeout: Duration,
 }
 struct Lane<E: StorageContext + Spawner> {
-    peer: ed25519::PublicKey,
     deployment: Deployment,
+    fetching: bool,
+    // Recovery holds one authorized dealing until its predecessor is available.
+    pending: Option<Dealing>,
     store: Option<Store<E>>,
     votes: Option<Store<E>>,
     state: Option<State<E, Sha256>>,
     next: u64,
 }
+type Recoveries = FuturesUnordered<BoxFuture<'static, (usize, usize, Option<Sealed>)>>;
 pub(crate) struct Serve {
     request: EvidenceRequest,
     response: oneshot::Sender<EvidenceResponse>,
@@ -435,7 +452,7 @@ impl Mailbox {
 pub(crate) struct Sealer<E: Spawner + Metrics + Network + StorageContext + CryptoRng> {
     context: ContextCell<E>,
     scheme: bls12381::Scheme,
-    operators: Vec<(ed25519::PublicKey, Deployment)>,
+    registry: RegistryView,
     db: Database<E>,
     partition: String,
     validators: Vec<ValidatorEntry>,
@@ -450,7 +467,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             Self {
                 context: ContextCell::new(context),
                 scheme: config.scheme,
-                operators: config.operators,
+                registry: config.registry,
                 db: config.db,
                 partition: config.partition,
                 validators: config.validators,
@@ -474,149 +491,46 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
     {
         let result: Result<()> = async {
             let mut lanes = Vec::new();
-            for (peer, deployment) in &self.operators {
-                let archive = store(
-                    self.context.child("archive"),
-                    &format!("{}-canonical", self.partition),
-                    deployment.digest(),
-                )
-                .await;
-                let votes = store(
-                    self.context.child("votes"),
-                    &format!("{}-votes", self.partition),
-                    deployment.digest(),
-                )
-                .await;
-                let config = state_config(
-                    &format!("{}-balances-{}", self.partition, deployment.digest()),
-                    self.context.as_present(),
-                    Sequential,
-                );
-                let state =
-                    State::<_, Sha256>::open(self.context.child("balances"), config).await?;
-                let (state, next) = recover(state, deployment, &archive).await?;
-                lanes.push(Lane {
-                    peer: peer.clone(),
-                    deployment: deployment.clone(),
-                    store: Some(archive),
-                    votes: Some(votes),
-                    state: Some(state),
-                    next,
-                });
+            let mut recoveries = FuturesUnordered::new();
+            for entry in self.registry.entries() {
+                self.lane(&mut lanes, &entry.deployment).await?;
             }
             loop {
+                // Give each ready source a turn so intake, recovery, and proof requests
+                // continue progressing when another source stays ready.
+                let mut progressed = false;
+                if let Some(Some(completion)) = recoveries.next().now_or_never() {
+                    self.recovered(&mut lanes, &mut recoveries, completion, &mut sender).await?;
+                    progressed = true;
+                }
+                if let Some(message) = self.mailbox.recv().now_or_never() {
+                    let Some(message) = message else { return Ok(()); };
+                    self.request(&mut lanes, &mut recoveries, message).await?;
+                    progressed = true;
+                }
+                if let Some(incoming) = receiver.recv().now_or_never() {
+                    let Ok((peer, bytes)) = incoming else { return Ok(()); };
+                    self.incoming(&mut lanes, &mut recoveries, peer, bytes, &mut sender).await?;
+                    progressed = true;
+                }
+                if progressed {
+                    // Network peers must also run while local input remains ready.
+                    commonware_runtime::reschedule().await;
+                    continue;
+                }
                 select! {
-                    incoming = receiver.recv() => {
-                        let Ok((peer, bytes)) = incoming else {
-                            return Ok(());
-                        };
-                        let Some(position) = lanes.iter().position(|lane| lane.peer == peer) else {
-                            continue;
-                        };
-                        let Ok(Message::Dealing(dealing)) = Message::decode(bytes) else {
-                            continue;
-                        };
-                        let batch = dealing.header.batch_id::<Sha256>().into_digest();
-                        if let Some(saved) = lanes[position]
-                            .votes
-                            .as_ref()
-                            .unwrap()
-                            .get(Identifier::Key(&batch))
-                            .await?
-                        {
-                            if saved.dealing == dealing.bytes
-                                && saved.context.payment().epoch() == dealing.epoch
-                            {
-                                self.vote(&mut sender, &peer, dealing.epoch, saved.header);
-                            }
-                            continue;
-                        }
-                        let deployment = *lanes[position].deployment.digest();
-                        let (machine, height) = {
-                            let db = self.db.read().await;
-                            let Some(Record::Machine(bytes)) =
-                                db.get(&machine_key(&deployment)).await?
-                            else {
-                                continue;
-                            };
-                            let machine = Machine::decode(bytes)?;
-                            let height = match db.get(&status_key(&deployment)).await? {
-                                Some(Record::Status(v)) => v.height,
-                                _ => 0,
-                            };
-                            (machine, height)
-                        };
-                        let Some(registered) = machine.registered() else {
-                            continue;
-                        };
-                        if registered.context.payment().epoch() != dealing.epoch
-                            || height > registered.context.admission_deadline()
-                        {
-                            continue;
-                        }
-                        self.reconcile(&mut lanes, position).await?;
-                        let lane = &mut lanes[position];
-                        if lane.next != dealing.epoch
-                            || lane.state.as_ref().unwrap().root()
-                                != *registered.context.predecessor_root()
-                        {
-                            continue;
-                        }
-                        let checked = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
-                            &self.scheme,
-                            lane.state.as_ref().unwrap(),
-                            registered.context,
-                            machine.operator_ack(),
-                            registered.deposits,
-                            registered.withdrawals,
-                            dealing.bytes,
-                            self.context.as_mut(),
-                            &Sequential,
-                        )
-                        .await;
-                        let Ok((_, prepared)) = checked else {
-                            warn!(epoch = dealing.epoch, "complete dealing validation failed");
-                            continue;
-                        };
-                        if prepared.close().header != dealing.header {
-                            continue;
-                        }
-                        if lane
-                            .votes
-                            .as_ref()
-                            .unwrap()
-                            .get(Identifier::Index(dealing.epoch))
-                            .await?
-                            .is_some()
-                        {
-                            continue;
-                        }
-                        let record = Self::record(
-                            registered.context.clone(),
-                            registered.deposits.clone(),
-                            registered.withdrawals.clone(),
-                            &prepared,
-                        );
-                        let archive = lane.votes.take().expect("vote archive owner");
-                        let archive = archive.put_sync(dealing.epoch, batch, record).await?;
-                        ensure!(
-                            archive.has(Identifier::Key(&batch)).await?,
-                            "vote evidence was not retained"
-                        );
-                        lane.votes = Some(archive);
-                        self.vote(&mut sender, &peer, dealing.epoch, dealing.header);
+                    completion = async {
+                        if recoveries.is_empty() { std::future::pending().await } else { recoveries.next().await }
+                    } => {
+                        self.recovered(&mut lanes, &mut recoveries, completion.expect("nonempty recovery set"), &mut sender).await?;
                     },
                     message = self.mailbox.recv() => {
-                        let Some(Serve { request, response }) = message else {
-                            return Ok(());
-                        };
-                        if let Some(position) = lanes
-                            .iter()
-                            .position(|lane| lane.deployment.digest() == &request.deployment)
-                        {
-                            self.reconcile(&mut lanes, position).await?;
-                        }
-                        response.send_lossy(self.serve(&lanes, request).await?);
+                        let Some(message) = message else { return Ok(()); };
+                        self.request(&mut lanes, &mut recoveries, message).await?;
+                    },
+                    incoming = receiver.recv() => {
+                        let Ok((peer, bytes)) = incoming else { return Ok(()); };
+                        self.incoming(&mut lanes, &mut recoveries, peer, bytes, &mut sender).await?;
                     },
                 }
             }
@@ -626,6 +540,290 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             error!(?error, "validator balance owner stopped");
         }
     }
+    async fn incoming<Se: Sender<PublicKey = ed25519::PublicKey>>(
+        &mut self,
+        lanes: &mut Vec<Lane<E>>,
+        recoveries: &mut Recoveries,
+        peer: ed25519::PublicKey,
+        bytes: IoBuf,
+        sender: &mut Se,
+    ) -> Result<()> {
+        // Authorize the fixed routing prefix before decoding the variable dealing.
+        let mut prefix = bytes.clone();
+        let Ok(0) = u8::read(&mut prefix) else {
+            return Ok(());
+        };
+        let Ok(deployment) = Digest::read(&mut prefix) else {
+            return Ok(());
+        };
+        let Some(entry) = self.registry.get(&deployment) else {
+            return Ok(());
+        };
+        if entry.network_key != peer || bytes.len() > entry.max_dealing_bytes as usize {
+            return Ok(());
+        }
+        let Ok(Message::Dealing(dealing)) = Message::decode(bytes) else {
+            return Ok(());
+        };
+        let position = self.lane(lanes, &entry.deployment).await?;
+        self.deal(lanes, recoveries, position, dealing, sender)
+            .await
+    }
+
+    async fn recovered<Se: Sender<PublicKey = ed25519::PublicKey>>(
+        &mut self,
+        lanes: &mut [Lane<E>],
+        recoveries: &mut Recoveries,
+        (position, holder, saved): (usize, usize, Option<Sealed>),
+        sender: &mut Se,
+    ) -> Result<()> {
+        lanes[position].fetching = false;
+        let next = lanes[position].next;
+        if let Some(certified) = self.reconcile(lanes, position, saved).await? {
+            let holder = if lanes[position].next == next {
+                holder + 1
+            } else {
+                0
+            };
+            self.begin_fetch(lanes, recoveries, position, holder, certified);
+            if !lanes[position].fetching {
+                lanes[position].pending = None;
+            }
+        } else if let Some(dealing) = lanes[position].pending.take() {
+            self.deal(lanes, recoveries, position, dealing, sender)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn request(
+        &mut self,
+        lanes: &mut Vec<Lane<E>>,
+        recoveries: &mut Recoveries,
+        Serve { request, response }: Serve,
+    ) -> Result<()> {
+        if let Some(entry) = self.registry.get(&request.deployment) {
+            let position = self.lane(lanes, &entry.deployment).await?;
+            if let Some(certified) = self.reconcile(lanes, position, None).await? {
+                self.begin_fetch(lanes, recoveries, position, 0, certified);
+            }
+        }
+        response.send_lossy(self.serve(lanes, request).await?);
+        Ok(())
+    }
+
+    async fn deal<Se: Sender<PublicKey = ed25519::PublicKey>>(
+        &mut self,
+        lanes: &mut [Lane<E>],
+        recoveries: &mut Recoveries,
+        position: usize,
+        dealing: Dealing,
+        sender: &mut Se,
+    ) -> Result<()> {
+        let deployment = *lanes[position].deployment.digest();
+        let peer = self
+            .registry
+            .get(&deployment)
+            .expect("authorized deployment")
+            .network_key
+            .clone();
+        let batch = dealing.header.batch_id::<Sha256>().into_digest();
+        if let Some(saved) = lanes[position]
+            .votes
+            .as_ref()
+            .unwrap()
+            .get(Identifier::Key(&batch))
+            .await?
+        {
+            if saved.dealing == dealing.bytes && saved.context.payment().epoch() == dealing.epoch {
+                self.vote(sender, &peer, deployment, dealing.epoch, saved.header);
+            }
+            return Ok(());
+        }
+        let (machine, height) = {
+            let db = self.db.read().await;
+            let Some(Record::Machine(bytes)) = db.get(&machine_key(&deployment)).await? else {
+                return Ok(());
+            };
+            let machine = Machine::decode(bytes)?;
+            let height = match db.get(&status_key(&deployment)).await? {
+                Some(Record::Status(v)) => v.height,
+                _ => 0,
+            };
+            (machine, height)
+        };
+        let Some(registered) = machine.registered() else {
+            return Ok(());
+        };
+        if registered.context.payment().epoch() != dealing.epoch
+            || height > registered.context.admission_deadline()
+        {
+            return Ok(());
+        }
+        if let Some(certified) = self.reconcile(lanes, position, None).await? {
+            self.begin_fetch(lanes, recoveries, position, 0, certified);
+        }
+        let lane = &mut lanes[position];
+        if lane.next != dealing.epoch
+            || lane.state.as_ref().unwrap().root() != *registered.context.predecessor_root()
+        {
+            if lane.fetching {
+                lane.pending = Some(dealing);
+            }
+            return Ok(());
+        }
+        let checked = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+            &self.scheme,
+            lane.state.as_ref().unwrap(),
+            registered.context,
+            &lane.deployment.operator_ack,
+            registered.deposits,
+            registered.withdrawals,
+            dealing.bytes,
+            self.context.as_mut(),
+            &Sequential,
+        )
+        .await;
+        let Ok((_, prepared)) = checked else {
+            warn!(epoch = dealing.epoch, "complete dealing validation failed");
+            return Ok(());
+        };
+        if prepared.close().header != dealing.header {
+            return Ok(());
+        }
+        if lane
+            .votes
+            .as_ref()
+            .unwrap()
+            .get(Identifier::Index(dealing.epoch))
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let record = Self::record(
+            registered.context.clone(),
+            registered.deposits.clone(),
+            registered.withdrawals.clone(),
+            &prepared,
+        );
+        let archive = lane.votes.take().expect("vote archive owner");
+        let archive = archive.put_sync(dealing.epoch, batch, record).await?;
+        ensure!(
+            archive.has(Identifier::Key(&batch)).await?,
+            "vote evidence was not retained"
+        );
+        lane.votes = Some(archive);
+        self.vote(sender, &peer, deployment, dealing.epoch, dealing.header);
+        Ok(())
+    }
+
+    async fn lane(&self, lanes: &mut Vec<Lane<E>>, deployment: &Deployment) -> Result<usize> {
+        if let Some(position) = lanes
+            .iter()
+            .position(|lane| lane.deployment.digest() == deployment.digest())
+        {
+            return Ok(position);
+        }
+        let archive = store(
+            self.context.child("archive"),
+            &format!("{}-canonical", self.partition),
+            deployment.digest(),
+        )
+        .await;
+        let votes = store(
+            self.context.child("votes"),
+            &format!("{}-votes", self.partition),
+            deployment.digest(),
+        )
+        .await;
+        let config = state_config(
+            &format!("{}-balances-{}", self.partition, deployment.digest()),
+            self.context.as_present(),
+            Sequential,
+        );
+        let state = State::<_, Sha256>::open(self.context.child("balances"), config).await?;
+        let (state, next) = recover(state, deployment, &archive).await?;
+        let position = lanes.len();
+        lanes.push(Lane {
+            deployment: deployment.clone(),
+            fetching: false,
+            pending: None,
+            store: Some(archive),
+            votes: Some(votes),
+            state: Some(state),
+            next,
+        });
+        Ok(position)
+    }
+
+    /// Recovery jobs own network buffers only; the actor retains the unique mutable balance owner.
+    fn begin_fetch(
+        &self,
+        lanes: &mut [Lane<E>],
+        recoveries: &mut Recoveries,
+        position: usize,
+        holder: usize,
+        certified: super::state::AdmittedRootsResponse,
+    ) {
+        if lanes[position].fetching || holder >= self.validators.len() {
+            return;
+        }
+        lanes[position].fetching = true;
+        let context = self.context.child("history_fetch");
+        let validator = self.validators[holder].query;
+        let timeout = self.fetch_timeout;
+        let deployment = *lanes[position].deployment.digest();
+        let max_dealing_bytes = self
+            .registry
+            .get(&deployment)
+            .expect("lane belongs to certified registry")
+            .max_dealing_bytes as usize;
+        let epoch = lanes[position].next;
+        recoveries.push(
+            async move {
+                let request = rpc::Request {
+                    method: METHOD_EVIDENCE,
+                    body: EvidenceRequest::new(deployment, EvidenceLookup::Dealing { epoch })
+                        .encode(),
+                };
+                let result = async {
+                    let response = select! {
+                        response = rpc::call(&context, validator, &request) => response.ok()?,
+                        _ = context.sleep(timeout) => return None,
+                    };
+                    let rpc::Response::Success { body } = response else {
+                        return None;
+                    };
+                    let EvidenceResponse::Served(Evidence::Dealing(saved)) =
+                        EvidenceResponse::decode(body).ok()?
+                    else {
+                        return None;
+                    };
+                    let dealing_size = Message::Dealing(Dealing {
+                        deployment,
+                        epoch,
+                        header: saved.header,
+                        bytes: saved.dealing.clone(),
+                    })
+                    .encode_size();
+                    if dealing_size > max_dealing_bytes
+                        || saved.context.deployment() != &deployment
+                        || saved.context.payment().epoch() != epoch
+                        || saved.header.batch_id::<Sha256>() != certified.batch_id
+                        || saved.roots != certified.roots
+                    {
+                        return None;
+                    }
+                    Some(*saved)
+                }
+                .await;
+                (position, holder, result)
+            }
+            .boxed(),
+        );
+    }
+
     fn record(
         context: CloseContext<Key, Digest>,
         deposits: DepositBatch<Key>,
@@ -649,7 +847,12 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
     }
 
     /// Advance only the branch that consensus admitted; a local vote is not branch authority.
-    async fn reconcile(&mut self, lanes: &mut [Lane<E>], position: usize) -> Result<()> {
+    async fn reconcile(
+        &mut self,
+        lanes: &mut [Lane<E>],
+        position: usize,
+        mut fetched: Option<Sealed>,
+    ) -> Result<Option<super::state::AdmittedRootsResponse>> {
         loop {
             let deployment = *lanes[position].deployment.digest();
             let epoch = lanes[position].next;
@@ -657,7 +860,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 let db = self.db.read().await;
                 match db.get(&admitted_key(&deployment, epoch)).await? {
                     Some(Record::Admitted(v)) => v,
-                    _ => return Ok(()),
+                    _ => return Ok(None),
                 }
             };
             let local = lanes[position]
@@ -666,7 +869,14 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 .unwrap()
                 .get(Identifier::Key(&certified.batch_id.into_digest()))
                 .await?;
-            let prepared = if let Some(saved) = local {
+            let prepared = if let Some(saved) = fetched.take().or(local) {
+                if saved.context.deployment() != &deployment
+                    || saved.context.payment().epoch() != epoch
+                    || saved.header.batch_id::<Sha256>() != certified.batch_id
+                    || saved.roots != certified.roots
+                {
+                    return Ok(Some(certified));
+                }
                 seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
                     &self.scheme,
                     lanes[position].state.as_ref().unwrap(),
@@ -684,18 +894,14 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             } else {
                 None
             };
-            let selected = match prepared {
-                Some(v) => Some(v),
-                None => self.fetch_serving(lanes, position, &certified).await?,
+            let Some((saved, prepared)) = prepared else {
+                return Ok(Some(certified));
             };
-            let Some((saved, prepared)) = selected else {
-                return Ok(());
-            };
-            ensure!(
-                prepared.close().header.batch_id::<Sha256>() == certified.batch_id
-                    && prepared.close().roots == certified.roots,
-                "certified close mismatch"
-            );
+            if prepared.close().header.batch_id::<Sha256>() != certified.batch_id
+                || prepared.close().roots != certified.roots
+            {
+                return Ok(Some(certified));
+            }
             let lane = &mut lanes[position];
             let record = Self::record(saved.context, saved.deposits, saved.withdrawals, &prepared);
             let batch = record.header.batch_id::<Sha256>().into_digest();
@@ -809,80 +1015,11 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         }
         answer(&record.close()?, &request.lookup)
     }
-    async fn fetch_serving(
-        &mut self,
-        lanes: &[Lane<E>],
-        position: usize,
-        certified: &super::state::AdmittedRootsResponse,
-    ) -> Result<Option<(Sealed, PreparedClose<Key, Digest>)>> {
-        let deployment = *lanes[position].deployment.digest();
-        let epoch = lanes[position].next;
-        let context = self.context.as_present();
-        let request = rpc::Request {
-            method: METHOD_EVIDENCE,
-            body: EvidenceRequest::new(deployment, EvidenceLookup::Dealing { epoch }).encode(),
-        };
-        for validator in self.validators.clone() {
-            let timeout = self.fetch_timeout;
-            let fetch = async {
-                select! {
-                    v = rpc::call(context, validator.query, &request) => v,
-                    _ = context.sleep(timeout) => anyhow::bail!("history fetch timeout"),
-                }
-            };
-            let mut fetch = pin!(fetch);
-            let response = loop {
-                select! {
-                    result = &mut fetch => break result,
-                    message = self.mailbox.recv() => {
-                        let Some(Serve { request, response }) = message else {
-                            return Ok(None);
-                        };
-                        response.send_lossy(self.serve(lanes, request).await?);
-                    },
-                }
-            };
-            let Ok(rpc::Response::Success { body }) = response else {
-                continue;
-            };
-            let Ok(EvidenceResponse::Served(Evidence::Dealing(saved))) =
-                EvidenceResponse::decode(body)
-            else {
-                continue;
-            };
-            if saved.context.deployment() != &deployment
-                || saved.context.payment().epoch() != epoch
-                || saved.header.batch_id::<Sha256>() != certified.batch_id
-                || saved.roots != certified.roots
-            {
-                continue;
-            }
-            let mut rng = self.context.child("history_validation");
-            let checked = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
-                &self.scheme,
-                lanes[position].state.as_ref().unwrap(),
-                &saved.context,
-                &lanes[position].deployment.operator_ack,
-                &saved.deposits,
-                &saved.withdrawals,
-                saved.dealing.clone(),
-                &mut rng,
-                &Sequential,
-            )
-            .await;
-            let Ok((_, prepared)) = checked else { continue };
-            if prepared.close().header != saved.header || prepared.close().roots != certified.roots
-            {
-                continue;
-            }
-            return Ok(Some((*saved, prepared)));
-        }
-        Ok(None)
-    }
     fn vote<Se: Sender<PublicKey = ed25519::PublicKey>>(
         &self,
         sender: &mut Se,
         operator: &ed25519::PublicKey,
+        deployment: Digest,
         epoch: u64,
         header: Header<Digest>,
     ) {
@@ -890,6 +1027,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         let sent = sender.send(
             Recipients::One(operator.clone()),
             Message::Vote(Ballot {
+                deployment,
                 epoch,
                 header,
                 vote,
@@ -918,12 +1056,17 @@ mod tests {
         transition::{Terminal, prepare_close_with_strategy},
         vector::{OutEntry, OutVector},
     };
+    use commonware_codec::{FixedSize, varint::UInt};
     use commonware_consensus::types::Height;
-    use commonware_cryptography::Signer as _;
+    use commonware_cryptography::{Digest as _, Signer as _};
     use commonware_glue::stateful::db::DatabaseSet;
-    use commonware_p2p::simulated::{Config as NetConfig, Link, Network};
+    use commonware_p2p::{
+        CheckedSender, LimitedSender,
+        simulated::{Config as NetConfig, Link, Network},
+    };
     use commonware_runtime::{
-        Clock as _, Listener as _, Network as _, Runner as _, Supervisor as _, deterministic,
+        Clock as _, IoBuf, IoBufs, Listener as _, Network as _, Runner as _, Supervisor as _,
+        deterministic,
     };
     use commonware_utils::{NZUsize, TestRng, probability};
     use std::{
@@ -932,7 +1075,127 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::SystemTime,
     };
+
+    #[test]
+    fn reservation_covers_dealing_wire_bound() {
+        let limits = crate::protocol::limits();
+        let rows = limits.max_rows() as usize;
+        let entries = limits.max_total_entries() as usize;
+        let integer = UInt(u64::MAX).encode_size();
+        // posted::encode charges keys and terminal signatures per row, indexed entries,
+        // and one optional aggregate. Independent maximum widths give an upper bound.
+        let payload = Header::<Digest>::SIZE
+            + rows.encode_size()
+            + rows
+                * (Key::SIZE
+                    + 1
+                    + integer
+                    + commonware_cryptography_curve25519::signing::Signature::SIZE
+                    + (limits.max_account_entries() as usize).encode_size())
+            + entries * ((rows - 1).encode_size() + 2 * integer)
+            + 1
+            + commonware_clearing::bajillion::transition::OperatorAggregate::SIZE;
+        let message = Message::Dealing(Dealing {
+            deployment: Digest::EMPTY,
+            epoch: u64::MAX,
+            header: Header::decode(Digest::EMPTY.encode()).unwrap(),
+            bytes: Bytes::from(vec![0; payload]),
+        });
+        assert_eq!(message.encode_size(), message.encode().len());
+        assert!(message.encode_size() <= crate::protocol::MIN_DEALING_BYTES as usize);
+    }
+
+    #[derive(Debug)]
+    struct Backlogged<R> {
+        inner: R,
+        peer: ed25519::PublicKey,
+        bytes: Bytes,
+        remaining: Arc<AtomicUsize>,
+        arm_on_first: bool,
+        trigger: Option<oneshot::Receiver<()>>,
+    }
+
+    impl<R: Receiver<PublicKey = ed25519::PublicKey>> Receiver for Backlogged<R> {
+        type Error = R::Error;
+        type PublicKey = ed25519::PublicKey;
+
+        async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
+            loop {
+                if self.remaining.load(Ordering::SeqCst) > 0 {
+                    self.remaining.fetch_sub(1, Ordering::SeqCst);
+                    return Ok((self.peer.clone(), self.bytes.clone().into()));
+                }
+                let message = if let Some(trigger) = self.trigger.as_mut() {
+                    select! {
+                        _ = trigger => {
+                            self.trigger = None;
+                            continue;
+                        },
+                        message = self.inner.recv() => message?,
+                    }
+                } else {
+                    self.inner.recv().await?
+                };
+                if std::mem::take(&mut self.arm_on_first) {
+                    self.remaining.store(120, Ordering::SeqCst);
+                }
+                return Ok(message);
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ObservedVotes<S> {
+        inner: S,
+        deployment: Option<Digest>,
+        remaining: Arc<AtomicUsize>,
+    }
+
+    impl<S: LimitedSender<PublicKey = ed25519::PublicKey>> LimitedSender for ObservedVotes<S> {
+        type PublicKey = ed25519::PublicKey;
+        type Checked<'a>
+            = ObservedVotes<S::Checked<'a>>
+        where
+            Self: 'a;
+
+        fn check(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(ObservedVotes {
+                inner: self.inner.check(recipients)?,
+                deployment: self.deployment,
+                remaining: self.remaining.clone(),
+            })
+        }
+    }
+
+    impl<S: CheckedSender<PublicKey = ed25519::PublicKey>> CheckedSender for ObservedVotes<S> {
+        type PublicKey = ed25519::PublicKey;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            self.inner.recipients()
+        }
+
+        fn send(
+            self,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> commonware_actor::Unreliable<commonware_actor::Feedback> {
+            let message = message.into().coalesce();
+            if let Message::Vote(ballot) = Message::decode(message.clone()).unwrap()
+                && Some(ballot.deployment) == self.deployment
+            {
+                assert!(
+                    self.remaining.load(Ordering::SeqCst) > 0,
+                    "recovery vote waited for the receive backlog to drain"
+                );
+            }
+            self.inner.send(message, priority)
+        }
+    }
 
     /// One two-peer simulated network: the operator's DA channel endpoints
     /// and the validator's, with links per `to_validator`/`to_operator`.
@@ -995,6 +1258,23 @@ mod tests {
         (operator_chan, validator_chan)
     }
 
+    async fn recover_lane(
+        sealer: &mut Sealer<deterministic::Context>,
+        lanes: &mut [Lane<deterministic::Context>],
+        position: usize,
+    ) {
+        let mut recoveries = FuturesUnordered::new();
+        if let Some(certified) = sealer.reconcile(lanes, position, None).await.unwrap() {
+            sealer.begin_fetch(lanes, &mut recoveries, position, 0, certified);
+        }
+        while let Some((position, holder, saved)) = recoveries.next().await {
+            lanes[position].fetching = false;
+            if let Some(certified) = sealer.reconcile(lanes, position, saved).await.unwrap() {
+                sealer.begin_fetch(lanes, &mut recoveries, position, holder + 1, certified);
+            }
+        }
+    }
+
     async fn history_server(
         context: deterministic::Context,
         address: SocketAddr,
@@ -1044,7 +1324,15 @@ mod tests {
                     staged_root: root,
                     withdrawals: withdrawals.clone(),
                     openings: Vec::new(),
-                    signature: protocol.sign_chain_registration(0, 400, &root, &root, &withdrawals),
+                    fee: 4096,
+                    signature: protocol.sign_chain_registration(
+                        0,
+                        400,
+                        &root,
+                        &root,
+                        &withdrawals,
+                        4096,
+                    ),
                 },
             );
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
@@ -1060,7 +1348,7 @@ mod tests {
                 Height::new(1),
                 1,
                 &crate::protocol::Timing::DEFAULT,
-                std::slice::from_ref(&deployment),
+                &crate::chain::harness::native(vec![deployment.clone()]),
                 &[registration],
             )
             .await
@@ -1086,6 +1374,7 @@ mod tests {
             .unwrap();
             let header = prepared.close().header;
             let wire = Message::Dealing(Dealing {
+                deployment: *deployment.digest(),
                 epoch: 0,
                 header,
                 bytes: prepared.encoded().clone(),
@@ -1105,7 +1394,11 @@ mod tests {
                     run.child("sealer"),
                     Config {
                         scheme,
-                        operators: vec![(operator.clone(), deployment.clone())],
+                        registry: RegistryView::new(vec![crate::chain::native::RegistryEntry {
+                            deployment: deployment.clone(),
+                            network_key: operator.clone(),
+                            max_dealing_bytes: 4 * 1024 * 1024,
+                        }]),
                         db: db.clone(),
                         partition: "vote-durable".into(),
                         validators: Vec::new(),
@@ -1114,6 +1407,7 @@ mod tests {
                 );
                 let handle = sealer.start(validator_channel);
                 let bad = Message::Dealing(Dealing {
+                    deployment: *deployment.digest(),
                     epoch: 0,
                     header,
                     bytes: Bytes::from_static(&[0]),
@@ -1339,8 +1633,9 @@ mod tests {
                     staged_root: root,
                     withdrawals: withdrawals.clone(),
                     openings: Vec::new(),
+                    fee: 4096,
                     signature: protocol.sign_chain_registration(
-                        epoch, 400, &root, &root, &withdrawals,
+                        epoch, 400, &root, &root, &withdrawals, 4096,
                     ),
                 })
             };
@@ -1365,7 +1660,7 @@ mod tests {
                 Height::new(1),
                 1,
                 &crate::protocol::Timing::DEFAULT,
-                std::slice::from_ref(&deployment),
+                &crate::chain::harness::native(vec![deployment.clone()]),
                 &[
                     registration(0),
                     SettlementTx::Admit(AdmitRequest {
@@ -1399,7 +1694,7 @@ mod tests {
                 context.child("sealer"),
                 Config {
                     scheme,
-                    operators: vec![(peer.clone(), deployment.clone())],
+                    registry: RegistryView::new(vec![crate::chain::native::RegistryEntry { deployment: deployment.clone(), network_key: peer.clone(), max_dealing_bytes: 4 * 1024 * 1024 }]),
                     db: db.clone(),
                     partition: "branch".into(),
                     validators,
@@ -1422,7 +1717,8 @@ mod tests {
             )
             .await;
             let mut lanes = vec![Lane {
-                peer: peer.clone(),
+                fetching: false,
+            pending: None,
                 deployment: deployment.clone(),
                 votes: Some(votes),
                 store: Some(canonical),
@@ -1430,11 +1726,11 @@ mod tests {
                 next: 0,
             }];
             let honest_holder = sealer.validators.pop().unwrap();
-            Box::pin(sealer.reconcile(&mut lanes, 0)).await.unwrap();
+            recover_lane(&mut sealer, &mut lanes, 0).await;
             assert_eq!(lanes[0].next, 0);
             assert_eq!(lanes[0].state.as_ref().unwrap().root(), old_root);
             sealer.validators.push(honest_holder);
-            Box::pin(sealer.reconcile(&mut lanes, 0)).await.unwrap();
+            recover_lane(&mut sealer, &mut lanes, 0).await;
             assert_eq!(
                 lanes[0].state.as_ref().unwrap().root(),
                 record_b.roots.successor
@@ -1613,6 +1909,7 @@ mod tests {
                 .await
                 .unwrap();
             let wrong_genesis_operations = Deployment::configured(
+                *deployment.digest(),
                 deployment.operator.clone(),
                 deployment.operator_ack,
                 deployment.accounts.clone(),
@@ -1632,6 +1929,7 @@ mod tests {
             .await
             .unwrap();
             let wrong_genesis = Deployment::configured(
+                *deployment.digest(),
                 deployment.operator.clone(),
                 deployment.operator_ack,
                 deployment.accounts.clone(),
@@ -1726,7 +2024,7 @@ mod tests {
                 Height::new(2),
                 2,
                 &crate::protocol::Timing::DEFAULT,
-                std::slice::from_ref(&deployment),
+                &crate::chain::harness::native(vec![deployment.clone()]),
                 &[registration(1)],
             )
             .await
@@ -1759,6 +2057,7 @@ mod tests {
             .unwrap();
             let next_header = next.close().header;
             let next_wire = Message::Dealing(Dealing {
+                deployment: *deployment.digest(),
                 epoch: 1,
                 header: next_header,
                 bytes: next.encoded().clone(),
@@ -1784,7 +2083,7 @@ mod tests {
                 context.child("restarted_sealer"),
                 Config {
                     scheme: verifier.clone(),
-                    operators: vec![(peer, deployment.clone())],
+                    registry: RegistryView::new(vec![crate::chain::native::RegistryEntry { deployment: deployment.clone(), network_key: peer, max_dealing_bytes: 4 * 1024 * 1024 }]),
                     db,
                     partition: "branch".into(),
                     validators: Vec::new(),
@@ -1825,5 +2124,260 @@ mod tests {
             assert_eq!(next_vote.header, next_header);
             assert_eq!(*next_vote.context.predecessor_root(), record_b.roots.successor);
         });
+    }
+    enum RecoveryCase {
+        Current,
+        Expired,
+        Successor,
+        BusyStart,
+        BusyResponse,
+    }
+
+    fn pending_recovery(case: RecoveryCase) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+            let peer = ed25519::PrivateKey::from_seed(190).public_key();
+            let validator = ed25519::PrivateKey::from_seed(191).public_key();
+            let mut configured = deployments();
+            configured.push(Deployment::new(
+                crate::protocol::deployment_of(&crate::protocol::operator_signer(1).public_key()),
+                crate::protocol::operator_signer(1).public_key(),
+                crate::protocol::operator_ack_key(1),
+                crate::protocol::accounts(),
+            ));
+            let mut native = crate::chain::harness::native(configured);
+            for entry in &mut native.deployments {
+                entry.network_key = peer.clone();
+            }
+            let scheme = bls12381::Scheme::signer(committee().unwrap(), clearing_private(0).unwrap()).unwrap();
+            let mut registrations = Vec::new();
+            let mut records = Vec::new();
+            let mut successors = Vec::new();
+            for (index, entry) in native.deployments.iter().enumerate() {
+                let deployment = &entry.deployment;
+                let protocol = Protocol::with_signer(
+                    NZUsize!(1), *deployment.digest(),
+                    crate::protocol::operator_signer(index as u64),
+                    crate::protocol::operator_ack_signer(index as u64),
+                ).unwrap();
+                let mut state = State::<_, Sha256>::init(
+                    context.child("operator"), state_config(&format!("liveness-{index}"), &context, Sequential),
+                    genesis_balances(deployment).unwrap(),
+                ).await.unwrap();
+                let epochs = if index == 0 { 3 } else { 1 };
+                for epoch in 0..epochs {
+                    let deposits = DepositBatch::empty();
+                    let withdrawals = WithdrawalBatch::empty();
+                    let root = deposits.root::<Sha256>().unwrap();
+                    let registration = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+                        deployment: *deployment.digest(), epoch, predecessor_liability: 400,
+                        deposits_root: root, staged_root: root, withdrawals: withdrawals.clone(), openings: Vec::new(), fee: 4096,
+                        signature: protocol.sign_chain_registration(epoch, 400, &root, &root, &withdrawals, 4096),
+                    });
+                    let height = [1, 2, 4][epoch as usize];
+                    let registered = protocol.registration_at(epoch, deposits.clone(), withdrawals.clone(), 400, height + 10, height + 11).unwrap().context;
+                    let close_context = registered.bind::<Sha256, _, _>(&state, &deposits, &withdrawals).await.unwrap();
+                    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(&state, &close_context, &deposits, &withdrawals, Vec::new(), &Sequential).await.unwrap();
+                    if epoch == 0 {
+                        registrations.push(registration);
+                        records.push(Sealer::<deterministic::Context>::record(close_context, deposits, withdrawals, &prepared));
+                    } else {
+                        successors.push((registration, Sealer::<deterministic::Context>::record(close_context, deposits, withdrawals, &prepared)));
+                    }
+                    if epoch + 1 < epochs {
+                        (state, _) = prepared.apply(state).await.unwrap();
+                    }
+                }
+            }
+            let first = records[0].clone();
+            let first_id = *first.context.deployment();
+            let second = records[1].clone();
+            let second_id = *second.context.deployment();
+            let admission = |record: &Sealed| {
+                let certificate = scheme.assemble_exact((1..=scheme.committee().quorum()).map(|index| {
+                    bls12381::Scheme::signer(committee().unwrap(), clearing_private(index).unwrap()).unwrap().sign(&record.header).unwrap()
+                })).unwrap();
+                SettlementTx::Admit(AdmitRequest {
+                    deployment: *record.context.deployment(), epoch: record.context.payment().epoch(), predecessor_liability: 400,
+                    deposits: record.deposits.clone(), withdrawals: record.withdrawals.clone(),
+                    header: record.header, roots: record.roots, amounts: record.amounts, certificate,
+                })
+            };
+            registrations.push(admission(&first));
+            let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
+                context.child("settlement"), db_config("liveness-settlement", CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE)),
+            ).await;
+            let batch = crate::chain::state::execute(db.new_batches().await, Height::new(1), 1, &crate::protocol::Timing::DEFAULT, &native, &registrations).await.unwrap();
+            db.apply(batch).await;
+            assert!(matches!(db.read().await.get(&admitted_key(&first_id, 0)).await.unwrap(), Some(Record::Admitted(_))));
+            let (registration, successor) = successors.remove(0);
+            let mut expected = (1, successor.header);
+            let batch = crate::chain::state::execute(db.new_batches().await, Height::new(2), 2, &crate::protocol::Timing::DEFAULT, &native, &[registration]).await.unwrap();
+            db.apply(batch).await;
+            let Some(Record::Machine(machine)) = db.read().await.get(&machine_key(&first_id)).await.unwrap() else { panic!("A machine"); };
+            assert_eq!(Machine::decode(machine).unwrap().registered().unwrap().context.payment().epoch(), 1);
+
+            let address = SocketAddr::from(([127, 0, 0, 1], 9201));
+            let mut listener = context.bind(address).await.unwrap();
+            let (started, pending) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let backlog = Arc::new(AtomicUsize::new(0));
+            let (activate, activation) = oneshot::channel();
+            let backlog_at_request = backlog.clone();
+            let busy_start = matches!(case, RecoveryCase::BusyStart);
+            let mut activate = matches!(case, RecoveryCase::BusyResponse).then_some(activate);
+            let history = if matches!(case, RecoveryCase::Successor) { vec![first, successor.clone()] } else { vec![first] };
+            let server = context.child("pending_holder").spawn(move |_| async move {
+                let mut gate = Some((started, released));
+                for record in history {
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let request = rpc::recv_request(&mut stream).await.unwrap();
+                let request = EvidenceRequest::decode(request.body).unwrap();
+                assert_eq!(request.deployment, first_id);
+                assert_eq!(request.lookup, EvidenceLookup::Dealing { epoch: record.context.payment().epoch() });
+                if let Some((started, released)) = gate.take() {
+                if busy_start {
+                    assert!(backlog_at_request.load(Ordering::SeqCst) > 0, "history request waited for the receive backlog to drain");
+                }
+                started.send_lossy(());
+                if !busy_start { released.await.unwrap(); }
+                }
+                let response = rpc::Response::Success {
+                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(record))).encode(),
+                };
+                let send = rpc::send_response(&mut sink, &response);
+                if let Some(activate) = activate.take() {
+                    // Publish the readable response and input backlog in one poll so
+                    // neither source can be selected before both are ready.
+                    send.now_or_never().expect("small response fits the network buffer").unwrap();
+                    backlog_at_request.store(120, Ordering::SeqCst);
+                    activate.send_lossy(());
+                } else {
+                    send.await.unwrap();
+                }
+                }
+            });
+            let ((mut send, mut receive), channel) = network(&context, &peer, &validator, true, true).await;
+            let busy = matches!(case, RecoveryCase::BusyStart | RecoveryCase::BusyResponse);
+            let (sender, receiver) = channel;
+            let second_wire = Message::Dealing(Dealing { deployment: second_id, epoch: 0, header: second.header, bytes: second.dealing.clone() }).encode();
+            let channel = (ObservedVotes { inner: sender, deployment: busy.then_some(first_id), remaining: backlog.clone() }, Backlogged {
+                inner: receiver, peer: peer.clone(), bytes: if busy_start { Bytes::from_static(&[0]) } else { second_wire.clone() }, remaining: backlog.clone(), arm_on_first: busy_start,
+                trigger: matches!(case, RecoveryCase::BusyResponse).then_some(activation),
+            });
+            let (sealer, mailbox) = Sealer::new(context.child("sealer"), Config {
+                scheme: scheme.clone(), registry: RegistryView::new(native.deployments.clone()), db: db.clone(),
+                partition: "liveness-sealer".into(),
+                validators: vec![ValidatorEntry { clearing: committee().unwrap().members()[0], query: address }],
+                fetch_timeout: Duration::from_secs(10),
+            });
+            let handle = sealer.start(channel);
+            let first_wire = Message::Dealing(Dealing { deployment: first_id, epoch: 1, header: successor.header, bytes: successor.dealing.clone() }).encode();
+            assert!(!send.send(Recipients::One(validator.clone()), first_wire.clone(), true).is_empty());
+            select! {
+                result = pending => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("certified A never started recovery"),
+            }
+            if matches!(case, RecoveryCase::Successor) {
+                let batch = crate::chain::state::execute(db.new_batches().await, Height::new(3), 3, &crate::protocol::Timing::DEFAULT, &native, &[admission(&successor)]).await.unwrap();
+                db.apply(batch).await;
+                assert!(matches!(db.read().await.get(&admitted_key(&first_id, 1)).await.unwrap(), Some(Record::Admitted(_))));
+                let (registration, successor) = successors.remove(0);
+                let batch = crate::chain::state::execute(db.new_batches().await, Height::new(4), 4, &crate::protocol::Timing::DEFAULT, &native, &[registration]).await.unwrap();
+                db.apply(batch).await;
+                let Some(Record::Machine(machine)) = db.read().await.get(&machine_key(&first_id)).await.unwrap() else { panic!("A machine"); };
+                assert_eq!(Machine::decode(machine).unwrap().registered().unwrap().context.payment().epoch(), 2);
+                expected = (2, successor.header);
+                let wire = Message::Dealing(Dealing { deployment: first_id, epoch: 2, header: successor.header, bytes: successor.dealing }).encode();
+                assert!(!send.send(Recipients::One(validator.clone()), wire, true).is_empty());
+                assert!(!send.send(Recipients::One(validator.clone()), first_wire, true).is_empty());
+            }
+            // The shared peer link is FIFO: B's vote proves A's inputs were handled before release.
+            if !busy_start {
+            assert!(!send.send(Recipients::One(validator.clone()), second_wire, true).is_empty());
+            let (_, vote) = select! {
+                result = receive.recv() => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("pending A recovery blocked B vote"),
+            };
+            let Message::Vote(ballot) = Message::decode(vote).unwrap() else { panic!("B vote"); };
+            assert_eq!(ballot.deployment, second_id);
+            assert_eq!(ballot.header, second.header);
+            let evidence = select! {
+                result = mailbox.serve(EvidenceRequest::new(first_id, EvidenceLookup::GenesisState { account: native.deployments[0].deployment.accounts[0].key.clone() })) => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("pending A recovery blocked evidence"),
+            };
+            assert!(matches!(evidence, EvidenceResponse::Served(Evidence::Genesis(_))));
+            }
+            if matches!(case, RecoveryCase::Expired) {
+                let batch = crate::chain::state::execute(db.new_batches().await, Height::new(13), 13, &crate::protocol::Timing::DEFAULT, &native, &[]).await.unwrap();
+                db.apply(batch).await;
+                let Some(Record::Machine(machine)) = db.read().await.get(&machine_key(&first_id)).await.unwrap() else { panic!("A machine"); };
+                assert!(Machine::decode(machine).unwrap().registered().is_none());
+            }
+            release.send_lossy(());
+            server.await.unwrap();
+            if !matches!(case, RecoveryCase::Expired) {
+                let vote = select! {
+                    result = async {
+                        loop {
+                            let (_, vote) = receive.recv().await.unwrap();
+                            let Message::Vote(ballot) = Message::decode(vote.clone()).unwrap() else { panic!("vote"); };
+                            if ballot.deployment == first_id { break vote; }
+                            assert_eq!(ballot.deployment, second_id);
+                        }
+                    } => result,
+                    _ = context.sleep(Duration::from_secs(1)) => panic!("recovery dropped the successor dealing"),
+                };
+                let Message::Vote(ballot) = Message::decode(vote).unwrap() else { panic!("A successor vote"); };
+                assert_eq!(ballot.deployment, first_id);
+                assert_eq!(ballot.epoch, expected.0);
+                assert_eq!(ballot.header, expected.1);
+                assert_eq!(ballot.vote.signer, scheme.me().unwrap());
+                assert!(scheme.verify_vote(&expected.1, &ballot.vote));
+            }
+            let recovered = async {
+                loop {
+                    let response = mailbox.serve(EvidenceRequest::new(first_id, EvidenceLookup::Dealing { epoch: 0 })).await.unwrap();
+                    if matches!(response, EvidenceResponse::Served(Evidence::Dealing(_))) { break; }
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            };
+            select! {
+                _ = recovered => {},
+                _ = context.sleep(Duration::from_secs(1)) => panic!("released recovery did not commit A"),
+            }
+            if matches!(case, RecoveryCase::Expired) {
+                select! {
+                    vote = receive.recv() => panic!("expired recovery produced a vote: {vote:?}"),
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+            }
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    #[test]
+    fn pending_recovery_allows_same_peer_deployment_and_evidence() {
+        pending_recovery(RecoveryCase::Current);
+    }
+
+    #[test]
+    fn recovery_rechecks_registration_before_voting() {
+        pending_recovery(RecoveryCase::Expired);
+    }
+
+    #[test]
+    fn recovery_retains_current_dealing_when_registration_advances() {
+        pending_recovery(RecoveryCase::Successor);
+    }
+
+    #[test]
+    fn recovery_starts_before_receive_backlog_drains() {
+        pending_recovery(RecoveryCase::BusyStart);
+    }
+
+    #[test]
+    fn recovery_completes_before_receive_backlog_drains() {
+        pending_recovery(RecoveryCase::BusyResponse);
     }
 }

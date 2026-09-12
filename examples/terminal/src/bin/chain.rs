@@ -6,7 +6,10 @@ use commonware_runtime::{
     Runner as _, Supervisor as _,
     tokio::{self, telemetry::Logs},
 };
-use commonware_terminal::chain_main::{Setup, Validator, run_setup, run_validator};
+use commonware_terminal::chain_main::{
+    OperatorSetup, RegisterOperator, Setup, Validator, prepare_operator, register_operator,
+    run_setup, run_validator,
+};
 use std::path::PathBuf;
 use tracing::Level;
 
@@ -28,6 +31,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Setup(Setup),
+    Operator(OperatorSetup),
+    Register(RegisterOperator),
     Validator(Validator),
 }
 
@@ -35,6 +40,8 @@ impl Command {
     fn runtime_dir(&self) -> PathBuf {
         match self {
             Self::Setup(args) => args.node_dir.join("runtime"),
+            Self::Operator(args) => args.node_dir.join("runtime"),
+            Self::Register(args) => args.node_dir.join("runtime"),
             Self::Validator(args) => args.node_dir.join("runtime"),
         }
     }
@@ -42,7 +49,12 @@ impl Command {
 
 fn main() {
     let cli = Cli::parse();
-    let runtime_dir = cli.command.runtime_dir();
+    let command = match cli.command {
+        Command::Setup(args) => return run_setup(args),
+        Command::Operator(args) => return prepare_operator(args).expect("operator setup failed"),
+        command => command,
+    };
+    let runtime_dir = command.runtime_dir();
     let config = tokio::Config::new()
         .with_worker_threads(cli.worker_threads)
         .with_catch_panics(false)
@@ -59,8 +71,11 @@ fn main() {
             None,
         );
 
-        match cli.command {
-            Command::Setup(args) => run_setup(args),
+        match command {
+            Command::Setup(_) | Command::Operator(_) => unreachable!("synchronous setup completed"),
+            Command::Register(args) => register_operator(context, args)
+                .await
+                .expect("operator registration failed"),
             Command::Validator(args) => run_validator(context, args).await,
         }
     });

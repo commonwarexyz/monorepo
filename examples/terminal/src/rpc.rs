@@ -1,26 +1,28 @@
 //! Native, one-request/one-response framing for the terminal roles.
 
 use anyhow::{Context as _, bail};
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
     BufsMut, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
 };
-use commonware_runtime::{Buf, BufMut, Network, Sink, Stream};
 #[cfg(test)]
 use commonware_runtime::{Clock, Listener};
+use commonware_runtime::{Network, Sink, Stream};
 use commonware_stream::{
     encrypted::Error,
     utils::codec::{recv_frame, send_frame},
 };
 use std::time::Duration;
 
-/// Maximum encoded payload accepted in one RPC frame.
-pub(crate) const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
+/// Maximum response frame: a full block, certified record, and ordered proof.
+pub(crate) const MAX_FRAME_SIZE: u32 = 8 * 1024 * 1024;
+const MAX_REQUEST_FRAME_SIZE: u32 = 4 * 1024 * 1024;
+const MAX_REQUEST_BODY_SIZE: usize = MAX_REQUEST_FRAME_SIZE as usize - 16;
 
 /// Pause before retrying a failed accept so a persistently failing listener cannot spin hot.
 pub(crate) const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// Maximum request body or response body/error accepted by the codec.
+/// Maximum response body/error accepted by the codec.
 ///
 /// The frame limit also includes the method/tag and length prefix. The small
 /// amount of reserved space keeps every value at this limit representable in a
@@ -161,16 +163,16 @@ impl Read for Response {
 /// Sends exactly one request frame. Any error means that the connection must
 /// be discarded because a partial frame may already have been written.
 pub(crate) async fn send_request<S: Sink>(sink: &mut S, request: &Request) -> Result<(), Error> {
-    if request.body.len() > MAX_BODY_SIZE {
+    if request.body.len() > MAX_REQUEST_BODY_SIZE {
         return Err(Error::SendTooLarge(request.body.len()));
     }
-    send_frame(sink, request.encode(), MAX_FRAME_SIZE).await
+    send_frame(sink, request.encode(), MAX_REQUEST_FRAME_SIZE).await
 }
 
 /// Receives and fully decodes exactly one request frame.
 pub(crate) async fn recv_request<T: Stream>(stream: &mut T) -> Result<Request, Error> {
-    let frame = recv_frame(stream, MAX_FRAME_SIZE).await?;
-    Ok(Request::decode_cfg(frame, &MAX_BODY_SIZE)?)
+    let frame = recv_frame(stream, MAX_REQUEST_FRAME_SIZE).await?;
+    Ok(Request::decode_cfg(frame, &MAX_REQUEST_BODY_SIZE)?)
 }
 
 /// Sends exactly one response frame. Any error means that the connection must
@@ -368,8 +370,8 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let mut encoded = BytesMut::new();
             1u8.write(&mut encoded);
-            (MAX_BODY_SIZE + 1).write(&mut encoded);
-            send_frame(&mut sink, encoded.freeze(), MAX_FRAME_SIZE)
+            (MAX_REQUEST_BODY_SIZE + 1).write(&mut encoded);
+            send_frame(&mut sink, encoded.freeze(), MAX_REQUEST_FRAME_SIZE)
                 .await
                 .unwrap();
 
@@ -377,7 +379,7 @@ mod tests {
             assert!(matches!(
                 result,
                 Err(Error::UnableToDecode(CodecError::InvalidLength(length)))
-                    if length == MAX_BODY_SIZE + 1
+                    if length == MAX_REQUEST_BODY_SIZE + 1
             ));
         });
     }
@@ -386,14 +388,14 @@ mod tests {
     fn oversized_outer_frame_is_rejected() {
         let (mut sink, mut stream) = mocks::Channel::init();
         deterministic::Runner::default().start(|_| async move {
-            RuntimeSink::send(&mut sink, UInt(MAX_FRAME_SIZE + 1).encode())
+            RuntimeSink::send(&mut sink, UInt(MAX_REQUEST_FRAME_SIZE + 1).encode())
                 .await
                 .unwrap();
 
             let result = recv_request(&mut stream).await;
             assert!(matches!(
                 result,
-                Err(Error::RecvTooLarge(length)) if length == MAX_FRAME_SIZE as usize + 1
+                Err(Error::RecvTooLarge(length)) if length == MAX_REQUEST_FRAME_SIZE as usize + 1
             ));
         });
     }
