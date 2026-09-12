@@ -59,7 +59,7 @@ pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
 use tracing::{debug, error};
-pub use writer::Writer;
+pub use writer::{Append, Recovering, Recovery, Writer};
 
 /// Size in bytes of the checksum record appended to each logical page.
 pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
