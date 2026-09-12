@@ -32,7 +32,14 @@
 //! value allocation from steady-state insertion. Value-returning methods such
 //! as [Cache::put] replace and drop displaced values as usual.
 //!
-//! The [clock] module provides [Clock], the default replacement policy.
+//! # Policies
+//!
+//! The default [Clock] policy provides low-overhead replacement without retaining
+//! evicted keys. It suits workloads with cheap misses or little benefit from
+//! reuse history. [Clock2QPlus] uses bounded history and separate admission and
+//! eviction regions to resist scans and favor recurring entries. Its extra work
+//! and metadata can pay off when avoiding a miss is expensive. Compare policies
+//! using the workload's total cost, including misses and retained memory.
 //!
 //! # Concurrency
 //!
@@ -74,12 +81,14 @@
 //! ```
 
 pub mod clock;
+pub mod clock2qplus;
 
 #[cfg(feature = "std")]
 use ahash::AHashMap as HashMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 pub use clock::Clock;
+pub use clock2qplus::Clock2QPlus;
 use core::{hash::Hash, num::NonZeroUsize, ops::Index};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
@@ -1173,6 +1182,17 @@ mod tests {
             ops in proptest::collection::vec(op_strategy(), 0..256),
         ) {
             exercise_policy::<Clock, _>(capacity, prefill, ops, |cache| {
+                cache.check_policy_invariants();
+            })?;
+        }
+
+        #[test]
+        fn clock2qplus_invariants_hold(
+            capacity in 1usize..8,
+            prefill in any::<bool>(),
+            ops in proptest::collection::vec(op_strategy(), 0..256),
+        ) {
+            exercise_policy::<clock2qplus::Clock2QPlus<u8>, _>(capacity, prefill, ops, |cache| {
                 cache.check_policy_invariants();
             })?;
         }

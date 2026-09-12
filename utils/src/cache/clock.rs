@@ -1,4 +1,4 @@
-//! CLOCK cache policy.
+//! The CLOCK cache replacement policy.
 //!
 //! CLOCK approximates least-recently-used replacement with one reference bit
 //! per cache slot. A hit sets the bit. When the cache is full, a clock hand
