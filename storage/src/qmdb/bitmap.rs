@@ -92,7 +92,13 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
 
     let mut scan = scan_from;
     if scan < committed_end {
-        let mut ones = bitmap.ones_iter_from(scan);
+        // Bound the iterator itself: testing a yielded location against the tip
+        // would still let next() search an arbitrarily long clear suffix.
+        let prefix = Prefix {
+            bitmap,
+            len: committed_end,
+        };
+        let mut ones = bitmap::Readable::ones_iter_from(&prefix, scan);
         while out.len() < limit {
             match ones.next() {
                 Some(idx) if idx < committed_end => {
@@ -117,6 +123,38 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
         scan = candidate + 1;
     }
     scan
+}
+
+/// A bitmap prefix that prevents the set-bit iterator from reading chunks past its end.
+struct Prefix<'a, B> {
+    bitmap: &'a B,
+    len: u64,
+}
+
+impl<B: bitmap::Readable<N>, const N: usize> bitmap::Readable<N> for Prefix<'_, B> {
+    fn complete_chunks(&self) -> usize {
+        (self.len / bitmap::BitMap::<N>::CHUNK_SIZE_BITS) as usize
+    }
+
+    fn get_chunk(&self, chunk: usize) -> [u8; N] {
+        self.bitmap.get_chunk(chunk)
+    }
+
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        if self.len <= self.pruned_bits() {
+            return ([0; N], 0);
+        }
+        let chunk_bits = bitmap::BitMap::<N>::CHUNK_SIZE_BITS;
+        let index = ((self.len - 1) / chunk_bits) as usize;
+        (self.get_chunk(index), (self.len - 1) % chunk_bits + 1)
+    }
+
+    fn pruned_chunks(&self) -> usize {
+        self.bitmap.pruned_chunks()
+    }
+    fn len(&self) -> u64 {
+        self.len
+    }
 }
 
 impl<const N: usize> std::fmt::Debug for Shared<N> {
@@ -149,5 +187,37 @@ impl<const N: usize> bitmap::Readable<N> for Shared<N> {
 
     fn len(&self) -> u64 {
         bitmap::Readable::<N>::len(&*self.read())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::bitmap::Readable;
+
+    #[test]
+    fn compaction_scan_does_not_read_past_budget() {
+        struct Guarded;
+        impl Readable<32> for Guarded {
+            fn complete_chunks(&self) -> usize {
+                4
+            }
+            fn get_chunk(&self, chunk: usize) -> [u8; 32] {
+                assert_eq!(chunk, 0, "scan read a chunk outside its budget");
+                [0; 32]
+            }
+            fn last_chunk(&self) -> ([u8; 32], u64) {
+                ([0; 32], 256)
+            }
+            fn pruned_chunks(&self) -> usize {
+                0
+            }
+            fn len(&self) -> u64 {
+                1024
+            }
+        }
+        let mut candidates = Vec::<u64>::new();
+        assert_eq!(fill_from(&Guarded, 0, 256, 1, &mut candidates), 256);
+        assert!(candidates.is_empty());
     }
 }
