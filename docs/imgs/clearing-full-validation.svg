@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 650" role="img" aria-labelledby="title description">
+  <title id="title">Every Validator Applies the Same Changes</title>
+  <desc id="description">The operator distributes one signed update to all 100 validators, shown as a ten-by-ten grid. Each validator retains the complete account state in QMDB and independently checks the whole close. Green dots show 67 signatures on the same commitment, enough to form a certificate; the other 33 votes are pending. An expanded validator shows the running example's balances changing from 100 to 85 for a, 40 to 58 for b, 25 to 26 for c, and 35 to 31 for d.</desc>
+  <rect width="1320" height="650" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 26px; font-weight: 700; fill: #111; }
+    .heading { font-size: 20px; font-weight: 700; fill: #111; }
+    .label { font-size: 18px; fill: #333; }
+    .note { font-size: 16px; fill: #666; }
+    .balance { font-size: 20px; fill: #111; }
+    .center { text-anchor: middle; }
+    .right { text-anchor: end; }
+    .blue { fill: #2424d4; }
+    .green { fill: #087a32; }
+    .panel { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .record { fill: #fff; stroke: #d6d6d6; stroke-width: 1.5; }
+    .wire { fill: none; stroke-width: 2; }
+    .broadcast { stroke: #2424d4; marker-end: url(#broadcast-arrow); }
+    .vote { stroke: #087a32; marker-end: url(#vote-arrow); }
+    .signed { fill: #087a32; stroke: #087a32; }
+    .pending { fill: #fff; stroke: #bcbcbc; }
+    .leader { fill: none; stroke: #2424d4; stroke-width: 1.5; stroke-dasharray: 3 5; }
+  </style>
+  <defs>
+    <marker id="broadcast-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#2424d4" stroke-width="1.2"/>
+    </marker>
+    <marker id="vote-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#087a32" stroke-width="1.2"/>
+    </marker>
+    <circle id="validator" r="7" stroke-width="1.5"/>
+    <g id="validator-row">
+      <use href="#validator" x="0"/>
+      <use href="#validator" x="26"/>
+      <use href="#validator" x="52"/>
+      <use href="#validator" x="78"/>
+      <use href="#validator" x="104"/>
+      <use href="#validator" x="130"/>
+      <use href="#validator" x="156"/>
+      <use href="#validator" x="182"/>
+      <use href="#validator" x="208"/>
+      <use href="#validator" x="234"/>
+    </g>
+  </defs>
+
+  <text class="title" x="34" y="39">Every Validator Applies the Same Changes</text>
+  <text class="note" x="34" y="66">One shared update, checked against each validator's complete local state</text>
+
+  <text class="heading center" x="172" y="116">Operator</text>
+  <rect x="64" y="139" width="245" height="228" rx="6" fill="#f4f4ff" stroke="#d0d0ef" stroke-width="1.5"/>
+  <rect x="56" y="147" width="245" height="228" rx="6" fill="#f4f4ff" stroke="#d0d0ef" stroke-width="1.5"/>
+  <rect x="48" y="155" width="245" height="228" rx="6" fill="#fff" stroke="#2424d4" stroke-width="1.5"/>
+  <text class="heading center blue" x="170.5" y="189">Signed update</text>
+  <path d="M68 205 H273" stroke="#dedede"/>
+  <text class="label blue" x="80" y="234">a → b</text>
+  <text class="label blue" x="80" y="264">b → c</text>
+  <text class="label blue" x="80" y="294">c → b, d</text>
+  <text class="label blue" x="80" y="324">d → a, b</text>
+  <text class="note center" x="170.5" y="363">4 payers · 6 entries</text>
+
+  <path class="wire broadcast" d="M310 260 H496"/>
+  <text class="label center blue" x="403" y="239">Same bytes</text>
+  <text class="note center" x="403" y="287">to all 100</text>
+
+  <text class="heading center" x="652" y="116">100 validators</text>
+  <rect class="panel" x="503" y="147" width="300" height="256" rx="6"/>
+  <g class="signed" transform="translate(535 181)">
+    <use href="#validator-row" y="0"/>
+    <use href="#validator-row" y="22"/>
+    <use href="#validator-row" y="44"/>
+    <use href="#validator-row" y="66"/>
+    <use href="#validator-row" y="88"/>
+    <use href="#validator-row" y="110"/>
+  </g>
+  <g transform="translate(535 313)">
+    <use class="signed" href="#validator" x="0"/>
+    <use class="signed" href="#validator" x="26"/>
+    <use class="signed" href="#validator" x="52"/>
+    <use class="signed" href="#validator" x="78"/>
+    <use class="signed" href="#validator" x="104"/>
+    <use class="signed" href="#validator" x="130"/>
+    <use class="signed" href="#validator" x="156"/>
+    <use class="pending" href="#validator" x="182"/>
+    <use class="pending" href="#validator" x="208"/>
+    <use class="pending" href="#validator" x="234"/>
+  </g>
+  <g class="pending" transform="translate(535 335)">
+    <use href="#validator-row" y="0"/>
+    <use href="#validator-row" y="22"/>
+    <use href="#validator-row" y="44"/>
+  </g>
+  <circle cx="535" cy="313" r="12" fill="none" stroke="#2424d4" stroke-width="1.5"/>
+  <text class="note center green" x="575" y="431">67 signed</text>
+  <text class="note center" x="725" y="431">33 pending</text>
+
+  <path class="wire vote" d="M809 260 H990"/>
+  <text class="note center green" x="900" y="239">Signatures</text>
+
+  <path d="M1004 177 H1264 L1286 199 V337 Q1286 343 1280 343 H1004 Q998 343 998 337 V183 Q998 177 1004 177 Z" fill="#f2faf4" stroke="#087a32" stroke-width="1.5"/>
+  <path d="M1264 177 V199 H1286" fill="none" stroke="#087a32" stroke-width="1.5"/>
+  <text class="heading center green" x="1142" y="211">Certified close</text>
+  <circle cx="1046" cy="266" r="20" fill="#087a32"/>
+  <path d="M1037 266 L1044 273 L1056 259" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="center green" x="1172" y="277" style="font-size:32px; font-weight:700;">67 / 100</text>
+  <text class="note center" x="1142" y="316">Same commitment</text>
+
+  <path class="leader" d="M523 313 H464 Q452 313 452 325 V423 Q452 443 472 443 H510 Q530 443 530 455"/>
+  <rect class="panel" x="318" y="455" width="688" height="178" rx="6"/>
+  <text class="heading" x="340" y="487">Each validator's QMDB</text>
+  <text class="note right" x="984" y="487">balance before → after</text>
+  <rect class="record" x="340" y="506" width="146" height="72" rx="4"/>
+  <text class="label blue" x="354" y="531">a</text>
+  <text class="balance center" x="413" y="560">100 → 85</text>
+  <rect class="record" x="506" y="506" width="146" height="72" rx="4"/>
+  <text class="label blue" x="520" y="531">b</text>
+  <text class="balance center" x="579" y="560">40 → 58</text>
+  <rect class="record" x="672" y="506" width="146" height="72" rx="4"/>
+  <text class="label blue" x="686" y="531">c</text>
+  <text class="balance center" x="745" y="560">25 → 26</text>
+  <rect class="record" x="838" y="506" width="146" height="72" rx="4"/>
+  <text class="label blue" x="852" y="531">d</text>
+  <text class="balance center" x="911" y="560">35 → 31</text>
+  <text class="note center" x="662" y="610">Verify · derive credits · update state · retain and sign</text>
+</svg>
