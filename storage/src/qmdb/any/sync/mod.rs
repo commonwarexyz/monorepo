@@ -1,53 +1,30 @@
 //! Shared synchronization logic for [crate::qmdb::any] databases.
-//! Contains implementation of [crate::qmdb::sync::Database] for all [Db] variants
-//! (ordered/unordered, fixed/variable).
+//! Contains the implementation of [crate::qmdb::sync::Database] for [Db], covering every
+//! variant (ordered/unordered, fixed/variable, any snapshot index).
 //!
 //! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
 
 use crate::{
     Context,
-    index::Factory as IndexFactory,
-    journal::{
-        authenticated,
-        contiguous::{Contiguous, Mutable, fixed, variable},
-    },
+    index::{Factory as IndexFactory, Unordered},
+    journal::{authenticated, contiguous::Mutable},
     merkle::{self, Location, full},
     qmdb::{
-        self,
+        self, SnapshotBuild,
         any::{
-            FixedConfig, FixedValue, VariableConfig, VariableValue,
+            Config,
             db::Db,
             operation::{Operation, update::Update},
-            ordered::{
-                fixed::{
-                    Db as OrderedFixedDb, Operation as OrderedFixedOp, Update as OrderedFixedUpdate,
-                },
-                variable::{
-                    Db as OrderedVariableDb, Operation as OrderedVariableOp,
-                    Update as OrderedVariableUpdate,
-                },
-            },
-            unordered::{
-                fixed::{
-                    Db as UnorderedFixedDb, Operation as UnorderedFixedOp,
-                    Update as UnorderedFixedUpdate,
-                },
-                variable::{
-                    Db as UnorderedVariableDb, Operation as UnorderedVariableOp,
-                    Update as UnorderedVariableUpdate,
-                },
-            },
         },
         metrics::Metrics,
-        operation::Key,
+        sync,
     },
-    translator::Translator,
 };
-use commonware_codec::{Codec, CodecShared, Read as CodecRead};
+use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::{Array, range::NonEmptyRange};
+use commonware_utils::range::NonEmptyRange;
 use core::num::{NonZeroU64, NonZeroUsize};
 
 #[cfg(test)]
@@ -55,7 +32,7 @@ pub(crate) mod tests;
 
 /// Shared helper to build a [Db] from sync components.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, C, S>(
+async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     context: E,
     merkle_config: full::Config<S>,
     log: C,
@@ -63,15 +40,15 @@ async fn build_db<F, E, U, I, H, C, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_concurrency: <I as SnapshotBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
-) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
+) -> Result<Db<F, E, C, I, H, U, N, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
     E: Context + Spawner,
     U: Update,
-    I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory + SnapshotBuild<F>,
     H: Hasher,
     C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
@@ -115,115 +92,83 @@ where
     Ok(db)
 }
 
-macro_rules! impl_sync_database {
-    ($db:ident, $op:ident, $update:ident,
-     $journal:ty, $config:ty,
-     $key_bound:path, $value_bound:ident
-     $(; $($where_extra:tt)+)?) => {
-        impl<F, E, K, V, H, T, S> qmdb::sync::Database for $db<F, E, K, V, H, T, S>
-        where
-            F: merkle::Family,
-            E: Context + Spawner,
-            K: $key_bound,
-            V: $value_bound + 'static,
-            H: Hasher,
-            T: Translator,
-            S: Strategy,
-            $($($where_extra)+)?
+impl<F, E, C, I, H, U, const N: usize, S> sync::Database for Db<F, E, C, I, H, U, N, S>
+where
+    F: merkle::Family,
+    E: Context + Spawner,
+    C: Mutable<Item = Operation<F, U>>
+        + sync::Journal<F, Context = E, Op = Operation<F, U>>
+        + 'static,
+    <C as sync::Journal<F>>::Config: Clone + Send,
+    I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Context = E;
+    type Op = Operation<F, U>;
+    type Journal = C;
+    type Hasher = H;
+    type Config = Config<
+        I::Translator,
+        <C as sync::Journal<F>>::Config,
+        S,
+        <I as SnapshotBuild<F>>::Concurrency,
+    >;
+    type Digest = H::Digest;
+
+    async fn from_sync_result(
+        context: Self::Context,
+        config: Self::Config,
+        log: Self::Journal,
+        pinned_nodes: Option<Vec<Self::Digest>>,
+        range: NonEmptyRange<Location<F>>,
+        apply_batch_size: NonZeroU64,
+    ) -> Result<Self, qmdb::Error<F>> {
+        build_db::<F, _, U, _, H, _, N, _>(
+            context,
+            config.merkle_config,
+            log,
+            config.translator,
+            pinned_nodes,
+            range,
+            apply_batch_size,
+            config.init_concurrency,
+            config.init_buffer,
+            config.init_cache_size,
+        )
+        .await
+    }
+
+    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+        Ok(self)
+    }
+
+    async fn local_pinned_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
         {
-            type Family = F;
-            type Context = E;
-            type Op = $op<F, K, V>;
-            type Journal = $journal;
-            type Hasher = H;
-            type Config = $config;
-            type Digest = H::Digest;
-
-            async fn from_sync_result(
-                context: Self::Context,
-                config: Self::Config,
-                log: Self::Journal,
-                pinned_nodes: Option<Vec<Self::Digest>>,
-                range: NonEmptyRange<Location<F>>,
-                apply_batch_size: NonZeroU64,
-            ) -> Result<Self, qmdb::Error<F>> {
-                let merkle_config = config.merkle_config.clone();
-                let translator = config.translator.clone();
-                let cache_size = config.init_cache_size;
-                let init_buffer = config.init_buffer;
-                let init_concurrency = config.init_concurrency;
-                build_db::<F, _, $update<K, V>, _, H, _, S>(
-                    context,
-                    merkle_config,
-                    log,
-                    translator,
-                    pinned_nodes,
-                    range,
-                    apply_batch_size,
-                    init_concurrency,
-                    init_buffer,
-                    cache_size,
-                )
-                .await
-            }
-
-            async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
-                Ok(self)
-            }
-
-            async fn local_pinned_nodes(
-                context: Self::Context,
-                config: &Self::Config,
-                target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-                journal: &Self::Journal,
-            ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-                if target.range.start() == Location::new(0)
-                    || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
-                {
-                    return Ok(None);
-                }
-
-                // The target's range starts at the inactivity floor.
-                qmdb::sync::local_pinned_nodes::<F, _, H, S>(
-                    context,
-                    config.merkle_config.clone(),
-                    target,
-                    target.range.start(),
-                )
-                .await
-            }
-
-            fn root(&self) -> Self::Digest {
-                crate::qmdb::any::db::Db::root(self)
-            }
+            return Ok(None);
         }
-    };
+
+        // The target's range starts at the inactivity floor.
+        qmdb::sync::local_pinned_nodes::<F, _, H, S>(
+            context,
+            config.merkle_config.clone(),
+            target,
+            target.range.start(),
+        )
+        .await
+    }
+
+    fn root(&self) -> Self::Digest {
+        Self::root(self)
+    }
 }
-
-impl_sync_database!(
-    UnorderedFixedDb, UnorderedFixedOp, UnorderedFixedUpdate,
-    fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
-    Array, FixedValue
-);
-
-impl_sync_database!(
-    UnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
-    variable::Journal<E, Self::Op>,
-    VariableConfig<T, <UnorderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
-    Key, VariableValue;
-    UnorderedVariableOp<F, K, V>: CodecShared
-);
-
-impl_sync_database!(
-    OrderedFixedDb, OrderedFixedOp, OrderedFixedUpdate,
-    fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
-    Array, FixedValue
-);
-
-impl_sync_database!(
-    OrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
-    variable::Journal<E, Self::Op>,
-    VariableConfig<T, <OrderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
-    Key, VariableValue;
-    OrderedVariableOp<F, K, V>: CodecShared
-);
