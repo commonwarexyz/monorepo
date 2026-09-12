@@ -133,7 +133,7 @@ impl<H: Hasher, B: Buf, S: Strategy> WithKernel for Encode<'_, H, B, S> {
     type Output = Result<(Summary, Vec<StrongShard<H::Digest>>), Error>;
 
     fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H>::new(Impl8::new(kernel)).encode(
+        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).encode(
             self.namespace,
             self.config,
             self.data,
@@ -156,7 +156,7 @@ impl<'a, H: Hasher, T: Iterator<Item = &'a CheckedShard>, S: Strategy> WithKerne
     type Output = Result<Vec<u8>, Error>;
 
     fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H>::new(Impl8::new(kernel)).decode(
+        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).decode(
             self.config,
             self.commitment,
             self.checking_data,
@@ -181,7 +181,7 @@ impl<H: Hasher> WithKernel for Weaken<'_, H> {
     >;
 
     fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H>::new(Impl8::new(kernel)).weaken(
+        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).weaken(
             self.namespace,
             self.config,
             self.commitment,
@@ -203,7 +203,7 @@ impl<H: Hasher> WithKernel for Check<'_, H> {
     type Output = Result<CheckedShard, Error>;
 
     fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H>::new(Impl8::new(kernel)).check(
+        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).check(
             self.config,
             self.commitment,
             self.checking_data,
