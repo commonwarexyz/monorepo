@@ -64,6 +64,9 @@ The prototype does not claim end-to-end QMDB performance or recovery coverage.
 
 ## Results
 
+The subsequent [allocation experiment](RELOCATION.md) measures both value widths with mimalloc,
+exact growth, and reuse of empty partition buffers.
+
 These historical measurements used the system allocator, not mimalloc. Re-run both variants with
 mimalloc before drawing conclusions for that allocator.
 

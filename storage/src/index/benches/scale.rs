@@ -23,6 +23,7 @@
 
 mod packed;
 mod packed_scale;
+mod relocate_scale;
 
 use commonware_runtime::{
     Metrics, Name, Supervisor,
@@ -130,8 +131,16 @@ fn main() {
     };
 
     for items in sizes {
-        println!("index_scale: items={items} allocator=mimalloc");
+        let allocation = if cfg!(index_alloc = "reuse") {
+            "reuse"
+        } else if cfg!(index_alloc = "exact") {
+            "exact"
+        } else {
+            "slabs"
+        };
+        println!("index_scale: items={items} allocator=mimalloc allocation={allocation}");
         packed_scale::run(items, &only);
+        relocate_scale::run(items, &only);
 
         // Each variant is built once; insert is the timed build, lookup re-seeds and reuses the
         // populated index. P=3 ordered SoA (the structure under test) runs first; the flat BTree is

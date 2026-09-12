@@ -45,6 +45,10 @@
 mod array;
 mod cursor;
 mod partition;
+#[cfg_attr(
+    any(index_alloc = "exact", index_alloc = "reuse"),
+    path = "pool_exact.rs"
+)]
 mod pool;
 
 pub use self::cursor::Cursor;

@@ -12,7 +12,7 @@ use commonware_utils::TestRng;
 use rand::Rng;
 use std::{hint::black_box, time::Instant};
 
-trait Value: Copy + Send + Sync {
+pub(super) trait Value: Copy + Send + Sync {
     fn encode(window: Window, location: u64) -> Self;
     fn decode(self, window: Window) -> u64;
 }
