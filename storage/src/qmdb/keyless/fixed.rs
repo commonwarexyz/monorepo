@@ -204,6 +204,48 @@ mod tests {
         (db, range.start)
     }
 
+    /// Reopening rejects a journal whose last commit declares a floor below the oldest retained
+    /// operation, since that state can never serve its active range. The check is journal agnostic,
+    /// so we test this only with one variant (fixed + mmr).
+    #[test_traced]
+    fn test_keyless_fixed_init_rejects_pruned_floor() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db_with_suffix::<mmr::Family>("init-floor", ctx.child("db")).await;
+
+            // Retain only a suffix of the log.
+            let mut batch = db.new_batch();
+            for i in 0..16 {
+                batch = batch.append(U64::new(i));
+            }
+            let commit_loc = Location::new(*db.bounds().end + 16);
+            let merkleized = batch.merkleize(&db, None, commit_loc).await;
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let last_commit = db.last_commit_loc();
+            let mut db = db.prune(last_commit).await.unwrap();
+            assert!(db.bounds().start > Location::new(0));
+
+            // Persist a commit whose floor precedes the retained history, bypassing batch
+            // validation.
+            (db.journal, _) = db
+                .journal
+                .append(&Operation::Commit(None, Location::new(0)))
+                .await
+                .unwrap();
+            db.journal = db.journal.sync().await.unwrap();
+            drop(db);
+
+            let cfg = db_config("init-floor", &ctx, Sequential);
+            let err = TestDb::<mmr::Family>::init(ctx.child("reopen"), cfg)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::DataCorrupted(_)),
+                "unexpected init error: {err:?}"
+            );
+        });
+    }
+
     /// A sync handle must not block database use while the backend sync is pending.
     #[test_traced]
     fn test_keyless_fixed_start_sync_overlaps_work() {
@@ -475,6 +517,7 @@ mod tests {
         test_keyless_fixed_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, db;
         test_keyless_fixed_rewind_recovery => run_rewind_recovery, reopen;
         test_keyless_fixed_rewind_pruned_target_errors => run_rewind_pruned_target_errors, reopen;
+        test_keyless_fixed_rewind_pruned_floor_errors => run_rewind_pruned_floor_errors, reopen;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
