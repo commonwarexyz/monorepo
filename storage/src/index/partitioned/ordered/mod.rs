@@ -7,6 +7,10 @@
 //! lookup/insert speed for memory density at scale; the unordered variant ([`super::unordered`])
 //! uses hash sub-indices instead and is faster when ordering is not required.
 //!
+//! Each partition's key/value arrays share one length, capacity, and slot in a slab.
+//! Buffers of the same capacity share slabs, which are released once all their buffers are freed.
+//! Buffers grow geometrically by byte size. Emptied partitions return their buffers to the pool.
+//!
 //! # Spilling over-full partitions
 //!
 //! Each sorted-array insert is an O(occupancy) memmove, so a partition that grows large makes
@@ -38,11 +42,13 @@
 //! The next index mutation of that partition spills it before access. `insert_and_retain` performs
 //! the check after releasing its internal cursor.
 
+mod array;
 mod cursor;
 mod partition;
+mod pool;
 
 pub use self::cursor::Cursor;
-use self::partition::Partition;
+use self::{partition::Partition, pool::Pool};
 #[commonware_macros::stability(ALPHA)]
 use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
@@ -59,6 +65,7 @@ use commonware_runtime::{
 use std::{
     collections::{BTreeMap, HashMap, btree_map, hash_map},
     ops::Bound,
+    sync::Arc,
 };
 
 /// Sorted-array length at which a partition converts to a `BTreeMap`, bounding the O(occupancy)
@@ -80,6 +87,9 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     /// local slot). Each stores its translated keys and values as sorted arrays (the inline
     /// representation), though an emptied partition may instead have spilled (see `spilled`).
     partitions: Box<[Partition<T::Key, V>]>,
+
+    /// Shared slabs for new partition buffers. Existing buffers retain their build worker's pool.
+    pool: Arc<Pool>,
 
     /// Partitions that have spilled out of their sorted arrays (reached `SPILL_THRESHOLD` entries),
     /// keyed by partition index; each maps translated keys to their value runs. Empty until a
@@ -119,6 +129,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         Self {
             translator,
             partitions,
+            pool: Arc::default(),
             spilled: HashMap::new(),
             threshold: SPILL_THRESHOLD,
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
@@ -253,6 +264,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             }
             return Some(Cursor::soa(
                 &mut self.partitions[i],
+                &self.pool,
                 k,
                 run,
                 &self.keys,
@@ -296,6 +308,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             if !run.is_empty() {
                 return Some(Cursor::soa(
                     &mut self.partitions[i],
+                    &self.pool,
                     k,
                     run,
                     &self.keys,
@@ -303,7 +316,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                     &self.pruned,
                 ));
             }
-            self.partitions[i].insert_at(run.end, k, value);
+            self.partitions[i].insert_at(run.end, k, value, &self.pool);
             self.keys.inc();
             self.items.inc();
             self.maybe_spill(i);
@@ -330,7 +343,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
 
         // Partition i is genuinely empty: start a fresh sorted array.
-        self.partitions[i].insert_at(0, k, value);
+        self.partitions[i].insert_at(0, k, value, &self.pool);
         self.keys.inc();
         self.items.inc();
         self.maybe_spill(i);
@@ -363,6 +376,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
             index: Self {
                 translator: self.translator.clone(),
                 partitions,
+                pool: Arc::default(),
                 spilled: HashMap::new(),
                 threshold: self.threshold,
                 keys: self.keys.clone(),
@@ -508,7 +522,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             let new_key = run.is_empty();
-            self.partitions[i].insert_at(run.end, k, value);
+            self.partitions[i].insert_at(run.end, k, value, &self.pool);
             self.items.inc();
             if new_key {
                 self.keys.inc();
@@ -533,7 +547,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         }
 
         // Genuinely empty partition: start a fresh sorted array.
-        self.partitions[i].insert_at(0, k, value);
+        self.partitions[i].insert_at(0, k, value, &self.pool);
         self.items.inc();
         self.keys.inc();
         self.maybe_spill(i);
