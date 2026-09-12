@@ -11,8 +11,8 @@
     <title>commonware > Out of Sight, Out of State</title>
     <meta name="description" content="Private payments without an
 ever-growing global nullifier set. Bonsai keeps validator state
-proportional to the number of accounts and lets wallets go offline
-indefinitely.">
+proportional to the number of accounts while preserving support for
+offline wallets.">
     <meta name="author" content="Guru Vamsi Policharla">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -23,8 +23,8 @@ indefinitely.">
     <meta property="og:title" content="Out of Sight, Out of State" />
     <meta property="og:description" content="Private payments without an
 ever-growing global nullifier set. Bonsai keeps validator state
-proportional to the number of accounts and lets wallets go offline
-indefinitely." />
+proportional to the number of accounts while preserving support for
+offline wallets." />
     <meta property="article:author" content="Guru Vamsi Policharla" />
     <meta property="article:published_time" content="2026-09-12T00:00:00Z" />
     <meta property="article:modified_time" content="2026-09-12T00:00:00Z" />
@@ -38,8 +38,8 @@ indefinitely." />
 State" />
     <meta property="twitter:description" content="Private payments
 without an ever-growing global nullifier set. Bonsai keeps validator
-state proportional to the number of accounts and lets wallets go offline
-indefinitely." />
+state proportional to the number of accounts while preserving support
+for offline wallets." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/private-payments.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/guruvamsip" />
@@ -134,9 +134,10 @@ Vamsi Policharla</a></div>
         id="live-txs" class="live">0</span> transactions, amounting to
         <u>a petabyte every year</u></li>
         </ul>
-        <p>While bigger machines could address bandwidth and compute
-        costs, requiring every validator to store another petabyte of
-        nullifiers each year is not practical.</p>
+        <p>Nullifiers must remain in fast storage and be checked against
+        every incoming transaction. While bigger machines could address
+        bandwidth and compute costs, requiring every validator to store
+        another petabyte of nullifiers each year is not practical.</p>
         <blockquote>
         <p><em>How do we process one million private transactions per
         second on commodity hardware?</em></p>
@@ -169,7 +170,7 @@ Vamsi Policharla</a></div>
         resume without replaying intervening chain history</li>
         </ul>
         <p>These performance gains come with a <a
-        href="#privacy-beyond-the-ledger">privacy tradeoff</a>:
+        href="#privacy-beyond-the-ledger">privacy tradeoff</a>: ledger
         observers see when an account acts, but still cannot see
         amounts, counterparties, or whether it sends or receives. In
         practice, however, we see this as a reasonable tradeoff for most
@@ -279,14 +280,18 @@ Vamsi Policharla</a></div>
         publish the same 256-byte payload <span class="math inline">(A,
         \mathsf{com}&#39;, \rho, \mathsf{root}_\rho, \pi)</span>: a
         32-byte account identifier, the new account commitment, a
-        receipt, an MMR root, and a 128-byte proof.</p>
+        receipt, an MMR root, and a 128-byte proof. Every operation
+        appends a receipt to the MMR: a real one for a send and an
+        unspendable dummy for a receive.</p>
         <h2 id="scaling">Scaling</h2>
         <p>We now focus on scaling the system. Inserting an element into
         an MMR requires only the <em>frontier</em> – a logarithmic
         number of hashes – which allows validators to prune old
         receipts. With <span class="math inline">2^{40}</span> receipts,
         we need at most 40 frontier hashes, or 1.25 KiB with 32-byte
-        hashes.</p>
+        hashes. Wallets can claim old receipts by fetching current
+        inclusion proofs from an archive, without replaying the
+        ledger.</p>
         <p><strong>Pruning Nullifiers.</strong> The real challenge lies
         in managing nullifier growth. For receipts, we prove
         <em>membership</em>; for nullifiers, we need to prove
@@ -326,14 +331,15 @@ Vamsi Policharla</a></div>
         <p>Recall that nullifiers are ordered by when their receipts
         were created. Choosing <span class="math inline">L</span> to
         retain the <span class="math inline">w</span> largest claimed
-        positions bounds the wallet’s storage to <span
+        positions bounds the wallet’s active storage to <span
         class="math inline">\ell</span> hashes plus <span
         class="math inline">w</span> positions, independent of the total
         number of receipts it has claimed. Older nullifiers can be moved
         to cold storage, so a receipt below <span
         class="math inline">L</span> can still be claimed by retrieving
-        the relevant path from cold storage and updating the
-        frontier.</p>
+        the relevant path from cold storage and updating the frontier.
+        The cold archive still grows with the account’s lifetime
+        activity.</p>
         <h2 id="from-bank-to-bonsai">From Bank to Bonsai</h2>
         <p>The simulation below follows four accounts as they make
         payments to one another. Use <strong>prev</strong> and

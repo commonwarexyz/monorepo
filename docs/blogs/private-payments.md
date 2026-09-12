@@ -1,6 +1,6 @@
 ---
 title: "Out of Sight, Out of State"
-description: "Private payments without an ever-growing global nullifier set. Bonsai keeps validator state proportional to the number of accounts and lets wallets go offline indefinitely."
+description: "Private payments without an ever-growing global nullifier set. Bonsai keeps validator state proportional to the number of accounts while preserving support for offline wallets."
 date: "September 12th, 2026"
 published-time: "2026-09-12T00:00:00Z"
 modified-time: "2026-09-12T00:00:00Z"
@@ -23,7 +23,7 @@ Suppose each transaction is $\approx 200$ bytes and takes $0.5-1$ ms to verify (
 - **compute:** every validator needs the equivalent of <u>500-1000 dedicated CPU cores</u>
 - **storage:** since you opened this page, the nullifier set (to prevent double spending) would have grown by <span class="live" id="live-bytes">0 MB</span> across <span class="live" id="live-txs">0</span> transactions, amounting to <u>a petabyte every year</u>
 
-While bigger machines could address bandwidth and compute costs, requiring every validator to store another petabyte of nullifiers each year is not practical.
+Nullifiers must remain in fast storage and be checked against every incoming transaction. While bigger machines could address bandwidth and compute costs, requiring every validator to store another petabyte of nullifiers each year is not practical.
 
 > *How do we process one million private transactions per second on commodity hardware?*
 
@@ -38,7 +38,7 @@ We are excited to share [Bonsai](/artifacts/bonsai.pdf), a private payment schem
 - validators store a **single 32-byte commitment per account** and a small number of hashes
 - wallets can **go offline indefinitely** and resume without replaying intervening chain history
 
-These performance gains come with a [privacy tradeoff](#privacy-beyond-the-ledger): observers see when an account acts, but still cannot see amounts, counterparties, or whether it sends or receives. In practice, however, we see this as a reasonable tradeoff for most users because the RPC providers and validators they submit to can already see which transactions come from whom.
+These performance gains come with a [privacy tradeoff](#privacy-beyond-the-ledger): ledger observers see when an account acts, but still cannot see amounts, counterparties, or whether it sends or receives. In practice, however, we see this as a reasonable tradeoff for most users because the RPC providers and validators they submit to can already see which transactions come from whom.
 
 ## Our Construction
 
@@ -88,11 +88,11 @@ Fees can be supported in both send and receive by revealing $v_{\mathsf{fee}}$ i
 
 Balances and amounts are now hidden from the ledger, but it still reveals whether an account sent or received funds. We can also hide the operation type by proving a strict disjunction of the send and receive relations. This strengthens the privacy guarantees (see Section 6.1 of the [Bonsai paper](/artifacts/bonsai.pdf) for a detailed discussion).
 
-In the operation-hiding variant, both send and receive publish the same 256-byte payload $(A, \mathsf{com}', \rho, \mathsf{root}_\rho, \pi)$: a 32-byte account identifier, the new account commitment, a receipt, an MMR root, and a 128-byte proof.
+In the operation-hiding variant, both send and receive publish the same 256-byte payload $(A, \mathsf{com}', \rho, \mathsf{root}_\rho, \pi)$: a 32-byte account identifier, the new account commitment, a receipt, an MMR root, and a 128-byte proof. Every operation appends a receipt to the MMR: a real one for a send and an unspendable dummy for a receive.
 
 ## Scaling
 
-We now focus on scaling the system. Inserting an element into an MMR requires only the *frontier* -- a logarithmic number of hashes -- which allows validators to prune old receipts. With $2^{40}$ receipts, we need at most 40 frontier hashes, or 1.25 KiB with 32-byte hashes.
+We now focus on scaling the system. Inserting an element into an MMR requires only the *frontier* -- a logarithmic number of hashes -- which allows validators to prune old receipts. With $2^{40}$ receipts, we need at most 40 frontier hashes, or 1.25 KiB with 32-byte hashes. Wallets can claim old receipts by fetching current inclusion proofs from an archive, without replaying the ledger.
 
 **Pruning Nullifiers.** The real challenge lies in managing nullifier growth. For receipts, we prove *membership*; for nullifiers, we need to prove *non-membership* to prevent double spending. MMRs do not support efficient non-membership proofs, so validators cannot use the same strategy.
 
@@ -104,7 +104,7 @@ But won't the nullifier set eventually grow too big for users to manage? We seem
 
 Users can also **prune their nullifier state**. For a threshold $L$, a wallet can summarize the claimed positions below $L$ with a frontier of at most $\ell$ hashes, where $\ell$ is the depth of the nullifier tree. It keeps all claimed positions at or above $L$. Together, these suffice to produce insertion proofs for unclaimed positions at any $\mathsf{pid} \geq L$.
 
-Recall that nullifiers are ordered by when their receipts were created. Choosing $L$ to retain the $w$ largest claimed positions bounds the wallet's storage to $\ell$ hashes plus $w$ positions, independent of the total number of receipts it has claimed. Older nullifiers can be moved to cold storage, so a receipt below $L$ can still be claimed by retrieving the relevant path from cold storage and updating the frontier.
+Recall that nullifiers are ordered by when their receipts were created. Choosing $L$ to retain the $w$ largest claimed positions bounds the wallet's active storage to $\ell$ hashes plus $w$ positions, independent of the total number of receipts it has claimed. Older nullifiers can be moved to cold storage, so a receipt below $L$ can still be claimed by retrieving the relevant path from cold storage and updating the frontier. The cold archive still grows with the account's lifetime activity.
 
 ## From Bank to Bonsai
 

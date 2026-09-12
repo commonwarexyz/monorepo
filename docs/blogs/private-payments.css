@@ -256,7 +256,6 @@
     fill: #777;
     font-size: 10px;
 }
-.sim-tiny.hot { fill: #d9251c; font-weight: bold; }
 .sim-tiny.center { text-anchor: middle; }
 .sim-tiny.right { text-anchor: end; }
 
@@ -275,6 +274,11 @@
 
 .sim-nf {
     fill: #d9251c;
+    opacity: 0.85;
+}
+
+.sim-receipt {
+    fill: #1f1fd1;
     opacity: 0.85;
 }
 
@@ -304,7 +308,6 @@
 .sim-frontier { fill: #1f1fd1; }
 .sim-leaf.cold, .sim-inner.cold { fill: #eee; }
 .sim-edge.cold { stroke: #eee; }
-.sim-tiny.cold { fill: #ccc; }
 
 .sim-flash {
     fill: #ffd54a;

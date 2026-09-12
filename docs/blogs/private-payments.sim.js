@@ -28,6 +28,8 @@
     const RECV_MIN = 3000;     // receivers claim after a random delay
     const RECV_MAX = 12000;
     const HOT_W = 4;           // largest claimed positions a user keeps hot, for the last step
+    const NULLIFIER_DEPTH = 40;
+    const SMT_DRAW_DEPTH = 4;
 
     const START_BALANCE = 1000;
     const AMOUNT_MIN = 10, AMOUNT_MAX = 200;
@@ -376,7 +378,7 @@
         const storeG = el('g', {}, svg);
         const cache = () => ({ g: el('g', {}, storeG), key: null, count: 0 });
         const S = {
-            headings: cache(), array: cache(), grid: cache(), mmr: cache(),
+            headings: cache(), array: cache(), grid: cache(), receipts: cache(), mmr: cache(),
             users: ACCOUNTS.map(() => cache()),
         };
 
@@ -419,7 +421,7 @@
                 case 3: return 'Balances are replaced by commitments (the hex tags), each rewritten when its account acts. The nullifier set is unchanged: one entry per receive.';
                 case 4: return 'One nullifier per send or receive now, real for receives and a dummy for sends, so the set grows twice as fast.';
                 case 5: return `Left: the receipt MMR. Receipts accumulate in perfect binary trees and validators only need to store the peaks (dots) to extend the tree. Right: the nullifier set, still held by validators and still growing with every transaction.`;
-                case 6: return `Validators keep commitments, the MMR frontier, and bounded recent roots, and delegate nullifier storage to users. Each user keeps a sparse Merkle tree keyed by receipt position (leaf labels): a leaf is set once the receipt at that position is claimed. In this example, users claim receipts in position order.`;
+                case 6: return `Validators keep commitments, the MMR frontier, and bounded recent roots, and delegate nullifier storage to users. Each user keeps a sparse Merkle tree keyed by receipt position: a leaf is set once the receipt at that position is claimed. In this example, users claim receipts in position order.`;
                 default: return `Each user freezes its tree below a threshold: the frozen prefix is summarized by its frontier (blue), only the ${HOT_W} largest claimed positions stay hot (red), and everything else moves to cold storage (faded). Nothing changes for the ledger.`;
             }
         });
@@ -618,17 +620,18 @@
             c.prev = vals;
         }
 
-        // A growing grid of cells, one per nullifier, filling the space row by row.
-        function drawGrid(c, x0, x1, y0, y1, count) {
+        // A growing grid of cells, one per retained item, filling the space row by row.
+        function drawGrid(c, x0, x1, y0, y1, count, className) {
+            className = className || 'sim-nf';
             const pitch = 15, size = 12, cols = Math.max(1, Math.floor((x1 - x0 + 3) / pitch)), rows = Math.max(0, Math.floor((y1 - y0) / pitch));
             const shown = Math.min(count, cols * rows);
-            const key = `grid|${x0}|${y0}`;
+            const key = `grid|${x0}|${y0}|${className}`;
             if (c.count > shown || c.key !== key) { c.g.innerHTML = ''; c.count = 0; c.key = key; }
             const fresh = c.count > 0;   // do not flash when repopulating after a step change
             for (let i = c.count; i < shown; i++) {
                 const x = x0 + (i % cols) * pitch, y = y0 + Math.floor(i / cols) * pitch;
                 if (fresh) flash(c.g, { x: x - 2, y: y - 2, width: size + 4, height: size + 4 });
-                el('rect', { x, y, width: size, height: size, class: 'sim-nf' }, c.g);
+                el('rect', { x, y, width: size, height: size, class: className }, c.g);
             }
             c.count = shown;
         }
@@ -674,53 +677,48 @@
             c.n = n;
         }
 
-        // A user's nullifier tree: a sparse Merkle tree keyed by receipt position. The leaf of
-        // position p is set once the user has claimed the receipt at p. The tree spans every
-        // position the log has issued so far (`space`), so its depth grows with the log, not
-        // with the user's activity. The simulation claims receipts in position order, so each
-        // insertion lands to the right of every earlier one and touches a single
-        // root-to-leaf path, which ripples upward.
+        // A user's nullifier tree is a fixed-depth sparse Merkle tree keyed by receipt position.
+        // The projection omits upper paths with empty siblings and covers a power-of-two range
+        // containing that account's claims, so unrelated ledger activity never changes the
+        // drawing. In-order insertions land to the right of earlier claims and touch a single
+        // root-to-leaf path.
         // Nodes are solid when the user stores them and hollow when their subtree is empty
         // (a default hash anyone can recompute).
         //
         // With `opts.hot` set to a threshold L, the prefix [0, L) is frozen: the maximal
         // subtrees covering it are summarized by their roots (the frontier, in blue), their
         // bodies move to cold storage (faded), and only the paths of positions >= L stay hot.
-        //
-        // `d` is the minimum depth. The drawn depth D is capped by the width; beyond it each
-        // drawn leaf stands for 2^(d-D) consecutive positions and nodes below that resolution
-        // (including frontier and hot nodes) cannot be drawn, so a note flags the coarsening.
-        function drawSMT(c, x, y, w, h, positions, space, d, opts) {
+        function drawSMT(c, x, y, w, h, positions, opts) {
             opts = opts || {};
-            const maxD = Math.max(d, Math.floor(Math.log2(w / 1.7)));
-            while (d < 30 && (1 << d) < space) d++;
-            const D = Math.min(d, maxD), LD = 1 << D;
+            const D = SMT_DRAW_DEPTH, LD = 2 ** D;
+            const maxPosition = positions.length ? positions[positions.length - 1] : 0;
+            const rangeBits = Math.max(D, Math.ceil(Math.log2(maxPosition + 1)));
+            const bucketWidth = 2 ** rangeBits / LD;
             const L = opts.hot || 0;
             // Switching to another set (a different user) is not an insertion.
             if (c.who !== opts.who) { c.who = opts.who; c.n = positions.length; }
             const n = positions.length;
-            const key = `smt|${opts.who || ''}|${d}|${D}|${n}|${L}|${x}|${y}|${w}|${h}`;
+            const key = `smt|${opts.who || ''}|${n}|${maxPosition}|${L}|${x}|${y}|${w}|${h}`;
             const prevN = c.n || 0;
             rebuild(c, key, g => {
                 const inserted = n > prevN && n > 0;
                 const r = Math.min(4.5, Math.max(1.1, w / LD / 2.6));
-                const labelRoom = D === d && w / LD >= 6;
-                const coarse = D < d;
-                const th = labelRoom || coarse ? h - 22 : h;
-                if (coarse) label(g, x + w / 2, y + h - 4, `${1 << (d - D)} positions per drawn leaf`, 'sim-tiny center');
-                const pos = (lvl, i) => ({ x: x + (i + 0.5) * w / (1 << lvl), y: y + r + lvl * (th - 2 * r) / D });
-                // The range of positions under the i-th drawn node at level lvl.
-                const lo = (lvl, i) => i << (d - lvl), hi = (lvl, i) => (i + 1) << (d - lvl);
+                const th = h - 22;
+                const scaleLabel = bucketWidth > 1 ? `depth ${NULLIFIER_DEPTH} (${bucketWidth} positions/leaf)` : `depth ${NULLIFIER_DEPTH}`;
+                label(g, x + w / 2, y + h - 2, scaleLabel, 'sim-tiny center');
+                const pos = (lvl, i) => ({ x: x + (i + 0.5) * w / 2 ** lvl, y: y + r + lvl * (th - 2 * r) / D });
+                const hi = (lvl, i) => (i + 1) * bucketWidth * 2 ** (D - lvl);
                 const frozen = (lvl, i) => L > 0 && hi(lvl, i) <= L;
-                const leafOf = p => p >> (d - D);
+                const leafOf = p => Math.floor(p / bucketWidth);
                 const held = new Set(positions.map(leafOf));
                 const holds = (lvl, i) => {
-                    const a = i << (D - lvl), b = (i + 1) << (D - lvl);
+                    const width = 2 ** (D - lvl);
+                    const a = i * width, b = (i + 1) * width;
                     for (const leaf of held) if (leaf >= a && leaf < b) return true;
                     return false;
                 };
                 for (let lvl = 0; lvl < D; lvl++) {
-                    for (let i = 0; i < (1 << lvl); i++) {
+                    for (let i = 0; i < 2 ** lvl; i++) {
                         const p = pos(lvl, i), a = pos(lvl + 1, 2 * i), b = pos(lvl + 1, 2 * i + 1);
                         el('path', { d: `M ${a.x} ${a.y} L ${p.x} ${p.y} L ${b.x} ${b.y}`, class: frozen(lvl, i) ? 'sim-edge cold' : 'sim-edge' }, g);
                     }
@@ -730,29 +728,26 @@
                     const delay = (D - lvl) * STEP_MS;
                     flash(g, { cx: p.x, cy: p.y, r: r + 6 }, delay);
                     if (lvl > 0) {
-                        const q = pos(lvl - 1, newLeaf >> (D - lvl + 1));
+                        const q = pos(lvl - 1, Math.floor(newLeaf / 2 ** (D - lvl + 1)));
                         const hot = el('path', { d: `M ${p.x} ${p.y} L ${q.x} ${q.y}`, class: 'sim-edge-hot' }, g);
                         hot.style.animationDelay = `${delay + STEP_MS / 2}ms`;
                     }
                 };
                 for (let lvl = 0; lvl <= D; lvl++) {
-                    for (let i = 0; i < (1 << lvl); i++) {
+                    for (let i = 0; i < 2 ** lvl; i++) {
                         const p = pos(lvl, i);
                         const base = lvl === D ? 'sim-leaf' : 'sim-inner';
                         let cls;
                         if (frozen(lvl, i)) {
                             // The frontier is the frozen nodes whose parent is not frozen.
-                            cls = lvl === 0 || !frozen(lvl - 1, i >> 1) ? 'sim-frontier' : base + ' cold';
+                            cls = lvl === 0 || !frozen(lvl - 1, Math.floor(i / 2)) ? 'sim-frontier' : base + ' cold';
                         } else {
                             cls = holds(lvl, i) ? base : base + ' empty';
                         }
-                        const onNew = inserted && i === (newLeaf >> (D - lvl));
+                        const onNew = inserted && i === Math.floor(newLeaf / 2 ** (D - lvl));
                         if (onNew) ripple(p, lvl);
                         if (onNew && lvl === D) cls += ' pop';
                         el('circle', { cx: p.x, cy: p.y, r: cls === 'sim-frontier' ? r + 1 : r, class: cls }, g);
-                        if (lvl === D && labelRoom && held.has(i)) {
-                            label(g, p.x, y + h - (i % 2 ? 0 : 11), String(i), 'sim-tiny center' + (i === newLeaf ? ' hot' : lo(D, i) < L ? ' cold' : ''));
-                        }
                     }
                 }
             });
@@ -790,20 +785,34 @@
 
             // Through step 5 the nullifier set sits with the owner, one square per entry.
             const nfCount = step === 0 ? 0 : step <= 3 ? c.recvs : nTx;
+            const receiptCount = step === 3 ? c.sends : step === 4 ? nTx : 0;
             const gx = X0 + arrayW + 36;
             if (step <= 4) {
-                rebuild(S.headings, `h|${step}|${nfCount}`, g => {
+                const splitX = gx + (XR - gx) / 2;
+                rebuild(S.headings, `h|${step}|${nfCount}|${receiptCount}`, g => {
                     label(g, X0, Y0, ownerHead, 'sim-h left');
                     headRule(g, X0, XR);
                     label(g, X0, Y0 + 62, step <= 2 ? 'balances: one per account' : 'commitments: one per account', 'sim-seg-label');
                     if (step === 0) {
                         label(g, gx, Y0 + 14 + 21, 'nothing per payment', 'sim-seg-label sim-muted');
-                    } else {
+                    } else if (step <= 2) {
                         label(g, gx, Y0 + 32, `${ownerPoss} nullifier set: ${nfCount}`, 'sim-h left red');
-                        label(g, gx, Y0 + 50, step <= 3 ? 'one per receive, never pruned' : 'one per send/receive, never pruned', 'sim-seg-label sim-muted');
+                        label(g, gx, Y0 + 50, 'one per receive, never pruned', 'sim-seg-label sim-muted');
+                    } else {
+                        label(g, gx, Y0 + 32, `retained receipts: ${receiptCount}`, 'sim-h left blue');
+                        label(g, gx, Y0 + 50, step === 3 ? 'one per send' : 'one per send/receive', 'sim-seg-label sim-muted');
+                        label(g, splitX + 10, Y0 + 32, `nullifier set: ${nfCount}`, 'sim-h left red');
+                        label(g, splitX + 10, Y0 + 50, step === 3 ? 'one per receive' : 'one per send/receive', 'sim-seg-label sim-muted');
+                        el('line', { x1: splitX, y1: Y0 + 20, x2: splitX, y2: bottom, class: 'sim-divider' }, g);
                     }
                 });
-                drawGrid(S.grid, gx, XR, Y0 + 62, bottom, nfCount);
+                if (step <= 2) {
+                    drawGrid(S.grid, gx, XR, Y0 + 62, bottom, nfCount);
+                    drawGrid(S.receipts, 0, 0, 0, 0, 0, 'sim-receipt');
+                } else {
+                    drawGrid(S.receipts, gx, splitX - 10, Y0 + 62, bottom, receiptCount, 'sim-receipt');
+                    drawGrid(S.grid, splitX + 10, XR, Y0 + 62, bottom, nfCount);
+                }
                 clearAll([S.mmr, ...S.users]);
                 return;
             }
@@ -846,6 +855,7 @@
                 });
             });
             drawMMR(S.mmr, X0, Y0 + 140, arrayW, bottom - Y0 - 150, nTx, { sizes: true });
+            drawGrid(S.receipts, 0, 0, 0, 0, 0, 'sim-receipt');
 
             if (!perUser) {
                 drawGrid(S.grid, gx, XR, Y0 + 62, bottom, nTx);
@@ -857,7 +867,7 @@
                 const cell = userCell(ux, uw, Y0, bottom, i);
                 const ty = cell.y + 30, th = cell.h - 34;
                 const hot = step === 7 ? hotThreshold(state.nf[a]) : 0;
-                drawSMT(S.users[i], cell.x, ty, cell.w, th, state.nf[a], nTx, 4, { who: a, hot });
+                drawSMT(S.users[i], cell.x, ty, cell.w, th, state.nf[a], { who: a, hot });
             });
         }
 
