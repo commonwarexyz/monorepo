@@ -51,7 +51,7 @@ impl<'a, T: Send> Pool<'a, T> {
         self.pool.push(Box::pin(future));
     }
 
-    /// Returns a futures that resolves to the next future in the pool that resolves.
+    /// Returns a future that resolves to the next future in the pool that resolves.
     ///
     /// If the pool is empty, the future will never resolve.
     pub fn next_completed(&mut self) -> SelectNextSome<'_, FuturesUnordered<PooledFuture<'a, T>>> {
