@@ -417,7 +417,7 @@ pub(crate) trait Chain: Send + 'static {
 pub(crate) struct Client {
     scheme: Scheme,
     /// The chain genesis: the validators' evidence-serving identities, so an
-    /// evidence request routes to the exact quorum holding its slice.
+    /// evidence request routes to the committee retaining the complete close.
     genesis: Genesis,
     /// The deployment this client reads.
     deployment: Digest,
@@ -468,13 +468,13 @@ impl Client {
 
     /// The chain genesis this client was built over: the validators'
     /// evidence-serving identities that route an evidence request to the
-    /// exact quorum retaining its slice.
+    /// committee retaining the complete close.
     pub(crate) const fn genesis(&self) -> &Genesis {
         &self.genesis
     }
 
     /// Fetches one piece of evidence for this deployment from the validators
-    /// retaining the lookup's slice, asking each holder in ascending
+    /// retaining the complete close, asking each holder in ascending
     /// participant order until one serves it or declares it absent. Every
     /// other answer is routing advice, and the last one is returned when no
     /// holder serves.
@@ -491,11 +491,7 @@ impl Client {
         ctx: &E,
         lookup: EvidenceLookup,
     ) -> Result<EvidenceResponse> {
-        let holders = match (&lookup, lookup.account()) {
-            (EvidenceLookup::Interval { slice, .. }, _) => self.genesis.holders_for(*slice)?,
-            (_, Some(account)) => self.genesis.holders_for_account(account)?,
-            (_, None) => bail!("evidence lookup names neither an account nor a slice"),
-        };
+        let holders = self.genesis.holders()?;
         let request = EvidenceRequest::new(self.deployment, lookup);
         let mut last = None;
         for holder in holders {
@@ -511,7 +507,7 @@ impl Client {
                 other => last = Some(other),
             }
         }
-        last.unwrap_or_else(|| bail!("no validator holds the requested slice"))
+        last.unwrap_or_else(|| bail!("no validator serves the requested evidence"))
     }
 
     /// Fetches one certified read from `address` without verifying it.

@@ -11,9 +11,10 @@ use crate::bajillion::{
         AckError, VECTOR_ACK_SIGNATURE_NAMESPACE, VECTOR_SEND_SIGNATURE_NAMESPACE, VectorAck,
         VectorSendBody,
     },
-    state::{AccountChange, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, StateLeaf},
+    state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore},
     transition::{
-        ChallengeIndex, ChangeParts, CloseContext, Header, RootBundle, StateCache, TransitionError,
+        ChallengeIndex, ChangeParts, CloseAmounts, CloseContext, Header, RootBundle,
+        TransitionError,
     },
     vector::{OutTipLookup, OutVector},
 };
@@ -25,276 +26,6 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use thiserror::Error;
 
-/// One live-state leaf and its opening under a state root.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StateOpening<P: PublicKey, D: Digest> {
-    /// Authenticated live leaf.
-    pub leaf: StateLeaf<P>,
-    /// Position and BMT authentication path.
-    pub proof: commitment::Opening<D>,
-}
-
-/// Account-relative state value and its membership opening.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StateValueOpening<D: Digest> {
-    /// State for the account supplied by the lookup target.
-    pub state: AccountState,
-    /// Position and BMT authentication path.
-    pub proof: commitment::Opening<D>,
-}
-
-/// Adjacent state leaves and one shared proof authenticating state absence.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StateAbsence<P: PublicKey, D: Digest> {
-    /// Immediate predecessor, or `None` at the beginning of the vector.
-    pub predecessor: Option<StateLeaf<P>>,
-    /// Immediate successor, or `None` at the end of the vector.
-    pub successor: Option<StateLeaf<P>>,
-    /// One shared opening for the adjacent disclosed neighbors.
-    pub opening: commitment::RangeOpening<D>,
-}
-
-/// Authenticated membership or ordered nonmembership under one state root.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StateLookup<P: PublicKey, D: Digest> {
-    /// The requested account is a live state member.
-    Present(Box<StateValueOpening<D>>),
-    /// The requested account is absent, authenticated by its adjacent live leaves.
-    ///
-    /// One neighbor is absent at a state boundary, and both are absent for an empty state.
-    Absent(StateAbsence<P, D>),
-}
-
-#[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for StateLookup<P, D>
-where
-    P: PublicKey,
-    D: Digest,
-    StateValueOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
-    StateAbsence<P, D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        if u.arbitrary()? {
-            Ok(Self::Present(Box::new(u.arbitrary()?)))
-        } else {
-            Ok(Self::Absent(u.arbitrary()?))
-        }
-    }
-}
-
-impl<P: PublicKey, D: Digest> StateLookup<P, D> {
-    /// Verifies this lookup and returns the member state, if present.
-    pub fn resolve<H: Hasher<Digest = D>>(
-        &self,
-        root: &VectorRoot<D>,
-        account: &P,
-    ) -> Result<Option<AccountState>, ChallengeError> {
-        match self {
-            Self::Present(opening) => {
-                let leaf = StateLeaf {
-                    account: account.clone(),
-                    state: opening.state,
-                };
-                opening
-                    .proof
-                    .verify::<H>(VectorKind::State, root, leaf.encode().as_ref())?;
-                Ok(Some(opening.state))
-            }
-            Self::Absent(absence) => {
-                absence.resolve::<H>(root, account)?;
-                Ok(None)
-            }
-        }
-    }
-}
-
-impl<P: PublicKey, D: Digest> StateAbsence<P, D> {
-    fn resolve<H: Hasher<Digest = D>>(
-        &self,
-        root: &VectorRoot<D>,
-        account: &P,
-    ) -> Result<(), ChallengeError> {
-        self.opening
-            .bracket(self.predecessor.is_some(), 0, self.successor.is_some())
-            .ok_or(ChallengeError::LookupOrder)?;
-        if self
-            .predecessor
-            .as_ref()
-            .is_some_and(|leaf| leaf.account >= *account)
-            || self
-                .successor
-                .as_ref()
-                .is_some_and(|leaf| leaf.account <= *account)
-        {
-            return Err(ChallengeError::LookupOrder);
-        }
-        let encoded = self
-            .predecessor
-            .iter()
-            .chain(self.successor.iter())
-            .map(Encode::encode)
-            .collect::<Vec<_>>();
-        self.opening
-            .verify::<H, _>(VectorKind::State, root, &encoded)?;
-        Ok(())
-    }
-}
-
-impl<D: Digest> Write for StateValueOpening<D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.state.write(buf);
-        self.proof.write(buf);
-    }
-}
-
-impl<D: Digest> EncodeSize for StateValueOpening<D> {
-    fn encode_size(&self) -> usize {
-        self.state.encode_size() + self.proof.encode_size()
-    }
-}
-
-impl<D: Digest> Read for StateValueOpening<D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            state: AccountState::read(buf)?,
-            proof: commitment::Opening::read(buf)?,
-        })
-    }
-}
-
-impl<P: PublicKey, D: Digest> Write for StateAbsence<P, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.predecessor.write(buf);
-        self.successor.write(buf);
-        self.opening.write(buf);
-    }
-}
-
-impl<P: PublicKey, D: Digest> EncodeSize for StateAbsence<P, D> {
-    fn encode_size(&self) -> usize {
-        self.predecessor.encode_size() + self.successor.encode_size() + self.opening.encode_size()
-    }
-}
-
-impl<P: PublicKey, D: Digest> Read for StateAbsence<P, D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            predecessor: Option::<StateLeaf<P>>::read(buf)?,
-            successor: Option::<StateLeaf<P>>::read(buf)?,
-            opening: commitment::RangeOpening::read_bounded(buf, 2, usize::MAX)?,
-        })
-    }
-}
-
-impl<P: PublicKey, D: Digest> Write for StateLookup<P, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Present(opening) => {
-                1_u8.write(buf);
-                opening.write(buf);
-            }
-            Self::Absent(absence) => {
-                2_u8.write(buf);
-                absence.write(buf);
-            }
-        }
-    }
-}
-
-impl<P: PublicKey, D: Digest> EncodeSize for StateLookup<P, D> {
-    fn encode_size(&self) -> usize {
-        match self {
-            Self::Present(opening) => u8::SIZE + opening.encode_size(),
-            Self::Absent(absence) => u8::SIZE + absence.encode_size(),
-        }
-    }
-}
-
-impl<P: PublicKey, D: Digest> Read for StateLookup<P, D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        match u8::read(buf)? {
-            1 => Ok(Self::Present(Box::new(StateValueOpening::read(buf)?))),
-            2 => Ok(Self::Absent(StateAbsence::read(buf)?)),
-            tag => Err(CodecError::InvalidEnum(tag)),
-        }
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<D> arbitrary::Arbitrary<'_> for StateValueOpening<D>
-where
-    D: Digest,
-    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            state: u.arbitrary()?,
-            proof: u.arbitrary()?,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for StateAbsence<P, D>
-where
-    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
-    D: Digest,
-    commitment::RangeOpening<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            predecessor: u.arbitrary()?,
-            successor: u.arbitrary()?,
-            opening: u.arbitrary()?,
-        })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<P, D> arbitrary::Arbitrary<'_> for StateOpening<P, D>
-where
-    P: PublicKey + for<'a> arbitrary::Arbitrary<'a>,
-    D: Digest,
-    commitment::Opening<D>: for<'a> arbitrary::Arbitrary<'a>,
-{
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            leaf: u.arbitrary()?,
-            proof: u.arbitrary()?,
-        })
-    }
-}
-
-impl<P: PublicKey, D: Digest> Write for StateOpening<P, D> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.leaf.write(buf);
-        self.proof.write(buf);
-    }
-}
-
-impl<P: PublicKey, D: Digest> EncodeSize for StateOpening<P, D> {
-    fn encode_size(&self) -> usize {
-        self.leaf.encode_size() + self.proof.encode_size()
-    }
-}
-
-impl<P: PublicKey, D: Digest> Read for StateOpening<P, D> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            leaf: StateLeaf::read(buf)?,
-            proof: commitment::Opening::read(buf)?,
-        })
-    }
-}
-
 /// Context-relative dual-signed acknowledgment evidence.
 ///
 /// The anchor, epoch, and operator key are reconstructed from the trusted close context, so the
@@ -305,7 +36,7 @@ pub struct AckWitness<P: PublicKey, D: Digest> {
     pub payer: P,
     /// Epoch-local batch sequence number.
     pub seq: u64,
-    /// Acknowledged lifetime cumulative debit endpoint.
+    /// Acknowledged epoch cumulative debit endpoint.
     pub cumulative_debit: u64,
     /// Acknowledged per-recipient vector root.
     pub send_root: VectorRoot<D>,
@@ -517,11 +248,11 @@ impl<P: PublicKey, D: Digest> ChangeAbsence<P, D> {
         if self
             .predecessor
             .as_ref()
-            .is_some_and(|leaf| leaf.account() >= account)
+            .is_some_and(|leaf| leaf.account().as_ref() >= account.as_ref())
             || self
                 .successor
                 .as_ref()
-                .is_some_and(|leaf| leaf.account() <= account)
+                .is_some_and(|leaf| leaf.account().as_ref() <= account.as_ref())
         {
             return Err(ChallengeError::LookupOrder);
         }
@@ -563,25 +294,19 @@ impl<P: PublicKey, D: Digest> Read for ChangeAbsence<P, D> {
     }
 }
 
-/// Compact debit resolution, retaining predecessor state only for an unchanged account.
+/// Public terminal debit authenticated by the epoch activity commitment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AccountLookup<P: PublicKey, D: Digest> {
     /// The account changed and exposes its compact terminal projection.
     Present(Box<ChangeOpening<D>>),
-    /// The account is unchanged and its predecessor debit remains authoritative.
-    Absent {
-        /// Predecessor-state membership or ordered-nonmembership proof.
-        state: Box<StateLookup<P, D>>,
-        /// Ordered proof that the account is absent from the change vector.
-        change: ChangeAbsence<P, D>,
-    },
+    /// The account has no public activity and therefore has epoch debit zero.
+    Absent(ChangeAbsence<P, D>),
 }
 
 impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
-    /// Verifies changed membership or unchanged predecessor-state resolution for `account`.
+    /// Verifies activity membership or absence for `account`.
     pub fn resolve<H: Hasher<Digest = D>>(
         &self,
-        predecessor_root: &VectorRoot<D>,
         change_root: &VectorRoot<D>,
         account: &P,
     ) -> Result<(u64, Option<AccountChange<P, D>>), ChallengeError> {
@@ -596,13 +321,9 @@ impl<P: PublicKey, D: Digest> AccountLookup<P, D> {
                 let leaf = AccountChange::from_value(account.clone(), opening.value);
                 Ok((leaf.terminal_debit(), Some(leaf)))
             }
-            Self::Absent { state, change } => {
+            Self::Absent(change) => {
                 change.resolve::<H>(change_root, account)?;
-                let state = state
-                    .resolve::<H>(predecessor_root, account)
-                    .map_err(|_| ChallengeError::LookupOrder)?
-                    .unwrap_or_else(AccountState::default);
-                Ok((state.cumulative_debit, None))
+                Ok((0, None))
             }
         }
     }
@@ -615,9 +336,8 @@ impl<P: PublicKey, D: Digest> Write for AccountLookup<P, D> {
                 1_u8.write(buf);
                 opening.write(buf);
             }
-            Self::Absent { state, change } => {
+            Self::Absent(change) => {
                 2_u8.write(buf);
-                state.write(buf);
                 change.write(buf);
             }
         }
@@ -629,7 +349,7 @@ impl<P: PublicKey, D: Digest> EncodeSize for AccountLookup<P, D> {
         u8::SIZE
             + match self {
                 Self::Present(opening) => opening.encode_size(),
-                Self::Absent { state, change } => state.encode_size() + change.encode_size(),
+                Self::Absent(change) => change.encode_size(),
             }
     }
 }
@@ -640,10 +360,7 @@ impl<P: PublicKey, D: Digest> Read for AccountLookup<P, D> {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             1 => Ok(Self::Present(Box::new(ChangeOpening::read(buf)?))),
-            2 => Ok(Self::Absent {
-                state: Box::new(StateLookup::read(buf)?),
-                change: ChangeAbsence::read(buf)?,
-            }),
+            2 => Ok(Self::Absent(ChangeAbsence::read(buf)?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -655,7 +372,7 @@ pub enum HigherEntryLookup<P: PublicKey, D: Digest> {
     /// The sender changed, so its child proof reconstructs the committed vector root.
     Present {
         /// Change value fields preceding the reconstructed vector root.
-        value: ChangeValueCore<D>,
+        value: ChangeValueCore,
         /// Membership opening under the change root.
         proof: commitment::Opening<D>,
         /// Membership or ordered absence under the reconstructed vector root.
@@ -854,6 +571,7 @@ pub fn adjudicate<H, P, D>(
     context: &CloseContext<P, D>,
     header: &Header<D>,
     roots: &RootBundle<D>,
+    amounts: &CloseAmounts,
     challenge: &Challenge<P, D>,
 ) -> Result<Verdict, ChallengeError>
 where
@@ -861,26 +579,23 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if !header.verify::<H, P>(context, roots) {
+    if !header.verify::<H, P>(context, roots, amounts) {
         return Err(ChallengeError::HeaderRoot);
     }
     match challenge {
         Challenge::HigherAckDebit { ack, payer } => {
             let body = ack.reconstruct(context)?;
-            let (terminal_debit, leaf) =
-                payer.resolve::<H>(context.predecessor_root(), &roots.change, &ack.payer)?;
+            let (terminal_debit, leaf) = payer.resolve::<H>(&roots.change, &ack.payer)?;
             if ack.cumulative_debit > terminal_debit {
                 return Ok(Verdict::Proven(ChallengeKind::HigherAckDebit));
             }
             if let Some(leaf) = leaf
-                && leaf.has_outgoing::<H>()
-                && !leaf.matches_outgoing::<H>(&body)
+                && leaf.has_outgoing()
+                && !leaf.matches_outgoing(context.payment(), &body)
             {
-                // A second countersigned body at the committed sequence is equivocation
-                // against the certified terminal. The fork challenge cannot reach this case:
-                // the posted corpus certifies the terminal through one aggregable
-                // countersignature per slice, so no individual countersignature of the
-                // committed body is extractable, and the certificate itself stands in for it.
+                // The close certificate authenticates the terminal body through the aggregate
+                // operator signature. A private countersignature on a different body at the
+                // same sequence proves equivocation against that certified terminal.
                 if ack.seq == leaf.terminal_seq() {
                     return Ok(Verdict::Proven(ChallengeKind::HigherAckDebit));
                 }
@@ -981,7 +696,6 @@ where
 /// Builds the payer lookup for a higher-debit challenge.
 pub fn account_lookup<H, P, D>(
     index: &ChallengeIndex<P, D>,
-    cache: &StateCache<P, D>,
     account: &P,
 ) -> Result<AccountLookup<P, D>, TransitionError>
 where
@@ -989,9 +703,6 @@ where
     P: PublicKey,
     D: Digest,
 {
-    if cache.root() != *index.predecessor_root() {
-        return Err(TransitionError::PredecessorRoot);
-    }
     match index.change_parts(account)? {
         ChangeParts::Present { leaf, proof } => {
             Ok(AccountLookup::Present(Box::new(ChangeOpening {
@@ -1003,18 +714,11 @@ where
             predecessor,
             successor,
             opening,
-        } => Ok(AccountLookup::Absent {
-            state: Box::new(
-                cache
-                    .lookup(account)
-                    .map_err(|_| TransitionError::PredecessorRoot)?,
-            ),
-            change: ChangeAbsence {
-                predecessor,
-                successor,
-                opening,
-            },
-        }),
+        } => Ok(AccountLookup::Absent(ChangeAbsence {
+            predecessor,
+            successor,
+            opening,
+        })),
     }
 }
 
@@ -1122,17 +826,13 @@ mod arbitrary_impls {
         P: PublicKey + arbitrary::Arbitrary<'a>,
         D: Digest + for<'b> arbitrary::Arbitrary<'b>,
         ChangeOpening<D>: arbitrary::Arbitrary<'a>,
-        StateLookup<P, D>: arbitrary::Arbitrary<'a>,
         ChangeAbsence<P, D>: arbitrary::Arbitrary<'a>,
     {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             if u.arbitrary()? {
                 Ok(Self::Present(Box::new(u.arbitrary()?)))
             } else {
-                Ok(Self::Absent {
-                    state: Box::new(u.arbitrary()?),
-                    change: u.arbitrary()?,
-                })
+                Ok(Self::Absent(u.arbitrary()?))
             }
         }
     }
@@ -1141,7 +841,6 @@ mod arbitrary_impls {
     where
         P: PublicKey + arbitrary::Arbitrary<'a>,
         D: Digest + for<'b> arbitrary::Arbitrary<'b>,
-        ChangeValueCore<D>: arbitrary::Arbitrary<'a>,
         commitment::Opening<D>: arbitrary::Arbitrary<'a>,
         OutTipLookup<P, D>: arbitrary::Arbitrary<'a>,
         ChangeAbsence<P, D>: arbitrary::Arbitrary<'a>,

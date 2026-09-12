@@ -1,6 +1,7 @@
 //! The operator role: application orchestration, the SQLite ledger, and RPC dispatch.
 
 mod actor;
+mod qmdb;
 pub(crate) mod rpc;
 mod store;
 

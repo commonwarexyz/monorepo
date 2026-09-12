@@ -1,6 +1,8 @@
 //! Custody flows: deposits, withdrawal authorization and escalation, and recovery.
 
-use super::{Agent, evidence::unusable_head, store::PendingWithdrawalClaim};
+use super::{
+    Agent, evidence::unusable_head, store::PendingWithdrawalClaim, wallet::settlement_status,
+};
 use crate::{
     chain::{
         client::{Chain, Client, EFFECT_ATTEMPTS, Env, POLL},
@@ -11,15 +13,14 @@ use crate::{
         },
     },
     operator::rpc as operator_rpc,
-    protocol::{DepositEvent, Key, identities},
+    protocol::{DepositEvent, Key, identities, settlement_config},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalAction},
-    commitment::VectorRoot,
+    qmdb::StateRoot,
 };
-use commonware_codec::Encode as _;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 #[cfg(not(test))]
 use rand::RngExt as _;
@@ -85,7 +86,7 @@ impl Agent {
 
         // Recovery at a frozen root requires an opening at that root: the one retained at
         // or refreshed to it by an earlier head read, or, for a wallet passive across the
-        // final finalization, one the slice holders open at the frozen head, which is the
+        // final finalization, one the validators open at the frozen head, which is the
         // faulted deployment's certified status root.
         let opening = match self.store.recovery_opening(&hard_fault.frozen_state_root)? {
             Some(opening) => opening,
@@ -107,8 +108,7 @@ impl Agent {
                     )?
             }
         };
-        let expected_custody = opening.leaf.state.balance;
-        let opening_digest = Sha256::hash(&[&opening.encode()]);
+        let expected_custody = opening.balance.get();
         let claim = SettlementTx::ClaimHardFault(ClaimHardFaultRequest {
             deployment: self.deployment,
             opening,
@@ -129,8 +129,8 @@ impl Agent {
             format!("the hard-fault claim earned no certified release (dry-run advice: {advice:?})")
         })?;
         ensure!(
-            record.opening == opening_digest,
-            "the hard-fault release consumed another opening"
+            record.root == hard_fault.frozen_state_root,
+            "the hard-fault release belongs to another frozen root"
         );
         let release = record.released;
         ensure!(
@@ -336,7 +336,7 @@ impl Agent {
 
                 // Retain a head opening before signing. It is not sent anywhere: if the
                 // deployment later hard-faults while frozen at this root, recovery needs it.
-                // The operator serves it first, and the slice holders when it does not.
+                // The operator serves it first, and the validators when it does not.
                 if self
                     .store
                     .recovery_opening(&status.state_root)
@@ -463,16 +463,46 @@ impl Agent {
             .pending_withdrawal
             .clone()
             .context("no signed withdrawal awaits escalation")?;
-        let root = VectorRoot {
+        let root = StateRoot {
             digest: *request.body().state_root(),
         };
         let opening = self
             .store
             .recovery_opening(&root)?
             .context("no retained head opening for the signed withdrawal")?;
+        let status = settlement_status(ctx, chain, self.deployment).await?;
+        ensure!(
+            status.state_root == root,
+            "the signed withdrawal reference root is no longer finalized"
+        );
+        let mut openings = vec![opening];
+        let first = status
+            .last_finalized
+            .map_or(Some(0), |last| last.checked_add(1))
+            .context("withdrawal epoch overflow")?;
+        let bound = settlement_config(&chain.genesis().timing())
+            .max_pending_epochs
+            .get();
+        for offset in 0..bound {
+            let epoch = first
+                .checked_add(offset as u64)
+                .context("withdrawal epoch overflow")?;
+            let Some(admitted) = chain.admitted(ctx, epoch).await? else {
+                break;
+            };
+            ensure!(
+                !admitted.finalized,
+                "the finalized withdrawal root advanced while gathering proofs"
+            );
+            openings.push(
+                self.holders
+                    .successor_opening(ctx, chain, request.account(), &admitted)
+                    .await?,
+            );
+        }
         let tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: request.clone(),
-            openings: vec![opening],
+            openings,
         });
         let advice = chain
             .deliver(ctx, &tx)

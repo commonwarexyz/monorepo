@@ -1,9 +1,7 @@
-//! Per-payer outgoing vectors and the recipient-major transpose.
+//! Per-payer outgoing vectors.
 //!
-//! A payer's epoch activity is one strictly recipient-sorted vector of cumulative entries whose
-//! sum equals its epoch debit advance. The operator's lazy collation re-sorts the union of all
-//! terminal vectors by (recipient, payer) into the transpose, whose per-recipient contiguous
-//! range sums are each row's credit delta.
+//! A payer's epoch activity is a vector of cumulative entries ordered by canonical recipient bytes.
+//! Its root authenticates the amount and payment count promised to each recipient.
 
 use crate::bajillion::{
     commitment::{self, VectorKind, VectorRoot},
@@ -13,31 +11,10 @@ use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
-    varint::UInt,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, lthash::LtHash};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_parallel::Sequential;
 use thiserror::Error;
-
-/// Domain prefix for accumulator edge keys.
-const EDGE_KEY_HASH_PREFIX: &[u8] = b"_COMMONWARE_CLEARING_EDGE_KEY";
-
-/// Folds one canonical edge key into a permutation accumulator.
-pub(crate) fn accumulate_edge<P: PublicKey>(
-    accumulator: &mut LtHash,
-    payer: &P,
-    recipient: &P,
-    cumulative: u64,
-    count: u64,
-) {
-    let mut encoded = Vec::with_capacity(EDGE_KEY_HASH_PREFIX.len() + P::SIZE * 2 + u64::SIZE * 2);
-    encoded.extend_from_slice(EDGE_KEY_HASH_PREFIX);
-    payer.write(&mut encoded);
-    recipient.write(&mut encoded);
-    cumulative.write(&mut encoded);
-    count.write(&mut encoded);
-    accumulator.add(&encoded);
-}
 
 /// One cumulative per-recipient entry of a payer's outgoing vector.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -93,7 +70,7 @@ pub struct OutVector<P: PublicKey> {
 }
 
 impl<P: PublicKey> OutVector<P> {
-    /// Creates a vector from strictly recipient-sorted, unique entries.
+    /// Creates a vector from entries with strictly increasing canonical recipient bytes.
     pub fn new(epoch: Epoch, payer: P, entries: Vec<OutEntry<P>>) -> Result<Self, Error> {
         let vector = Self {
             epoch,
@@ -126,7 +103,7 @@ impl<P: PublicKey> OutVector<P> {
         &self.payer
     }
 
-    /// Returns the strictly recipient-sorted entries.
+    /// Returns entries ordered by canonical recipient bytes.
     #[must_use]
     pub fn entries(&self) -> &[OutEntry<P>] {
         &self.entries
@@ -139,7 +116,7 @@ impl<P: PublicKey> OutVector<P> {
         if self
             .entries
             .windows(2)
-            .any(|pair| pair[0].recipient >= pair[1].recipient)
+            .any(|pair| pair[0].recipient.as_ref() >= pair[1].recipient.as_ref())
         {
             return Err(Error::NonCanonicalOrder);
         }
@@ -183,26 +160,6 @@ impl<P: PublicKey> OutVector<P> {
         self.commitment::<H, D>().map(|tree| tree.root())
     }
 
-    /// Folds this vector's edge keys into a fresh accumulator partial.
-    ///
-    /// A sender maintains this partial incrementally as its entries change, so the closer can
-    /// lane-sum per-payer partials into coverage boundaries instead of re-expanding every edge.
-    /// Validators never consume partials: they fold raw entries from their dealt slices.
-    #[must_use]
-    pub fn accumulator(&self) -> LtHash {
-        let mut partial = LtHash::new();
-        for entry in &self.entries {
-            accumulate_edge(
-                &mut partial,
-                &self.payer,
-                &entry.recipient,
-                entry.cumulative,
-                entry.count,
-            );
-        }
-        partial
-    }
-
     /// Produces either a membership opening or an adjacent-neighbor absence proof.
     pub fn lookup<H, D>(&self, recipient: &P) -> Result<OutTipLookup<P, D>, Error>
     where
@@ -212,7 +169,7 @@ impl<P: PublicKey> OutVector<P> {
         let tree = self.commitment::<H, D>()?;
         match self
             .entries
-            .binary_search_by(|entry| entry.recipient.cmp(recipient))
+            .binary_search_by(|entry| entry.recipient.as_ref().cmp(recipient.as_ref()))
         {
             Ok(position) => Ok(OutTipLookup::Present {
                 cumulative: self.entries[position].cumulative,
@@ -325,13 +282,11 @@ impl<P: PublicKey, D: Digest> OutTipLookup<P, D> {
                 opening
                     .bracket(predecessor.is_some(), 0, successor.is_some())
                     .ok_or(Error::LookupOrder)?;
-                if predecessor
-                    .as_ref()
-                    .is_some_and(|entry| entry.recipient >= *recipient || entry.validate().is_err())
-                    || successor.as_ref().is_some_and(|entry| {
-                        entry.recipient <= *recipient || entry.validate().is_err()
-                    })
-                {
+                if predecessor.as_ref().is_some_and(|entry| {
+                    entry.recipient.as_ref() >= recipient.as_ref() || entry.validate().is_err()
+                }) || successor.as_ref().is_some_and(|entry| {
+                    entry.recipient.as_ref() <= recipient.as_ref() || entry.validate().is_err()
+                }) {
                     return Err(Error::LookupOrder);
                 }
                 let encoded = predecessor
@@ -424,142 +379,7 @@ impl<P: PublicKey, D: Digest> EncodeSize for OutTipLookup<P, D> {
     }
 }
 
-/// One recipient-major collated edge terminal.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct TransposeEntry<P: PublicKey> {
-    /// Credited recipient, the major sort key.
-    pub recipient: P,
-    /// Paying account, the minor sort key.
-    pub payer: P,
-    /// Epoch-cumulative credit on this edge.
-    pub cumulative: Amount,
-    /// Number of payments on this edge this epoch.
-    pub count: u64,
-}
-
-impl<P: PublicKey> TransposeEntry<P> {
-    /// Returns whether the entry endpoint admits a positive-payment completion.
-    pub const fn validate(&self) -> Result<(), Error> {
-        if self.cumulative == 0 || self.count == 0 || self.cumulative < self.count {
-            return Err(Error::InfeasibleEntry);
-        }
-        Ok(())
-    }
-}
-
-impl<P: PublicKey> Write for TransposeEntry<P> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.recipient.write(buf);
-        self.payer.write(buf);
-        self.cumulative.write(buf);
-        self.count.write(buf);
-    }
-}
-
-impl<P: PublicKey> FixedSize for TransposeEntry<P> {
-    const SIZE: usize = P::SIZE * 2 + u64::SIZE * 2;
-}
-
-impl<P: PublicKey> Read for TransposeEntry<P> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            recipient: P::read(buf)?,
-            payer: P::read(buf)?,
-            cumulative: u64::read(buf)?,
-            count: u64::read(buf)?,
-        })
-    }
-}
-
-/// Writes a transpose range in recipient-grouped form.
-///
-/// The recipient-major sort makes each recipient's entries one contiguous group, so the wire
-/// form carries each recipient key once per group instead of once per entry: a group count,
-/// then per group the recipient, an entry count, and the per-entry (payer, cumulative, count)
-/// remainders with the cumulative and count as varints. Any contiguous range encodes this
-/// way, including ranges that start or end inside a group. Ordering is not re-validated
-/// here: decoded ranges flow into the existing canonical-sort validation.
-pub fn write_transpose<P: PublicKey>(entries: &[TransposeEntry<P>], buf: &mut impl BufMut) {
-    let mut runs = 0_usize;
-    let mut index = 0;
-    while index < entries.len() {
-        let mut end = index + 1;
-        while end < entries.len() && entries[end].recipient == entries[index].recipient {
-            end += 1;
-        }
-        runs += 1;
-        index = end;
-    }
-    runs.write(buf);
-    let mut index = 0;
-    while index < entries.len() {
-        let start = index;
-        while index < entries.len() && entries[index].recipient == entries[start].recipient {
-            index += 1;
-        }
-        entries[start].recipient.write(buf);
-        (index - start).write(buf);
-        for entry in &entries[start..index] {
-            entry.payer.write(buf);
-            UInt(entry.cumulative).write(buf);
-            UInt(entry.count).write(buf);
-        }
-    }
-}
-
-/// Reads a recipient-grouped transpose range of at most `max` entries.
-pub fn read_transpose<P: PublicKey>(
-    buf: &mut impl Buf,
-    max: usize,
-) -> Result<Vec<TransposeEntry<P>>, CodecError> {
-    let runs = usize::read_cfg(buf, &RangeCfg::new(..=max))?;
-    let mut entries = Vec::new();
-    for _ in 0..runs {
-        let recipient = P::read(buf)?;
-        let remaining = max
-            .checked_sub(entries.len())
-            .filter(|remaining| *remaining > 0)
-            .ok_or(CodecError::Invalid("Transpose", "interval exceeds bound"))?;
-        let len = usize::read_cfg(buf, &RangeCfg::new(1..=remaining))?;
-        entries.reserve(len);
-        for _ in 0..len {
-            entries.push(TransposeEntry {
-                recipient: recipient.clone(),
-                payer: P::read(buf)?,
-                cumulative: UInt::read(buf)?.into(),
-                count: UInt::read(buf)?.into(),
-            });
-        }
-    }
-    Ok(entries)
-}
-
-/// Returns the exact recipient-grouped encoded size of a transpose range.
-pub fn transpose_encode_size<P: PublicKey>(entries: &[TransposeEntry<P>]) -> usize {
-    let mut runs = 0_usize;
-    let mut size = 0_usize;
-    let mut index = 0;
-    while index < entries.len() {
-        let start = index;
-        while index < entries.len() && entries[index].recipient == entries[start].recipient {
-            index += 1;
-        }
-        runs += 1;
-        size += P::SIZE
-            + (index - start).encode_size()
-            + entries[start..index]
-                .iter()
-                .map(|entry| {
-                    P::SIZE + UInt(entry.cumulative).encode_size() + UInt(entry.count).encode_size()
-                })
-                .sum::<usize>();
-    }
-    runs.encode_size() + size
-}
-
-/// Errors returned while constructing or verifying outgoing vectors and transposes.
+/// Errors returned while constructing or verifying outgoing vectors.
 #[derive(Debug, Error)]
 pub enum Error {
     /// The outgoing vector exceeds the protocol bound.
@@ -588,7 +408,6 @@ pub enum Error {
 #[cfg(feature = "arbitrary")]
 mod arbitrary_impls {
     use super::*;
-    use alloc::collections::BTreeSet;
 
     impl<'a, P> arbitrary::Arbitrary<'a> for OutVector<P>
     where
@@ -597,10 +416,12 @@ mod arbitrary_impls {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             let epoch = u.arbitrary()?;
             let payer = u.arbitrary()?;
-            let mut recipients = BTreeSet::new();
+            let mut recipients = Vec::new();
             for _ in 0..u.int_in_range(0..=4_usize)? {
-                recipients.insert(u.arbitrary::<P>()?);
+                recipients.push(u.arbitrary::<P>()?);
             }
+            recipients.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
+            recipients.dedup_by(|a, b| a.as_ref() == b.as_ref());
             let entries = recipients
                 .into_iter()
                 .map(|recipient| {
@@ -657,20 +478,6 @@ mod arbitrary_impls {
             })
         }
     }
-
-    impl<'a, P> arbitrary::Arbitrary<'a> for TransposeEntry<P>
-    where
-        P: PublicKey + arbitrary::Arbitrary<'a>,
-    {
-        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-            Ok(Self {
-                recipient: u.arbitrary()?,
-                payer: u.arbitrary()?,
-                cumulative: u.arbitrary()?,
-                count: u.arbitrary()?,
-            })
-        }
-    }
 }
 
 #[cfg(test)]
@@ -722,56 +529,6 @@ mod tests {
         );
         let lookup = vector.lookup::<Sha256, ShaDigest>(&missing).unwrap();
         assert_eq!(lookup.resolve::<Sha256>(&root, &missing).unwrap(), (0, 0));
-    }
-
-    #[test]
-    fn transpose_codec_round_trips_and_sizes_exactly() {
-        let mut recipients = (0..3u64).map(account).collect::<Vec<_>>();
-        recipients.sort_unstable();
-        let mut payers = (10..14u64).map(account).collect::<Vec<_>>();
-        payers.sort_unstable();
-        let mut entries = Vec::new();
-        for (r, recipient) in recipients.iter().enumerate() {
-            for (p, payer) in payers.iter().enumerate().take(r + 2) {
-                entries.push(TransposeEntry {
-                    recipient: recipient.clone(),
-                    payer: payer.clone(),
-                    cumulative: 5 + p as u64,
-                    count: 1 + p as u64,
-                });
-            }
-        }
-        // A full range and a range that starts and ends inside groups.
-        for interval in [&entries[..], &entries[1..entries.len() - 1]] {
-            let mut buf = Vec::new();
-            write_transpose(interval, &mut buf);
-            assert_eq!(buf.len(), transpose_encode_size(interval));
-            let decoded = read_transpose::<VerifyingKey>(&mut &buf[..], entries.len()).unwrap();
-            assert_eq!(decoded, interval);
-        }
-        assert!(
-            transpose_encode_size(&entries) < entries.len() * TransposeEntry::<VerifyingKey>::SIZE
-        );
-    }
-
-    #[test]
-    fn transpose_codec_rejects_empty_runs_and_overflow() {
-        let entry = TransposeEntry {
-            recipient: account(1),
-            payer: account(2),
-            cumulative: 3,
-            count: 1,
-        };
-        let mut buf = Vec::new();
-        write_transpose(std::slice::from_ref(&entry), &mut buf);
-        assert!(read_transpose::<VerifyingKey>(&mut &buf[..], 0).is_err());
-
-        // A group claiming zero entries is rejected by the length range.
-        let mut forged = Vec::new();
-        1_usize.write(&mut forged);
-        entry.recipient.write(&mut forged);
-        0_usize.write(&mut forged);
-        assert!(read_transpose::<VerifyingKey>(&mut &forged[..], 8).is_err());
     }
 
     #[test]

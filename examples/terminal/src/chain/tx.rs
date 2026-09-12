@@ -51,16 +51,14 @@
 //! | `ClaimHardFault` | anyone holding the account's frozen-root opening; funds go to the opened account and its signed withdrawal | the state opening against the frozen root | consumed opening position and its release record (`PositionConflict`) |
 //! | `ClaimPendingDeposit` | anyone (the refund is fixed to the account) | the chain's own staged-deposit record after a fault | consumed staged deposit and its refund record |
 
-use crate::protocol::{DepositEvent, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, SettlementResult};
+use crate::protocol::{DepositEvent, Key, MAX_DESTINATION_BYTES, SettlementResult};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
     admission::bls12381::Certificate,
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalBatch},
-    challenge::StateOpening,
     commitment::VectorRoot,
-    transition::{
-        BatchId, ExternalPayoutClaim, Header, RootBundle, TerminalProof, WithdrawalClaim,
-    },
+    qmdb::StateOpening,
+    transition::{BatchId, CloseAmounts, ExternalPayoutClaim, Header, RootBundle, WithdrawalClaim},
 };
 use commonware_codec::{
     Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -175,13 +173,7 @@ impl Read for ClaimHardFaultRequest {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let deployment = Digest::read(buf)?;
-        let opening = StateOpening::read(buf)?;
-        if opening.proof.proof.leaf_count > MAX_ACCOUNTS as u32 {
-            return Err(CodecError::Invalid(
-                "clearing_terminal::ClaimHardFaultRequest",
-                "state opening exceeds the terminal account bound",
-            ));
-        }
+        let opening = StateOpening::read_cfg(buf, &super::query::MAX_PROOF_DIGESTS)?;
         Ok(Self {
             deployment,
             opening,
@@ -282,7 +274,10 @@ impl Read for QueueWithdrawalRequest {
             request: SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
             openings: Vec::<StateOpening<Key, Digest>>::read_cfg(
                 buf,
-                &(RangeCfg::new(0..=MAX_STATE_OPENINGS), ()),
+                &(
+                    RangeCfg::new(0..=MAX_STATE_OPENINGS),
+                    super::query::MAX_PROOF_DIGESTS,
+                ),
             )?,
         })
     }
@@ -361,7 +356,10 @@ impl Read for RegisterEpochRequest {
             )?,
             openings: Vec::<StateOpening<Key, Digest>>::read_cfg(
                 buf,
-                &(RangeCfg::new(0..=MAX_BATCH_ITEMS), ()),
+                &(
+                    RangeCfg::new(0..=MAX_BATCH_ITEMS),
+                    super::query::MAX_PROOF_DIGESTS,
+                ),
             )?,
             signature: Signature::read(buf)?,
         })
@@ -382,7 +380,7 @@ pub(crate) struct AdmitRequest {
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
-    pub(crate) terminal_proof: TerminalProof<Digest>,
+    pub(crate) amounts: CloseAmounts,
     pub(crate) certificate: Certificate,
 }
 
@@ -396,7 +394,7 @@ impl From<&SettlementResult> for AdmitRequest {
             withdrawals: result.withdrawals.clone(),
             header: result.header,
             roots: result.roots,
-            terminal_proof: result.terminal_proof.clone(),
+            amounts: result.amounts,
             certificate: result.certificate.clone(),
         }
     }
@@ -411,7 +409,7 @@ impl Write for AdmitRequest {
         self.withdrawals.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
-        self.terminal_proof.write(buf);
+        self.amounts.write(buf);
         self.certificate.write(buf);
     }
 }
@@ -425,7 +423,7 @@ impl EncodeSize for AdmitRequest {
             + self.withdrawals.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
-            + self.terminal_proof.encode_size()
+            + self.amounts.encode_size()
             + self.certificate.encode_size()
     }
 }
@@ -448,7 +446,7 @@ impl Read for AdmitRequest {
             )?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
-            terminal_proof: TerminalProof::read(buf)?,
+            amounts: CloseAmounts::read(buf)?,
             certificate: Certificate::read_cfg(buf, &CERTIFICATE_PARTICIPANTS)?,
         };
         if request.certificate.signers.len() != CERTIFICATE_PARTICIPANTS {
@@ -690,7 +688,23 @@ mod tests {
         // A genuine higher-entry challenge over a committed close: the
         // retained acknowledgment witness with its entry opening plus the
         // composed sender lookup, the family the bound is sized for.
-        let fraud = omitting_close(&mut TestRng::new(41), 11, 12).unwrap();
+        let fraud = commonware_runtime::Runner::start(
+            commonware_runtime::deterministic::Runner::default(),
+            |context| async move {
+                let strategy = commonware_parallel::Rayon::new(NonZeroUsize::MIN).unwrap();
+                let config = crate::protocol::state_config("bound-proof", &context, strategy);
+                let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256, _>::init(
+                    context,
+                    config,
+                    crate::protocol::genesis_balances(&crate::protocol::deployments()[0]).unwrap(),
+                )
+                .await
+                .unwrap();
+                Box::pin(omitting_close(state, &mut TestRng::new(41), 11, 12))
+                    .await
+                    .unwrap()
+            },
+        );
         let context = fraud.result.payment_context.clone();
         let held = &fraud.held_receipt;
         let genuine: Challenge<Key, Digest> = Challenge::HigherAckEntry {

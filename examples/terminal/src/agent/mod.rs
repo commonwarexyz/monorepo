@@ -3,6 +3,8 @@
 mod claim;
 mod custody;
 mod evidence;
+#[cfg(test)]
+mod fixtures;
 mod pay;
 mod receive;
 mod store;

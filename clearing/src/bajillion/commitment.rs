@@ -14,22 +14,16 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::bmt;
 use thiserror::Error;
 
-const STATE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_STATE_LEAF";
-const STATE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_STATE_ROOT";
 const CHANGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_LEAF";
 const CHANGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_CHANGE_ROOT";
 const DEPOSIT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_LEAF";
 const DEPOSIT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_DEPOSIT_ROOT";
 const WITHDRAWAL_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_LEAF";
 const WITHDRAWAL_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_ROOT";
-const COVERAGE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_COVERAGE_LEAF";
-const COVERAGE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_COVERAGE_ROOT";
 const WITHDRAWAL_OUTPUT_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_LEAF";
 const WITHDRAWAL_OUTPUT_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_WITHDRAWAL_OUTPUT_ROOT";
 const OUT_ENTRY_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_OUT_ENTRY_LEAF";
 const OUT_ENTRY_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_OUT_ENTRY_ROOT";
-const TRANSPOSE_LEAF_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_TRANSPOSE_LEAF";
-const TRANSPOSE_ROOT_DOMAIN: &[u8] = b"_COMMONWARE_CLEARING_TRANSPOSE_ROOT";
 
 /// Maximum number of values in a committed vector or disclosed in one proof.
 ///
@@ -44,48 +38,36 @@ pub const MAX_VECTOR_LENGTH: u32 = 1 << 24;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum VectorKind {
-    /// Complete account-state vector.
-    State = 1,
     /// Sorted vector of changed-account guards.
     Change = 2,
     /// Chain-sealed deposit vector.
     Deposit = 3,
     /// Chain-sealed withdrawal vector.
     Withdrawal = 4,
-    /// Gap-free deterministic proof-slice boundaries.
-    Coverage = 5,
     /// Validator-derived withdrawal outputs in request order.
     WithdrawalOutput = 6,
     /// Sorted per-payer cumulative outgoing entries.
     OutEntry = 7,
-    /// Globally sorted recipient-major transpose entries.
-    Transpose = 8,
 }
 
 impl VectorKind {
     const fn leaf_domain(self) -> &'static [u8] {
         match self {
-            Self::State => STATE_LEAF_DOMAIN,
             Self::Change => CHANGE_LEAF_DOMAIN,
             Self::Deposit => DEPOSIT_LEAF_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_LEAF_DOMAIN,
-            Self::Coverage => COVERAGE_LEAF_DOMAIN,
             Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_LEAF_DOMAIN,
             Self::OutEntry => OUT_ENTRY_LEAF_DOMAIN,
-            Self::Transpose => TRANSPOSE_LEAF_DOMAIN,
         }
     }
 
     const fn root_domain(self) -> &'static [u8] {
         match self {
-            Self::State => STATE_ROOT_DOMAIN,
             Self::Change => CHANGE_ROOT_DOMAIN,
             Self::Deposit => DEPOSIT_ROOT_DOMAIN,
             Self::Withdrawal => WITHDRAWAL_ROOT_DOMAIN,
-            Self::Coverage => COVERAGE_ROOT_DOMAIN,
             Self::WithdrawalOutput => WITHDRAWAL_OUTPUT_ROOT_DOMAIN,
             Self::OutEntry => OUT_ENTRY_ROOT_DOMAIN,
-            Self::Transpose => TRANSPOSE_ROOT_DOMAIN,
         }
     }
 }
@@ -101,14 +83,11 @@ impl Read for VectorKind {
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            1 => Ok(Self::State),
             2 => Ok(Self::Change),
             3 => Ok(Self::Deposit),
             4 => Ok(Self::Withdrawal),
-            5 => Ok(Self::Coverage),
             6 => Ok(Self::WithdrawalOutput),
             7 => Ok(Self::OutEntry),
-            8 => Ok(Self::Transpose),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -121,17 +100,13 @@ impl FixedSize for VectorKind {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VectorKind {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(1..=8)? {
-            1 => Self::State,
-            2 => Self::Change,
-            3 => Self::Deposit,
-            4 => Self::Withdrawal,
-            5 => Self::Coverage,
-            6 => Self::WithdrawalOutput,
-            7 => Self::OutEntry,
-            8 => Self::Transpose,
-            _ => unreachable!("range contains every vector kind"),
-        })
+        Ok(*u.choose(&[
+            Self::Change,
+            Self::Deposit,
+            Self::Withdrawal,
+            Self::WithdrawalOutput,
+            Self::OutEntry,
+        ])?)
     }
 }
 
@@ -750,29 +725,6 @@ impl<D: Digest> RangeOpening<D> {
         }
     }
 
-    /// Verifies the covered leaves against a domain-separated root, hashing the tree levels
-    /// with `strategy`. The leaves must be the covered values in position order, hashed as
-    /// [`Self::leaves_with`] hashes them, so a caller that derives the values in parallel can
-    /// hash each where it is produced.
-    pub(crate) fn verify_leaves_with<H>(
-        &self,
-        kind: VectorKind,
-        root: &VectorRoot<D>,
-        leaves: &[D],
-        strategy: &impl Strategy,
-    ) -> Result<(), Error>
-    where
-        H: Hasher<Digest = D>,
-    {
-        self.validate_shape()?;
-        bound(self.start, self.proof.leaf_count, leaves.len())?;
-        if self.root_from_leaves::<H>(kind, leaves, strategy)? == *root {
-            Ok(())
-        } else {
-            Err(Error::InvalidOpening)
-        }
-    }
-
     /// Narrows this opening to the `sub_count` covered values starting at `sub_start`.
     ///
     /// `encoded_values` are the values this opening covers in position order, exactly as
@@ -1118,11 +1070,11 @@ mod tests {
     #[test]
     fn roots_bind_kind_length_and_value_order() {
         let values = [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()];
-        let state = tree(VectorKind::State, &values).root();
+        let state = tree(VectorKind::Deposit, &values).root();
         let change = tree(VectorKind::Change, &values).root();
-        let shorter = tree(VectorKind::State, &values[..2]).root();
+        let shorter = tree(VectorKind::Deposit, &values[..2]).root();
         let reordered = tree(
-            VectorKind::State,
+            VectorKind::Deposit,
             &[b"b".as_slice(), b"a".as_slice(), b"c".as_slice()],
         )
         .root();
@@ -1130,8 +1082,8 @@ mod tests {
         assert_ne!(state.digest, shorter.digest);
         assert_ne!(state.digest, reordered.digest);
         assert_ne!(
-            empty_root::<Sha256>(VectorKind::State).digest,
-            empty_root::<Sha256>(VectorKind::Deposit).digest
+            empty_root::<Sha256>(VectorKind::Deposit).digest,
+            empty_root::<Sha256>(VectorKind::Withdrawal).digest
         );
     }
 
@@ -1247,7 +1199,7 @@ mod tests {
 
     #[test]
     fn open_matches_direct_opening_for_every_range() {
-        for kind in [VectorKind::State, VectorKind::Transpose] {
+        for kind in [VectorKind::Deposit, VectorKind::OutEntry] {
             for len in 1..=40 {
                 let values = encoded(kind, len);
                 let tree = tree_of(kind, &values);
@@ -1273,7 +1225,7 @@ mod tests {
 
     #[test]
     fn narrow_matches_direct_range_opening_for_every_sub_range() {
-        for kind in [VectorKind::State, VectorKind::Transpose] {
+        for kind in [VectorKind::Deposit, VectorKind::OutEntry] {
             for len in 1..=16 {
                 let values = encoded(kind, len);
                 let tree = tree_of(kind, &values);

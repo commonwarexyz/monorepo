@@ -745,7 +745,6 @@ mod tests {
                     .lock()
                     .payment_head(&wallet.public_key())
                     .unwrap()
-                    .state
                     .balance,
                 93
             );
@@ -960,14 +959,14 @@ mod tests {
                 let mut chain = client(&context, &control);
                 move |operator_context| async move {
                     // The head read stages under the placeholder context, the
-                    // first acceptance registers (moving the anchor to the
-                    // chain-assigned deadlines) and answers the corrective,
-                    // and the re-signed acceptance commits but its response
-                    // is lost.
+                    // first acceptance registers and answers the corrective.
+                    // The wallet authenticates that old context cannot commit,
+                    // reads the new head, and loses the accepted retry's response.
                     let mut accepted = None;
                     for expected_method in [
                         operator_rpc::METHOD_PAYMENT_HEAD,
                         operator_rpc::METHOD_ACCEPT_SEND,
+                        operator_rpc::METHOD_PAYMENT_HEAD,
                         operator_rpc::METHOD_ACCEPT_SEND,
                     ] {
                         let (_, mut sink, mut stream) = operator_listener.accept().await.unwrap();
@@ -1030,12 +1029,15 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(retained_opening_count, 1);
-            let settled_count = agent_database
-                .query_row("SELECT COUNT(*) FROM agent_payments", [], |row| {
-                    row.get::<_, i64>(0)
-                })
+            let concluded = agent_database
+                .query_row(
+                    "SELECT COUNT(*), SUM(state = 5) FROM agent_payments",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
                 .unwrap();
-            assert_eq!(settled_count, 0);
+            // Only the retired pre-registration intent is concluded; the accepted send remains pending.
+            assert_eq!(concluded, (1, 1));
             let (persisted_authorization, persisted_entries) = agent_database
                 .query_row(
                     "SELECT authorization, entries FROM agent_pending_payment",
@@ -1307,15 +1309,7 @@ mod tests {
             .await
             .unwrap();
             acked.await.unwrap();
-            assert_eq!(
-                operator
-                    .lock()
-                    .payment_head(&account)
-                    .unwrap()
-                    .state
-                    .balance,
-                107
-            );
+            assert_eq!(operator.lock().payment_head(&account).unwrap().balance, 107);
             drop(operator);
 
             // A redelivery whose acknowledgement was itself not durable is a
@@ -1337,15 +1331,7 @@ mod tests {
             .unwrap();
             acked.await.unwrap();
             assert!(staged.is_empty(), "a replayed event staged a new credit");
-            assert_eq!(
-                operator
-                    .lock()
-                    .payment_head(&account)
-                    .unwrap()
-                    .state
-                    .balance,
-                107
-            );
+            assert_eq!(operator.lock().payment_head(&account).unwrap().balance, 107);
 
             // An included but rejected transaction earns no custody record,
             // so the observer skips it: the block still acknowledges, and
@@ -1370,15 +1356,7 @@ mod tests {
             .unwrap();
             acked.await.unwrap();
             assert!(staged.is_empty());
-            assert_eq!(
-                operator
-                    .lock()
-                    .payment_head(&account)
-                    .unwrap()
-                    .state
-                    .balance,
-                107
-            );
+            assert_eq!(operator.lock().payment_head(&account).unwrap().balance, 107);
         });
     }
 

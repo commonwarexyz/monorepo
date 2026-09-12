@@ -1,10 +1,18 @@
 use super::*;
 use crate::bajillion::{
-    admission::{assigned_slice_spans, seal},
+    admission::seal,
+    challenge::{AckWitness, EntryWitness, account_lookup, higher_entry_lookup},
     model::settlement as spec,
-    vector::OutTipLookup,
+    payment::{SendAuthorization, VECTOR_ACK_AGGREGATE_NAMESPACE, VectorAck, VectorSendBody},
+    qmdb::account_key,
+    state::SettlementOutput,
+    transition::{ChallengeIndex, OperatorVariant, Terminal, prepare_close_with_strategy},
+    vector::{OutEntry, OutTipLookup, OutVector},
 };
+use commonware_cryptography::bls12381::primitives::ops::sign_message;
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
+use commonware_parallel::Sequential;
+use commonware_utils::test_rng;
 
 const ACCOUNTS: [spec::Account; 3] = [
     spec::Account::Alice,
@@ -53,33 +61,20 @@ fn spec_batch(registration: spec::RegistrationId) -> spec::Batch {
     }
 }
 
-// One acknowledged payment from `payer` to `recipient` under the registered deposits and
-// withdrawals. A queued amount releases with the production coverage rule: the requested
-// amount releases exactly when the payer's row tail covers it and nothing otherwise. An
-// absent recipient without a staged deposit classifies as an external payout.
-#[allow(clippy::too_many_arguments)]
-fn refined_payment_close(
-    cache: &TestCache,
+// Signed epoch activity is the source of both payer debit and recipient credit. Production
+// preparation derives balances and settlement outputs from this terminal and the boundaries.
+fn refined_payment(
     context: &TestContext,
     operator_ack: &BlsPrivate,
     payer: &SigningKey,
     recipient: &SigningKey,
-    deposits: &TestDeposits,
-    withdrawals: &TestWithdrawals,
     amount: u64,
-) -> (Built, TestCache) {
-    let epoch = context.payment().epoch();
-    let payer_key = payer.public_key();
-    let recipient_key = recipient.public_key();
-    let payer_predecessor = cache.opening(&payer_key).unwrap().leaf.state;
-    let recipient_predecessor = cache
-        .opening(&recipient_key)
-        .map_or_else(|_| AccountState::default(), |opening| opening.leaf.state);
-    let out_vector = OutVector::new(
-        epoch,
-        payer_key.clone(),
+) -> Terminal<VerifyingKey, ShaDigest> {
+    let vector = OutVector::new(
+        context.payment().epoch(),
+        payer.public_key(),
         vec![OutEntry {
-            recipient: recipient_key.clone(),
+            recipient: recipient.public_key(),
             cumulative: amount,
             count: 1,
         }],
@@ -87,130 +82,48 @@ fn refined_payment_close(
     .unwrap();
     let body = VectorSendBody::new(
         context.payment(),
-        payer_key.clone(),
+        payer.public_key(),
         1,
-        payer_predecessor
-            .cumulative_debit
-            .checked_add(amount)
-            .unwrap(),
-        out_vector.root::<Sha256, ShaDigest>().unwrap(),
+        amount,
+        vector.root::<Sha256, ShaDigest>().unwrap(),
     );
     let operator_signature = sign_message::<OperatorVariant>(
         operator_ack,
         VECTOR_ACK_AGGREGATE_NAMESPACE,
         body.encode().as_ref(),
     );
-    let outgoing = SendAuthorization::sign(body, payer);
-    let transpose = vec![TransposeEntry {
-        recipient: recipient_key.clone(),
-        payer: payer_key.clone(),
-        cumulative: amount,
-        count: 1,
-    }];
-
-    let payer_request = withdrawals.request_for(&payer_key);
-    let payer_tail = payer_predecessor
-        .balance
-        .checked_add(deposits.amount_for(&payer_key))
-        .and_then(|balance| balance.checked_sub(amount))
-        .unwrap();
-    let payer_applied = payer_request.map_or(0, |request| match request.body().action() {
-        WithdrawalAction::Amount(requested) if requested.get() <= payer_tail => requested.get(),
-        WithdrawalAction::Amount(_) => 0,
-        WithdrawalAction::Close => payer_tail,
-    });
-    let payer_balance = payer_tail - payer_applied;
-    let recipient_successor = if recipient_predecessor.active {
-        AccountState {
-            balance: recipient_predecessor
-                .balance
-                .checked_add(deposits.amount_for(&recipient_key))
-                .and_then(|balance| balance.checked_add(amount))
-                .unwrap(),
-            cumulative_credit: recipient_predecessor
-                .cumulative_credit
-                .checked_add(amount)
-                .unwrap(),
-            receipt_count: recipient_predecessor.receipt_count.checked_add(1).unwrap(),
-            ..recipient_predecessor
-        }
-    } else {
-        AccountState {
-            cumulative_credit: amount,
-            receipt_count: 1,
-            ..AccountState::default()
-        }
-    };
-    let mut rows = vec![
-        (
-            AccountRow {
-                account: payer_key,
-                predecessor: payer_predecessor,
-                successor: AccountState {
-                    balance: payer_balance,
-                    active: payer_balance > 0,
-                    cumulative_debit: payer_predecessor
-                        .cumulative_debit
-                        .checked_add(amount)
-                        .unwrap(),
-                    ..payer_predecessor
-                },
-                outgoing: Some(outgoing),
-                output: payer_request.map_or(SettlementOutput::None, |_| {
-                    SettlementOutput::Withdrawal(payer_applied)
-                }),
-                prefix: Prefix::default(),
-            },
-            out_vector,
-            Some(operator_signature),
-        ),
-        (
-            AccountRow {
-                account: recipient_key,
-                predecessor: recipient_predecessor,
-                successor: recipient_successor,
-                outgoing: None,
-                output: SettlementOutput::None,
-                prefix: Prefix::default(),
-            },
-            OutVector::empty(epoch, recipient.public_key()),
-            None,
-        ),
-    ];
-    rows.sort_unstable_by(|left, right| left.0.account.cmp(&right.0.account));
-    let mut prefix = Prefix::default();
-    for (row, vector, _) in &mut rows {
-        let (debit, credit, receipts) = row.checked_deltas().unwrap();
-        let deposit = deposits.amount_for(&row.account);
-        let payout = if row.predecessor.active || deposit != 0 {
-            0
-        } else {
-            credit
-        };
-        if payout != 0 {
-            row.output = SettlementOutput::ExternalPayout(payout);
-        }
-        let withdrawal = match row.output {
-            SettlementOutput::Withdrawal(applied) => applied,
-            _ => 0,
-        };
-        prefix = prefix
-            .checked_extend(Prefix {
-                deposit,
-                debit,
-                credit,
-                payout,
-                withdrawal,
-                withdrawal_count: u64::from(matches!(row.output, SettlementOutput::Withdrawal(_))),
-                out_count: u64::try_from(vector.entries().len()).unwrap(),
-                in_count: receipts,
-            })
-            .unwrap();
-        row.prefix = prefix;
+    Terminal {
+        authorization: SendAuthorization::sign(body, payer),
+        vector,
+        operator_signature,
     }
-    let built = build_prepared(cache, context, deposits, withdrawals, rows, transpose);
-    let successor = successor_cache(cache, &built);
-    (built, successor)
+}
+
+fn fork_ack(
+    context: &TestContext,
+    operator: &SigningKey,
+    payer: &SigningKey,
+    seq: u64,
+    amount: u64,
+) -> VectorAck<VerifyingKey, ShaDigest> {
+    let vector = OutVector::new(
+        context.payment().epoch(),
+        payer.public_key(),
+        vec![OutEntry {
+            recipient: SigningKey::from_seed(9_999).public_key(),
+            cumulative: amount,
+            count: 1,
+        }],
+    )
+    .unwrap();
+    let body = VectorSendBody::new(
+        context.payment(),
+        payer.public_key(),
+        seq,
+        amount,
+        vector.root::<Sha256, ShaDigest>().unwrap(),
+    );
+    VectorAck::sign_by_authorities(body, payer, operator)
 }
 
 struct RegisteredMaterial {
@@ -224,7 +137,7 @@ struct RegisteredMaterial {
 struct BatchMaterial {
     context: TestContext,
     withdrawals: TestWithdrawals,
-    close: Built,
+    close: TestClose,
     successor: TestCache,
     id: BatchId<ShaDigest>,
 }
@@ -332,120 +245,36 @@ impl RefinementDriver {
     }
 
     fn canonical_cache(&self, root: spec::Root) -> TestCache {
-        let states = match root {
-            spec::Root::R0 => [
-                Some(AccountState {
-                    balance: 10,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                Some(AccountState {
-                    balance: 5,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                None,
-            ],
-            spec::Root::R1 => [
-                Some(AccountState {
-                    balance: 8,
-                    cumulative_debit: 2,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                Some(AccountState {
-                    balance: 9,
-                    cumulative_credit: 2,
-                    receipt_count: 1,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                None,
-            ],
-            spec::Root::R2 | spec::Root::R3 => [
-                Some(AccountState {
-                    balance: 7,
-                    cumulative_debit: 3,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                Some(AccountState {
-                    balance: if root == spec::Root::R2 { 9 } else { 7 },
-                    cumulative_credit: 2,
-                    receipt_count: 1,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                None,
-            ],
-            // B1C's successor: Bob's carried withdrawal swept his balance and
-            // staged deposit, removing the account.
-            spec::Root::R2C => [
-                Some(AccountState {
-                    balance: 8,
-                    cumulative_debit: 2,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                None,
-                None,
-            ],
-            // B2D's successor: Bob paid 8 to Alice, so his queued amount of 2
-            // was uncovered and released nothing.
-            spec::Root::R3D => [
-                Some(AccountState {
-                    balance: 15,
-                    cumulative_debit: 3,
-                    cumulative_credit: 8,
-                    receipt_count: 1,
-                    active: true,
-                }),
-                Some(AccountState {
-                    balance: 1,
-                    cumulative_debit: 8,
-                    cumulative_credit: 2,
-                    receipt_count: 1,
-                    active: true,
-                }),
-                None,
-            ],
-            spec::Root::R4 => [
-                None,
-                Some(AccountState {
-                    balance: 7,
-                    cumulative_credit: 2,
-                    receipt_count: 1,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                None,
-            ],
-            spec::Root::Offset | spec::Root::OffsetC => [
-                Some(AccountState {
-                    balance: 10,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                Some(AccountState {
-                    balance: 3,
-                    active: true,
-                    ..AccountState::default()
-                }),
-                None,
-            ],
-            spec::Root::Empty => [None, None, None],
+        if root == spec::Root::R0 {
+            return self.fixture.cache.clone();
+        }
+        let (predecessor, balances) = match root {
+            spec::Root::R1 => (spec::Root::R0, [8, 9, 0]),
+            spec::Root::R2 => (spec::Root::R1, [7, 9, 0]),
+            spec::Root::R3 => (spec::Root::R2, [7, 7, 0]),
+            spec::Root::R2C => (spec::Root::R1, [8, 0, 0]),
+            spec::Root::R3D => (spec::Root::R2, [15, 1, 0]),
+            spec::Root::R4 => (spec::Root::R3, [0, 7, 0]),
+            spec::Root::Offset | spec::Root::OffsetC => (spec::Root::R0, [10, 3, 0]),
+            spec::Root::R0 | spec::Root::Empty => {
+                unreachable!("no successor history for this root")
+            }
         };
-        let leaves = ACCOUNTS
-            .into_iter()
-            .zip(states)
-            .filter_map(|(account, state)| {
-                state.map(|state| StateLeaf {
-                    account: self.key(account),
-                    state,
+        // Current roots bind the canonical batch history, including balance-neutral epochs.
+        // Replaying each predecessor before its updates makes counterfactual fixtures agree
+        // with actual admitted candidates without trusting a map-derived root.
+        self.canonical_cache(predecessor).next(
+            ACCOUNTS
+                .into_iter()
+                .zip(balances)
+                .map(|(account, balance)| {
+                    (
+                        account_key(&self.key(account)).unwrap(),
+                        NonZeroU64::new(balance),
+                    )
                 })
-            })
-            .collect();
-        StateCache::new::<Sha256>(leaves).unwrap()
+                .collect(),
+        )
     }
 
     fn deposit(&self, id: spec::DepositId) -> (ShaDigest, VerifyingKey, u64) {
@@ -480,7 +309,7 @@ impl RefinementDriver {
         };
         let root = self
             .available_cache(request.context_root)
-            .map(StateCache::root)
+            .map(TestCache::root)
             .unwrap_or_else(|| self.canonical_cache(request.context_root).root());
         let action = match request.action {
             spec::WithdrawalAction::Amount(amount) => {
@@ -593,15 +422,21 @@ impl RefinementDriver {
                 let cache = self.canonical_cache(source_root);
                 let account = self.key(opening.account);
                 let mut witness = cache.opening(&account).unwrap_or_else(|_| {
-                    cache
-                        .opening(&cache.leaves()[0].account)
-                        .expect("every nonempty canonical root has a leaf")
+                    ACCOUNTS
+                        .into_iter()
+                        .find_map(|account| cache.opening(&self.key(account)).ok())
+                        .expect("every nonempty canonical root has a live account")
                 });
-                witness.leaf.account = account;
-                witness.leaf.state.balance = u64::from(opening.state.balance);
-                witness.leaf.state.active = opening.state.active;
-                if !opening.authenticated_state || opening.root == spec::Root::Empty {
-                    witness.leaf.state.cumulative_debit += 1;
+                let authenticated_balance = witness.balance;
+                witness.account = account;
+                witness.balance =
+                    NonZeroU64::new(u64::from(opening.state.balance)).unwrap_or(NonZeroU64::MIN);
+                if !opening.authenticated_state
+                    || !opening.state.active
+                    || opening.state.balance == 0
+                    || opening.root == spec::Root::Empty
+                {
+                    witness.balance = NonZeroU64::new(authenticated_balance.get() + 1).unwrap();
                 }
                 witness
             })
@@ -674,84 +509,73 @@ impl RefinementDriver {
         if let Some(actual) = self.available_cache(batch.candidate().predecessor) {
             assert_eq!(actual.root(), cache.root());
         }
-        let (close, successor) = match batch {
-            spec::Batch::B0 => refined_payment_close(
-                &cache,
+        let terminals = match batch {
+            spec::Batch::B0 => vec![refined_payment(
                 &registered.context,
                 &self.fixture.operator_ack,
                 &self.fixture.accounts[0],
                 &self.fixture.accounts[1],
-                &registered.deposits,
-                &registered.withdrawals,
                 2,
-            ),
-            spec::Batch::B1 => refined_payment_close(
-                &cache,
+            )],
+            spec::Batch::B1 => vec![refined_payment(
                 &registered.context,
                 &self.fixture.operator_ack,
                 &self.fixture.accounts[0],
                 &self.carol,
-                &registered.deposits,
-                &registered.withdrawals,
                 1,
-            ),
-            // B1C carries Bob's never-queued withdrawal in a boundary close,
-            // and OffsetC's carried offset defers its staged deposit.
+            )],
             spec::Batch::B2
             | spec::Batch::B3
             | spec::Batch::Offset
             | spec::Batch::B1C
-            | spec::Batch::OffsetC => boundary_close(
-                &cache,
-                &registered.context,
-                &registered.deposits,
-                &registered.withdrawals,
-            ),
-            // Bob spends below his queued amount, so certification degrades
-            // the release to zero.
-            spec::Batch::B2D => refined_payment_close(
-                &cache,
+            | spec::Batch::OffsetC => Vec::new(),
+            spec::Batch::B2D => vec![refined_payment(
                 &registered.context,
                 &self.fixture.operator_ack,
                 &self.fixture.accounts[1],
                 &self.fixture.accounts[0],
+                8,
+            )],
+        };
+        let (vote, close, successor) = deterministic::Runner::default().start(|runtime| async {
+            let state = cache.reopen(runtime, "refinement-close").await;
+            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+                &state,
+                &registered.context,
                 &registered.deposits,
                 &registered.withdrawals,
-                8,
-            ),
-        };
-        let spans = assigned_slice_spans::<Sha256, _>(
-            self.fixture.signer.committee(),
-            registered.context.assignment(),
-            self.fixture.signer.me().unwrap(),
-        )
-        .unwrap();
-        let slices = close
-            .prepared
-            .assemble_slices(&cache, &spans, &Sequential)
+                terminals,
+                &Sequential,
+            )
+            .await
             .unwrap();
-        let (vote, sealed) = seal::<Sha256, _, _, PaymentBatchVerifier, _>(
-            &self.fixture.signer,
-            &registered.context,
-            &self.fixture.operator_bls,
-            &registered.deposits,
-            &registered.withdrawals,
-            &close.header,
-            &close.roots,
-            slices,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .unwrap();
-        assert_eq!(sealed.header(), &close.header);
-        assert_eq!(sealed.roots(), &close.roots);
+            let (vote, sealed) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+                &self.fixture.signer,
+                &state,
+                &registered.context,
+                &self.fixture.operator_bls,
+                &registered.deposits,
+                &registered.withdrawals,
+                prepared.encoded().clone(),
+                &mut test_rng(),
+                &Sequential,
+            )
+            .await
+            .unwrap();
+            assert_eq!(sealed.close().header, prepared.close().header);
+            assert_eq!(sealed.close().roots, prepared.close().roots);
+            assert_eq!(sealed.close().amounts, prepared.close().amounts);
+            let mutations = sealed.state().mutations().to_vec();
+            let (state, close) = sealed.apply::<_, Sha256>(state).await.unwrap();
+            let successor = cache.extended(*state.head(), mutations);
+            (vote, close, successor)
+        });
         let certificate = self.fixture.signer.assemble_exact([vote]).unwrap();
-        let terminal = close.prepared.terminal_proof().unwrap();
         let result = self.fixture.chain.admit(
             u64::from(self.now),
             close.header,
             close.roots,
-            terminal,
+            close.amounts,
             certificate,
         );
         match result {
@@ -791,12 +615,7 @@ impl RefinementDriver {
                 // A retained countersigned endpoint for a payer the close never advanced.
                 let payer = &self.fixture.accounts[1];
                 let ack = fork_ack(&material.context, &self.fixture.operator, payer, 1, 2);
-                let lookup = account_lookup::<Sha256, _, _>(
-                    &index,
-                    self.cache(target.candidate().predecessor),
-                    &payer.public_key(),
-                )
-                .unwrap();
+                let lookup = account_lookup::<Sha256, _, _>(&index, &payer.public_key()).unwrap();
                 Challenge::HigherAckDebit {
                     ack: Box::new(AckWitness::from_ack(&ack)),
                     payer: Box::new(lookup),
@@ -871,7 +690,10 @@ impl RefinementDriver {
                     1,
                     3,
                 );
-                ack_fork(&left, &right)
+                Challenge::AckFork {
+                    left: Box::new(AckWitness::from_ack(&left)),
+                    right: Box::new(AckWitness::from_ack(&right)),
+                }
             }
         };
         self.fixture
@@ -912,21 +734,13 @@ impl RefinementDriver {
     fn claim_withdrawal(&mut self, batch: spec::Batch, source: spec::Batch, position: u8) -> bool {
         let source = self.material(source);
         let account = source.withdrawals.requests().iter().find_map(|request| {
-            let claim = source
-                .close
-                .prepared
-                .withdrawal_claim(&source.withdrawals, request.account())
-                .ok()?;
+            let claim = source.close.withdrawal_claim(request.account()).ok()?;
             (claim.position() == u32::from(position)).then_some(request.account().clone())
         });
         let Some(account) = account else {
             return false;
         };
-        let claim = source
-            .close
-            .prepared
-            .withdrawal_claim(&source.withdrawals, &account)
-            .unwrap();
+        let claim = source.close.withdrawal_claim(&account).unwrap();
         let expected = claim.output().clone();
         let batch_id = self.material(batch).id;
         self.fixture
@@ -937,10 +751,7 @@ impl RefinementDriver {
 
     fn claim_payout(&mut self, batch: spec::Batch, source: spec::Batch, position: u8) -> bool {
         let source = self.material(source);
-        let claim = source
-            .close
-            .prepared
-            .external_payout_claim(&self.carol.public_key());
+        let claim = source.close.external_payout_claim(&self.carol.public_key());
         let Ok(claim) = claim else {
             return false;
         };
@@ -1101,11 +912,8 @@ impl RefinementDriver {
         self.assert_refines();
     }
 
-    fn root(&self, root: spec::Root) -> VectorRoot<ShaDigest> {
-        match root {
-            spec::Root::Empty => commitment::empty_root::<Sha256>(VectorKind::State),
-            _ => self.cache(root).root(),
-        }
+    fn root(&self, root: spec::Root) -> crate::bajillion::qmdb::StateRoot<ShaDigest> {
+        self.cache(root).root()
     }
 
     fn expected_batch(&self, id: BatchId<ShaDigest>) -> spec::Batch {
@@ -1124,15 +932,7 @@ impl RefinementDriver {
         let Some(claims) = chain.hard_fault_claims.as_ref() else {
             return chain.unfinalized_withdrawal_deadline(account);
         };
-        let position = self
-            .cache(match self.state.terminal {
-                spec::Terminal::Claiming { frozen_root, .. } => frozen_root,
-                spec::Terminal::Dormant | spec::Terminal::Settled => return None,
-            })
-            .opening(account)
-            .ok()
-            .map(|opening| opening.proof.position);
-        if position.is_some_and(|position| claims.claimed_positions.contains(&position)) {
+        if claims.claimed_accounts.contains(account) {
             return None;
         }
         claims
@@ -1153,7 +953,17 @@ impl RefinementDriver {
         let chain = &self.fixture.chain;
         assert_eq!(self.now, self.state.now);
         assert_eq!(chain.expected_epoch, u64::from(self.state.expected_epoch));
-        assert_eq!(chain.current_state_root, self.root(self.state.current_root));
+        let finalized_root = if self.state.current_root == spec::Root::Empty {
+            assert!(chain.hard_fault_is_settled());
+            BATCHES
+                .into_iter()
+                .filter(|batch| self.state.finalized_batches & (1 << batch.index()) != 0)
+                .max_by_key(|batch| batch.candidate().epoch)
+                .map_or(spec::Root::R0, |batch| batch.candidate().successor)
+        } else {
+            self.state.current_root
+        };
+        assert_eq!(chain.current_state_root, self.root(finalized_root));
         assert_eq!(
             chain.current_liability,
             u64::from(self.state.current_liability)
@@ -1165,11 +975,14 @@ impl RefinementDriver {
             assert_eq!(cache.liability(), u64::from(self.state.current_liability));
             for account in ACCOUNTS {
                 let expected = self.state.current_state[account.index()];
-                let actual = cache.opening(&self.key(account)).ok();
+                let key = self.key(account);
+                let actual = cache
+                    .lookup(&key)
+                    .resolve::<Sha256>(&cache.root(), &account_key(&key).unwrap())
+                    .unwrap();
                 assert_eq!(actual.is_some(), expected.active);
                 if let Some(actual) = actual {
-                    assert_eq!(actual.leaf.state.active, expected.active);
-                    assert_eq!(actual.leaf.state.balance, u64::from(expected.balance));
+                    assert_eq!(actual.get(), u64::from(expected.balance));
                 }
             }
         }
@@ -1204,6 +1017,7 @@ impl RefinementDriver {
             let material = self.material(*expected);
             assert_eq!(actual.batch.header, material.close.header);
             assert_eq!(actual.batch.roots, material.close.roots);
+            assert_eq!(actual.batch.amounts, material.close.amounts);
             assert_eq!(actual.admitted.context, material.context);
             assert_eq!(actual.batch.roots.successor, material.successor.root());
             assert_eq!(
@@ -1465,11 +1279,8 @@ impl RefinementDriver {
                         claims.deposits.get(&key).copied(),
                         (expected != 0).then_some(u64::from(expected))
                     );
-                    let opening = self.cache(*frozen_root).opening(&key).ok();
                     assert_eq!(
-                        opening.is_some_and(|opening| {
-                            claims.claimed_positions.contains(&opening.proof.position)
-                        }),
+                        claims.claimed_accounts.contains(&key),
                         self.state.consumed_state & (1 << index) != 0
                     );
                 }

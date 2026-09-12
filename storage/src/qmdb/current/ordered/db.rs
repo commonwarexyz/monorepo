@@ -31,6 +31,26 @@ pub struct KeyValueProof<F: merkle::Graftable, K: Key, D: Digest, const N: usize
     pub next_key: K,
 }
 
+impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> KeyValueProof<F, K, D, N> {
+    /// Verify that `key` currently has `value` under `root`.
+    pub fn verify<H: Hasher<Digest = D>, V: ValueEncoding>(
+        &self,
+        key: K,
+        value: V::Value,
+        root: &D,
+    ) -> bool
+    where
+        Operation<F, K, V>: Codec,
+    {
+        let op = Operation::<F, K, V>::Update(Update {
+            key,
+            value,
+            next_key: self.next_key.clone(),
+        });
+        self.proof.verify::<H, _>(op, root)
+    }
+}
+
 impl<F: merkle::Graftable, K: Key, D: Digest, const N: usize> Write for KeyValueProof<F, K, D, N> {
     fn write(&self, buf: &mut impl BufMut) {
         self.proof.write(buf);
@@ -112,13 +132,7 @@ where
         proof: &KeyValueProof<F, K, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let op = Operation::Update(Update {
-            key,
-            value,
-            next_key: proof.next_key.clone(),
-        });
-
-        proof.proof.verify::<H, _>(op, root)
+        proof.verify::<H, V>(key, value, root)
     }
 
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
@@ -146,37 +160,7 @@ where
         proof: &super::ExclusionProof<F, K, V, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
-        let (op_proof, op) = match proof {
-            super::ExclusionProof::KeyValue(op_proof, data) => {
-                if data.key == *key {
-                    // The provided `key` is in the DB if it matches the start of the span.
-                    return false;
-                }
-                if !crate::qmdb::any::db::Db::<F, E, C, I, H, Update<K, V>, N, S>::span_contains(
-                    &data.key,
-                    &data.next_key,
-                    key,
-                ) {
-                    // If the key is not within the span, then this proof cannot prove its
-                    // exclusion.
-                    return false;
-                }
-
-                (op_proof, Operation::Update(data.clone()))
-            }
-            super::ExclusionProof::Commit(op_proof, metadata) => {
-                // Handle the case where the proof shows the db is empty, hence any key is proven
-                // excluded. For the db to be empty, the floor must equal the commit operation's
-                // location.
-                let floor_loc = op_proof.loc;
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), floor_loc),
-                )
-            }
-        };
-
-        op_proof.verify::<H, _>(op, root)
+        proof.verify::<H>(key, root)
     }
 }
 

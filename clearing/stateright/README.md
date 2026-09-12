@@ -16,11 +16,11 @@ REGISTERED PROOF CONTEXT
         | prepare -> deal -> missing / incomplete / exact delivery
         v
   honest validator seal
-  - every assigned slice
+  - one identical complete dealing
   - every distinct payer/operator signature
-  - typed openings, rows, outputs, and coverage
+  - epoch activity, balance transitions, and settlement outputs
         |
-        +-- reject malformed/incomplete attempt
+        +-- reject invalid complete dealing
         |        |
         |        +--> reset attempt-local state and retry
         |             under the same live registration
@@ -55,8 +55,8 @@ OPEN + [Pending e, Pending e+1, ...]
                                                        freeze last finalized root
                                                            +------------+-----------+
                                                            |                        |
-                                                    claim each state       refund each account's
-                                                    position once          aggregate deposit once
+                                                    claim each account     refund each account's
+                                                    balance once           aggregate deposit once
                                                            |                        |
                                                            +------------+-----------+
                                                                         v
@@ -75,12 +75,12 @@ registration.
 
 | File | Exhaustive responsibility |
 | --- | --- |
-| `certification.rs` | A four-validator, two-slice `n = 3f + 1`, `q = 2f + 1` instance. It explores the valid verifier result plus 27 distinct local failure classes on either slice, missing/incomplete/exact delivery, every exact quorum, durable retention, rejection, and same-registration retry. The failure classes abstract outcomes of the production verifier. They do not reimplement cryptography or Merkle proofs. |
-| `challenge.rs` | All settlement targets and every payer-signature, operator-signature, and context-authentication bit combination over representative semantic endpoints. It separately checks structural validity, semantic contradiction, and `NoContradiction` for the three acknowledgment challenge kinds: a retained endpoint above the committed terminal debit, a retained per-edge entry above the committed public entry, and an operator acknowledgment fork at one payer sequence number. The higher-debit kind is modeled as the strictly-higher-debit arm only. The production adjudicator's sequence arms (a different countersigned body at the committed sequence, an equal endpoint at a strictly later sequence, and the earlier-retry and credit-only declines) are pinned by unit tests in `src/bajillion/tests.rs`, not by this model. |
+| `certification.rs` | A four-validator, one-complete-dealing `n = 3f + 1`, `q = 2f + 1` instance. It explores the two verifier outcomes (valid and invalid), independent missing/incomplete/exact delivery, every exact quorum, complete-dealing retention, rejection, and same-registration retry. Cryptographic, commitment, and semantic failures share the rejection transition; their byte-level validation belongs to production tests. |
+| `challenge.rs` | All settlement targets and every payer-signature, operator-signature, and context-authentication bit combination over representative semantic endpoints. It separately checks structural validity, semantic contradiction, and `NoContradiction` for the three acknowledgment challenge kinds: a retained endpoint above the committed terminal debit, a retained per-edge entry above the committed public entry, and an operator acknowledgment fork at one payer sequence number. The higher-debit kind is modeled as the strictly-higher-debit arm only. The production adjudicator's sequence arms (a different countersigned body at the committed sequence, an equal endpoint at a strictly later sequence, and the earlier-retry and credit-only declines) are pinned by unit tests in `src/bajillion/tests/challenges.rs`, not by this model. |
 | `claims.rs` | Eight exact replay identities: two typed namespaces, two batches, and two positions. It explores every claim ordering while checking typed root identity, output value and position, destination routing, atomic mutation, reserve conservation, and independence across kind, batch, and position. |
 | `settlement.rs` | A three-account, eight-candidate, three-pending-slot, bounded-time instance. It explores intake, superset registration with operator-carried requests, deadline ties, certified admission including coverage-degraded and carried-offset closes, strict ancestry and FIFO finalization, challenge suffix cuts, clean-prefix drain, finalized reserve creation, claim routing, replay expiry, custody conservation, and terminal recovery. |
 | `scenarios.rs` | Twenty-six deterministic end-to-end traces using the same settlement transition function. They cover accepted and rejected boundaries, every challenge kind, front/middle/tail operator faults, registration and intake expiry, every sender-value bucket, Amount and Close, exact claim routing, replay, and finalized reserves that survive a later fault. |
-| `refinement.rs` | Test-only production adapter for the settlement model. It constructs real deposits, signed withdrawals, payments, closes, proof slices, sealed dealings, certificates, challenges, openings, and claims, then checks action acceptance, returned value, and a behavior-relevant private state projection after every step. |
+| `refinement.rs` | Test-only production adapter for the settlement model. It constructs real deposits, signed withdrawals, epoch payments, QMDB state histories, complete dealings, certificates, challenges, Current openings, and claims, then checks action acceptance, returned value, and a behavior-relevant private state projection after every step. |
 
 The models compose through two opaque capabilities. A `CertifiedClose` is emitted for one exact
 candidate and registration only after the certification transition function reaches exact valid
@@ -92,10 +92,23 @@ finalized-output ledger. This is an assume-guarantee decomposition: it checks ea
 to completion without taking the impractical Cartesian product of every proof delivery, challenge
 witness, and settlement ordering.
 
+Every honest signer retains the entire certified dealing. A certificate with `q = 2f + 1`
+signatures guarantees at least `q - f = f + 1` honest copies; Byzantine signers need not retain
+anything. The canonical all-honest fixture has three copies, but that is not the general quorum
+guarantee. Evidence retention and voting are atomic in the model; the embedding must durably
+persist evidence before publishing its vote. Incomplete delivery blocks sealing and does not
+establish semantic invalidity.
+
+The certification count follows directly from the finite choices. Each valid generation has
+2 pre-dealing states, `4^3 * 3 * 2 - 3 = 381` delivery/vote states, 30 certificate states, and
+30 issued states. Invalid attempts have 2 pre-dealing states, `3^4 * 2 = 162` delivery/vote
+states, and `(3^3 - 2^3) * 3 * 2 = 114` rejected states. The initial and retry valid generations
+are distinct, so the total is `2 * (2 + 381 + 30 + 30) + 2 + 162 + 114 = 1,164`.
+
 The checked state counts are part of the tests so an accidental state-space reduction is visible:
 
-- 153,886 certification states, including all 27 invalid-proof profiles on either slice and every
-  exact quorum and delivery ordering;
+- 1,164 certification states, including both verifier outcomes, initial and retry generations,
+  and every exact quorum and delivery ordering;
 - 1,502 challenge states, including every authentication-bit combination for every target, the
   representative endpoint classes for both excess dimensions (cumulative credit and payment
   count), and the equal-endpoint terminal control that must not convict;
@@ -117,7 +130,7 @@ fails its ordinary Rust test.
 
 | Obligation | Exhaustive finite graph | Deterministic trace | Production refinement |
 | --- | --- | --- | --- |
-| Exact dealing, quorum intersection, retention, and retry | `certification.rs` | Certification unit traces | Every refined admission runs `assemble_slices`, `seal`, certificate formation, and `admit`. Malformed-dealing tests remain separate |
+| Exact dealing, quorum, retention, and retry | `certification.rs` | Certification unit traces | Every refined admission runs full-close preparation, whole-dealing `seal`, QMDB application, certificate formation, and `admit`. Malformed-dealing tests remain separate |
 | Both signatures, typed lookups, and challenge relation | `challenge.rs` | Every challenge edge in `scenarios.rs` | Refinement constructs real evidence for all three kinds. Production verifier tests cover malformed evidence and codecs |
 | Consecutive admission and FIFO finalization | `settlement.rs` | Skip and out-of-order rejection | Four real epochs refine step by step. Rejected skip/finalize calls must stutter |
 | Front, middle, tail, registration, deposit, and withdrawal faults | `settlement.rs` | Exact recovery traces in `scenarios.rs` | Real challenged-suffix and all three deadline classes refine through terminal fund recovery. Broader malicious-operator tests remain separate |
@@ -139,8 +152,12 @@ path for every action variant. For each mapped call, the test compares acceptanc
 returned custody output, and a private projection containing the finalized root and liability,
 custody buckets, staged deposits and withdrawals, deadlines, registration, ordered pipeline and
 statuses, replay keys, claim reserves, fault and fence identity, frozen terminal boundary,
-and consumed state positions. Per-account deposit refunds and terminal recovery outputs are also
-compared exactly. Rejected calls at the already-observed time must stutter. A separate timed-call
+and consumed recovery accounts. Per-account deposit refunds and terminal recovery outputs are also
+compared exactly. Recovery replay is keyed by account within the frozen root; ordinary output
+claims still use their authenticated BMT positions. Once recovery drains, production retains the
+last finalized Current root while the abstract `Empty` sentinel marks the drained custody state.
+The adapter checks that retained root against the last finalized modeled batch.
+Rejected calls at the already-observed time must stutter. A separate timed-call
 profile checks the production rule that observing a deadline may persist a permanent fault even
 when the requested operation returns an error.
 
@@ -151,8 +168,10 @@ expiry, direct deposit refund, terminal state recovery, an operator-carried requ
 registers, admits, and claims without ever being queued, and a coverage-degraded close whose
 uncovered amount finalizes with a zero release and no claimable output. It also checks that beginning terminal
 settlement is idempotently retryable while claims remain.
-Every admission uses the production proof-slice assembler and `seal`, so a modeled
+Every admission uses production full-close preparation and whole-dealing `seal`, so a modeled
 `CertifiedClose` reaches settlement only alongside a real authenticated dealing and certificate.
+State fixtures replay canonical batches through Current Ordered/MMB and retain their exact history;
+matching balances alone do not identify a historical QMDB root.
 All three challenge kinds use real payer and operator signatures and production openings, so
 every abstract contradiction the settlement model can raise has a constructible production
 counterpart.
@@ -167,7 +186,7 @@ durable crash safety.
 
 For every modeled permanent fault, new intake and admission stay fenced. A proven challenge may
 leave an earlier clean prefix, which must resolve FIFO. No later epoch can skip it. Terminal
-settlement then freezes the last finalized state and exposes one replay-protected claim per live
+settlement then freezes the last finalized state and exposes one frozen-root/account replay-protected claim per live
 account plus one replay-protected aggregate refund per account with unfinalized deposits. Deposit
 IDs remain intake replay keys, but multiple deposits to one account settle together. An Amount
 request the frozen balance covers splits the tail into withdrawal and residual, and one it cannot
@@ -182,7 +201,7 @@ mutation.
 
 ## Refinement boundary
 
-The model uses small enums, ideal cryptography, mathematical amounts, explicit proof-fault profiles,
+The model uses small enums, ideal cryptography, mathematical amounts, two opaque verifier outcomes,
 and representative challenge endpoint classes. It does not independently derive the production
 Merkle/row verifier or quantify over every numeric payment tuple. The refinement exercises real
 hash framing, Merkle verification, BLS certification, randomized payment-signature batching, and
@@ -190,7 +209,7 @@ claim openings for its declared fixtures. Broader codecs, arithmetic limits, all
 adversarial byte domains, storage crash cuts, and external asset adapters remain covered by
 Bajillion's Rust unit tests, fuzz targets, and the embedding's crash-consistency tests. The finite
 results establish every reachable state of these instances. They are not an inductive proof for
-arbitrary account, validator, slice, or payment counts.
+arbitrary account, validator, or payment counts.
 
 ## Why Stateright
 

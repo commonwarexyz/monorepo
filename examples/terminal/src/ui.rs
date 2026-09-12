@@ -408,11 +408,11 @@ async fn refresh<E: Env>(
             Ok(PollCloseResponse::Finished(close)) => {
                 state.pending_closes.pop_front();
                 state.log(format!(
-                    "epoch {} finalized {}: {} rows, {} slices, prepare {}us, deal {}us, seal {}us",
+                    "epoch {} finalized {}: {} rows, {} dealing bytes, prepare {}us, deal {}us, seal {}us",
                     close.epoch,
                     String::from_utf8_lossy(&close.header),
                     close.rows,
-                    close.slices,
+                    close.dealing_bytes,
                     close.prepare_micros,
                     close.deal_micros,
                     close.seal_micros
@@ -457,11 +457,6 @@ async fn refresh<E: Env>(
         for epoch in summary.withheld {
             state.log(format!(
                 "epoch {epoch} ALARM: finalized while the operator withholds the committed evidence for held credits (unverifiable, window closed)"
-            ));
-        }
-        for epoch in summary.unavailable {
-            state.log(format!(
-                "epoch {epoch} ALARM: held credits went unreconciled past the operator's retention window (the committed evidence is no longer served, so their coverage is unverifiable)"
             ));
         }
     }
@@ -974,11 +969,24 @@ fn fraud_arc() -> Result<()> {
         }
         let record = registered.context("the registered epoch left no certified record")?;
         ensure!(record.epoch == 0, "the certified record is not epoch 0");
-        let fraud = omitting_close(
-            &mut rand::rng(),
+        let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256, _>::init(
+            context.child("fraud_balances"),
+            crate::protocol::state_config(
+                "fraud-balances",
+                &context,
+                commonware_parallel::Rayon::new(NonZeroUsize::MIN)?,
+            ),
+            crate::protocol::genesis_balances(&crate::protocol::deployments()[0])?,
+        )
+        .await?;
+        let mut fraud_rng = context.child("fraud_rng");
+        let fraud = Box::pin(omitting_close(
+            state,
+            &mut fraud_rng,
             record.admission_deadline,
             record.challenge_deadline,
-        )?;
+        ))
+        .await?;
         ensure!(
             *fraud.result.payment_context.anchor() == record.anchor,
             "the fraudulent close does not bind the assigned anchor"
@@ -1085,7 +1093,6 @@ mod tests {
         operator::rpc as operator_rpc,
         protocol::{INITIAL_BALANCE, deployment},
     };
-    use commonware_clearing::bajillion::commitment::VectorRoot;
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_runtime::{
         Clock as _, Listener as _, Network as _, Runner as _, Supervisor as _, deterministic,
@@ -1138,7 +1145,7 @@ mod tests {
                 height: 1,
                 timestamp: 1,
                 deployment: deployment(),
-                state_root: VectorRoot {
+                state_root: commonware_clearing::bajillion::qmdb::StateRoot {
                     digest: Sha256::hash(&[b"stale-display-root"]),
                 },
                 last_finalized: None,

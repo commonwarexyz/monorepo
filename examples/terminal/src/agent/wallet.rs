@@ -21,7 +21,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, ensure};
-use commonware_clearing::bajillion::{boundary::SignedWithdrawal, challenge::StateOpening};
+use commonware_clearing::bajillion::{boundary::SignedWithdrawal, qmdb::StateOpening};
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::Network;
 use std::{collections::BTreeSet, net::SocketAddr, path::Path};
@@ -37,26 +37,19 @@ use std::{collections::BTreeSet, net::SocketAddr, path::Path};
 /// never an overwritable cache. Everything the counterparty can reproduce is a cache and
 /// never gates progress.
 ///
-/// The cached signing context follows the cache rule and exists precisely so that
-/// ordinary payments need nothing beyond local SQL. The wallet's own durable cumulative
-/// debit is the authoritative signing endpoint, the cached `(epoch, anchor)` is the
-/// claimed context to bind, and the cached verified floor lower-bounds affordability.
-/// When the operator has moved to a new context, the wallet learns it from the typed
-/// corrective rejection its next send earns, never from a routine head read. The cache
-/// steers only what gets signed: settlement's registration confirmation after
-/// acceptance remains the trust anchor before anything is recorded.
+/// Cached contexts and verified balance floors keep successful payments local until submission.
+/// Accepted debit, sequence, and vector state belong to their exact epoch and anchor.
+/// A corrective reply cannot replace an ambiguous authorization; settlement resolves it first.
 ///
 /// Frozen-root recovery requires an opening at the last finalized root, which advances
 /// with every finalization by anyone. Openings refresh on every head read or balance
-/// poll, so only a wallet passive across the final finalization holds none, and it then
-/// opens the frozen root through the slice holders retaining a dealing at it.
+/// poll; a passive wallet fetches the frozen root through the validators' retained state.
 ///
 /// The operator is the fast path for every read and the only path for accepting a send or
 /// applying a withdrawal. Every enforcement flow completes without it: heads, floors, and
-/// endpoints come from the slice holders' openings at the certified state root, committed
-/// entries and claims from their sealed dealings inside a close's challenge window, and
-/// the signing context from the chain's own registration, each verified against a
-/// certified root before use.
+/// balances come from Current proofs at certified state roots, while payment outcomes,
+/// committed entries, and claims come from authenticated epoch activity. The signing
+/// context comes from the chain's own registration. Every proof binds its certified root.
 ///
 /// As a receiver, this wallet may rely on a payment exactly when its verified receipt is
 /// durably held. A balance that moved in the operator's head is an observation, not
@@ -83,7 +76,6 @@ pub(crate) struct Agent {
     pub(super) pending_withdrawal_claim: Option<PendingWithdrawalClaim>,
     pub(super) pending_payout_claim: Option<PendingPayoutClaim>,
     pub(super) pending_close_epoch: Option<u64>,
-    pub(super) cumulative_debit: u64,
     pub(super) receipt_count: u64,
     /// Receiver intake ledger summary and durable fetch cursor.
     pub(super) incoming: IncomingSummary,
@@ -92,7 +84,7 @@ pub(crate) struct Agent {
     /// Finalized epochs whose committed evidence the operator is currently withholding, latched
     /// so the alarm is reported once per stretch of withholding.
     pub(super) withheld: BTreeSet<u64>,
-    /// The wallet's route to validator-served evidence: the slice holders each
+    /// The wallet's route to validator-served evidence: the validators each
     /// enforcement flow falls back to when the operator is unreachable or refuses.
     pub(super) holders: Holders,
 }
@@ -181,7 +173,6 @@ impl Agent {
             pending_withdrawal_claim: state.pending_withdrawal_claim,
             pending_payout_claim: state.pending_payout_claim,
             pending_close_epoch: None,
-            cumulative_debit: state.cumulative_debit,
             receipt_count: state.receipt_count,
             incoming: state.incoming,
             last_reconciled_epoch: state.last_reconciled_epoch,
@@ -260,7 +251,7 @@ impl Agent {
     ///
     /// The operator's head is the fast path: it carries the live balance and the
     /// signing context to re-cache. When the operator is unreachable or its head fails
-    /// verification, the slice holders open the wallet's leaf at the certified head
+    /// verification, the validators open the wallet's leaf at the certified head
     /// instead and the finalized balance is reported, so the poll never depends on the
     /// operator.
     ///
@@ -268,8 +259,8 @@ impl Agent {
     /// opening is retained through [`Self::verify_head`] or [`Self::retain_head`], so a
     /// wallet that only watches its balance still refreshes its frozen-root recovery
     /// evidence and, from an operator head, re-anchors its optimistic signing state.
-    /// This read is off the payment hot path: payments sign from the cached context and
-    /// learn a moved context from the operator's corrective rejection instead.
+    /// Payments use the cached context. A corrective rejection triggers authenticated
+    /// resolution of the exact pending intent before a new context can be used.
     pub(crate) async fn balance<E: Env>(
         &mut self,
         ctx: &E,
@@ -283,7 +274,7 @@ impl Agent {
                         .await
                         .context("read settlement balance head")?;
                     match self.verify_head(&head, &status) {
-                        Ok(()) => return Ok(head.state.balance),
+                        Ok(()) => return Ok(head.balance),
                         Err(error) => error,
                     }
                 }
@@ -293,26 +284,28 @@ impl Agent {
             .validator_head(ctx, chain)
             .await
             .map_err(|error| unusable_head(operator_error, error))?;
-        Ok(opening.leaf.state.balance)
+        Ok(opening.map_or(0, |opening| opening.balance.get()))
     }
 
-    /// This wallet's leaf at the certified head, opened by the slice holders,
+    /// This wallet's leaf at the certified head, opened by the validators,
     /// verified against the status root, and retained: the head read that
     /// needs no operator.
     pub(super) async fn validator_head<E: Env>(
         &mut self,
         ctx: &E,
         chain: &mut Client,
-    ) -> Result<(StatusRecord, StateOpening<Key, Digest>)> {
+    ) -> Result<(StatusRecord, Option<StateOpening<Key, Digest>>)> {
         let status = settlement_status(ctx, chain, self.deployment)
             .await
             .context("read settlement head")?;
         let account = self.account();
         let opening = self
             .holders
-            .validator_opening(ctx, chain, &account, &status)
+            .validator_balance(ctx, chain, &account, &status)
             .await?;
-        self.retain_head(&status.state_root, &opening)?;
+        if let Some(opening) = &opening {
+            self.retain_head(&status.state_root, opening)?;
+        }
         Ok((status, opening))
     }
 

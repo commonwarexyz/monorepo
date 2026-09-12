@@ -1,5 +1,7 @@
 #![no_main]
 
+mod support;
+
 use commonware_clearing::bajillion::{
     admission::{
         Committee,
@@ -8,27 +10,23 @@ use commonware_clearing::bajillion::{
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch, WithdrawalBody},
     challenge::{
         AccountLookup, AckWitness, ChallengeError, ChangeAbsence, ChangeOpening, EntryWitness,
-        HigherEntryLookup, StateLookup, StateOpening, adjudicate, decode_bounded,
+        HigherEntryLookup, adjudicate, decode_bounded,
     },
     commitment::{MultiOpening, Opening, RangeOpening, VectorKind, VectorRoot, empty_root},
     payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
-    state::{
-        AccountChange, AccountRow, AccountState, ChangeGuard, ChangeValue, ChangeValueCore, Prefix,
-        SettlementOutput, StateLeaf,
-    },
+    posted,
+    qmdb::{StateLookup, StateOpening, StateRoot, StateValueOpening},
+    state::{AccountChange, ChangeGuard, ChangeValue, ChangeValueCore, SettlementOutput},
     transition::{
-        Assignment, BatchId, CloseContext, CloseLimits, CoverageRange, EpochContext,
-        ExternalPayoutClaim, Header, RootBundle, SliceBoundary, StateCache, TerminalProof,
-        WithdrawalClaim, WithdrawalOutput, decode_slice_bounded,
+        BatchId, CloseAmounts, CloseContext, CloseLimits, ExternalPayoutClaim, Header, RootBundle,
+        WithdrawalClaim, WithdrawalOutput,
     },
-    vector::{
-        OutEntry, OutTipLookup, OutVector, TransposeEntry, read_transpose, transpose_encode_size,
-        write_transpose,
-    },
+    vector::{OutEntry, OutTipLookup, OutVector},
 };
 use commonware_codec::{Decode, Encode, EncodeSize, RangeCfg, Read};
 use commonware_cryptography::{Hasher, Sha256, Signer, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
+use commonware_runtime::{Runner as _, deterministic};
 use libfuzzer_sys::fuzz_target;
 use std::fmt::Debug;
 
@@ -50,49 +48,53 @@ where
 
     let encoded = value.encode();
     assert_eq!(encoded.len(), value.encode_size());
+    if !encoded.is_empty() {
+        assert!(T::decode_cfg(&encoded[..encoded.len() - 1], cfg).is_err());
+    }
+    let mut trailing = encoded.to_vec();
+    trailing.push(0);
+    assert!(T::decode_cfg(trailing.as_slice(), cfg).is_err());
     let decoded = T::decode_cfg(encoded, cfg).expect("encoded value must remain decodable");
     assert_eq!(decoded, value);
 }
 
-fn semantic_header(
+async fn semantic_header(
     seed: u8,
+    runtime: deterministic::Context,
 ) -> (
     CloseContext<VerifyingKey, Digest>,
     Header<Digest>,
     RootBundle<Digest>,
+    CloseAmounts,
 ) {
     let operator = SigningKey::from_seed(u64::from(seed));
-    let cache = StateCache::new::<Sha256>(Vec::new()).expect("empty cache is canonical");
+    let state = support::new_state(runtime, "wire", Vec::new()).await;
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
-    let context = EpochContext::new::<Sha256>(
+    let context = support::close_context(
         Sha256::hash(&[b"wire-decode-challenge", &[seed]]),
         u64::from(seed),
         operator.public_key(),
+        &state,
         &deposits,
         &withdrawals,
-        cache.liability(),
         u64::from(seed),
         u64::from(seed) + 1,
         CloseLimits::protocol_maximum(),
-        Assignment::new(Sha256::hash(&[b"wire-decode-committee"]), 0)
-            .expect("zero-bit assignment is valid"),
+        Sha256::hash(&[b"wire-decode-committee"]),
     )
-    .and_then(|epoch| epoch.bind::<Sha256>(&cache, &deposits, &withdrawals))
-    .expect("bounded semantic context must construct");
+    .await;
     let roots = RootBundle {
         change: empty_root::<Sha256>(VectorKind::Change),
         withdrawal_outputs: empty_root::<Sha256>(VectorKind::WithdrawalOutput),
-        successor: cache.root(),
-        coverage: empty_root::<Sha256>(VectorKind::Coverage),
-        transpose: empty_root::<Sha256>(VectorKind::Transpose),
-        transpose_len: 0,
+        successor: state.root(),
     };
-    let header = Header::new::<Sha256, _>(&context, &roots);
-    (context, header, roots)
+    let amounts = CloseAmounts::default();
+    let header = Header::new::<Sha256, _>(&context, &roots, &amounts);
+    (context, header, roots, amounts)
 }
 
-fn challenge_roundtrip(bytes: &[u8], seed: u8) {
+async fn challenge_roundtrip(bytes: &[u8], seed: u8, runtime: deterministic::Context) {
     let Ok(challenge) = decode_bounded::<VerifyingKey, Digest>(bytes, MAX_INPUT_BYTES) else {
         return;
     };
@@ -103,40 +105,37 @@ fn challenge_roundtrip(bytes: &[u8], seed: u8) {
         .expect("encoded challenge must remain bounded and decodable");
     assert_eq!(decoded, challenge);
 
-    let (context, header, roots) = semantic_header(seed);
-    let _ = adjudicate::<Sha256, _, _>(&context, &header, &roots, &decoded);
+    let (context, header, roots, amounts) = semantic_header(seed, runtime).await;
+    let _ = adjudicate::<Sha256, _, _>(&context, &header, &roots, &amounts, &decoded);
 }
 
-fn slice_roundtrip(bytes: &[u8], limits: CloseLimits) {
-    let Ok(slice) = decode_slice_bounded::<VerifyingKey, Digest>(bytes, limits, MAX_INPUT_BYTES)
-    else {
-        return;
-    };
-
-    let encoded = slice.encode();
-    assert_eq!(encoded.len(), slice.encoded_size());
-    let decoded = decode_slice_bounded::<VerifyingKey, Digest>(
-        &encoded,
+async fn dealing_roundtrip(bytes: &[u8], limits: CloseLimits, runtime: deterministic::Context) {
+    let state = support::new_state(runtime, "dealing", Vec::new()).await;
+    let deposits = DepositBatch::empty();
+    let withdrawals = WithdrawalBatch::empty();
+    let operator = SigningKey::from_seed(0);
+    let context = support::close_context(
+        Sha256::hash(&[b"wire"]),
+        0,
+        operator.public_key(),
+        &state,
+        &deposits,
+        &withdrawals,
+        0,
+        1,
         limits,
-        MAX_INPUT_BYTES.max(encoded.len()),
+        Sha256::hash(&[b"committee"]),
     )
-    .expect("encoded slice must remain bounded and decodable");
-    assert_eq!(decoded, slice);
-}
-
-fn transpose_roundtrip(bytes: &[u8], max: usize) {
-    let Ok(entries) = read_transpose::<VerifyingKey>(&mut &bytes[..], max) else {
-        return;
-    };
-
-    // The decoder accepts adjacent runs sharing one recipient that the encoder would merge,
-    // so parity is asserted on the canonical re-encoding rather than the input bytes.
-    let mut encoded = Vec::new();
-    write_transpose(&entries, &mut encoded);
-    assert_eq!(encoded.len(), transpose_encode_size(&entries));
-    let decoded = read_transpose::<VerifyingKey>(&mut &encoded[..], entries.len())
-        .expect("encoded transpose interval must remain decodable");
-    assert_eq!(decoded, entries);
+    .await;
+    if let Ok(dealing) = posted::decode::<VerifyingKey, Digest>(bytes.to_vec().into(), &context) {
+        assert_eq!(dealing.encoded().as_ref(), bytes);
+        let decoded =
+            posted::decode::<VerifyingKey, Digest>(dealing.encoded().clone(), &context).unwrap();
+        assert_eq!(decoded.header(), dealing.header());
+        let mut trailing = bytes.to_vec();
+        trailing.push(0);
+        assert!(posted::decode::<VerifyingKey, Digest>(trailing.into(), &context).is_err());
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -182,14 +181,14 @@ fuzz_target!(|data: &[u8]| {
         5 => roundtrip::<Certificate>(bytes, &item_limit),
         6 => roundtrip::<Vote>(bytes, &()),
         7 => roundtrip::<WithdrawalAction>(bytes, &()),
-        8 => roundtrip::<AccountState>(bytes, &()),
-        9 => roundtrip::<StateLeaf<VerifyingKey>>(bytes, &()),
-        10 => roundtrip::<Prefix>(bytes, &()),
-        11 => roundtrip::<AccountRow<VerifyingKey, Digest>>(bytes, &()),
+        8 => roundtrip::<StateRoot<Digest>>(bytes, &()),
+        9 => roundtrip::<StateValueOpening<Digest>>(bytes, &item_limit),
+        10 => roundtrip::<CloseAmounts>(bytes, &()),
+        11 => roundtrip::<core::num::NonZeroU64>(bytes, &()),
         12 => roundtrip::<SettlementOutput>(bytes, &()),
         13 => roundtrip::<AccountChange<VerifyingKey, Digest>>(bytes, &()),
         14 => roundtrip::<ChangeValue<Digest>>(bytes, &()),
-        15 => roundtrip::<ChangeValueCore<Digest>>(bytes, &()),
+        15 => roundtrip::<ChangeValueCore>(bytes, &()),
         16 => roundtrip::<ChangeGuard<VerifyingKey, Digest>>(bytes, &()),
         17 => roundtrip::<Opening<Digest>>(bytes, &()),
         18 => roundtrip::<MultiOpening<Digest>>(bytes, &()),
@@ -203,29 +202,34 @@ fuzz_target!(|data: &[u8]| {
         26 => roundtrip::<OutEntry<VerifyingKey>>(bytes, &()),
         27 => roundtrip::<OutVector<VerifyingKey>>(bytes, &()),
         28 => roundtrip::<OutTipLookup<VerifyingKey, Digest>>(bytes, &()),
-        29 => roundtrip::<TransposeEntry<VerifyingKey>>(bytes, &()),
-        30 => transpose_roundtrip(bytes, item_limit),
-        31 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &()),
-        32 => roundtrip::<StateLookup<VerifyingKey, Digest>>(bytes, &()),
+        29 => roundtrip::<StateLookup<Digest>>(bytes, &item_limit),
+        30 => roundtrip::<CloseContext<VerifyingKey, Digest>>(bytes, &()),
+        31 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &item_limit),
+        32 => roundtrip::<StateLookup<Digest>>(bytes, &item_limit),
         33 => roundtrip::<AccountLookup<VerifyingKey, Digest>>(bytes, &()),
         34 => roundtrip::<ChangeOpening<Digest>>(bytes, &()),
         35 => roundtrip::<ChangeAbsence<VerifyingKey, Digest>>(bytes, &()),
         36 => roundtrip::<AckWitness<VerifyingKey, Digest>>(bytes, &()),
         37 => roundtrip::<EntryWitness<VerifyingKey, Digest>>(bytes, &()),
         38 => roundtrip::<HigherEntryLookup<VerifyingKey, Digest>>(bytes, &()),
-        39 => challenge_roundtrip(bytes, limit_selector),
+        39 => {
+            deterministic::Runner::seeded(u64::from(limit_selector)).start(|runtime| async move {
+                challenge_roundtrip(bytes, limit_selector, runtime).await
+            })
+        }
         40 => roundtrip::<Header<Digest>>(bytes, &()),
         41 => roundtrip::<RootBundle<Digest>>(bytes, &()),
         42 => roundtrip::<BatchId<Digest>>(bytes, &()),
         43 => roundtrip::<CloseLimits>(bytes, &()),
-        44 => roundtrip::<Assignment<Digest>>(bytes, &()),
-        45 => roundtrip::<SliceBoundary>(bytes, &()),
-        46 => roundtrip::<CoverageRange<Digest>>(bytes, &()),
-        47 => roundtrip::<TerminalProof<Digest>>(bytes, &()),
+        44 => roundtrip::<StateRoot<Digest>>(bytes, &()),
+        45 => roundtrip::<StateValueOpening<Digest>>(bytes, &item_limit),
+        46 => roundtrip::<StateOpening<VerifyingKey, Digest>>(bytes, &item_limit),
+        47 => roundtrip::<CloseAmounts>(bytes, &()),
         48 => roundtrip::<WithdrawalOutput>(bytes, &RangeCfg::new(..=destination_limit)),
         49 => roundtrip::<WithdrawalClaim<Digest>>(bytes, &RangeCfg::new(..=destination_limit)),
         50 => roundtrip::<ExternalPayoutClaim<VerifyingKey, Digest>>(bytes, &()),
-        51 => slice_roundtrip(bytes, close_limits),
+        51 => deterministic::Runner::seeded(u64::from(limit_selector))
+            .start(|runtime| async move { dealing_roundtrip(bytes, close_limits, runtime).await }),
         _ => unreachable!(),
     }
 

@@ -166,7 +166,7 @@ DEPOSIT OR WITHDRAWAL AUTHORIZATION
 
 CLEAN CLOSE
 
-operator prepare -> deal -> validators seal every assigned proof slice
+operator prepare -> deal -> validators validate the complete dealing
           -> certificate -> settlement admit
           -> PENDING through the inclusive challenge deadline
           -> the deadline passes when the chain finalizes a block past it
@@ -216,7 +216,7 @@ settlement until its close registers, so it gains the deadline-fault guarantee o
 is admitted. If the operator disappears or censors first, the signer queues the exact signed
 request at settlement instead. The next registered close must then carry the queued request
 verbatim, and only an operator that stalls entirely lets the obligation expire into hard-fault
-recovery. A frozen root the agent never observed is opened by its slice holders instead: the
+recovery. A frozen root the agent never observed is opened by the committee instead: the
 validators retaining a sealed dealing at that root serve the leaf, and recovery verifies it against
 the frozen state root before claiming. An account reactivated by a current-epoch deposit cannot pay
 until it appears in a later epoch-predecessor state, because the current frozen root has no live
@@ -232,9 +232,9 @@ durably hold the receipt and gate service on it, so a balance read from the oper
 observation, not reliance. In the background it reconciles held credits against the admitted
 close: settlement serves the batch identity and roots it admitted for the epoch, and
 committed-side evidence is trusted only when it verifies under those roots. That evidence comes
-from the payer's slice holders: the validators retaining the admitted close's sealed dealing
+from the committee: the validators retaining the admitted close's sealed dealing
 through its challenge window serve the payer's committed terminal entry, or its authenticated
-absence, from the slice alone, so the accused operator is never the source of the lookup that
+absence, from retained close evidence, so the accused operator is never the source of the lookup that
 convicts it and can neither withhold nor fabricate coverage while the window is open. Once the
 window closes and the dealing is released, the operator's reconstruction is the fallback, and
 only there does its retention window apply: a finalized close stays reconstructable until
@@ -257,13 +257,12 @@ send's context proves settlement registered exactly that payment context. A rece
 context the chain never registered has no close to adjudicate against and is never recorded.
 
 Each wallet flow draws on four sources: the operator's RPC (the fast path, never trusted on its
-own), the validators' query servers (certified reads and submit-then-prove effects), the slice
-holders' evidence (openings and claims from the validators retaining a close's sealed dealing
+own), the validators' query servers (certified reads and submit-then-prove effects), the committee' evidence (openings and claims from the validators retaining a close's sealed dealing
 through its challenge window, every one verified against a certified root before use), and the
 wallet's own SQLite state. The operator may answer first, and every enforcement flow completes
 without it.
 
-| Flow | Operator RPC (fast path) | Validator query servers (certified) | Validator evidence (slice holders) | Local state |
+| Flow | Operator RPC (fast path) | Validator query servers (certified) | Validator evidence (committee) | Local state |
 | --- | --- | --- | --- | --- |
 | Pay | `accept_send`, `payment_head` for a fresh stage, and an optional `accepted_batch` receipts fetch once a lost acceptance resolves against the finalized endpoint | `anchor` for the send's epoch, `status` to stage or resolve, and `registration` for the signing context when the operator serves no usable head | the wallet's leaf at the certified head when the operator's head is unreachable or fails verification: the affordability floor for staging, the endpoint for resolution | cached (epoch, anchor), cumulative debit, staged send, held receipts |
 | Balance and head opening | `payment_head` | `status`, whose finalized state root the served opening is verified against | the wallet's leaf at the certified head when the operator's head is unreachable or fails verification | the opening retained by root, the signing context re-cached from an operator head |
@@ -271,59 +270,53 @@ without it.
 | Escalate | none | `deliver` QueueWithdrawal, `withdrawal` record | none | the pending signed request and its locally retained opening |
 | Claims | `withdrawal_evidence` or `external_payout_evidence` only when no admitted close is inside its window, then a courtesy `acknowledge_*` the claim never waits on | `status`, `registration`, and `admitted` for the open windows, `claim_roots`, `deliver` claim, `withdrawal_release` or `payout_release` record | the withdrawal output or external payout claim from the admitted close's holders inside its window, verified against the admitted roots and cached | cached evidence and the claim intent slot |
 | Receipt intake | `incoming_payments` | `anchor` per receipt epoch | none | held receipts and the durable cursor |
-| Reconcile | `committed_entry` only when every holder declines | `status`, `admitted`, `deliver` Challenge, `fault` record | the payer's committed terminal entry from the payer's slice holders, verified against the admitted change root | held receipts, the durable per-epoch outcome |
+| Reconcile | `committed_entry` only when every holder declines | `status`, `admitted`, `deliver` Challenge, `fault` record | the payer's committed terminal entry from the committee, verified against the admitted change root | held receipts, the durable per-epoch outcome |
 | Deposit, refund, hard-fault claim | none | `deliver` plus the `deposit`, `refund`, `fault`, and `hard_fault` records | the wallet's leaf at the frozen root when none is retained | the staged deposit, and for the hard-fault claim an opening retained for the frozen root |
 | Registration and settlement status | none (the operator status panel is the operator's own uncertified report) | `registration`, `status` | none | none |
 
 ## Close certification and data availability
 
-Distributed certification runs over the settlement DA channel. An operator sends each
-validator exactly its assigned proof slices, one per assigned span (a contiguous range of
-slices) and stripped of their unchanged state: every slice travels as a `DealtSlice`, and the
-validator hydrates it against the key interval it retains for that span at the registered
-close's predecessor root. The operator never materializes a slice per span: it encodes every
-slice's chunk (its rows against the retained predecessor leaves, its senders' entries, and its
-transpose range) once, computes one witness per distinct span, and sends each dealing as the
-witness followed by the covered chunks, so dealing costs one pass over the close however many
-validators share a slice. Intervals are retained one record per slice, so a future re-grouping
-of slices a validator already holds into different spans needs no re-sync. A slice it never
-held or already pruned (a validator that missed a close, or one starting from an empty
-directory) is fetched when the next dealing arrives: the validator asks the slice's other
-holders through their query servers (`EvidenceLookup::Interval`), one at a time from a
-deterministic offset with a bounded wait per holder, rotating past routing advice, garbage,
-and silence, verifies the served range against the registered close's predecessor root (which
-consensus certified, so nothing the holder sends is trusted) and the slice bounds, retains it,
-and only then hydrates and seals, while still answering evidence requests. A dealing whose
-interval no holder serves is skipped with a warning naming the slice and every decline. This is
-the mechanism a rotated-in validator needs, but a true validator-set change also needs the
-settlement chain to accept a committee schedule (it pins one committee commitment today),
-which is a separate protocol change. Genesis seeds each deployment's intervals from its
-configured accounts, every sealed close advances them under the successor root, and the
-advanced intervals are made durable together with the sealed dealing before the vote leaves
-the validator, so dealing bytes scale with the movers rather than the account set. The
-validator routes each dealing by the sending operator's network identity to the deployment
-that operator runs and seals it with clearing `seal` against THAT deployment's
-chain-registered close from its
-own applied state, never against operator-supplied context material. The sealed dealing
-lands in that deployment's own prunable archive (the partition folds the deployment digest,
-so two deployments' closes never contend for one deadline slot), keyed by the close's batch
-id (deployment-unique by construction: the header commits the payment anchor, which folds
-the deployment digest) and sectioned by its challenge deadline height, and it is synced
-there before the vote returns to the sending operator: the vote attests to availability the
-validator must be able to honor, so a validator killed between seal and vote still holds its
-dealing on restart. The record carries the registered close context it sealed against, so a
-restarted validator keeps serving challenge and claim evidence for a close the chain has
-already admitted (and so no longer names as registered) through its challenge window.
-Sections are pruned only when they lie strictly below the certified
-finalized height, where every challenge window they cover is closed, never on wall clock. A
-record is never overwritten: a replayed dealing re-votes from the stored bytes, and a
-conflicting dealing for an occupied slot is refused, in the interval store as in the dealing
-archive (a differing close for an epoch whose advanced intervals are already retained is
-refused before sealing, closing the crash window between the two syncs). Dealings and votes are recoverable
-off-chain traffic, resent until quorum, and only the finalized admission is durable protocol
-state. The operator verifies every returned vote, assembles the exact-quorum certificate,
-submits the admission transaction, and completes only once its own certified state finalized
-the exact batch.
+Distributed certification sends the same complete dealing to every committee member. The
+header commits the epoch payment anchor, the activity root, the withdrawal-output root,
+the successor QMDB balance root, and the withdrawal and payout totals. Validators derive
+these commitments from the keyed inputs and their own predecessor state, then validate the
+whole dealing before voting. Balance storage contains only positive current balances;
+zero balances are authenticated absence. The separate settlement-record QMDB continues to
+certify chain custody, admissions, deadlines, and claims.
+
+Each validator durably records the validated dealing, canonical mutations, and evidence
+before returning its vote. Votes and chain-selected history have separate archives: signing
+one candidate does not authorize advancing the balance replica along that branch. Before
+sealing a successor or serving an admitted balance root, the validator follows the actual
+chain admission. A missed close is fetched from the other validators through
+`EvidenceLookup::Dealing`, checked against the certified batch and roots, and fully validated
+before replay. Invalid responses and timeouts advance to the next holder. The canonical
+record is synced before applying and committing its QMDB mutations. Restart opens the native
+QMDB head and compares it with the accepted archive frontier. It applies only a missing
+canonical tail whose archive record became durable before the QMDB update completed;
+already applied mutations are not replayed. Mutable storage failures stop the owning service.
+
+The initial retention policy keeps complete activity evidence and canonical balance history.
+Validators can serve Current membership and absence proofs at genesis, predecessor, pending,
+finalized, and frozen recovery roots after the operator fails. Historical Current proofs use
+an on-demand, read-only view of the same QMDB. They neither maintain a second database nor
+rewind the live replica. A pending root remains
+available even after its own challenge deadline because earlier FIFO windows can delay its
+finalization. Catch-up and historical proof cost depend on the missing closes and requested
+historical view; no bounded history pruning policy is implemented yet.
+
+Setup generates each deployment's genesis root and operation count through native batch
+preparation, writes them into the trusted genesis configuration, and removes its temporary
+QMDB files. Followers consume that configuration without creating a separate genesis
+database. Live balance replicas check their prepared genesis against the configured
+commitment before exposing it.
+
+The operator persists the completed close and its mutations before committing its own QMDB
+state, then submits admission and waits for the exact certified batch. It can accept
+root-independent payments for the next epoch while closing the prior epoch; a successor
+balance opening becomes available once that predecessor close has been applied. Every
+validator partition is scoped by the full deployment digest, so concurrent deployments
+keep independent balance and evidence ownership.
 
 ## Keys
 
@@ -333,7 +326,7 @@ the exact batch.
 | Clearing committee key (BLS) | each validator's `node.json` | seals dealings and signs close-admission votes |
 | Operator network key (ed25519) | each `operator-<index>/node.json` | authenticates that operator as a registered p2p secondary |
 | Operator clearing key (curve25519) | each `operator-<index>/node.json` (a fixed demo protocol constant) | signs the curve25519 half of that operator's receipts and its epoch registrations, and its digest names the deployment the operator runs |
-| Operator acknowledgment key (BLS MinSig) | each `operator-<index>/node.json` (a fixed demo protocol constant whose public key `genesis.json` fixes per deployment) | signs the aggregable half of every acknowledgment, combined into one countersignature per proof slice in the close and verified by every sealer against the genesis-fixed key |
+| Operator acknowledgment key (BLS MinSig) | each `operator-<index>/node.json` (a fixed demo protocol constant whose public key `genesis.json` fixes per deployment) | signs the aggregable half of every acknowledgment, combined into one countersignature per sender in the close and verified by every sealer against the genesis-fixed key |
 | Wallet key (curve25519) | one per agent | signs sends and withdrawal authorizations, and names the account custody and claims resolve to |
 
 ## Run
@@ -512,19 +505,16 @@ Deposit and withdrawal deadlines are independent: if one expires while a clean a
 remains challengeable, the fault is recorded, the clean FIFO front still finalizes after its
 window, and terminal recovery preserves both its claim reserves and its successor state.
 
-SQLite atomically derives every pending Close tail, projects those historical rows inactive at zero
-balance while retaining their counters and payment evidence, adjusts live liability, records the
-close job, and opens the successor under a root-independent payment context. The cut is proportional
-to Close authorizations rather than all accounts, and unchanged account versions remain
-copy-on-write. A background worker rebuilds the predecessor BMTs, deals each validator its proof
-slices over the DA channel, collects the committee's votes into the exact-quorum certificate, and
-submits the certified close to settlement. The chain opens the successor epoch's registration
-window at the predecessor's admission, while that close's challenge window still runs, so a
-successor's first payment retries only until the predecessor's close is admitted; the Bajillion
-settlement primitive itself supports a bounded admitted pipeline. Close retries remain
-bound to their original epoch, so a lost response cannot cut the active successor. Finalization
-prunes only the balance versions that epochs below the retention window still needed, so every
-finalized close inside that window reconstructs exactly for receiver reconciliation.
+SQLite atomically derives every pending Close tail, projects closed accounts inactive at zero
+balance, records the close job, and opens the successor under a root-independent payment
+context. The cut visits Close authorizations rather than all accounts, and unchanged SQL
+balance versions remain shared. A background worker prepares the close against its persisted
+QMDB predecessor, distributes the complete dealing, collects the exact-quorum certificate,
+and submits admission. The chain opens the successor registration window at admission while
+the predecessor remains challengeable. Close retries remain bound to their original epoch,
+so a lost response cannot cut the active successor. Finalization can prune obsolete SQL
+projections; the independent QMDB history and close evidence remain available for proofs and
+receiver reconciliation.
 
 The scripted walkthrough deposits and waits for the operator's observed credit to show in the verified
 balance, hands the operator a withdrawal to carry, pays an internal receiver,

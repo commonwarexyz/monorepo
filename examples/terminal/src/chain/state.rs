@@ -103,12 +103,12 @@ use commonware_clearing::bajillion::{
     boundary::{SignedWithdrawal, WithdrawalBatch},
     challenge::{ChallengeKind, Verdict},
     commitment::VectorRoot,
+    qmdb::StateRoot,
     settlement::{
         Bounds, ClaimError, DepositRefund, HardFaultReason, HardFaultRelease, HardFaultSettlement,
         Registered, SettlementChain, SettlementError,
     },
-    state::{AccountState, StateLeaf},
-    transition::{BatchId, ExternalPayout, OperatorKey, RootBundle, StateCache, WithdrawalOutput},
+    transition::{BatchId, ExternalPayout, OperatorKey, RootBundle, WithdrawalOutput},
 };
 use commonware_codec::{
     Decode, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -260,7 +260,7 @@ pub(crate) struct StatusRecord {
     pub(crate) timestamp: u64,
     pub(crate) deployment: Digest,
     /// Clearing state root (the settlement chain's account commitment).
-    pub(crate) state_root: VectorRoot<Digest>,
+    pub(crate) state_root: StateRoot<Digest>,
     /// Highest finalized epoch. Epochs finalize in order, so the state root
     /// covers every epoch at or below it.
     pub(crate) last_finalized: Option<u64>,
@@ -303,7 +303,7 @@ impl Read for StatusRecord {
             height: u64::read(buf)?,
             timestamp: u64::read(buf)?,
             deployment: Digest::read(buf)?,
-            state_root: VectorRoot::read(buf)?,
+            state_root: StateRoot::read(buf)?,
             last_finalized: Option::<u64>::read(buf)?,
             custody: u64::read(buf)?,
             claimable: u64::read(buf)?,
@@ -419,7 +419,7 @@ impl Read for ClaimRootsResponse {
 /// or validator-served committed-side evidence is trusted only when it
 /// verifies under these roots: the change root for challenge lookups and
 /// claims, the successor root for state openings, the withdrawal-output
-/// root for withdrawal claims, and the transpose root for credits.
+/// root for withdrawal claims.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AdmittedRootsResponse {
     pub(crate) batch_id: BatchId<Digest>,
@@ -428,7 +428,7 @@ pub(crate) struct AdmittedRootsResponse {
     pub(crate) change: VectorRoot<Digest>,
     /// The full root bundle the admitted header commits.
     pub(crate) roots: RootBundle<Digest>,
-    /// Whether the close finalized. While false, its inclusive challenge window is open.
+    /// Whether FIFO settlement finalized the close.
     pub(crate) finalized: bool,
 }
 
@@ -727,7 +727,7 @@ pub(crate) struct BeginHardFaultSettlementResponse {
     pub(crate) reason: HardFaultReasonResponse,
     pub(crate) admission_fence_epoch: u64,
     pub(crate) invalid_from: Option<BatchId<Digest>>,
-    pub(crate) frozen_state_root: VectorRoot<Digest>,
+    pub(crate) frozen_state_root: StateRoot<Digest>,
     pub(crate) state_liability: u64,
     pub(crate) unfinalized_deposit_total: u64,
     pub(crate) custody_balance: u64,
@@ -779,7 +779,7 @@ impl Read for BeginHardFaultSettlementResponse {
             reason: HardFaultReasonResponse::read(buf)?,
             admission_fence_epoch: u64::read(buf)?,
             invalid_from: Option::<BatchId<Digest>>::read(buf)?,
-            frozen_state_root: VectorRoot::read(buf)?,
+            frozen_state_root: StateRoot::read(buf)?,
             state_liability: u64::read(buf)?,
             unfinalized_deposit_total: u64::read(buf)?,
             custody_balance: u64::read(buf)?,
@@ -993,21 +993,21 @@ impl Read for PayoutReleaseRecord {
 /// One hard-fault release, keyed by account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HardFaultReleaseRecord {
-    /// Digest of the exact opening that consumed the position.
-    pub(crate) opening: Digest,
+    /// Frozen balance root authenticated by this account release.
+    pub(crate) root: StateRoot<Digest>,
     pub(crate) released: ClaimHardFaultResponse,
 }
 
 impl Write for HardFaultReleaseRecord {
     fn write(&self, buf: &mut impl BufMut) {
-        self.opening.write(buf);
+        self.root.write(buf);
         self.released.write(buf);
     }
 }
 
 impl EncodeSize for HardFaultReleaseRecord {
     fn encode_size(&self) -> usize {
-        self.opening.encode_size() + self.released.encode_size()
+        self.root.encode_size() + self.released.encode_size()
     }
 }
 
@@ -1016,7 +1016,7 @@ impl Read for HardFaultReleaseRecord {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            opening: Digest::read(buf)?,
+            root: StateRoot::read(buf)?,
             released: ClaimHardFaultResponse::read(buf)?,
         })
     }
@@ -1499,26 +1499,11 @@ impl Machine {
     /// One configured deployment's genesis machine, constructed from its
     /// configured accounts under the chain-wide genesis `timing` policy.
     pub(crate) fn genesis(config: &Deployment, timing: &Timing) -> Self {
-        let mut leaves = config
-            .accounts
-            .iter()
-            .map(|account| StateLeaf {
-                account: account.key.clone(),
-                state: AccountState {
-                    balance: account.balance,
-                    active: true,
-                    ..AccountState::default()
-                },
-            })
-            .collect::<Vec<_>>();
-        leaves.sort_unstable_by(|left, right| left.account.cmp(&right.account));
-        let state =
-            StateCache::new::<Sha256>(leaves).expect("the genesis account state is well formed");
         let chain = SettlementChain::new(
             *config.digest(),
             config.operator.clone(),
             committee().expect("the demo committee is statically valid"),
-            &state,
+            config.genesis(),
             0,
             settlement_config(timing),
         )
@@ -1809,7 +1794,7 @@ impl Machine {
             let Some(opening) = request
                 .openings
                 .iter()
-                .find(|opening| &opening.leaf.account == carried.account())
+                .find(|opening| &opening.account == carried.account())
             else {
                 return Ok(Step::rejected(Reject::MissingOpening));
             };
@@ -1911,7 +1896,7 @@ impl Machine {
             height,
             request.header,
             request.roots,
-            request.terminal_proof.clone(),
+            request.amounts,
             request.certificate.clone(),
         ) {
             Ok(batch_id) => batch_id,
@@ -1996,14 +1981,15 @@ impl Machine {
     }
 
     fn claim_hard_fault(&mut self, config: &Deployment, request: &ClaimHardFaultRequest) -> Step {
+        let root = self.chain.current_state_root();
         let release = match self.chain.claim_hard_fault(&request.opening) {
             Ok(release) => release,
             Err(error) => return Step::rejected(chain_rejection(&error)),
         };
         Step::applied(vec![(
-            hard_fault_key(config.digest(), &request.opening.leaf.account),
+            hard_fault_key(config.digest(), &request.opening.account),
             Some(Record::HardFault(HardFaultReleaseRecord {
-                opening: Sha256::hash(&[&request.opening.encode()]),
+                root,
                 released: release.into(),
             })),
         )])
@@ -2306,7 +2292,7 @@ where
 /// evidence. Rejections are effect-free, so this is the only typed
 /// diagnosis a submitter gets: execution re-checks everything at inclusion,
 /// the peek deliberately skips the expensive arms (certificate verification,
-/// terminal proofs, challenge adjudication, machine-internal gates), and
+/// challenge adjudication, machine-internal gates), and
 /// any answer can go stale the moment state advances.
 pub(crate) async fn advise<E>(
     db: &Database<E>,
@@ -2497,10 +2483,12 @@ where
             };
             let deployment = config.digest();
             if let Some(Record::HardFault(release)) = guard
-                .get(&hard_fault_key(deployment, &request.opening.leaf.account))
+                .get(&hard_fault_key(deployment, &request.opening.account))
                 .await?
             {
-                if release.opening == Sha256::hash(&[&request.opening.encode()]) {
+                if request.opening.verify::<Sha256>(&release.root).is_ok()
+                    && release.released.account == request.opening.account
+                {
                     Advice::Applied
                 } else {
                     Advice::Doomed(Reject::PositionConflict)
@@ -2564,10 +2552,7 @@ mod codec_tests {
         let roots = RootBundle {
             change,
             withdrawal_outputs: root(b"anchored-record-outputs"),
-            successor: root(b"anchored-record-successor"),
-            coverage: root(b"anchored-record-coverage"),
-            transpose: root(b"anchored-record-transpose"),
-            transpose_len: 3,
+            successor: StateRoot::new(Sha256::hash(&[b"anchored-record-successor"])),
         };
         for admitted in [
             AdmittedRootsResponse::new(batch_id, roots, false),

@@ -2,6 +2,7 @@ use commonware_clearing::bajillion::{
     payment::{EntryReceipt, PaymentContext, SendAuthorization, VectorAck, VectorSendBody},
     vector::{OutEntry, OutTipLookup, OutVector},
 };
+use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Hasher, Sha256, Signer as _, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{SigningKey, StrictVerifyingKey as VerifyingKey};
 use criterion::{Criterion, criterion_group};
@@ -99,6 +100,23 @@ fn bench_verify_ack(c: &mut Criterion) {
                 black_box(&fixture.authorization)
                     .verify(black_box(&fixture.context))
                     .expect("benchmark authorization is valid");
+            });
+        },
+    );
+    let encoded = fixture.receipt.encode();
+    c.bench_function(
+        &format!(
+            "{}/kind=receive-receipt entries={ENTRIES} backend=curve25519 hash=sha256",
+            module_path!()
+        ),
+        |b| {
+            b.iter(|| {
+                let receipt = EntryReceipt::<VerifyingKey, Digest>::decode(encoded.clone())
+                    .expect("receipt decodes");
+                receipt
+                    .verify::<Sha256>(black_box(&fixture.context))
+                    .expect("decoded receipt verifies");
+                black_box(receipt);
             });
         },
     );

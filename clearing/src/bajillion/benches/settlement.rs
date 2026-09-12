@@ -1,16 +1,14 @@
-use super::fixtures::strategy;
 use bytes::Bytes;
 use commonware_clearing::bajillion::{
     admission::{Committee, bls12381},
     boundary::{DepositBatch, SignedWithdrawal, WithdrawalAction, WithdrawalBatch},
-    challenge::StateOpening,
+    posted,
+    qmdb::{self, State, StateHead, StateOpening, account_key},
     settlement::{EpochDeadlinePolicy, SettlementChain, SettlementConfig},
-    state::{AccountRow, AccountState, Prefix, SettlementOutput, StateLeaf},
     transition::{
-        Assignment, Close, CloseContext, CloseLimits, EpochContext, Header, OperatorKey,
-        OperatorSignature, RootBundle, StateCache, TerminalProof, prepare_close_with_strategy,
+        CloseAmounts, CloseContext, CloseLimits, EpochContext, Header, OperatorKey, RootBundle,
+        prepare_close_with_strategy, validate_close_with_strategy,
     },
-    vector::OutVector,
 };
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
@@ -24,11 +22,18 @@ use commonware_cryptography::{
 use commonware_cryptography_curve25519::signing::{
     BatchVerifier as PaymentBatchVerifier, SigningKey, StrictVerifyingKey as VerifyingKey,
 };
-use commonware_utils::TestRng;
-use criterion::{BatchSize, Criterion, criterion_group};
+use commonware_parallel::Sequential;
+use commonware_runtime::{Runner as _, deterministic, utils::buffer::paged::CacheRef};
+use commonware_storage::{
+    journal::contiguous::fixed::Config as JournalConfig, merkle::full::Config as MerkleConfig,
+    qmdb::current::FixedConfig, translator::EightCap,
+};
+use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, time::SYSTEM_TIME_PRECISION};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     num::{NonZeroU64, NonZeroUsize},
+    time::{Duration, Instant},
 };
 
 const LIVE_ACCOUNTS: usize = 1_024;
@@ -60,12 +65,10 @@ const HARD_FAULT_PROFILES: &[(usize, usize)] = &[
     (1_000_000, 1_024),
 ];
 
-type TestCache = StateCache<VerifyingKey, Digest>;
+type TestState = State<deterministic::Context, Sha256>;
 type TestChain = SettlementChain<Sha256, VerifyingKey>;
-type TestClose = Close<VerifyingKey, Digest>;
 type TestContext = CloseContext<VerifyingKey, Digest>;
 type TestHeader = Header<Digest>;
-type TestTerminalProof = TerminalProof<Digest>;
 type TestWithdrawals = WithdrawalBatch<VerifyingKey, Digest>;
 
 struct Account {
@@ -119,7 +122,7 @@ struct AdmissionFixture {
     withdrawals: TestWithdrawals,
     header: TestHeader,
     roots: RootBundle<Digest>,
-    terminal_proof: TestTerminalProof,
+    amounts: CloseAmounts,
     certificate: bls12381::Certificate,
 }
 
@@ -132,12 +135,12 @@ struct AdmitInput {
     chain: TestChain,
     header: TestHeader,
     roots: RootBundle<Digest>,
-    terminal_proof: TestTerminalProof,
+    amounts: CloseAmounts,
     certificate: bls12381::Certificate,
 }
 
 struct ChainSource {
-    cache: TestCache,
+    head: StateHead<Digest>,
     validators: Validators,
 }
 
@@ -196,7 +199,35 @@ fn operator_bls() -> OperatorKey {
     compute_public::<MinSig>(&Private::new(Scalar::from(OPERATOR_BLS_SEED)))
 }
 
-fn state_fixture(live_accounts: usize) -> (TestCache, Vec<Account>) {
+fn state_config(context: &deterministic::Context) -> qmdb::Config<Sequential> {
+    let cache = CacheRef::from_pooler(context, NZU16!(4096), NZUsize!(64));
+    FixedConfig {
+        merkle_config: MerkleConfig {
+            journal_partition: "settlement-merkle".into(),
+            metadata_partition: "settlement-merkle-meta".into(),
+            items_per_blob: NZU64!(1024),
+            write_buffer: NZUsize!(4096),
+            strategy: Sequential,
+            page_cache: cache.clone(),
+        },
+        journal_config: JournalConfig {
+            partition: "settlement-operations".into(),
+            items_per_blob: NZU64!(1024),
+            write_buffer: NZUsize!(4096),
+            page_cache: cache,
+        },
+        grafted_metadata_partition: "settlement-grafts".into(),
+        translator: EightCap,
+        init_cache_size: Some(NZUsize!(64)),
+        init_buffer: NZUsize!(4096),
+        init_concurrency: (),
+    }
+}
+
+async fn state_fixture(
+    runtime: deterministic::Context,
+    live_accounts: usize,
+) -> (TestState, Vec<Account>) {
     let mut accounts = (0..live_accounts)
         .map(|index| {
             let index = u64::try_from(index).expect("account index fits in u64");
@@ -208,175 +239,132 @@ fn state_fixture(live_accounts: usize) -> (TestCache, Vec<Account>) {
         })
         .collect::<Vec<_>>();
     accounts.sort_unstable_by(|left, right| left.public.cmp(&right.public));
-    let leaves = accounts
+    let genesis = accounts
         .iter()
-        .map(|account| StateLeaf {
-            account: account.public.clone(),
-            state: AccountState {
-                balance: OPENING_BALANCE,
-                active: true,
-                ..AccountState::default()
-            },
+        .map(|account| {
+            (
+                account_key(&account.public).expect("benchmark account key is canonical"),
+                NonZeroU64::new(OPENING_BALANCE),
+            )
         })
         .collect();
-    let cache = StateCache::new::<Sha256>(leaves).expect("benchmark state is canonical");
-    (cache, accounts)
-}
-
-fn chain(cache: &TestCache, validators: &Validators, max_pending_epochs: usize) -> TestChain {
-    SettlementChain::new(
-        deployment(),
-        SigningKey::from_seed(OPERATOR_SEED).public_key(),
-        validators.committee.clone(),
-        cache,
-        0,
-        settlement_config(max_pending_epochs, cache.len()),
-    )
-    .expect("benchmark settlement chain is valid")
+    let config = state_config(&runtime);
+    let state = TestState::open(runtime, config)
+        .await
+        .expect("open native state");
+    assert!(state.is_bootstrap());
+    let genesis = state
+        .prepare(state.head(), genesis)
+        .await
+        .expect("prepare canonical genesis");
+    let state = state.apply(genesis).await.expect("apply canonical genesis");
+    (state, accounts)
 }
 
 impl ChainSource {
-    fn new(live_accounts: usize, validator_count: usize) -> (Self, Vec<Account>) {
-        let (cache, accounts) = state_fixture(live_accounts);
+    async fn new(
+        runtime: deterministic::Context,
+        live_accounts: usize,
+        validator_count: usize,
+    ) -> (Self, TestState, Vec<Account>) {
+        let (state, accounts) = state_fixture(runtime, live_accounts).await;
         (
             Self {
-                cache,
+                head: *state.head(),
                 validators: Validators::new(validator_count),
             },
+            state,
             accounts,
         )
     }
 
     fn fresh_chain(&self, max_pending_epochs: usize) -> TestChain {
-        chain(&self.cache, &self.validators, max_pending_epochs)
-    }
-}
-
-fn context(
-    cache: &TestCache,
-    validators: &Validators,
-    epoch: u64,
-    deposits: &DepositBatch<VerifyingKey>,
-    withdrawals: &TestWithdrawals,
-) -> TestContext {
-    // Sequential registrations must present strictly increasing admission
-    // deadlines, so each epoch's deadlines advance from the base constants
-    // while keeping the exact configured challenge duration.
-    let admission_deadline = ADMISSION_DEADLINE + epoch;
-    let challenge_deadline = admission_deadline + (CHALLENGE_DEADLINE - ADMISSION_DEADLINE);
-    EpochContext::new::<Sha256>(
-        deployment(),
-        epoch,
-        SigningKey::from_seed(OPERATOR_SEED).public_key(),
-        deposits,
-        withdrawals,
-        cache.liability(),
-        admission_deadline,
-        challenge_deadline,
-        CloseLimits::protocol_maximum(),
-        Assignment::new(validators.committee.commitment::<Sha256>(), 0)
-            .expect("benchmark assignment is valid"),
-    )
-    .and_then(|epoch| epoch.bind::<Sha256>(cache, deposits, withdrawals))
-    .expect("benchmark close context is valid")
-}
-
-fn withdrawal_close(
-    cache: &TestCache,
-    context: &TestContext,
-    deposits: &DepositBatch<VerifyingKey>,
-    withdrawals: &TestWithdrawals,
-) -> (TestClose, TestTerminalProof) {
-    let mut prefix = Prefix::default();
-    let mut rows = Vec::with_capacity(withdrawals.len());
-    let mut out_vectors = Vec::with_capacity(withdrawals.len());
-    for request in withdrawals.requests() {
-        let account = request.account().clone();
-        let predecessor = cache
-            .leaves()
-            .iter()
-            .find(|leaf| leaf.account == account)
-            .expect("benchmark withdrawal account is registered")
-            .state;
-        let (applied, closes_account) = match request.body().action() {
-            WithdrawalAction::Amount(amount) => (amount.get(), false),
-            WithdrawalAction::Close => (predecessor.balance, true),
-        };
-        let mut successor = predecessor;
-        successor.balance = successor
-            .balance
-            .checked_sub(applied)
-            .expect("benchmark withdrawal is affordable");
-        successor.active = predecessor.active && !closes_account;
-        prefix = prefix
-            .checked_extend(Prefix {
-                withdrawal: applied,
-                withdrawal_count: 1,
-                ..Prefix::default()
-            })
-            .expect("benchmark totals are representable");
-        rows.push(AccountRow {
-            account: account.clone(),
-            predecessor,
-            successor,
-            outgoing: None,
-            output: SettlementOutput::Withdrawal(applied),
-            prefix,
-        });
-        out_vectors.push(OutVector::empty(context.payment().epoch(), account));
-    }
-    let out_partials = out_vectors
-        .iter()
-        .map(OutVector::accumulator)
-        .collect::<Vec<_>>();
-    let operator_signatures: Vec<Option<OperatorSignature>> = vec![None; rows.len()];
-    let prepared = prepare_close_with_strategy::<Sha256, _, _>(
-        cache,
-        context,
-        deposits,
-        withdrawals,
-        rows,
-        out_vectors,
-        &out_partials,
-        &operator_signatures,
-        Vec::new(),
-        strategy(),
-    )
-    .expect("benchmark close is valid");
-    prepared
-        .validate::<Sha256, PaymentBatchVerifier, _>(
-            context,
-            &operator_bls(),
-            deposits,
-            withdrawals,
-            &mut TestRng::new(0),
-            strategy(),
+        SettlementChain::new(
+            deployment(),
+            SigningKey::from_seed(OPERATOR_SEED).public_key(),
+            self.validators.committee.clone(),
+            &(&self.head).into(),
+            0,
+            settlement_config(
+                max_pending_epochs,
+                usize::try_from(self.head.live_accounts())
+                    .expect("benchmark account count fits in usize"),
+            ),
         )
-        .expect("benchmark close is valid");
-    let terminal_proof = prepared
-        .terminal_proof()
-        .expect("benchmark terminal proof is valid");
-    (prepared.into_close(), terminal_proof)
+        .expect("benchmark settlement chain is valid")
+    }
 }
 
-fn admission_fixture(
-    cache: &TestCache,
+#[commonware_macros::boxed]
+async fn admission_fixture(
+    state: TestState,
     validators: &Validators,
     epoch: u64,
     withdrawals: TestWithdrawals,
-) -> AdmissionFixture {
+) -> (TestState, AdmissionFixture) {
     let deposits = DepositBatch::empty();
-    let context = context(cache, validators, epoch, &deposits, &withdrawals);
-    let (close, terminal_proof) = withdrawal_close(cache, &context, &deposits, &withdrawals);
+
+    // Sequential registrations require strictly increasing admission deadlines.
+    let admission_deadline = ADMISSION_DEADLINE + epoch;
+    let context = EpochContext::new::<Sha256>(
+        deployment(),
+        epoch,
+        SigningKey::from_seed(OPERATOR_SEED).public_key(),
+        &deposits,
+        &withdrawals,
+        state.liability(),
+        admission_deadline,
+        admission_deadline + (CHALLENGE_DEADLINE - ADMISSION_DEADLINE),
+        CloseLimits::protocol_maximum(),
+        validators.committee.commitment::<Sha256>(),
+    )
+    .expect("benchmark epoch is valid")
+    .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+    .await
+    .expect("benchmark close context is valid");
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        &state,
+        &context,
+        &deposits,
+        &withdrawals,
+        Vec::new(),
+        &Sequential,
+    )
+    .await
+    .expect("benchmark close is valid");
+    let dealing =
+        posted::decode(prepared.encoded().clone(), &context).expect("benchmark dealing decodes");
+    let validated = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+        &state,
+        &context,
+        &operator_bls(),
+        &deposits,
+        &withdrawals,
+        dealing,
+        &mut TestRng::new(0),
+        &Sequential,
+    )
+    .await
+    .expect("benchmark complete dealing validates");
+    assert_eq!(prepared.close().header, validated.close().header);
+    drop(prepared);
+    let (state, close) = validated
+        .apply(state)
+        .await
+        .expect("benchmark close applies");
+    assert_eq!(state.root(), close.roots.successor);
     let certificate = validators.certificate(&close.header);
-    AdmissionFixture {
-        context,
-        withdrawals,
-        header: close.header,
-        roots: close.roots,
-        terminal_proof,
-        certificate,
-    }
+    (
+        state,
+        AdmissionFixture {
+            context,
+            withdrawals,
+            header: close.header,
+            roots: close.roots,
+            amounts: close.amounts,
+            certificate,
+        },
+    )
 }
 
 fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
@@ -385,25 +373,25 @@ fn admit_fixture(chain: &mut TestChain, admission: AdmissionFixture) {
         withdrawals,
         header,
         roots,
-        terminal_proof,
+        amounts,
         certificate,
     } = admission;
     chain
         .register_close(0, context, withdrawals, &[], |_| true)
         .expect("benchmark close can be registered");
     chain
-        .admit(0, header, roots, terminal_proof, certificate)
+        .admit(0, header, roots, amounts, certificate)
         .expect("benchmark close can be admitted");
 }
 
 fn signed_withdrawal(
-    cache: &TestCache,
+    state: &TestState,
     account: &Account,
     deadline: u64,
 ) -> SignedWithdrawal<VerifyingKey, Digest> {
     SignedWithdrawal::sign(
         deployment(),
-        cache.root().digest,
+        state.root().digest,
         Bytes::from_static(b"benchmark-destination"),
         WithdrawalAction::Amount(NonZeroU64::MIN),
         deadline,
@@ -411,22 +399,28 @@ fn signed_withdrawal(
     )
 }
 
-fn withdrawal_sources(
-    cache: &TestCache,
+async fn withdrawal_sources(
+    state: &TestState,
     accounts: &[Account],
     count: usize,
     deadline: u64,
 ) -> Vec<WithdrawalSource> {
-    accounts
-        .iter()
-        .take(count)
-        .map(|account| WithdrawalSource {
-            request: signed_withdrawal(cache, account, deadline),
-            opening: cache
-                .opening(&account.public)
-                .expect("benchmark account can be opened"),
-        })
-        .collect()
+    let mut withdrawals = Vec::with_capacity(count);
+    for account in accounts.iter().take(count) {
+        let opening = state
+            .opening(account.public.clone())
+            .await
+            .expect("benchmark account can be opened");
+        assert_eq!(
+            opening.verify::<Sha256>(&state.root()).unwrap().get(),
+            OPENING_BALANCE
+        );
+        withdrawals.push(WithdrawalSource {
+            request: signed_withdrawal(state, account, deadline),
+            opening,
+        });
+    }
+    withdrawals
 }
 
 fn queue_withdrawals(chain: &mut TestChain, withdrawals: &[WithdrawalSource]) {
@@ -442,30 +436,40 @@ fn queue_withdrawals(chain: &mut TestChain, withdrawals: &[WithdrawalSource]) {
     }
 }
 
-fn queue_source(depth: usize) -> QueueSource {
-    let (chain, accounts) = ChainSource::new(LIVE_ACCOUNTS, 1);
-    let admissions = (0..depth)
-        .map(|epoch| {
-            let epoch = u64::try_from(epoch).expect("benchmark epoch fits in u64");
-            admission_fixture(
-                &chain.cache,
-                &chain.validators,
-                epoch,
-                WithdrawalBatch::empty(),
-            )
-        })
-        .collect();
-    let opening = chain
-        .cache
-        .opening(&accounts[0].public)
-        .expect("benchmark account can be opened");
-    let request = signed_withdrawal(&chain.cache, &accounts[0], WITHDRAWAL_DEADLINE);
-    QueueSource {
+#[commonware_macros::boxed]
+async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSource {
+    let (chain, mut state, accounts) = ChainSource::new(runtime, LIVE_ACCOUNTS, 1).await;
+    let request = signed_withdrawal(&state, &accounts[0], WITHDRAWAL_DEADLINE);
+    let mut openings = vec![state.opening(accounts[0].public.clone()).await.unwrap()];
+    let mut admissions = Vec::with_capacity(depth);
+    for epoch in 0..depth {
+        let (next, admission) = admission_fixture(
+            state,
+            &chain.validators,
+            u64::try_from(epoch).unwrap(),
+            WithdrawalBatch::empty(),
+        )
+        .await;
+        state = next;
+        openings.push(state.opening(accounts[0].public.clone()).await.unwrap());
+        admissions.push(admission);
+    }
+    let source = QueueSource {
         chain,
         admissions,
         request,
-        openings: vec![opening; depth + 1],
+        openings,
+    };
+    let input = queue_input(&source);
+    let roots = input.chain.withdrawal_safety_roots();
+    assert_eq!(roots.len(), source.openings.len());
+    for (root, opening) in roots.iter().zip(&source.openings) {
+        assert_eq!(
+            opening.verify::<Sha256>(root).unwrap().get(),
+            OPENING_BALANCE
+        );
     }
+    source
 }
 
 fn queue_input(source: &QueueSource) -> QueueInput {
@@ -479,22 +483,23 @@ fn queue_input(source: &QueueSource) -> QueueInput {
     }
 }
 
-fn close_source(withdrawal_count: usize, validator_count: usize) -> CloseSource {
-    let (chain, accounts) = ChainSource::new(LIVE_ACCOUNTS, validator_count);
-    let withdrawals = withdrawal_sources(
-        &chain.cache,
-        &accounts,
-        withdrawal_count,
-        WITHDRAWAL_DEADLINE,
-    );
+async fn close_source(
+    runtime: deterministic::Context,
+    withdrawal_count: usize,
+    validator_count: usize,
+) -> CloseSource {
+    let (chain, state, accounts) = ChainSource::new(runtime, LIVE_ACCOUNTS, validator_count).await;
+    let withdrawals =
+        withdrawal_sources(&state, &accounts, withdrawal_count, WITHDRAWAL_DEADLINE).await;
     let mut seed_chain = chain.fresh_chain(1);
     queue_withdrawals(&mut seed_chain, &withdrawals);
-    let admission = admission_fixture(
-        &chain.cache,
+    let (_, admission) = admission_fixture(
+        state,
         &chain.validators,
         0,
         seed_chain.pending_withdrawals(),
-    );
+    )
+    .await;
     CloseSource {
         chain,
         withdrawals,
@@ -510,7 +515,7 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
         withdrawals,
         header,
         roots,
-        terminal_proof,
+        amounts,
         certificate,
     } = source.admission.clone();
     chain
@@ -520,7 +525,7 @@ fn admit_input(source: &CloseSource) -> AdmitInput {
         chain,
         header,
         roots,
-        terminal_proof,
+        amounts,
         certificate,
     }
 }
@@ -532,10 +537,14 @@ fn finalize_input(source: &CloseSource) -> TestChain {
     chain
 }
 
-fn hard_fault_source(live_accounts: usize, claims: usize) -> HardFaultSource {
+async fn hard_fault_source(
+    runtime: deterministic::Context,
+    live_accounts: usize,
+    claims: usize,
+) -> HardFaultSource {
     assert!(claims > 0 && claims <= live_accounts);
-    let (chain, accounts) = ChainSource::new(live_accounts, 1);
-    let withdrawals = withdrawal_sources(&chain.cache, &accounts, claims, FAULT_DEADLINE);
+    let (chain, state, accounts) = ChainSource::new(runtime, live_accounts, 1).await;
+    let withdrawals = withdrawal_sources(&state, &accounts, claims, FAULT_DEADLINE).await;
     HardFaultSource { chain, withdrawals }
 }
 
@@ -548,86 +557,102 @@ fn hard_fault_input(source: &HardFaultSource) -> TestChain {
     chain
 }
 
+// Runtime startup, QMDB construction, proof generation, and per-iteration chain preparation
+// are excluded. Only the operation between Instant::now and elapsed contributes to Criterion.
 fn bench_queue_withdrawal(c: &mut Criterion) {
     for &depth in QUEUE_DEPTHS {
-        let source = queue_source(depth);
         c.bench_function(
             &format!(
                 "{}/op=queue depth={depth} live_accounts={LIVE_ACCOUNTS}",
                 module_path!()
             ),
             |b| {
-                b.iter_batched(
-                    || queue_input(&source),
-                    |mut input| {
-                        input
-                            .chain
-                            .queue_withdrawal(
-                                black_box(0),
-                                input.request,
-                                black_box(&source.openings),
-                                |_| true,
-                            )
-                            .expect("benchmark withdrawal can be queued");
-                        black_box(&input.chain);
-                    },
-                    BatchSize::LargeInput,
-                );
+                b.iter_custom(|iterations| {
+                    deterministic::Runner::new(
+                        deterministic::Config::default().with_cycle(SYSTEM_TIME_PRECISION),
+                    )
+                    .start(|runtime| async move {
+                        let source = queue_source(runtime, depth).await;
+                        let mut elapsed = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let mut input = queue_input(&source);
+                            let start = Instant::now();
+                            input
+                                .chain
+                                .queue_withdrawal(
+                                    black_box(0),
+                                    input.request,
+                                    black_box(&source.openings),
+                                    |_| true,
+                                )
+                                .expect("benchmark withdrawal can be queued");
+                            elapsed += start.elapsed();
+                            black_box(input.chain);
+                        }
+                        elapsed
+                    })
+                })
             },
         );
     }
 }
 
 fn bench_admit(c: &mut Criterion) {
-    let source = close_source(1, ADMISSION_VALIDATORS);
     c.bench_function(
         &format!(
             "{}/op=admit live_accounts={LIVE_ACCOUNTS} n={ADMISSION_VALIDATORS} q={ADMISSION_QUORUM} withdrawals=1",
             module_path!()
         ),
         |b| {
-            b.iter_batched(
-                || admit_input(&source),
-                |mut input| {
-                    black_box(
-                        input
-                            .chain
-                            .admit(
-                                black_box(0),
-                                input.header,
-                                input.roots,
-                                input.terminal_proof,
-                                input.certificate,
-                            )
-                            .expect("benchmark close can be admitted"),
-                    )
-                },
-                BatchSize::LargeInput,
-            );
+            b.iter_custom(|iterations| {
+                deterministic::Runner::new(deterministic::Config::default().with_cycle(SYSTEM_TIME_PRECISION)).start(|runtime| async move {
+                    let source = close_source(runtime, 1, ADMISSION_VALIDATORS).await;
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let mut input = admit_input(&source);
+                        let start = Instant::now();
+                        let batch = input.chain.admit(
+                            black_box(0), input.header, input.roots, input.amounts, input.certificate,
+                        ).expect("benchmark close can be admitted");
+                        elapsed += start.elapsed();
+                        black_box(batch);
+                        black_box(input.chain);
+                    }
+                    elapsed
+                })
+            })
         },
     );
 }
 
 fn bench_finalize(c: &mut Criterion) {
     for &withdrawals in FINALIZE_WITHDRAWALS {
-        let source = close_source(withdrawals, 1);
         c.bench_function(
             &format!(
                 "{}/op=finalize live_accounts={LIVE_ACCOUNTS} withdrawals={withdrawals}",
                 module_path!()
             ),
             |b| {
-                b.iter_batched(
-                    || finalize_input(&source),
-                    |mut chain| {
-                        black_box(
-                            chain
+                b.iter_custom(|iterations| {
+                    deterministic::Runner::new(
+                        deterministic::Config::default().with_cycle(SYSTEM_TIME_PRECISION),
+                    )
+                    .start(|runtime| async move {
+                        let source = close_source(runtime, withdrawals, 1).await;
+                        let mut elapsed = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let mut chain = finalize_input(&source);
+                            let start = Instant::now();
+                            let finalized = chain
                                 .finalize(black_box(FINALIZE_AT))
-                                .expect("benchmark close can be finalized"),
-                        )
-                    },
-                    BatchSize::LargeInput,
-                );
+                                .expect("benchmark close can be finalized");
+                            elapsed += start.elapsed();
+                            black_box(finalized);
+                            black_box(chain);
+                        }
+                        elapsed
+                    })
+                })
             },
         );
     }
@@ -635,24 +660,41 @@ fn bench_finalize(c: &mut Criterion) {
 
 fn bench_hard_fault(c: &mut Criterion) {
     for &(live_accounts, claims) in HARD_FAULT_PROFILES {
-        let source = hard_fault_source(live_accounts, claims);
         c.bench_function(
             &format!(
                 "{}/op=begin-hard-fault live_accounts={live_accounts} withdrawals={claims}",
                 module_path!()
             ),
             |b| {
-                b.iter_batched(
-                    || hard_fault_input(&source),
-                    |mut chain| {
-                        black_box(
-                            chain
+                b.iter_custom(|iterations| {
+                    deterministic::Runner::new(
+                        deterministic::Config::default().with_cycle(SYSTEM_TIME_PRECISION),
+                    )
+                    .start(|runtime| async move {
+                        let source = hard_fault_source(runtime, live_accounts, claims).await;
+                        let mut elapsed = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let mut chain = hard_fault_input(&source);
+                            let start = Instant::now();
+                            let settlement = chain
                                 .begin_hard_fault_settlement()
-                                .expect("benchmark hard-fault claims can begin"),
-                        )
-                    },
-                    BatchSize::LargeInput,
-                );
+                                .expect("benchmark hard-fault claims can begin");
+                            elapsed += start.elapsed();
+                            black_box(settlement);
+
+                            // Exercise independent recovery with the retained frozen-root Current proofs.
+                            for withdrawal in &source.withdrawals {
+                                black_box(
+                                    chain
+                                        .claim_hard_fault(&withdrawal.opening)
+                                        .expect("benchmark account can recover"),
+                                );
+                            }
+                            black_box(chain);
+                        }
+                        elapsed
+                    })
+                })
             },
         );
     }
@@ -661,9 +703,5 @@ fn bench_hard_fault(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets =
-        bench_queue_withdrawal,
-        bench_admit,
-        bench_finalize,
-        bench_hard_fault,
+    targets = bench_queue_withdrawal, bench_admit, bench_finalize, bench_hard_fault,
 }

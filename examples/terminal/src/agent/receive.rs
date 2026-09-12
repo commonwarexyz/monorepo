@@ -7,7 +7,7 @@ use crate::{
         state::{AdmittedRootsResponse, FaultRecord, HardFaultReasonResponse, StatusRecord},
         tx::{ChallengeRequest, SettlementTx},
     },
-    operator::{Operator, rpc as operator_rpc},
+    operator::rpc as operator_rpc,
     protocol::Key,
 };
 use anyhow::{Context, Result, ensure};
@@ -36,10 +36,6 @@ pub(crate) struct ReconcileSummary {
     /// needed to verify or convict, reported once per stretch of withholding. The epoch keeps
     /// retrying and self-heals if the evidence is later served.
     pub(crate) withheld: Vec<u64>,
-    /// Epochs whose committed-side evidence aged out of the operator's retention window before
-    /// their held credits reconciled, decided as unavailable: the honest operator no longer
-    /// reconstructs the close, so a refusal there is not withholding.
-    pub(crate) unavailable: Vec<u64>,
 }
 
 impl ReconcileSummary {
@@ -49,7 +45,6 @@ impl ReconcileSummary {
             && self.convicted.is_empty()
             && self.unenforceable.is_empty()
             && self.withheld.is_empty()
-            && self.unavailable.is_empty()
     }
 }
 
@@ -194,20 +189,10 @@ impl Agent {
     /// admitted for the epoch (read with the recency bound, so the admitted-or-absent verdict
     /// holds at a certified tip no older than the recency threshold), and committed-side
     /// evidence is trusted only when it verifies under that anchor. The evidence comes from
-    /// the payer's slice holders, the validators retaining the admitted close's sealed
-    /// dealing through its challenge window, so the accused operator is never the source
-    /// of the lookup that convicts it. The operator's reconstruction is the fallback only
-    /// when every holder declines, which is the case once the window closed and the
-    /// dealing was released. A refusal from both, an unanchored or unprovable lookup, and a
-    /// per-epoch fault are all the documented availability dependence: that epoch stays
-    /// unreconciled and retries without shadowing the others. Nobody can buy coverage with
-    /// a fabricated root, but coverage of a finalized close can no longer be convicted, only
-    /// verified, so an epoch that finalizes while its evidence is still withheld is surfaced
-    /// as withheld and kept retrying. That dependence is bounded by the operator's retention
-    /// contract: the honest operator reconstructs a finalized close until
-    /// [`Operator::RETAINED_EPOCHS`] further epochs finalize, so a refusal for an older
-    /// epoch that the validators also cannot serve is unavailability, and the epoch is
-    /// decided as such instead of alarmed or retried.
+    /// validators, which retain the complete close. The operator is a fallback when every
+    /// validator declines. Missing, unanchored, or unprovable evidence leaves that epoch
+    /// unresolved without blocking other epochs. After finalization the challenge window
+    /// is closed, so withheld evidence raises an alarm and remains retryable at every age.
     ///
     /// The challenge window sits between admission and finalization. On the first held receipt
     /// that exceeds the anchored committed entry while that window is open, the wallet convicts
@@ -323,28 +308,11 @@ impl Agent {
                     summary.convicted.push(epoch);
                     return Ok(());
                 }
-                // Served evidence was unavailable, unanchored, or unprovable: retry the whole
-                // epoch next heartbeat. Once the close has finalized, withheld evidence is
-                // an alarm, not a wait: conviction is no longer possible and coverage can no
-                // longer be verified, so surface the dead end (once per stretch of withholding)
-                // while still retrying in case the evidence is eventually served. Past the
-                // operator's retention window the honest operator no longer reconstructs the
-                // close, so the refusal is unavailability rather than withholding, and the
-                // epoch is decided loudly instead of retried.
+                // Finalized close evidence remains accountable at every age. A refusal
+                // leaves the receipt unresolved and alarms once until evidence is served.
                 EntryVerdict::Refused => {
-                    if !admitted.finalized {
-                        return Ok(());
-                    }
-                    if retained(epoch, status.last_finalized) {
-                        if self.withheld.insert(epoch) {
-                            summary.withheld.push(epoch);
-                        }
-                    } else {
-                        self.store
-                            .record_unavailable(epoch)
-                            .context("record unavailable epoch")?;
-                        self.withheld.remove(&epoch);
-                        summary.unavailable.push(epoch);
+                    if admitted.finalized && self.withheld.insert(epoch) {
+                        summary.withheld.push(epoch);
                     }
                     return Ok(());
                 }
@@ -388,7 +356,7 @@ impl Agent {
         account: &Key,
         held: &super::store::HeldEntry,
     ) -> EntryVerdict {
-        // The committed entry comes from the payer's slice holders, verified against the
+        // The committed entry comes from the validators, verified against the
         // anchored change root. The operator is the accused party, so its reconstruction is
         // the fallback only when every holder declines.
         let lookup = match self
@@ -484,16 +452,4 @@ impl Agent {
         }
         EntryVerdict::Refused
     }
-}
-
-/// Whether the honest operator still reconstructs `epoch`'s committed close when
-/// `last_finalized` is the certified finalization head: the retention contract behind the
-/// withholding alarm. A status read lagging the admitted record can only understate the head,
-/// which errs toward alarming withholding and retrying.
-fn retained(epoch: u64, last_finalized: Option<u64>) -> bool {
-    last_finalized.is_none_or(|last| {
-        epoch
-            .checked_add(Operator::RETAINED_EPOCHS)
-            .is_none_or(|horizon| last < horizon)
-    })
 }

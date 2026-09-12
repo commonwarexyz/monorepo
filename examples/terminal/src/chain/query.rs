@@ -23,7 +23,7 @@
 //!   [`EvidenceResponse`] from the validator's retained sealed dealings (see
 //!   [`crate::chain::da`]): per-account openings a challenge, a chain
 //!   withdrawal, or a claim needs, the deployment's genesis state, and the
-//!   slice intervals another validator catches up from. Every served opening
+//!   complete closes another validator replays for catch-up. Every served opening
 //!   verifies against certified roots the client already holds, so nothing
 //!   here is trusted unverified.
 //!
@@ -33,7 +33,7 @@
 use crate::{
     chain::{
         app::Finalized,
-        da::{Mailbox as SealerMailbox, SliceRange},
+        da::{Mailbox as SealerMailbox, Sealed},
         ingress::{Mailbox as IngressMailbox, Submission},
         state::{
             Advice, Record, admitted_key, advise, anchor_key, claim_roots_key, deposit_key,
@@ -43,15 +43,14 @@ use crate::{
         tx::SettlementTx,
         types::{Block, Database, Exclusion, MAX_TX_BYTES, Proof, StateKey},
     },
-    protocol::{Deployment, Key, MAX_DESTINATION_BYTES, MAX_SLICES, limits},
+    protocol::{Deployment, Key, MAX_DESTINATION_BYTES},
     rpc::{self, ACCEPT_RETRY_DELAY, error_response},
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
-    challenge::{AccountLookup, ChangeOpening, HigherEntryLookup, StateOpening},
-    commitment::{RangeOpening, VectorRoot},
+    challenge::{AccountLookup, ChangeOpening, HigherEntryLookup},
+    qmdb::{Absence, StateOpening},
     transition::{BatchId, ExternalPayoutClaim, Header, RootBundle, WithdrawalClaim},
-    vector::TransposeEntry,
 };
 use commonware_codec::{
     Decode as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -64,7 +63,7 @@ use commonware_cryptography::{certificate::Scheme, sha256::Digest};
 use commonware_runtime::{Clock, Handle, Listener as _, Metrics, Network, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::Acknowledgement;
-use std::{net::SocketAddr, ops::Range};
+use std::net::SocketAddr;
 use tracing::debug;
 
 /// Submits one settlement transaction into the ingress queue.
@@ -461,10 +460,8 @@ impl Read for Submitted {
 /// One evidence lookup within one deployment's retained sealed dealings.
 ///
 /// Close-bound lookups name the batch id of the sealed close and the account
-/// whose slice the serving validator must hold. [`Self::GenesisState`] opens
-/// the deployment's genesis state, which every validator holds whole, and
-/// [`Self::Interval`] returns one slice's retained live leaves at a certified
-/// state root for another holder's catch-up.
+/// whose evidence is requested. [`Self::GenesisState`] opens the deployment's
+/// genesis state, and [`Self::Dealing`] returns a complete close for canonical replay.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EvidenceLookup {
     /// The account's leaf under the close's predecessor state root.
@@ -485,23 +482,17 @@ pub(crate) enum EvidenceLookup {
     Account { batch: Digest, account: Key },
     /// The account's validator-derived withdrawal output for claiming.
     WithdrawalOutput { batch: Digest, account: Key },
-    /// The recipient's credited transpose range under the transpose root.
-    Credits { batch: Digest, recipient: Key },
     /// The account's leaf under the deployment's genesis state root.
     GenesisState { account: Key },
-    /// One slice's retained live leaves at `root`, with the guards that
-    /// prove the slice complete.
-    Interval {
-        root: VectorRoot<Digest>,
-        slice: u16,
-    },
+    /// Complete durable close material for replay by a lagging validator.
+    Dealing { epoch: u64 },
     /// The account's external payout claim under the change root.
     ExternalPayout { batch: Digest, account: Key },
 }
 
 impl EvidenceLookup {
     /// The sealed close this lookup addresses, or `None` for a lookup outside
-    /// any close (genesis state and interval catch-up).
+    /// any close (genesis state and close catch-up).
     pub(crate) const fn batch(&self) -> Option<&Digest> {
         match self {
             Self::PredecessorState { batch, .. }
@@ -510,14 +501,12 @@ impl EvidenceLookup {
             | Self::CommittedEntry { batch, .. }
             | Self::Account { batch, .. }
             | Self::WithdrawalOutput { batch, .. }
-            | Self::Credits { batch, .. }
             | Self::ExternalPayout { batch, .. } => Some(batch),
-            Self::GenesisState { .. } | Self::Interval { .. } => None,
+            Self::GenesisState { .. } | Self::Dealing { .. } => None,
         }
     }
 
-    /// The account whose slice the serving validator must hold, or `None`
-    /// for an interval lookup, which names its slice directly.
+    /// The requested account, or `None` for a complete close lookup.
     pub(crate) const fn account(&self) -> Option<&Key> {
         match self {
             Self::PredecessorState { account, .. }
@@ -528,8 +517,7 @@ impl EvidenceLookup {
             | Self::GenesisState { account }
             | Self::ExternalPayout { account, .. } => Some(account),
             Self::CommittedEntry { payer, .. } => Some(payer),
-            Self::Credits { recipient, .. } => Some(recipient),
-            Self::Interval { .. } => None,
+            Self::Dealing { .. } => None,
         }
     }
 }
@@ -572,19 +560,13 @@ impl Write for EvidenceLookup {
                 batch.write(buf);
                 account.write(buf);
             }
-            Self::Credits { batch, recipient } => {
-                6_u8.write(buf);
-                batch.write(buf);
-                recipient.write(buf);
-            }
             Self::GenesisState { account } => {
                 7_u8.write(buf);
                 account.write(buf);
             }
-            Self::Interval { root, slice } => {
+            Self::Dealing { epoch } => {
                 8_u8.write(buf);
-                root.write(buf);
-                slice.write(buf);
+                epoch.write(buf);
             }
             Self::ExternalPayout { batch, account } => {
                 9_u8.write(buf);
@@ -611,9 +593,8 @@ impl EncodeSize for EvidenceLookup {
                 payer,
                 recipient,
             } => batch.encode_size() + payer.encode_size() + recipient.encode_size(),
-            Self::Credits { batch, recipient } => batch.encode_size() + recipient.encode_size(),
             Self::GenesisState { account } => account.encode_size(),
-            Self::Interval { root, slice } => root.encode_size() + slice.encode_size(),
+            Self::Dealing { epoch } => epoch.encode_size(),
         }
     }
 }
@@ -648,16 +629,11 @@ impl Read for EvidenceLookup {
                 batch: Digest::read(buf)?,
                 account: Key::read(buf)?,
             }),
-            6 => Ok(Self::Credits {
-                batch: Digest::read(buf)?,
-                recipient: Key::read(buf)?,
-            }),
             7 => Ok(Self::GenesisState {
                 account: Key::read(buf)?,
             }),
-            8 => Ok(Self::Interval {
-                root: VectorRoot::read(buf)?,
-                slice: u16::read(buf)?,
+            8 => Ok(Self::Dealing {
+                epoch: u64::read(buf)?,
             }),
             9 => Ok(Self::ExternalPayout {
                 batch: Digest::read(buf)?,
@@ -708,13 +684,13 @@ impl Read for EvidenceRequest {
     }
 }
 
-/// One close-bound opening served from a sealed proof slice, byte-equal to
-/// what the whole-close constructors produce and verifiable against the
-/// served roots.
+/// One close-bound opening verifiable against the certified roots.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EvidenceBody {
     /// A state leaf opening (predecessor or successor state).
     State(StateOpening<Key, Digest>),
+    /// Authenticated zero balance at the requested account key.
+    StateAbsent(Absence<Digest>),
     /// The higher-debit payer lookup.
     Account(AccountLookup<Key, Digest>),
     /// A compact change opening.
@@ -725,17 +701,15 @@ pub(crate) enum EvidenceBody {
     WithdrawalOutput(WithdrawalClaim<Digest>),
     /// An external payout claim.
     ExternalPayout(ExternalPayoutClaim<Key, Digest>),
-    /// The recipient's contiguous credited transpose entries with their
-    /// opening under the transpose root.
-    Credits {
-        entries: Vec<TransposeEntry<Key>>,
-        opening: RangeOpening<Digest>,
-    },
 }
 
 impl Write for EvidenceBody {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
+            Self::StateAbsent(proof) => {
+                6_u8.write(buf);
+                proof.write(buf);
+            }
             Self::State(opening) => {
                 0_u8.write(buf);
                 opening.write(buf);
@@ -760,11 +734,6 @@ impl Write for EvidenceBody {
                 5_u8.write(buf);
                 claim.write(buf);
             }
-            Self::Credits { entries, opening } => {
-                6_u8.write(buf);
-                entries.write(buf);
-                opening.write(buf);
-            }
         }
     }
 }
@@ -772,13 +741,13 @@ impl Write for EvidenceBody {
 impl EncodeSize for EvidenceBody {
     fn encode_size(&self) -> usize {
         1 + match self {
+            Self::StateAbsent(proof) => proof.encode_size(),
             Self::State(opening) => opening.encode_size(),
             Self::Account(lookup) => lookup.encode_size(),
             Self::Change(opening) => opening.encode_size(),
             Self::CommittedEntry(lookup) => lookup.encode_size(),
             Self::WithdrawalOutput(claim) => claim.encode_size(),
             Self::ExternalPayout(claim) => claim.encode_size(),
-            Self::Credits { entries, opening } => entries.encode_size() + opening.encode_size(),
         }
     }
 }
@@ -788,7 +757,10 @@ impl Read for EvidenceBody {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            0 => Ok(Self::State(StateOpening::read(buf)?)),
+            0 => Ok(Self::State(StateOpening::read_cfg(
+                buf,
+                &MAX_PROOF_DIGESTS,
+            )?)),
             1 => Ok(Self::Account(AccountLookup::read(buf)?)),
             2 => Ok(Self::Change(ChangeOpening::read(buf)?)),
             3 => Ok(Self::CommittedEntry(HigherEntryLookup::read(buf)?)),
@@ -797,20 +769,10 @@ impl Read for EvidenceBody {
                 &RangeCfg::new(0..=MAX_DESTINATION_BYTES),
             )?)),
             5 => Ok(Self::ExternalPayout(ExternalPayoutClaim::read(buf)?)),
-            6 => {
-                // A recipient's credits are one contiguous run of the
-                // anchor-bound transpose, so its total entry limit bounds
-                // both the entries and the opening they are proven under.
-                let max_entries = usize::try_from(limits().max_total_entries())
-                    .map_err(|_| CodecError::Invalid("EvidenceBody", "entry limit"))?;
-                Ok(Self::Credits {
-                    entries: Vec::<TransposeEntry<Key>>::read_cfg(
-                        buf,
-                        &(RangeCfg::new(1..=max_entries), ()),
-                    )?,
-                    opening: RangeOpening::read_cfg(buf, &max_entries)?,
-                })
-            }
+            6 => Ok(Self::StateAbsent(Absence::read_cfg(
+                buf,
+                &(MAX_PROOF_DIGESTS, (), ()),
+            )?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -830,9 +792,10 @@ pub(crate) enum Evidence {
     },
     /// One account opened under the deployment's genesis state root.
     Genesis(StateOpening<Key, Digest>),
-    /// One slice's live leaves at the requested root, with the adjacent
-    /// guards outside the slice (or the vector ends) proving it complete.
-    Interval(SliceRange),
+    /// Authenticated absence from genesis.
+    GenesisAbsent(Absence<Digest>),
+    /// Canonical close retained by a validator before its vote.
+    Dealing(Box<Sealed>),
 }
 
 impl Write for Evidence {
@@ -848,13 +811,17 @@ impl Write for Evidence {
                 roots.write(buf);
                 body.write(buf);
             }
+            Self::GenesisAbsent(proof) => {
+                3_u8.write(buf);
+                proof.write(buf);
+            }
             Self::Genesis(opening) => {
                 1_u8.write(buf);
                 opening.write(buf);
             }
-            Self::Interval(range) => {
+            Self::Dealing(dealing) => {
                 2_u8.write(buf);
-                range.write(buf);
+                dealing.write(buf);
             }
         }
     }
@@ -868,8 +835,9 @@ impl EncodeSize for Evidence {
                 roots,
                 body,
             } => header.encode_size() + roots.encode_size() + body.encode_size(),
+            Self::GenesisAbsent(proof) => proof.encode_size(),
             Self::Genesis(opening) => opening.encode_size(),
-            Self::Interval(range) => range.encode_size(),
+            Self::Dealing(dealing) => dealing.encode_size(),
         }
     }
 }
@@ -884,8 +852,15 @@ impl Read for Evidence {
                 roots: RootBundle::read(buf)?,
                 body: EvidenceBody::read(buf)?,
             }),
-            1 => Ok(Self::Genesis(StateOpening::read(buf)?)),
-            2 => Ok(Self::Interval(SliceRange::read(buf)?)),
+            1 => Ok(Self::Genesis(StateOpening::read_cfg(
+                buf,
+                &MAX_PROOF_DIGESTS,
+            )?)),
+            2 => Ok(Self::Dealing(Box::new(Sealed::read(buf)?))),
+            3 => Ok(Self::GenesisAbsent(Absence::read_cfg(
+                buf,
+                &(MAX_PROOF_DIGESTS, (), ()),
+            )?)),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -895,26 +870,18 @@ impl Read for Evidence {
 ///
 /// Only [`Self::Served`] carries anything verifiable. The other answers are
 /// unauthenticated routing advice: a client that cannot get an answer from
-/// one holder asks the next in the slice's quorum.
+/// one holder asks the next committee member.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum EvidenceResponse {
     /// The requested evidence.
     Served(Evidence),
-    /// The account's slice is outside this validator's assigned spans, which
-    /// are returned so the client can pick a holder.
-    NotHolder { spans: Vec<Range<u16>> },
-    /// This validator holds no sealed dealing for the batch (or no interval
-    /// at the root).
+    /// This validator has not retained the requested close.
     Unsealed,
-    /// The batch finalized and its dealing was released after its challenge
-    /// window closed.
-    Pruned,
     /// The deployment is not served by this validator.
     Unknown,
-    /// The held slice has nothing to open for the lookup: the account is not
-    /// live in the requested state, has no changed row, no withdrawal, no
-    /// payout, or no credit in this close.
+    /// The requested activity or claim is unavailable. This is routing advice,
+    /// not authenticated absence; state absence has a verifiable proof.
     Absent,
 }
 
@@ -925,16 +892,7 @@ impl Write for EvidenceResponse {
                 0_u8.write(buf);
                 evidence.write(buf);
             }
-            Self::NotHolder { spans } => {
-                1_u8.write(buf);
-                spans.len().write(buf);
-                for span in spans {
-                    span.start.write(buf);
-                    span.end.write(buf);
-                }
-            }
             Self::Unsealed => 2_u8.write(buf),
-            Self::Pruned => 3_u8.write(buf),
             Self::Unknown => 4_u8.write(buf),
             Self::Absent => 5_u8.write(buf),
         }
@@ -945,14 +903,7 @@ impl EncodeSize for EvidenceResponse {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Served(evidence) => evidence.encode_size(),
-            Self::NotHolder { spans } => {
-                spans.len().encode_size()
-                    + spans
-                        .iter()
-                        .map(|span| span.start.encode_size() + span.end.encode_size())
-                        .sum::<usize>()
-            }
-            Self::Unsealed | Self::Pruned | Self::Unknown | Self::Absent => 0,
+            Self::Unsealed | Self::Unknown | Self::Absent => 0,
         }
     }
 }
@@ -963,23 +914,7 @@ impl Read for EvidenceResponse {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             0 => Ok(Self::Served(Evidence::read(buf)?)),
-            1 => {
-                let count = usize::read_cfg(buf, &RangeCfg::new(..=MAX_SLICES))?;
-                let mut spans = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let span = u16::read(buf)?..u16::read(buf)?;
-                    if span.start >= span.end || usize::from(span.end) > MAX_SLICES {
-                        return Err(CodecError::Invalid(
-                            "EvidenceResponse",
-                            "span is not canonical",
-                        ));
-                    }
-                    spans.push(span);
-                }
-                Ok(Self::NotHolder { spans })
-            }
             2 => Ok(Self::Unsealed),
-            3 => Ok(Self::Pruned),
             4 => Ok(Self::Unknown),
             5 => Ok(Self::Absent),
             tag => Err(CodecError::InvalidEnum(tag)),
@@ -1193,31 +1128,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        chain::da::{genesis_cache, genesis_range, slice_ranges},
-        protocol::{MAX_ACCOUNTS, SLICE_BITS, deployments, identities},
-    };
-    use bytes::BytesMut;
-    use commonware_clearing::bajillion::state::StateLeaf;
-    use commonware_codec::{DecodeExt as _, FixedSize as _};
+    use crate::protocol::{deployments, genesis_balances, identities, state_config};
+    use commonware_clearing::bajillion::qmdb::{State, StateLookup, account_key};
+    use commonware_codec::DecodeExt as _;
     use commonware_cryptography::{Hasher as _, Sha256};
-
-    fn digest(name: &[u8]) -> Digest {
-        Sha256::hash(&[name])
-    }
-
-    fn root(name: &[u8]) -> VectorRoot<Digest> {
-        VectorRoot {
-            digest: digest(name),
-        }
-    }
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Runner as _, deterministic};
 
     #[test]
     fn evidence_request_codecs_round_trip() {
         let account = identities()[0].key.clone();
-        let other = identities()[1].key.clone();
-        let batch = digest(b"batch");
-        let lookups = [
+        let batch = Sha256::hash(&[b"batch"]);
+        let lookups = vec![
             EvidenceLookup::PredecessorState {
                 batch,
                 account: account.clone(),
@@ -1230,136 +1152,83 @@ mod tests {
                 batch,
                 account: account.clone(),
             },
-            EvidenceLookup::CommittedEntry {
-                batch,
-                payer: account.clone(),
-                recipient: other.clone(),
-            },
             EvidenceLookup::Account {
                 batch,
                 account: account.clone(),
+            },
+            EvidenceLookup::CommittedEntry {
+                batch,
+                payer: account.clone(),
+                recipient: identities()[1].key.clone(),
             },
             EvidenceLookup::WithdrawalOutput {
                 batch,
                 account: account.clone(),
             },
-            EvidenceLookup::Credits {
+            EvidenceLookup::ExternalPayout {
                 batch,
-                recipient: other,
-            },
-            EvidenceLookup::GenesisState {
                 account: account.clone(),
             },
-            EvidenceLookup::Interval {
-                root: root(b"interval"),
-                slice: 3,
-            },
-            EvidenceLookup::ExternalPayout { batch, account },
+            EvidenceLookup::GenesisState { account },
+            EvidenceLookup::Dealing { epoch: 7 },
         ];
-        for (tag, lookup) in lookups.into_iter().enumerate() {
-            let request = EvidenceRequest::new(digest(b"deployment"), lookup);
-            let encoded = request.encode();
-            assert_eq!(encoded.len(), request.encode_size());
-            assert_eq!(encoded[Digest::SIZE], tag as u8);
-            assert_eq!(EvidenceRequest::decode(encoded).unwrap(), request);
+        for lookup in lookups {
+            let request = EvidenceRequest::new(batch, lookup);
+            let bytes = request.encode();
+            assert_eq!(bytes.len(), request.encode_size());
+            assert_eq!(EvidenceRequest::decode(bytes).unwrap(), request);
         }
-        assert!(matches!(
-            EvidenceLookup::decode(Bytes::from_static(&[10])),
-            Err(CodecError::InvalidEnum(10))
-        ));
+        for tag in [6, 10, 255] {
+            assert!(EvidenceLookup::decode(Bytes::from(vec![tag])).is_err());
+        }
     }
 
     #[test]
-    fn evidence_response_codecs_round_trip() {
-        let genesis = genesis_cache(&deployments()[0]);
-        let account = identities()[0].key.clone();
-        let opening = genesis.opening(&account).unwrap();
-        let ranges = slice_ranges(
-            &genesis_range(&genesis),
-            genesis.leaves(),
-            &(0..MAX_SLICES as u16),
-            SLICE_BITS,
-        )
-        .unwrap();
-        let header = Header::decode(digest(b"header").encode()).unwrap();
-        let roots = RootBundle {
-            change: root(b"change"),
-            withdrawal_outputs: root(b"outputs"),
-            successor: root(b"successor"),
-            coverage: root(b"coverage"),
-            transpose: root(b"transpose"),
-            transpose_len: 7,
-        };
-        let responses = [
-            EvidenceResponse::Served(Evidence::Genesis(opening.clone())),
-            EvidenceResponse::Served(Evidence::Interval(ranges[0].clone())),
-            EvidenceResponse::Served(Evidence::Close {
-                header,
-                roots,
-                body: EvidenceBody::State(opening),
-            }),
-            EvidenceResponse::NotHolder {
-                spans: vec![0..2, 3..4],
-            },
-            EvidenceResponse::Unsealed,
-            EvidenceResponse::Pruned,
-            EvidenceResponse::Unknown,
-            EvidenceResponse::Absent,
-        ];
-        for response in responses {
-            let encoded = response.encode();
-            assert_eq!(encoded.len(), response.encode_size());
-            assert_eq!(EvidenceResponse::decode(encoded).unwrap(), response);
-        }
-        assert!(matches!(
-            EvidenceResponse::decode(Bytes::from_static(&[6])),
-            Err(CodecError::InvalidEnum(6))
-        ));
-        assert!(matches!(
-            Evidence::decode(Bytes::from_static(&[3])),
-            Err(CodecError::InvalidEnum(3))
-        ));
-        assert!(matches!(
-            EvidenceBody::decode(Bytes::from_static(&[7])),
-            Err(CodecError::InvalidEnum(7))
-        ));
-    }
-
-    #[test]
-    fn evidence_codecs_reject_out_of_bound_shapes() {
-        // More spans than slices, and a span that is empty or past the
-        // partition, are refused.
-        let mut encoded = BytesMut::new();
-        1_u8.write(&mut encoded);
-        (MAX_SLICES + 1).write(&mut encoded);
-        assert!(EvidenceResponse::decode(encoded.freeze()).is_err());
-        for span in [(2_u16, 1_u16), (0, MAX_SLICES as u16 + 1)] {
-            let mut encoded = BytesMut::new();
-            1_u8.write(&mut encoded);
-            1_usize.write(&mut encoded);
-            span.0.write(&mut encoded);
-            span.1.write(&mut encoded);
-            assert!(EvidenceResponse::decode(encoded.freeze()).is_err());
-        }
-
-        // A credit range with no entries is refused.
-        let mut encoded = BytesMut::new();
-        6_u8.write(&mut encoded);
-        0_usize.write(&mut encoded);
-        assert!(EvidenceBody::decode(encoded.freeze()).is_err());
-
-        // A slice range with more members than accounts is refused.
-        let genesis = genesis_cache(&deployments()[0]);
-        let leaf: StateLeaf<crate::protocol::Key> = genesis.leaves()[0].clone();
-        let ranges = slice_ranges(
-            &genesis_range(&genesis),
-            genesis.leaves(),
-            &(0..MAX_SLICES as u16),
-            SLICE_BITS,
-        )
-        .unwrap();
-        let mut oversized = ranges[0].clone();
-        oversized.members = vec![leaf; MAX_ACCOUNTS + 1];
-        assert!(SliceRange::decode(oversized.encode()).is_err());
+    fn balance_evidence_codec_preserves_membership_absence_and_bounds() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = state_config("query-proofs", &context, Sequential);
+            let state = State::<_, Sha256>::init(
+                context,
+                config,
+                genesis_balances(&deployments()[0]).unwrap(),
+            )
+            .await
+            .unwrap();
+            let account = identities()[0].key.clone();
+            let present = state.opening(account).await.unwrap();
+            let absent = crate::protocol::external_identity().key;
+            let StateLookup::Absent(proof) =
+                state.lookup(&account_key(&absent).unwrap()).await.unwrap()
+            else {
+                panic!("external account absent")
+            };
+            let responses = vec![
+                EvidenceResponse::Served(Evidence::Genesis(present)),
+                EvidenceResponse::Served(Evidence::GenesisAbsent(proof.clone())),
+                EvidenceResponse::Unsealed,
+                EvidenceResponse::Unknown,
+                EvidenceResponse::Absent,
+            ];
+            for response in responses {
+                let bytes = response.encode();
+                assert_eq!(bytes.len(), response.encode_size());
+                assert_eq!(EvidenceResponse::decode(bytes.clone()).unwrap(), response);
+                if matches!(response, EvidenceResponse::Served(_)) {
+                    for end in 0..bytes.len() {
+                        assert!(EvidenceResponse::decode(bytes.slice(..end)).is_err());
+                    }
+                }
+            }
+            assert_eq!(
+                StateLookup::Absent(proof.clone())
+                    .resolve::<Sha256>(&state.root(), &account_key(&absent).unwrap())
+                    .unwrap(),
+                None
+            );
+            assert!(
+                StateLookup::<Digest>::decode_cfg(StateLookup::Absent(proof).encode(), &0).is_err()
+            );
+            assert!(EvidenceBody::decode(Bytes::from_static(&[7])).is_err());
+        });
     }
 }

@@ -5,7 +5,7 @@ use super::{
     store::MAX_INCOMING_PAGE,
 };
 use crate::{
-    protocol::{Acceptance, Entry, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, MAX_ENTRIES, Receipt},
+    protocol::{Acceptance, Entry, Key, MAX_DESTINATION_BYTES, MAX_ENTRIES, Receipt},
     rpc,
 };
 use anyhow::{Context, Result, bail};
@@ -14,10 +14,10 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::boundary::WithdrawalAction;
 use commonware_clearing::bajillion::{
     boundary::SignedWithdrawal,
-    challenge::{HigherEntryLookup, StateOpening},
+    challenge::HigherEntryLookup,
     commitment::VectorRoot,
     payment::{PaymentContext, SendAuthorization},
-    state::AccountState,
+    qmdb::{StateOpening, StateRoot},
     transition::{BatchId, ExternalPayoutClaim, WithdrawalClaim},
     vector::OutEntry,
 };
@@ -27,6 +27,8 @@ use commonware_codec::{
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_runtime::Network;
 use std::net::SocketAddr;
+
+const MAX_STATE_PROOF_DIGESTS: usize = 4096;
 
 pub(crate) const METHOD_STATUS: u8 = 0;
 pub(crate) const METHOD_PAYMENT_HEAD: u8 = 1;
@@ -282,15 +284,15 @@ impl Read for StatusResponse {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PaymentHeadResponse {
     pub(crate) context: PaymentContext<Key, Digest>,
-    pub(crate) state: AccountState,
-    pub(crate) root: VectorRoot<Digest>,
+    pub(crate) balance: u64,
+    pub(crate) root: StateRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
 impl Write for PaymentHeadResponse {
     fn write(&self, buf: &mut impl BufMut) {
         self.context.write(buf);
-        self.state.write(buf);
+        self.balance.write(buf);
         self.root.write(buf);
         self.opening.write(buf);
     }
@@ -299,7 +301,7 @@ impl Write for PaymentHeadResponse {
 impl EncodeSize for PaymentHeadResponse {
     fn encode_size(&self) -> usize {
         self.context.encode_size()
-            + self.state.encode_size()
+            + self.balance.encode_size()
             + self.root.encode_size()
             + self.opening.encode_size()
     }
@@ -311,16 +313,10 @@ impl Read for PaymentHeadResponse {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         let response = Self {
             context: PaymentContext::read(buf)?,
-            state: AccountState::read(buf)?,
-            root: VectorRoot::read(buf)?,
-            opening: StateOpening::read(buf)?,
+            balance: u64::read(buf)?,
+            root: StateRoot::read(buf)?,
+            opening: StateOpening::read_cfg(buf, &MAX_STATE_PROOF_DIGESTS)?,
         };
-        if response.opening.proof.proof.leaf_count > MAX_ACCOUNTS as u32 {
-            return Err(CodecError::Invalid(
-                "clearing_terminal::PaymentHeadResponse",
-                "payer opening exceeds the terminal account bound",
-            ));
-        }
         Ok(response)
     }
 }
@@ -657,7 +653,7 @@ impl Read for CommittedEntryResponse {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WithdrawalOpeningResponse {
-    pub(crate) root: VectorRoot<Digest>,
+    pub(crate) root: StateRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
 }
 
@@ -679,8 +675,8 @@ impl Read for WithdrawalOpeningResponse {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
         Ok(Self {
-            root: VectorRoot::read(buf)?,
-            opening: StateOpening::read(buf)?,
+            root: StateRoot::read(buf)?,
+            opening: StateOpening::read_cfg(buf, &MAX_STATE_PROOF_DIGESTS)?,
         })
     }
 }
@@ -822,7 +818,7 @@ pub(crate) struct CloseFinishedResponse {
     pub(crate) epoch: u64,
     pub(crate) header: Bytes,
     pub(crate) rows: u64,
-    pub(crate) slices: u64,
+    pub(crate) dealing_bytes: u64,
     pub(crate) payout_total: u64,
     pub(crate) header_bytes: u64,
     pub(crate) certificate_bytes: u64,
@@ -836,7 +832,7 @@ impl Write for CloseFinishedResponse {
         self.epoch.write(buf);
         self.header.write(buf);
         self.rows.write(buf);
-        self.slices.write(buf);
+        self.dealing_bytes.write(buf);
         self.payout_total.write(buf);
         self.header_bytes.write(buf);
         self.certificate_bytes.write(buf);
@@ -851,7 +847,7 @@ impl EncodeSize for CloseFinishedResponse {
         self.epoch.encode_size()
             + self.header.encode_size()
             + self.rows.encode_size()
-            + self.slices.encode_size()
+            + self.dealing_bytes.encode_size()
             + self.payout_total.encode_size()
             + self.header_bytes.encode_size()
             + self.certificate_bytes.encode_size()
@@ -869,7 +865,7 @@ impl Read for CloseFinishedResponse {
             epoch: u64::read(buf)?,
             header: Bytes::read_cfg(buf, &RangeCfg::new(0..=MAX_CLOSE_HEADER_BYTES))?,
             rows: u64::read(buf)?,
-            slices: u64::read(buf)?,
+            dealing_bytes: u64::read(buf)?,
             payout_total: u64::read(buf)?,
             header_bytes: u64::read(buf)?,
             certificate_bytes: u64::read(buf)?,
@@ -958,7 +954,7 @@ fn close_event(event: Option<CloseEvent>) -> Result<PollCloseResponse> {
             epoch: finished.epoch,
             header: rpc::bounded_utf8(finished.header_digest, MAX_CLOSE_HEADER_BYTES),
             rows: count(finished.rows, "close row count")?,
-            slices: count(finished.slices, "close slice count")?,
+            dealing_bytes: count(finished.dealing_bytes, "close dealing bytes")?,
             payout_total: finished.payout_total,
             header_bytes: count(finished.header_bytes, "header byte count")?,
             certificate_bytes: count(finished.certificate_bytes, "certificate byte count")?,
@@ -1050,7 +1046,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
                 .context("read payment head")?;
             Ok(PaymentHeadResponse {
                 context: head.context,
-                state: head.state,
+                balance: head.balance,
                 root: head.root,
                 opening: head.opening,
             }
@@ -1668,7 +1664,7 @@ mod tests {
             ),
         )))
         .unwrap();
-        assert_eq!(opening.opening.leaf.account, payer_key);
+        assert_eq!(opening.opening.account, payer_key);
 
         let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
         let withdrawal = SignedWithdrawal::sign(
@@ -1724,10 +1720,7 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(applied_close.digest, close_digest);
-        assert_eq!(
-            operator.payment_head(&close_account).unwrap().state.balance,
-            100
-        );
+        assert_eq!(operator.payment_head(&close_account).unwrap().balance, 100);
 
         let head = PaymentHeadResponse::decode(success_body(handle(
             &mut operator,
@@ -1740,7 +1733,7 @@ mod tests {
             ),
         )))
         .unwrap();
-        assert_eq!(head.state.balance, 93);
+        assert_eq!(head.balance, 93);
 
         let (authorization, entries) = operator
             .sign_send(0, &[(wallets[0].public_key(), 5)])
