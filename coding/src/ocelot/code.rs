@@ -93,13 +93,23 @@ pub trait Impl: Copy + Send + Sync + 'static {
     /// `dst -= c * src`, elementwise.
     fn mul_sub(self, dst: &mut [u8], src: &[u8], c: Self::Element);
 
-    /// Compute independent inner products of `shard` with `coefficients`.
+    /// Compute independent randomized linear checksums of `shard`.
     ///
-    /// `shard` and `out` must be aligned to [`Self::ALIGN`]. `coefficients`
-    /// must have length `shard.len() * out.len() / Self::ALIGN` and contains
-    /// one shard-sized vector of uniformly represented field elements for each
-    /// output element. Binary extension fields must map every byte string to
-    /// exactly one field element. `out` uses the same canonical representation.
+    /// `coefficients` is uniformly sampled random input. Implementations should
+    /// use it directly to select the checksum map; it does not need to be
+    /// hashed or passed through another randomness extractor. There is one byte
+    /// of randomness per input code symbol for each output code symbol, so its
+    /// length is
+    /// `(shard.len() / Self::ALIGN) * (out.len() / Self::ALIGN)`.
+    ///
+    /// For fixed `coefficients`, the map from `shard` to `out` must be linear
+    /// and must commute with this implementation's encoder: encoding checksums
+    /// of the original shards must produce the checksums of the encoded shards.
+    /// The random maps must detect any nonzero shard difference, except with
+    /// probability 2^-8 per output code symbol. Output symbols use the code
+    /// field's canonical byte representation.
+    ///
+    /// `shard` and `out` must both be aligned to [`Self::ALIGN`].
     fn checksum(self, shard: &[u8], coefficients: &[u8], out: &mut [u8]);
 
     /// The forward butterfly: `x += c * y`, then `y += x`.
