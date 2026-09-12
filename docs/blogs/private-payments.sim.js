@@ -244,18 +244,41 @@
     // Init
     // -----------------------------------------------------------------------
 
-    // The simulation has eight fixed designs, in the same order as the rules
-    // above. Keep their titles local so article headings and paragraphs can
-    // change independently of the interactive.
+    // Each design pairs its title with an explanation. The order matches the
+    // simulation rules above.
     const STEPS = [
-        'A Bank',
-        'ecash',
-        'Decentralized ecash',
-        'Hide balances',
-        'Hide operations',
-        'Scaling: prune receipts',
-        'Scaling: delegate nullifiers',
-        'Scaling: prune nullifiers',
+        {
+            title: 'A Bank',
+            description: 'The bank holds the funds and updates both balances for every payment. It sees who paid whom and how much.',
+        },
+        {
+            title: 'ecash',
+            description: 'Blind signatures let the sender hand a coin privately to the receiver. The bank sees withdrawals and redemptions without directly linking them, and keeps a nullifier for every redeemed coin to prevent double spending.',
+        },
+        {
+            title: 'Decentralized ecash',
+            description: 'A committee of validators replaces the bank and agrees on payments through consensus. Balances, amounts, and which accounts send or receive are now visible on a public ledger.',
+        },
+        {
+            title: 'Hide Balances',
+            description: 'Commitments hide balances and amounts; zero-knowledge proofs show that each update is valid. The ledger still reveals which account sent or received, and validators retain receipts and nullifiers.',
+        },
+        {
+            title: 'Hide Operations',
+            description: 'Send and receive use the same public payload, hiding which operation an account performed. Each publishes a receipt and a nullifier, with dummy values where needed, so validator storage still grows with every transaction.',
+        },
+        {
+            title: 'Scaling: Prune Receipts',
+            description: 'Receipts go into a Merkle Mountain Range. Validators keep its frontier and recent roots instead of every receipt, while receivers prove that their receipts are included. The global nullifier set still grows.',
+        },
+        {
+            title: 'Scaling: Delegate Nullifiers',
+            description: 'Each wallet tracks claimed receipt positions in its own nullifier tree and proves each update. Validators keep only account commitments, the receipt frontier, and recent roots; nullifier storage now grows at the wallets.',
+        },
+        {
+            title: 'Scaling: Prune Nullifiers',
+            description: `Each wallet keeps the ${HOT_W} largest claimed positions and a frontier summarizing older nullifiers. Older tree data moves to cold storage, bounding the active state; claiming an older receipt requires retrieving its path.`,
+        },
     ];
 
     function init() {
@@ -271,13 +294,16 @@
         const dots = h('div', 'sim-dots', bar);
         const dotEls = STEPS.map((s, i) => {
             const d = h('span', 'sim-dot', dots);
-            d.title = s;
+            d.title = s.title;
             d.addEventListener('click', () => setStep(i));
             return d;
         });
         const next = h('button', '', bar); next.textContent = 'next \u203A';
         prev.addEventListener('click', () => setStep(step - 1));
         next.addEventListener('click', () => setStep(step + 1));
+
+        const caption = h('p', 'sim-caption', mount);
+        caption.setAttribute('aria-live', 'polite');
 
         // const boxes = h('div', 'sim-counters', mount);
         // const boxEls = ['storage', 'validator work', 'validators learn'].map(k => {
@@ -400,7 +426,8 @@
 
         function setStep(i) {
             step = clamp(i, 0, N - 1);
-            title.textContent = `${step}. ${STEPS[step]}`;
+            title.textContent = `${step}. ${STEPS[step].title}`;
+            caption.textContent = STEPS[step].description;
             dotEls.forEach((d, j) => d.classList.toggle('on', j === step));
             prev.disabled = step === 0;
             next.disabled = step === N - 1;

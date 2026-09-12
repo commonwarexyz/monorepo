@@ -12,7 +12,7 @@
                 <button type="button" data-view="ledger" aria-pressed="true">Ledger observer</button>
                 <button type="button" data-view="rpc" aria-pressed="false">RPC operator</button>
             </div>
-            <p class="rpc-status" role="status"></p>
+            <p class="sim-caption" role="status"></p>
             <div class="rpc-flow">
                 <div class="rpc-node">
                     <strong>Wallet clients</strong>
@@ -34,7 +34,6 @@
                     <ol class="rpc-transactions" aria-label="Transactions on the ledger"></ol>
                 </div>
             </div>
-            <p class="rpc-caption">The transaction numbers identify the same submissions in both views. Client labels identify submission sources, not cryptographic accounts.</p>
         `;
 
         const transactions = mount.querySelector('.rpc-transactions');
@@ -62,9 +61,10 @@
             for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.view === view));
             groups.hidden = !operator;
             mount.querySelector('.rpc-hidden').hidden = operator;
-            mount.querySelector('.rpc-status').textContent = operator
+            const description = operator
                 ? 'The RPC can group repeated submissions by client/session. The ledger contains no such client labels.'
                 : 'The ledger reveals the ordered transactions without their submission sources.';
+            mount.querySelector('.sim-caption').textContent = `${description} The transaction numbers identify the same submissions in both views. Client labels identify submission sources, not cryptographic accounts.`;
         }
         for (const b of buttons) b.addEventListener('click', () => update(b.dataset.view));
         update('ledger');

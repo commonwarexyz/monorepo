@@ -73,6 +73,13 @@
     font-weight: bold;
 }
 
+.sim-caption {
+    color: #555;
+    font-size: 12px;
+    line-height: 1.45;
+    margin: 0 0 12px;
+}
+
 .sim-dots {
     display: flex;
     gap: 6px;
@@ -420,6 +427,7 @@
 }
 
 #rpc-diagram .rpc-controls .sim-title {
+    flex: none;
     margin-right: 4px;
 }
 
@@ -432,12 +440,6 @@
 #rpc-diagram .rpc-controls button:focus-visible {
     outline: 2px solid #0000ee;
     outline-offset: 2px;
-}
-
-#rpc-diagram .rpc-status,
-#rpc-diagram .rpc-caption {
-    margin: 10px 0;
-    line-height: 1.45;
 }
 
 #rpc-diagram .rpc-flow {
@@ -507,11 +509,6 @@
     padding: 6px 8px;
     border-left: 3px solid #d9251c;
     background: #fffbe8;
-}
-
-#rpc-diagram .rpc-caption {
-    color: #555;
-    font-size: 12px;
 }
 
 #rpc-diagram [hidden] {
