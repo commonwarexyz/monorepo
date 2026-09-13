@@ -194,8 +194,9 @@
     draw(group, 'rect', { width, height, rx: 4 });
     const name = label(group, width / 2, 23, '', { 'text-anchor': 'middle', 'font-weight': 'bold' });
     const status = label(group, width / 2, 42, '', { 'text-anchor': 'middle', class: 'log-small' });
-    return (x, y, state, identity, detail, visible = true) => {
-      group.style.transform = `translate(${x}px, ${y}px)`;
+    return (x, y, state, identity, detail, visible = true, scale = 1) => {
+      group.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+      group.dataset.departing = scale < 1;
       group.style.opacity = visible ? 1 : 0;
       group.dataset.state = state;
       name.textContent = identity;
@@ -228,8 +229,7 @@
     label(svg, 18, 389, 'Consumed by marshal', { 'font-weight': 'bold' });
     const output = names.map((name, i) => cell(svg, 18 + i * 55, 403, 48, name));
     draw(svg, 'path', { d: 'M18 445 H340 m-5 -4 l5 4 l-5 4', class: 'log-wire' });
-    label(svg, 180, 464, 'Fixed order · A1 → A2 → A3 → A4 → A5 → A6', { 'text-anchor': 'middle', class: 'log-small log-muted' });
-    const refill = label(svg, 18, 487, 'A freed slot admits the next reference', { class: 'log-small log-muted' });
+    const refill = label(svg, 18, 464, 'A freed slot admits the next reference', { class: 'log-small log-muted' });
     const cards = names.map(() => spatialCard(svg, 100, 58));
     const arrival = [4, 8, 3, 6, 7, 10];
     const consumption = [5, 9, 11, 12, 13, 14];
@@ -252,9 +252,10 @@
       'Consensus kept running. Marshal used at most four slots, refilling them as it consumed bodies.',
     ];
     return {
-      height: 502, steps: captions.length,
+      height: 479, steps: captions.length,
       render(step) {
         const prefix = consumption.filter(at => step >= at).length;
+        const waiting = arrival.filter((at, i) => i > prefix && step >= at && step < consumption[i]).length;
         live.textContent = step ? 'Keeps running →' : 'Selected references';
         feed.style.opacity = step >= 1 ? 1 : 0.2;
         cards.forEach((set, i) => {
@@ -262,11 +263,11 @@
           const done = step >= consumption[i];
           const ready = step >= arrival[i];
           const [x, y] = slotPositions[i % 4];
-          set(x, done ? 382 : requested ? y : y - 14, ready ? 'ready' : 'pending', names[i], ready ? 'Body ready' : 'Requesting…', requested && !done);
+          const blocked = requested && !ready && i === prefix && waiting > 0;
+          set(done ? 18 + i * 55 : x, done ? 403 : requested ? y : y - 14, blocked ? 'blocked' : ready ? 'ready' : 'pending', names[i], ready ? 'Body ready' : 'Requesting…', requested && !done, done ? 0.48 : 1);
         });
         next(step < 2 ? 'produced' : prefix === 6 ? 'ready' : step >= arrival[prefix] ? 'ready' : 'pending', prefix === 6 ? '✓' : names[prefix]);
         gate.textContent = step < 2 ? 'Not started' : prefix === 6 ? 'Done' : step >= arrival[prefix] ? 'Ready' : 'Waiting';
-        const waiting = arrival.filter((at, i) => i > prefix && step >= at && step < consumption[i]).length;
         held.textContent = step < 2 ? '' : prefix === 6 ? '6 consumed' : waiting && step < arrival[prefix] ? `${waiting} held` : 'in order';
         output.forEach((set, i) => set(i < prefix ? 'ready' : 'empty', i < prefix ? names[i] : '·'));
         refill.textContent = step === 5 ? 'Slot 1 refills: A1 leaves → request A5' : step === 9 ? 'Slot 2 refills: A2 leaves → request A6' : 'A freed slot admits the next reference';
@@ -330,7 +331,7 @@
         bodyCards.forEach((set, i) => {
           const done = step >= 9 + i;
           const ready = step >= (i ? 7 : 8);
-          set(48 + i * 160, done ? 448 : 351, ready ? 'ready' : step >= 6 ? 'pending' : 'empty', `A${i + 3}`, ready ? 'Body ready' : step >= 6 ? 'Requesting…' : 'Body needed', !done);
+          set(done ? 104 + i * 100 : 48 + i * 160, done ? 455 : 351, ready ? 'ready' : step >= 6 ? 'pending' : 'empty', `A${i + 3}`, ready ? 'Body ready' : step >= 6 ? 'Requesting…' : 'Body needed', !done, done ? 0.5 : 1);
         });
         bodyNote.textContent = step < 6 ? 'Header repair comes first' : step === 6 ? 'Two concurrent requests · window limit 4' : step === 7 ? 'A4 waits behind missing A3' : step === 8 ? 'Gap closed · ready to consume' : step === 9 ? 'A3 consumed · A4 is next' : 'Both bodies consumed';
         consumed.forEach((set, i) => set(step >= 9 + i ? 'ready' : 'empty', step >= 9 + i ? `A${i + 3}` : '·'));

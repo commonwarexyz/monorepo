@@ -177,10 +177,13 @@
 .log-spatial .log-space-tiny { font-size: 9px; }
 .log-spatial .log-space-feed { fill: none; stroke: #5555a8; stroke-width: 1.3; transition: opacity 280ms ease; }
 .log-spatial .log-space-card { transition: transform 320ms ease, opacity 220ms ease; }
+.log-spatial .log-space-card[data-departing="true"] { transition: transform 320ms ease, opacity 100ms ease 240ms; }
 .log-spatial .log-space-card rect { fill: #fff; stroke: #c6cbd0; transition: fill 220ms ease, stroke 220ms ease; }
 .log-spatial .log-space-card text { fill: #6b7077; }
 .log-spatial .log-space-card[data-state="known"] rect { fill: #f3f3ff; stroke: #5555a8; }
 .log-spatial .log-space-card[data-state="known"] text { fill: #39398c; }
+.log-spatial .log-space-card[data-state="blocked"] rect { fill: #fff7dc; stroke: #92752b; stroke-width: 2.5; }
+.log-spatial .log-space-card[data-state="blocked"] text { fill: #756126; }
 .log-spatial .log-space-card[data-state="pending"] rect { fill: #fffdf5; stroke: #a78e43; stroke-dasharray: 4 3; }
 .log-spatial .log-space-card[data-state="pending"] text { fill: #756126; }
 .log-spatial .log-space-card[data-state="ready"] rect { fill: #edf7ef; stroke: #3a8252; }
@@ -192,6 +195,7 @@
 .log-spatial .log-space-link[data-state="ready"] { stroke: #3a8252; }
 @media (prefers-reduced-motion: reduce) {
   .log-spatial .log-space-card,
+  .log-spatial .log-space-card[data-departing="true"],
   .log-spatial .log-space-card rect,
   .log-spatial .log-space-feed,
   .log-spatial .log-space-link { transition: none; }
