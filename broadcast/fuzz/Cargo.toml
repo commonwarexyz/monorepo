@@ -14,6 +14,7 @@ commonware-broadcast = { path = ".." }
 commonware-codec.workspace = true
 commonware-cryptography = { workspace = true, features = ["arbitrary"] }
 commonware-p2p.workspace = true
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
