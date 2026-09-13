@@ -7,7 +7,10 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 
 /// Message types that can be sent to the `Mailbox`
 pub(crate) enum Message<P: PublicKey, M: Digestible> {
@@ -44,32 +47,75 @@ impl<P: PublicKey, M: Digestible> Message<P, M> {
     }
 }
 
-pub(crate) struct Pending<P: PublicKey, M: Digestible>(VecDeque<Message<P, M>>);
+enum PendingEntry<P: PublicKey, M: Digestible> {
+    Message(Message<P, M>),
+    Broadcast { digest: M::Digest, message: Arc<M> },
+}
+
+pub(crate) struct Pending<P: PublicKey, M: Digestible> {
+    queue: VecDeque<PendingEntry<P, M>>,
+    broadcasts: BTreeMap<M::Digest, Recipients<P>>,
+}
 
 impl<P: PublicKey, M: Digestible> Default for Pending<P, M> {
     fn default() -> Self {
-        Self(VecDeque::new())
+        Self {
+            queue: VecDeque::new(),
+            broadcasts: BTreeMap::new(),
+        }
     }
 }
 
 impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.queue.is_empty()
     }
 
     fn drain<F>(&mut self, mut push: F)
     where
         F: FnMut(Message<P, M>) -> Option<Message<P, M>>,
     {
-        while let Some(message) = self.0.pop_front() {
-            if message.response_closed() {
-                continue;
-            }
+        while let Some(entry) = self.queue.pop_front() {
+            let (message, digest) = match entry {
+                PendingEntry::Message(message) => {
+                    if message.response_closed() {
+                        continue;
+                    }
+                    (message, None)
+                }
+                PendingEntry::Broadcast { digest, message } => {
+                    let recipients = self
+                        .broadcasts
+                        .remove(&digest)
+                        .expect("every queued broadcast has recipients");
+                    (
+                        Message::Broadcast {
+                            recipients,
+                            message,
+                        },
+                        Some(digest),
+                    )
+                }
+            };
 
-            if let Some(message) = push(message) {
-                self.0.push_front(message);
-                break;
+            let Some(message) = push(message) else {
+                continue;
+            };
+            match (digest, message) {
+                (
+                    Some(digest),
+                    Message::Broadcast {
+                        recipients,
+                        message,
+                    },
+                ) => {
+                    self.broadcasts.insert(digest, recipients);
+                    self.queue
+                        .push_front(PendingEntry::Broadcast { digest, message });
+                }
+                (_, message) => self.queue.push_front(PendingEntry::Message(message)),
             }
+            break;
         }
     }
 }
@@ -82,8 +128,58 @@ impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
             return;
         }
 
-        overflow.0.push_back(message);
+        if let Self::Broadcast {
+            recipients,
+            message,
+        } = message
+        {
+            let digest = message.digest();
+            if let Some(queued) = overflow.broadcasts.get_mut(&digest) {
+                merge_recipients(queued, recipients);
+                return;
+            }
+            overflow.broadcasts.insert(digest, recipients);
+            overflow
+                .queue
+                .push_back(PendingEntry::Broadcast { digest, message });
+            return;
+        }
+
+        overflow.queue.push_back(PendingEntry::Message(message));
     }
+}
+
+fn merge_recipients<P: PublicKey>(current: &mut Recipients<P>, incoming: Recipients<P>) {
+    let previous = std::mem::replace(current, Recipients::Some(Vec::new()));
+    *current = match (previous, incoming) {
+        (Recipients::All, _) | (_, Recipients::All) => Recipients::All,
+        (left, right) => {
+            let mut recipients = match left {
+                Recipients::One(peer) => vec![peer],
+                Recipients::Some(peers) => peers,
+                Recipients::All => unreachable!("all recipients handled above"),
+            };
+            match right {
+                Recipients::One(peer) => {
+                    if !recipients.contains(&peer) {
+                        recipients.push(peer);
+                    }
+                }
+                Recipients::Some(peers) => {
+                    for peer in peers {
+                        if !recipients.contains(&peer) {
+                            recipients.push(peer);
+                        }
+                    }
+                }
+                Recipients::All => unreachable!("all recipients handled above"),
+            }
+            match recipients.as_slice() {
+                [peer] => Recipients::One(peer.clone()),
+                _ => Recipients::Some(recipients),
+            }
+        }
+    };
 }
 
 /// Ingress mailbox for [super::Engine].

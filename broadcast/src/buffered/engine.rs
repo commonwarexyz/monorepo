@@ -4,9 +4,10 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    Provider, Receiver, Recipients, Sender,
-    utils::codec::{WrappedSender, wrap},
+    Blocker, Provider, Receiver, Recipients, Sender,
+    utils::codec::{WrappedBackgroundReceiver, WrappedSender},
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, status::Status},
@@ -17,9 +18,10 @@ use commonware_utils::{
 };
 use std::{
     collections::{BTreeMap, VecDeque},
+    num::NonZeroUsize,
     sync::Arc,
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace};
 
 /// A responder waiting for a message.
 struct Waiter<M> {
@@ -41,12 +43,20 @@ enum InsertMessageResult {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E, P, M, D>
+///
+/// Inbound messages are decoded off the event loop through the configured
+/// [`Strategy`], so codec-embedded validation of large payloads never serializes
+/// behind the engine's other duties. In-flight decodes are bounded by the
+/// strategy's parallelism and decoded messages that outrun the engine are
+/// dropped; peers whose messages fail to decode are blocked.
+pub struct Engine<E, P, M, D, B, T>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
-    M: Digestible + Codec,
+    M: Digestible + Codec + Send + 'static,
     D: Provider<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
+    T: Strategy,
 {
     ////////////////////////////////////////
     // Interfaces
@@ -67,6 +77,15 @@ where
 
     /// Configuration for decoding messages
     codec_config: M::Cfg,
+
+    /// Capacity of the decoded-message channel from the background receiver.
+    ingress_capacity: NonZeroUsize,
+
+    /// Blocks peers whose messages fail to decode.
+    blocker: B,
+
+    /// Strategy used to decode inbound messages off the event loop.
+    strategy: T,
 
     ////////////////////////////////////////
     // Messaging
@@ -109,16 +128,18 @@ where
     metrics: metrics::Metrics<P>,
 }
 
-impl<E, P, M, D> Engine<E, P, M, D>
+impl<E, P, M, D, B, T> Engine<E, P, M, D, B, T>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
-    M: Digestible + Codec,
+    M: Digestible + Codec + Send + 'static,
     D: Provider<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
+    T: Strategy,
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
+    pub fn new(context: E, cfg: Config<P, M::Cfg, D, B, T>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) =
             mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
@@ -131,6 +152,9 @@ where
             priority: cfg.priority,
             deque_size: cfg.deque_size,
             codec_config: cfg.codec_config,
+            ingress_capacity: cfg.mailbox_size,
+            blocker: cfg.blocker,
+            strategy: cfg.strategy,
             mailbox_receiver,
             waiters: BTreeMap::new(),
             deques: BTreeMap::new(),
@@ -154,12 +178,18 @@ where
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap(
-            self.codec_config.clone(),
-            self.context.network_buffer_pool().clone(),
-            network.0,
+        let mut sender =
+            WrappedSender::<_, M>::new(self.context.network_buffer_pool().clone(), network.0);
+        let (ingress, mut receiver) = WrappedBackgroundReceiver::<_, P, B, _, M, T>::new(
+            self.context.child("ingress"),
             network.1,
+            self.codec_config.clone(),
+            self.blocker.clone(),
+            self.ingress_capacity,
+            self.strategy.clone(),
         );
+        // Keep the handle alive so the background decoder is not aborted.
+        let _ingress_handle = ingress.start();
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -201,27 +231,11 @@ where
                     self.handle_get(digest, responder);
                 }
             },
-            // Handle incoming messages
-            msg = receiver.recv() => {
-                // Error handling
-                let (peer, msg) = match msg {
-                    Ok(r) => r,
-                    Err(err) => {
-                        error!(?err, "receiver failed");
-                        break;
-                    }
-                };
-
-                // Decode the message
-                let msg = match msg {
-                    Ok(msg) => msg,
-                    Err(err) => {
-                        warn!(?err, ?peer, "failed to decode message");
-                        self.metrics.receive.inc(Status::Invalid);
-                        continue;
-                    }
-                };
-
+            // Handle incoming messages, already decoded off-loop by the background receiver
+            Some((peer, msg)) = receiver.recv() else {
+                error!("ingress receiver closed");
+                break;
+            } => {
                 trace!(?peer, "network");
                 self.metrics.peer.get_or_create_by(&peer).inc();
                 self.handle_network(peer, msg);
