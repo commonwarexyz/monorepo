@@ -18,6 +18,7 @@ use core::{
 };
 
 /// CLOCK admission and eviction policy.
+#[derive(Debug)]
 pub struct Clock {
     /// Next slot examined during eviction.
     hand: Slot,
@@ -200,7 +201,7 @@ mod tests {
         cache.put(3, 30);
         cache.put(4, 40); // Evicts key 1 and clears the other reference bits.
 
-        let slot = *cache.index.get(&2).unwrap();
+        let slot = cache.find_slot(&2).unwrap();
         assert_eq!(cache.get_at(slot, &2).copied(), Some(20));
         cache.put(5, 50);
         assert!(cache.contains(&2), "get_at must protect key 2");

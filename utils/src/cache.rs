@@ -32,6 +32,12 @@
 //! value allocation from steady-state insertion. Value-returning methods such
 //! as [Cache::put] replace and drop displaced values as usual.
 //!
+//! The resident index stores only slot IDs and reads keys from the slots. It
+//! reserves space for twice the resident limit at construction, keeping its
+//! backing allocation fixed throughout insertion and eviction. Tombstone
+//! cleanup can still rehash the index in place. This reservation covers index
+//! storage; keys, values, and other metadata can allocate separately.
+//!
 //! The [clock] module provides [Clock], the default replacement policy.
 //!
 //! # Concurrency
@@ -75,14 +81,11 @@
 
 pub mod clock;
 
-#[cfg(feature = "std")]
-use ahash::AHashMap as HashMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 pub use clock::Clock;
 use core::{hash::Hash, num::NonZeroUsize, ops::Index};
-#[cfg(not(feature = "std"))]
-use hashbrown::HashMap;
+use hashbrown::HashTable;
 
 type Hasher = ahash::RandomState;
 
@@ -134,8 +137,9 @@ pub trait Policy<K> {
     /// `states` provides policy state indexed by [Slot]. `has_vacancy` reports
     /// whether unused capacity is available, though the policy may still choose
     /// a victim. The policy commits its choice by calling `claim` exactly once.
-    /// Passing `None` claims unused capacity and returns its assigned slot.
-    /// Passing `Some(slot)` replaces that slot and returns its previous key.
+    /// Passing `None` requires `has_vacancy` and claims unused capacity,
+    /// returning its assigned slot. Passing `Some(slot)` replaces that live slot
+    /// and returns its previous key.
     ///
     /// The returned [Slot] must be the storage resolved by `claim`. The returned
     /// [Self::SlotState] becomes the incoming entry's initial policy state.
@@ -191,10 +195,14 @@ pub struct Cache<K, V, P = Clock>
 where
     P: Policy<K>,
 {
-    /// Maps each live key to the index of its slot in `slots`.
+    /// Indexes live slots by their canonical keys in `slots`.
+    ///
+    /// Twice the resident bound keeps live entries within half the usable
+    /// capacity, where hashbrown reclaims tombstones in place without growing.
     ///
     /// `index.len() + free.len() == slots.len()` always holds.
-    index: HashMap<K, Slot, Hasher>,
+    index: HashTable<Slot>,
+    hasher: Hasher,
     /// Backing storage for slots, grown lazily up to `capacity` and then reused.
     slots: Vec<Entry<K, V, P::SlotState>>,
     /// Slots detached from the index and available for reuse. Populated by
@@ -213,7 +221,8 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         let policy = P::new(capacity);
         let capacity = capacity.get();
         Self {
-            index: HashMap::with_capacity_and_hasher(capacity, Hasher::default()),
+            index: HashTable::with_capacity(capacity.checked_mul(2).expect("capacity overflow")),
+            hasher: Hasher::default(),
             slots: Vec::with_capacity(capacity),
             free: Vec::new(),
             capacity,
@@ -242,7 +251,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// Returns `true` if `key` is in the cache without recording use.
     #[inline]
     pub fn contains(&self, key: &K) -> bool {
-        self.index.contains_key(key)
+        self.find_slot(key).is_some()
     }
 
     /// Returns a reference to the value for `key` without recording use.
@@ -250,7 +259,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// Unlike [Self::get], this does not notify the policy of a hit.
     #[inline]
     pub fn peek(&self, key: &K) -> Option<&V> {
-        let &slot = self.index.get(key)?;
+        let slot = self.find_slot(key)?;
         Some(&self.slots[slot].value)
     }
 
@@ -261,7 +270,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// [Policy::hit].
     #[inline]
     pub fn get(&self, key: &K) -> Option<&V> {
-        let &index = self.index.get(key)?;
+        let index = self.find_slot(key)?;
         let slot = &self.slots[index];
         self.policy.hit(index, &slot.state);
         Some(&slot.value)
@@ -291,7 +300,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// Returns a mutable reference to the value for `key`, recording use.
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        let &index = self.index.get(key)?;
+        let index = self.find_slot(key)?;
         let slot = &mut self.slots[index];
         self.policy.hit_mut(index, &mut slot.state);
         Some(&mut slot.value)
@@ -300,10 +309,10 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// Inserts `value` for `key`.
     ///
     /// If `key` was already present, replaces and returns the previous value,
-    /// recording use. If the cache cannot use vacant capacity, the policy
-    /// selects a resident to evict.
+    /// recording use. Otherwise the policy claims vacant capacity or selects a
+    /// resident to evict.
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
-        if let Some(&index) = self.index.get(&key) {
+        if let Some(index) = self.find_slot(&key) {
             let slot = &mut self.slots[index];
             self.policy.hit_mut(index, &mut slot.state);
             return Some(core::mem::replace(&mut slot.value, value));
@@ -316,11 +325,11 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// miss.
     ///
     /// On a hit, `f` is not called. On a miss, `f` is called, its result is
-    /// inserted (evicting an entry if the cache is full), and a reference to the
-    /// stored value is returned.
+    /// inserted (evicting a resident if the policy selects one), and a reference
+    /// to the stored value is returned.
     pub fn get_or_insert_with<F: FnOnce() -> V>(&mut self, key: K, f: F) -> &V {
-        let slot = match self.index.get(&key) {
-            Some(&slot) => {
+        let slot = match self.find_slot(&key) {
+            Some(slot) => {
                 self.policy.hit_mut(slot, &mut self.slots[slot].state);
                 slot
             }
@@ -340,8 +349,8 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         key: K,
         f: F,
     ) -> Result<&V, E> {
-        let slot = match self.index.get(&key) {
-            Some(&slot) => {
+        let slot = match self.find_slot(&key) {
+            Some(slot) => {
                 self.policy.hit_mut(slot, &mut self.slots[slot].state);
                 slot
             }
@@ -370,8 +379,8 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// may already have been updated. If the panic is caught, this cache must
     /// not be used again.
     pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> (Slot, &mut V) {
-        let slot = match self.index.get(&key) {
-            Some(&slot) => {
+        let slot = match self.find_slot(&key) {
+            Some(slot) => {
                 self.policy.hit_mut(slot, &mut self.slots[slot].state);
                 slot
             }
@@ -379,10 +388,10 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
                 let (slot, state) = self.claim_slot(&key);
                 match slot {
                     Some(slot) => {
-                        self.slots[slot].key = key.clone();
+                        self.slots[slot].key = key;
                         self.slots[slot].state = state;
                         self.slots[slot].live = true;
-                        self.index.insert(key, slot);
+                        self.index_slot(slot);
                         slot
                     }
                     None => self.grow(key, make(), state),
@@ -397,14 +406,17 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
     /// The slot and its allocation are retained for reuse, so the value is not
     /// returned.
     pub fn remove(&mut self, key: &K) -> bool {
-        match self.index.remove(key) {
-            Some(slot) => {
+        match self.index.find_entry(self.hasher.hash_one(key), |&slot| {
+            self.slots[slot].key == *key
+        }) {
+            Ok(entry) => {
+                let slot = entry.remove().0;
                 self.policy.remove(Some(slot), key);
                 self.slots[slot].live = false;
                 self.free.push(slot);
                 true
             }
-            None => {
+            Err(_) => {
                 self.policy.remove(None, key);
                 false
             }
@@ -422,10 +434,11 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
             policy,
             ..
         } = self;
-        index.retain(|key, &mut slot| {
-            let keep = keep(key, &slots[slot].value);
+        index.retain(|&mut slot| {
+            let resident = &mut slots[slot];
+            let keep = keep(&resident.key, &resident.value);
             if !keep {
-                policy.remove(Some(slot), key);
+                policy.remove(Some(slot), &resident.key);
                 slots[slot].live = false;
                 free.push(slot);
             }
@@ -442,18 +455,39 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         self.policy.clear();
     }
 
+    #[inline]
+    fn find_slot(&self, key: &K) -> Option<Slot> {
+        self.index
+            .find(self.hasher.hash_one(key), |&slot| {
+                self.slots[slot].key == *key
+            })
+            .copied()
+    }
+
+    /// Publishes a slot after its canonical key is installed. All indexed slots
+    /// retain their keys while insertion may rehash the table.
+    #[inline]
+    fn index_slot(&mut self, slot: Slot) {
+        let hash = self.hasher.hash_one(&self.slots[slot].key);
+        let slots = &self.slots;
+        let hasher = &self.hasher;
+        let _ = self
+            .index
+            .insert_unique(hash, slot, |&slot| hasher.hash_one(&slots[slot].key));
+    }
+
     /// Pushes a brand new slot holding `(key, value)` and returns its index.
     ///
     /// Only called while the cache is below capacity.
     fn grow(&mut self, key: K, value: V, state: P::SlotState) -> Slot {
         let slot = self.slots.len();
-        self.index.insert(key.clone(), slot);
         self.slots.push(Entry {
             key,
             value,
             state,
             live: true,
         });
+        self.index_slot(slot);
         slot
     }
 
@@ -462,11 +496,11 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
         let (slot, state) = self.claim_slot(&key);
         match slot {
             Some(slot) => {
-                self.slots[slot].key = key.clone();
+                self.slots[slot].key = key;
                 self.slots[slot].value = value;
                 self.slots[slot].state = state;
                 self.slots[slot].live = true;
-                self.index.insert(key, slot);
+                self.index_slot(slot);
                 slot
             }
             None => self.grow(key, value, state),
@@ -491,6 +525,7 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
             free,
             capacity,
             policy,
+            hasher,
         } = self;
         let has_vacancy = !free.is_empty() || slots.len() < *capacity;
 
@@ -509,11 +544,15 @@ impl<K: Hash + Eq + Clone, V, P: Policy<K>> Cache<K, V, P> {
                         .expect("policy selected a slot outside the cache");
                     assert!(resident.live, "policy selected a nonresident slot");
 
-                    // Transfer the displaced key to the policy without cloning it.
-                    let (evicted, indexed_slot) = index
-                        .remove_entry(&resident.key)
-                        .expect("a live victim must be indexed");
-                    assert_eq!(indexed_slot, slot, "resident index must match its slot");
+                    // Policy state borrows the entries throughout insertion, so the
+                    // victim key stays in place until the policy call returns.
+                    let evicted = resident.key.clone();
+                    index
+                        .find_entry(hasher.hash_one(&resident.key), |&candidate| {
+                            candidate == slot
+                        })
+                        .expect("a live victim must be indexed")
+                        .remove();
 
                     Claimed::Evicted(evicted)
                 },
@@ -535,9 +574,10 @@ where
     ///
     /// After this call, the first `capacity` inserts reuse a pre-allocated slot
     /// instead of growing, so `make` (and any allocation it performs) runs only
-    /// here. Use this to front-load allocation at construction so steady-state
-    /// inserts never allocate. Free slots are seeded with the default key as a
-    /// throwaway placeholder that is overwritten when the slot is first filled.
+    /// here. Use this to front-load value allocation at construction so
+    /// steady-state inserts never allocate values. Free slots are seeded with the
+    /// default key as a throwaway placeholder that is overwritten when the slot
+    /// is first filled.
     pub fn prefill<F: FnMut() -> V>(&mut self, mut make: F) {
         let start = self.free.len();
         while self.slots.len() < self.capacity {
@@ -556,11 +596,12 @@ where
     }
 }
 
-impl<K, V> core::fmt::Debug for Cache<K, V, Clock> {
+impl<K, V, P: Policy<K> + core::fmt::Debug> core::fmt::Debug for Cache<K, V, P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Cache")
             .field("len", &self.index.len())
             .field("capacity", &self.capacity)
+            .field("policy", &self.policy)
             .finish()
     }
 }
@@ -643,11 +684,11 @@ mod tests {
             let free: HashSet<Slot> = self.free.iter().copied().collect();
             assert_eq!(free.len(), self.free.len(), "duplicate free slot");
             let mut seen = HashSet::new();
-            for (key, &slot) in &self.index {
+            for &slot in &self.index {
                 assert!(slot < self.slots.len());
                 assert!(!free.contains(&slot), "slot {slot} both live and free");
                 assert!(seen.insert(slot), "slot {slot} mapped twice");
-                assert!(self.slots[slot].key == *key);
+                assert_eq!(self.find_slot(&self.slots[slot].key), Some(slot));
                 assert!(self.slots[slot].live, "indexed slot {slot} not live");
             }
             for &slot in &self.free {
@@ -1069,23 +1110,26 @@ mod tests {
         GetMut(u8, u16),
         Remove(u8),
         Retain(u8),
+        Clear,
     }
 
-    fn op_strategy() -> impl Strategy<Value = Op> {
+    fn op_strategy(keys: u8) -> impl Strategy<Value = Op> {
         prop_oneof![
-            (0u8..16).prop_map(Op::Get),
-            (0u8..16).prop_map(Op::Peek),
-            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::Put(k, v)),
-            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsert(k, v)),
-            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMut(k, v)),
-            (0u8..16, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
-            (0u8..16).prop_map(Op::Remove),
-            (0u8..16).prop_map(Op::Retain),
+            8 => (0..keys).prop_map(Op::Get),
+            8 => (0..keys).prop_map(Op::Peek),
+            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::Put(k, v)),
+            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsert(k, v)),
+            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMut(k, v)),
+            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
+            8 => (0..keys).prop_map(Op::Remove),
+            8 => (0..keys).prop_map(Op::Retain),
+            1 => Just(Op::Clear),
         ]
     }
 
     fn exercise_policy<P, F>(
         capacity: usize,
+        keys: u8,
         prefill: bool,
         ops: Vec<Op>,
         check_policy_invariants: F,
@@ -1144,6 +1188,11 @@ mod tests {
                     model.retain(|resident, _| *resident < key);
                     prop_assert!(cache.len() <= usize::from(key).min(capacity));
                 }
+                Op::Clear => {
+                    cache.clear();
+                    model.clear();
+                    prop_assert!(cache.is_empty());
+                }
             }
 
             prop_assert!(cache.len() <= capacity);
@@ -1151,7 +1200,7 @@ mod tests {
             prop_assert!(cache.slots.len() <= capacity);
             // Every present key holds its last-written value and was logically
             // inserted; absent keys are an allowed (evicted) state.
-            for key in 0..16u8 {
+            for key in 0..keys {
                 let present = cache.contains(&key);
                 prop_assert_eq!(present, cache.peek(&key).is_some());
                 if present {
@@ -1170,11 +1219,14 @@ mod tests {
         fn clock_invariants_hold(
             capacity in 1usize..8,
             prefill in any::<bool>(),
-            ops in proptest::collection::vec(op_strategy(), 0..256),
+            ops in proptest::collection::vec(op_strategy(16), 0..256),
         ) {
-            exercise_policy::<Clock, _>(capacity, prefill, ops, |cache| {
+            exercise_policy::<Clock, _>(capacity, 16, prefill, ops, |cache| {
                 cache.check_policy_invariants();
             })?;
         }
     }
 }
+
+#[cfg(test)]
+mod slot_index_tests;
