@@ -6200,6 +6200,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(4));
+            let page_cache = cfg.page_cache.clone();
             let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..20u64 {
@@ -6222,9 +6223,21 @@ mod tests {
                 }
             }
 
-            // The last blob (positions 16..20) spans at most the cache capacity, so after
-            // warming exactly those positions they are all served synchronously.
-            let tail: Vec<u64> = (16..20).collect();
+            // Consume tail-page history, then fill the cache with unrelated single-page reads.
+            // The synchronous-hit checks must hold without favorable prior admission state.
+            page_cache.clear();
+            reader
+                .read_many(&(16..20).collect::<Vec<_>>())
+                .await
+                .unwrap();
+            page_cache.clear();
+            for pos in [0, 4, 8] {
+                reader.read(pos).await.unwrap();
+            }
+
+            // Positions 18 and 19 span one cached page and the in-memory tail, so warming them
+            // makes both available synchronously.
+            let tail: Vec<u64> = (18..20).collect();
             reader.read_many(&tail).await.unwrap();
             let served = reader.try_read_many_sync(&tail);
             for (item, pos) in served.iter().zip(&tail) {

@@ -161,7 +161,9 @@ impl CacheRef {
     ///
     /// The cache stores at most `capacity` pages, each exactly `page_size` bytes (see
     /// [Self::page_size] for how this relates to a page's physical size on disk).
-    /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
+    /// Initialization eagerly allocates and zeroes all cache slots from `pool`. Eviction follows
+    /// [cache::Clock2QPlus], whose [sizing rules](cache::clock2qplus#sizing-and-state) describe
+    /// admission at small capacities.
     ///
     /// Any `page_size` is accepted, but physical pages that do not align with storage pages (see
     /// the module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
