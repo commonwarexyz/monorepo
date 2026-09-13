@@ -17,22 +17,6 @@ const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
 #[derive(Clone, Copy)]
 pub(super) struct Backend(());
 
-impl Backend {
-    /// Constructs the backend if the required CPU features are available.
-    pub(super) fn new() -> Option<Self> {
-        available().then_some(Self(()))
-    }
-
-    /// Runs an entire computation with AVX-512F and AVX-512 IFMA enabled.
-    ///
-    /// Enabling the target features around the whole computation lets backend operations inline
-    /// without crossing a target-feature boundary for every operation.
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    pub(super) fn call<F: WithBackend>(self, f: F) -> F::Output {
-        f.call(self)
-    }
-}
-
 /// Feature set this backend requires: AVX-512F for the 512-bit integer add/shift/mask operations,
 /// and AVX-512 IFMA for the 52x52-bit multiply-accumulates.
 fn available() -> bool {
@@ -218,76 +202,6 @@ fn sub_raw(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
     })
 }
 
-/// # Correctness
-///
-/// Every input must satisfy [`FVec`]'s limb bound. That bound keeps raw field arithmetic within
-/// its documented ranges and keeps every IFMA operand below its `2^52` ceiling.
-impl Backend {
-    /// Negates selected lanes with reduced output while preserving every unselected limb.
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn conditional_neg_field(self, value: FVec, negative: &[bool; LANES]) -> FVec {
-        let mask = negative
-            .iter()
-            .enumerate()
-            .fold(0u8, |mask, (lane, &select)| mask | ((select as u8) << lane));
-        let value = load(&value.limbs);
-        let zero = [_mm512_setzero_si512(); 5];
-        let negated = reduce_regs(sub_raw(zero, value));
-        FVec {
-            limbs: store(core::array::from_fn(|limb| {
-                _mm512_mask_blend_epi64(mask, value[limb], negated[limb])
-            })),
-        }
-    }
-
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn add_field(self, a: FVec, b: FVec) -> FVec {
-        FVec {
-            limbs: store(reduce_regs(add_raw(load(&a.limbs), load(&b.limbs)))),
-        }
-    }
-
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn neg_field(self, a: FVec) -> FVec {
-        let zero = [_mm512_setzero_si512(); 5];
-        FVec {
-            limbs: store(reduce_regs(sub_raw(zero, load(&a.limbs)))),
-        }
-    }
-
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn sub_field(self, a: FVec, b: FVec) -> FVec {
-        FVec {
-            limbs: store(reduce_regs(sub_raw(load(&a.limbs), load(&b.limbs)))),
-        }
-    }
-
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn mul_field(self, a: FVec, b: FVec) -> FVec {
-        FVec {
-            limbs: store(mul_regs(load(&a.limbs), load(&b.limbs))),
-        }
-    }
-
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn pow2k_field(self, a: FVec, k: u32) -> FVec {
-        let mut value = load(&a.limbs);
-        for _ in 0..k {
-            value = square_regs(value);
-        }
-        FVec {
-            limbs: store(value),
-        }
-    }
-
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn square_field(self, a: FVec) -> FVec {
-        FVec {
-            limbs: store(square_regs(load(&a.limbs))),
-        }
-    }
-}
-
 impl FBackend for Backend {
     #[inline(always)]
     fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
@@ -333,6 +247,20 @@ impl FBackend for Backend {
 }
 
 impl Backend {
+    /// Constructs the backend if the required CPU features are available.
+    pub(super) fn new() -> Option<Self> {
+        available().then_some(Self(()))
+    }
+
+    /// Runs an entire computation with AVX-512F and AVX-512 IFMA enabled.
+    ///
+    /// Enabling the target features around the whole computation lets backend operations inline
+    /// without crossing a target-feature boundary for every operation.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub(super) fn call<F: WithBackend>(self, f: F) -> F::Output {
+        f.call(self)
+    }
+
     /// Fused point addition.
     ///
     /// # Correctness
@@ -465,6 +393,72 @@ impl Backend {
             z: FVec {
                 limbs: store(mul_regs(f, g)),
             },
+        }
+    }
+
+    // Field operations require inputs within FVec's limb bound. This keeps raw field
+    // arithmetic within its documented ranges and every IFMA operand below its 2^52 ceiling.
+    /// Negates selected lanes with reduced output while preserving every unselected limb.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn conditional_neg_field(self, value: FVec, negative: &[bool; LANES]) -> FVec {
+        let mask = negative
+            .iter()
+            .enumerate()
+            .fold(0u8, |mask, (lane, &select)| mask | ((select as u8) << lane));
+        let value = load(&value.limbs);
+        let zero = [_mm512_setzero_si512(); 5];
+        let negated = reduce_regs(sub_raw(zero, value));
+        FVec {
+            limbs: store(core::array::from_fn(|limb| {
+                _mm512_mask_blend_epi64(mask, value[limb], negated[limb])
+            })),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn add_field(self, a: FVec, b: FVec) -> FVec {
+        FVec {
+            limbs: store(reduce_regs(add_raw(load(&a.limbs), load(&b.limbs)))),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn neg_field(self, a: FVec) -> FVec {
+        let zero = [_mm512_setzero_si512(); 5];
+        FVec {
+            limbs: store(reduce_regs(sub_raw(zero, load(&a.limbs)))),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn sub_field(self, a: FVec, b: FVec) -> FVec {
+        FVec {
+            limbs: store(reduce_regs(sub_raw(load(&a.limbs), load(&b.limbs)))),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn mul_field(self, a: FVec, b: FVec) -> FVec {
+        FVec {
+            limbs: store(mul_regs(load(&a.limbs), load(&b.limbs))),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn pow2k_field(self, a: FVec, k: u32) -> FVec {
+        let mut value = load(&a.limbs);
+        for _ in 0..k {
+            value = square_regs(value);
+        }
+        FVec {
+            limbs: store(value),
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn square_field(self, a: FVec) -> FVec {
+        FVec {
+            limbs: store(square_regs(load(&a.limbs))),
         }
     }
 }
