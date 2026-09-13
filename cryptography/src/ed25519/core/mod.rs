@@ -27,6 +27,8 @@ mod error;
 mod signature;
 mod signing_key;
 mod verification_key;
+#[cfg(test)]
+mod zip215;
 
 pub use error::Error;
 pub use signature::Signature;
