@@ -57,6 +57,44 @@ replacing the eight-byte slab implementation with this free list. Full-scale par
 steady workloads still need measurement; matching occupancy does not reproduce their allocator,
 cache, or contention behavior.
 
+### Why exact fit saved little RSS with eight-byte values
+
+A follow-up heap inspection at 3,906,250 keys shows that exact fit substantially reduces live
+allocation bytes, but leaves more empty slots inside mimalloc's pages. With eight-byte values:
+
+| Heap accounting, B/key | Slabs | Exact |
+| --- | ---: | ---: |
+| Live allocator blocks, including rounding and metadata | 19.54 | 14.69 |
+| Unused initialized block slots in allocator pages | 0.93 | 5.24 |
+| RSS minus the above block capacity | 1.72 | 2.01 |
+| Process RSS | 22.18 | 21.94 |
+
+For slabs, live allocator blocks also include spare capacity inside our slabs and partition
+buffers. Exact-fit layout requests need about 13.6 B/key including headers and alignment; size
+rounding accounts for roughly another 1.1 B/key. For example, a 60-entry buffer requests 784
+bytes and mimalloc gives it an 896-byte block. Most of the remaining overhead is page occupancy.
+
+The exact policy's 640-byte class has 309 pages with 20,171,520 bytes of initialized block
+capacity, holding only 3,700,480 bytes of live allocations (18.35% occupancy). The 768-byte class
+adds another 2,971,392 unused bytes. Partitions pass through these classes during growth; larger
+partitions move out, while smaller partitions leave live buffers scattered across the old pages.
+Those holes cannot satisfy a request in a larger size class. Exact fit removes array slack but
+does not compact mimalloc's partially occupied pages.
+
+Calling `mi_collect(true)` after the build changed neither RSS nor these page counts in any of
+the twelve diagnostic runs. This is not just a backlog of wholly freed pages waiting for a flush.
+The evidence supports rejecting this allocation strategy for its RSS result, while leaving the
+benefit of tighter live storage intact.
+
+The diagnostics used the same workload and allocator as above, three fresh processes for each
+policy/value width, with temporary instrumentation after the build and outside its timing.
+The complete `mi_heap_visit_blocks` walk is needed: the deprecated thread-heap walk omits pages
+no longer attached to that thread's allocation queues. In the bundled 0.1.49/v3 header, `used`
+is a block count and `committed` is initialized block capacity, not an OS residency measurement.
+The table therefore reports block accounting and an RSS remainder, not a physical page census.
+[allocation-diagnostics.csv](allocation-diagnostics.csv) records every visited size class before
+and after collection. Instrumentation was removed after measurement; the implementation is unchanged.
+
 ## Policies
 
 - `slabs`: existing geometric growth and two-KiB slabs.
