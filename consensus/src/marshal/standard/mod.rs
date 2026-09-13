@@ -9928,6 +9928,7 @@ mod tests {
                 priority: false,
                 codec_config: (),
                 peer_provider: oracle.manager(),
+                blocker: control.clone(),
                 strategy: Sequential,
             };
             let (broadcast_engine, buffer) =
