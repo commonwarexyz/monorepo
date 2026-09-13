@@ -709,19 +709,15 @@ where
     // Ops are applied in small windows: each window's partitions are prefetched before any
     // op is applied, hiding the random-access cache misses partition lookups take.
     const PREFETCH_WINDOW: usize = 16;
-    let mut window = Vec::with_capacity(PREFETCH_WINDOW);
     while let Some(batch) = rx.recv().await {
         let mut ops = batch.into_iter();
-        loop {
-            window.clear();
-            window.extend(ops.by_ref().take(PREFETCH_WINDOW));
-            if window.is_empty() {
-                break;
-            }
-            for (key, _, _) in &window {
+        while !ops.as_slice().is_empty() {
+            // Borrow the window's ops for the prefetch pass, then consume exactly those.
+            let window = ops.as_slice().len().min(PREFETCH_WINDOW);
+            for (key, _, _) in &ops.as_slice()[..window] {
                 index.prefetch(key.as_ref());
             }
-            for (key, loc, is_delete) in window.drain(..) {
+            for (key, loc, is_delete) in ops.by_ref().take(window) {
                 if is_delete {
                     if let Some(cursor) = index.get_mut(&key) {
                         delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
