@@ -81,8 +81,9 @@ partitions move out, while smaller partitions leave live buffers scattered acros
 Those holes cannot satisfy a request in a larger size class. Exact fit removes array slack but
 does not compact mimalloc's partially occupied pages.
 
-Calling `mi_collect(true)` after the build changed neither RSS nor these page counts in any of
-the twelve diagnostic runs. This is not just a backlog of wholly freed pages waiting for a flush.
+Calling `mi_collect(true)` after the build did not lower RSS in any of the twelve diagnostic runs.
+For exact fit, it also left every page count and block-capacity total unchanged. This is not just
+a backlog of wholly freed pages waiting for a flush.
 The evidence supports rejecting this allocation strategy for its RSS result, while leaving the
 benefit of tighter live storage intact.
 
