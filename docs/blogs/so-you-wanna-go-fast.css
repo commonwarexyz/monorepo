@@ -111,7 +111,7 @@
 .log-svg .log-small { font-size: 10px; }
 .log-svg .log-muted { fill: #666; }
 .log-svg .log-wire { fill: none; stroke: #aaa; stroke-width: 1; }
-.log-svg .log-sweep { fill: #fffbe8; stroke: #b89b37; stroke-width: 1; }
+.log-svg .log-sweep { fill: #f3f4f5; stroke: #737982; stroke-width: 1.2; stroke-dasharray: 4 3; }
 .log-svg .log-route { fill: none; stroke: #1f1fd1; stroke-width: 1.5; }
 .log-svg .log-window { fill: none; stroke: #1f1fd1; stroke-width: 2; }
 .log-svg .log-ready-line { fill: none; stroke: #0e8f3e; stroke-width: 3; }
@@ -199,4 +199,33 @@
   .log-spatial .log-space-card rect,
   .log-spatial .log-space-feed,
   .log-spatial .log-space-link { transition: none; }
+}
+
+.log-fetch .log-fetch-panel { fill: #fafbfc; stroke: #c9cfd6; }
+.log-fetch .log-space-card rect { fill: #fff; stroke: #c9cfd6; transition: fill 240ms ease, stroke 240ms ease; }
+.log-fetch .log-space-card text { fill: #6b7077; }
+.log-fetch .log-space-card[data-state="pending"] rect { fill: #fffbe8; stroke: #a78e43; }
+.log-fetch .log-space-card[data-state="pending"] text { fill: #756126; }
+.log-fetch .log-space-card[data-state="ready"] rect { fill: #edf7ef; stroke: #3a8252; }
+.log-fetch .log-space-card[data-state="ready"] text { fill: #28653c; }
+.log-fetch .log-fetch-join { fill: none; stroke: #c9cfd6; stroke-width: 2; transition: stroke 240ms ease; }
+.log-fetch .log-fetch-gate { fill: #fff; stroke: #c9cfd6; transition: fill 240ms ease, stroke 240ms ease; }
+.log-fetch .log-fetch-join[data-ready="true"],
+.log-fetch .log-fetch-gate[data-ready="true"] { stroke: #3a8252; }
+.log-fetch .log-fetch-gate[data-ready="true"] { fill: #edf7ef; }
+.log-fetch .log-cell[data-state="pending"] rect { fill: #fffdf5; stroke: #a78e43; }
+.log-fetch .log-cell[data-state="pending"] text { fill: #756126; }
+.log-recovery .log-recovery-disk { fill: #f5faf6; stroke: #8eaf98; }
+.log-recovery .log-recovery-ram { fill: #fffdf6; stroke: #b7a56b; stroke-dasharray: 5 3; transition: fill 240ms ease; }
+.log-recovery .log-recovery-memory[data-crashed="true"] .log-recovery-ram { fill: #f6f6f6; stroke: #aaa; }
+.log-recovery .log-cell text { font-size: 10px; }
+.log-recovery .log-cell rect { transition: fill 240ms ease, stroke 240ms ease; }
+.log-recovery .log-route { transition: opacity 240ms ease; }
+@media (prefers-reduced-motion: reduce) {
+  .log-fetch .log-space-card rect,
+  .log-fetch .log-fetch-join,
+  .log-fetch .log-fetch-gate,
+  .log-recovery .log-recovery-ram,
+  .log-recovery .log-cell rect,
+  .log-recovery .log-route { transition: none; }
 }

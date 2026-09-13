@@ -49,7 +49,6 @@
     const arrivals = [1, 2, 1, 2, 3, 2, 3, 3];
     [1, 2, 3].forEach((offset, i) => label(svg, 38, 70 + i * 38, String(offset), { 'text-anchor': 'middle', class: 'log-muted' }));
     const frontier = label(svg, 18, 184, 'Frontier: waiting', { class: 'log-small' });
-    const route = draw(svg, 'path', { class: 'log-route', opacity: 0 });
     label(svg, 18, 211, 'Output positions', { 'font-weight': 'bold' });
     const output = ITEMS.map((item, i) => {
       const x = 18 + (i % 4) * 84;
@@ -58,6 +57,11 @@
       label(svg, x + 35, y + 10, String(i + 1), { 'text-anchor': 'middle', class: 'log-small log-muted' });
       return cell(svg, x, y + 14, 70, item);
     });
+    const moving = draw(svg, 'g', { opacity: 0, 'aria-hidden': 'true' });
+    draw(moving, 'rect', { width: 56, height: 28, rx: 3, fill: '#f3f3ff', stroke: '#1f1fd1', 'stroke-width': 1.5 });
+    const movingName = label(moving, 28, 18, '', { 'text-anchor': 'middle', fill: '#1f1fd1' });
+    let flight;
+    let previous = -1;
     return {
       height: 356, steps: 14,
       render(step) {
@@ -67,17 +71,24 @@
         output.forEach((set, i) => set(i < count ? 'produced' : 'empty', i < count ? ITEMS[i] : '·'));
         frontier.textContent = step < 4 ? 'Frontier: waiting' : 'Finalized frontier [3, 2, 3]';
         sweep.setAttribute('opacity', current ? 1 : 0);
-        route.setAttribute('opacity', current && step < 13 ? 1 : 0);
+        if (flight) flight.cancel();
         if (current) {
           const row = Number(current[1]) - 1;
-          const x = 104 + 'ABC'.indexOf(current[0]) * 88;
-          const y = 79 + row * 38;
-          const dest = 53 + ((count - 1) % 4) * 84;
-          const bottom = 240 + Math.floor((count - 1) / 4) * 64;
-          const approach = bottom - 12;
           sweep.setAttribute('y', 48 + row * 38);
-          route.setAttribute('d', `M ${x} ${y} V ${y + 5} H 354 V ${approach} H ${dest} V ${bottom - 3} m -4 -5 l 4 5 l 4 -5`);
+          if (step === previous + 1 && step < 13 && !reduced.matches) {
+            const sourceX = 76 + 'ABC'.indexOf(current[0]) * 88;
+            const sourceY = 51 + row * 38;
+            const targetX = 25 + ((count - 1) % 4) * 84;
+            const targetY = 254 + Math.floor((count - 1) / 4) * 64;
+            movingName.textContent = current;
+            flight = moving.animate([
+              { transform: `translate(${sourceX}px, ${sourceY}px)`, opacity: 1 },
+              { transform: `translate(${targetX}px, ${targetY}px)`, opacity: 1, offset: 0.85 },
+              { transform: `translate(${targetX}px, ${targetY}px)`, opacity: 0 },
+            ], { duration: 420, easing: 'ease-in-out' });
+          }
         }
+        previous = step;
         if (step < 4) return 'Each producer extends its own chain. Arrival order assigns no output position.';
         if (step === 4) return 'The frontier settles. Sweep each segment offset in producer order: A, B, C.';
         if (step < 13) return `Offset ${current[1]}: reference ${current} takes output position ${count}. No body read is needed.`;
@@ -92,20 +103,27 @@
   }
 
   function fetch(svg) {
-    const bodies = positionLane(svg, 61, 'Body in custody (durable)', 38);
+    svg.classList.add('log-fetch');
+    draw(svg, 'rect', { x: 10, y: 8, width: 340, height: 145, rx: 8, class: 'log-fetch-panel' });
+    const bodies = positionLane(svg, 61, 'Bodies in durable custody', 36);
     ITEMS.slice(0, 6).forEach((_, i) => label(svg, 42 + i * 54, 51, String(i + 1), { 'text-anchor': 'middle', class: 'log-small log-muted' }));
     const windowLine = draw(svg, 'path', { class: 'log-window' });
     const prefixLine = draw(svg, 'path', { class: 'log-ready-line' });
-    const cursor = label(svg, 18, 135, 'Ready prefix: 0');
-    const windowText = label(svg, 18, 113, 'Custody window: 1–5 (limit: 5)', { class: 'log-small', fill: '#1f1fd1' });
-    const archive = cell(svg, 18, 157, 146, 'Index/history sync');
-    const checkpoint = cell(svg, 194, 157, 146, 'Checkpoint sync');
-    draw(svg, 'path', { d: 'M 169 171 H 189 m -5 -4 l 5 4 l -5 4', class: 'log-wire' });
-    const phase = label(svg, 18, 211, 'Publication waits for both syncs', { class: 'log-small' });
-    const published = positionLane(svg, 245, 'Published output references');
+    const cursor = label(svg, 18, 137, 'Ready prefix: 0');
+    const windowText = label(svg, 18, 115, '', { class: 'log-small', fill: '#1f1fd1' });
+    label(svg, 18, 179, 'Save the publication batch', { 'font-weight': 'bold' });
+    draw(svg, 'path', { d: 'M180 187 V197 M92 211 V197 H268 V211', class: 'log-wire' });
+    const index = spatialCard(svg, 148, 56);
+    const history = spatialCard(svg, 148, 56);
+    const joins = [92, 268].map(x => draw(svg, 'path', { d: `M${x} 267 V283 H180 V298`, class: 'log-fetch-join' }));
+    const gate = draw(svg, 'circle', { cx: 180, cy: 283, r: 4, class: 'log-fetch-gate' });
+    const checkpoint = cell(svg, 83, 300, 194, 'Checkpoint waiting');
+    const phase = label(svg, 180, 351, '', { 'text-anchor': 'middle', class: 'log-small' });
+    const release = draw(svg, 'path', { d: 'M180 358 V374 m-4 -5 l4 5 l4 -5', class: 'log-fetch-join' });
+    const published = positionLane(svg, 411, 'Published output references');
     const completion = [1, 6, 2, 8, 3, 4];
     return {
-      height: 286, steps: 14,
+      height: 451, steps: 14,
       render(step) {
         const ready = completion.map(at => step >= at);
         let prefix = 0;
@@ -117,36 +135,51 @@
         prefixLine.setAttribute('d', prefix ? `M 18 91 H ${12 + prefix * 54}` : '');
         windowText.textContent = prefix === 6 ? 'Custody window drained (limit: 5)' : `Custody window: ${prefix + 1}–${Math.min(6, prefix + 5)} (limit: 5)`;
         cursor.textContent = `Ready prefix: ${prefix} / 6`;
-        archive(step >= 10 ? 'ready' : step === 9 ? 'acked' : 'empty', step >= 10 ? 'Index/history saved' : step === 9 ? 'Syncing records' : 'Index/history sync');
-        checkpoint(step >= 12 ? 'ready' : step === 11 ? 'acked' : 'empty', step >= 12 ? 'Checkpoint saved' : step === 11 ? 'Checkpoint syncing' : 'Checkpoint sync');
-        published.forEach((set, i) => set(step >= 12 ? 'committed' : 'empty', step >= 12 ? ITEMS[i] : '·'));
-        phase.textContent = step >= 12 ? 'Durable checkpoint → delivery may begin' : step >= 10 ? 'Index/history durable. Checkpoint next' : 'Publication waits for both syncs';
+        index(18, 211, step >= 9 ? 'ready' : step === 8 ? 'pending' : 'empty', 'Output index', step >= 9 ? 'Saved' : step === 8 ? 'Syncing' : 'Waiting');
+        history(194, 211, step >= 10 ? 'ready' : step >= 8 ? 'pending' : 'empty', 'Consensus history', step >= 10 ? 'Saved' : step >= 8 ? 'Syncing' : 'Waiting');
+        joins.forEach((join, i) => join.dataset.ready = step >= 9 + i);
+        gate.dataset.ready = step >= 10;
+        checkpoint(step >= 12 ? 'ready' : step === 11 ? 'acked' : 'empty', step >= 12 ? 'Checkpoint saved' : step === 11 ? 'Checkpoint syncing' : 'Checkpoint waiting');
+        published.forEach((set, i) => set(step >= 13 ? 'produced' : 'empty', step >= 13 ? ITEMS[i] : '·'));
+        release.dataset.ready = step >= 13;
+        phase.textContent = step >= 13 ? 'Publish in position order' : step >= 12 ? 'Checkpoint durable · ready to publish' : step === 11 ? 'Saving checkpoint · delivery waits' : step >= 10 ? 'Both saved · checkpoint may sync' : step === 9 ? 'Index saved · waiting for history' : 'Both lanes must finish before checkpoint';
         if (!step) return 'Order is known. Track custody for positions 1–5. Position 6 waits outside this five-slot window.';
         if (step === 1) return 'A1 is durable and enters the publication batch. Its custody-window slot becomes available for position 6.';
         if (step === 2) return 'C1 reaches durable custody at position 3. The ready prefix still waits for B1 at position 2.';
         if (step === 3) return 'B2 reaches durable custody at position 5. B1 is still missing, so the ready prefix remains at 1.';
         if (step < 6) return 'C2 is also durable. Positions 3, 5, and 6 are ready, but missing B1 holds the prefix at 1.';
         if (step < 8) return 'Body 2 reaches durable custody. The ready prefix advances from 1 to 3, then waits for body 4.';
-        if (step === 8) return 'Body 4 closes the gap. All six bodies are durable. Their output references are ready to publish.';
-        if (step < 11) return 'First synchronize the output index and consensus history. A ready prefix alone is not published progress.';
+        if (step === 8) return 'Body 4 closes the gap. All six bodies are durable. Start syncing the output index and consensus history in parallel.';
+        if (step === 9) return 'The output index sync finishes. Consensus history is still syncing, so the checkpoint waits.';
+        if (step === 10) return 'Consensus history sync finishes too. Both lanes are durable, so checkpoint sync can begin.';
         if (step === 11) return 'Then synchronize the checkpoint naming this batch. Delivery still waits.';
+        if (step === 12) return 'Checkpoint sync succeeds. The batch is durable and ready for publication.';
         return 'The checkpoint is durable. Publish references 1–6 in order so delivery can now locate their durable bodies.';
       },
     };
   }
 
   function recovery(svg) {
-    const index = positionLane(svg, 37, 'Persisted output index');
-    index.forEach((set, i) => set('committed', `${i + 1}:${ITEMS[i]}`));
-    const route = draw(svg, 'path', { class: 'log-route', opacity: 0 });
-    const deliveries = positionLane(svg, 104, 'Application delivery');
-    const acks = positionLane(svg, 165, 'Application ack received');
-    const durable = draw(svg, 'path', { class: 'log-cursor' });
-    const cursor = label(svg, 18, 219, 'Durable ack cursor: 0');
-    const sync = cell(svg, 18, 239, 162, 'Cursor sync: idle');
-    const phase = label(svg, 193, 258, 'Live', { fill: '#1f1fd1' });
+    svg.classList.add('log-recovery');
+    draw(svg, 'rect', { x: 10, y: 8, width: 340, height: 174, rx: 8, class: 'log-recovery-disk' });
+    label(svg, 18, 28, 'DURABLE STORAGE', { class: 'log-small', 'font-weight': 'bold' });
+    label(svg, 342, 28, 'survives a crash', { class: 'log-small log-muted', 'text-anchor': 'end' });
+    const index = positionLane(svg, 60, 'Persisted output index');
+    index.forEach((set, i) => set('produced', `${i + 1}:${ITEMS[i]}`));
+    const saved = positionLane(svg, 119, 'Saved acknowledgement progress');
+    const cursor = label(svg, 18, 168, 'Durable cursor: 0', { class: 'log-small' });
+    const memory = draw(svg, 'g', { class: 'log-recovery-memory' });
+    draw(memory, 'rect', { x: 10, y: 208, width: 340, height: 156, rx: 8, class: 'log-recovery-ram' });
+    label(memory, 18, 229, 'VOLATILE MEMORY', { class: 'log-small', 'font-weight': 'bold' });
+    const phase = label(memory, 342, 229, 'Live', { 'text-anchor': 'end', class: 'log-small' });
+    const deliveries = positionLane(memory, 263, 'Application delivery');
+    const acks = positionLane(memory, 325, 'Received acks · waiting to save');
+    const route = draw(svg, 'path', { d: 'M342 74 H355 V277 H343 m5 -4 l-5 4 l5 4', class: 'log-route', opacity: 0 });
+    const replayNote = label(svg, 180, 198, '', { class: 'log-small', 'text-anchor': 'middle' });
+    const sync = cell(svg, 87, 390, 186, 'Cursor sync: idle');
+    const syncNote = label(svg, 180, 442, '', { class: 'log-small', 'text-anchor': 'middle' });
     return {
-      height: 284, steps: 21,
+      height: 455, steps: 21,
       render(step) {
         const crashed = step >= 10;
         const received = crashed
@@ -156,21 +189,19 @@
         const replay = step >= 12 ? Math.min(4, step - 11) : 0;
         deliveries.forEach((set, i) => {
           const replayed = crashed && i >= 2 && i < 2 + replay;
-          set(replayed ? 'replay' : (!crashed && step >= 1) || (crashed && i < 2) ? 'sent' : 'empty',
-            replayed ? ITEMS[i] : crashed && i >= 2 ? '·' : step >= 1 ? ITEMS[i] : '·');
+          set(replayed ? 'replay' : !crashed && step >= 1 ? 'sent' : 'empty',
+            replayed || !crashed && step >= 1 ? ITEMS[i] : '·');
         });
-        acks.forEach((set, i) => set(i < prefix ? 'acked' : received[i] ? 'ready' : 'empty', i < prefix ? 'saved' : received[i] ? 'yes' : '—'));
-        durable.setAttribute('d', prefix ? `M 18 199 H ${12 + prefix * 54}` : '');
-        cursor.textContent = `Durable ack cursor: ${prefix}`;
+        acks.forEach((set, i) => set(i >= prefix && received[i] ? 'acked' : 'empty', i >= prefix && received[i] ? `${i + 1} ack` : '·'));
+        saved.forEach((set, i) => set(i < prefix ? 'ready' : 'empty', i < prefix ? `${i + 1} saved` : '·'));
+        cursor.textContent = `Durable cursor: ${prefix} · restart at ${prefix + 1}`;
         const syncing = step === 4 || step === 18;
-        sync(syncing ? 'acked' : prefix ? 'ready' : 'empty', syncing ? 'Cursor syncing…' : prefix ? `Cursor ${prefix} synced` : 'Cursor sync: idle');
-        phase.textContent = step === 10 || step === 11 ? 'CRASH' : crashed ? 'Restart' : 'Live';
-        phase.setAttribute('fill', step === 10 || step === 11 ? '#d9251c' : '#1f1fd1');
+        sync(syncing ? 'acked' : prefix ? 'ready' : 'empty', syncing ? `Saving cursor ${step === 4 ? 2 : 6}` : prefix ? `Cursor ${prefix} synced` : 'Cursor sync: idle');
+        memory.dataset.crashed = step === 10 || step === 11;
+        phase.textContent = step === 10 || step === 11 ? 'Cleared by crash' : crashed ? 'Restarted' : 'Live';
+        replayNote.textContent = step === 10 || step === 11 ? 'Crash clears memory · storage survives' : step >= 12 && step <= 15 ? `Replay position ${replay + 2} from saved index` : 'Only durable progress survives a restart';
+        syncNote.textContent = step === 10 || step === 11 ? 'Cursor 2 survives · later acks lost' : step >= 12 && step <= 15 ? 'Replay follows saved cursor 2' : syncing ? 'Sync in progress · saved cursor unchanged' : step >= 19 ? 'All six positions saved' : step >= 5 ? 'Saved through 2 · later acks still volatile' : 'Received acks are not yet saved';
         route.setAttribute('opacity', step >= 12 && step <= 15 ? 1 : 0);
-        if (replay) {
-          const x = 42 + (replay + 1) * 54;
-          route.setAttribute('d', `M ${x} 67 V 91 m -4 -5 l 4 5 l 4 -5`);
-        }
         if (!step) return 'Six output references and their bodies are durable. The application has acknowledged none.';
         if (step === 1) return 'Deliver all six positions. Delivery does not advance the durable acknowledgement cursor.';
         if (step === 2) return 'Ack 1 arrives. It is held in memory. The durable cursor is still 0.';
@@ -343,9 +374,9 @@
   const FIGURES = {
     forward: { title: 'Start with what consensus knows', build: forward, description: 'Consensus supplies authenticated references A1 through A6 to marshal, then continues independently. A rolling four-slot window acquires bodies concurrently and refills as marshal consumes them. Responses arrive out of order, but marshal consumes A1 through A6 in order.' },
     repair: { title: 'Fill in the missing history', build: repair, description: 'Marshal knows headers A2 and A5. It requests A4 by the exact parent commitment in A5, verifies A4, then requests and verifies A3 using A4’s parent commitment. A3’s parent matches A2, joining the known history. Forward body acquisition can then resume within the bounded window.' },
-    order: { title: 'Histories become positions', build: order, description: 'One settled pass over frontier [3, 2, 3] sweeps segment offsets, then producers, into A1 B1 C1 A2 B2 C2 A3 C3. The gold cursor selects a source row. A blue path connects its reference to an output position.' },
-    fetch: { title: 'Ready, then durable publication', build: fetch, description: 'Broadcast bodies reach durable custody out of order. A five-position output window tracks their readiness. The ready prefix advances from 1 to 3 to 6. The output index and consensus history sync first, then the checkpoint syncs, then references are published for delivery.' },
-    recovery: { title: 'Received is not yet durable', build: recovery, description: 'Application acks 1 and 2 become durable only after cursor sync. Acks 4 and 5 remain volatile behind missing 3. A crash discards them. Recovery reads persisted output positions 3 through 6, replays them, obtains fresh acks, and syncs cursor 6.' },
+    order: { title: 'Histories become positions', build: order, description: 'One settled pass over frontier [3, 2, 3] sweeps segment offsets, then producers, into A1 B1 C1 A2 B2 C2 A3 C3. A dashed grey outline selects a source row. Each selected reference moves into its numbered output position.' },
+    fetch: { title: 'Ready, then durable publication', build: fetch, description: 'Broadcast bodies reach durable custody out of order. A five-position output window tracks their readiness. The ready prefix advances from 1 to 3 to 6. Separate output index and consensus history lanes sync in parallel and finish independently. Both must be saved before the checkpoint syncs. Only then are references published for delivery.' },
+    recovery: { title: 'Received is not yet durable', build: recovery, description: 'Separate storage and memory compartments show received acknowledgements and saved progress. Application acks 1 and 2 become durable only after cursor sync. Acks 4 and 5 remain volatile behind missing 3. A crash discards them. Recovery reads persisted output positions 3 through 6, replays them, obtains fresh acks, and syncs cursor 6.' },
   };
 
   function mountFigure(mount, config, index) {
