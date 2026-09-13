@@ -197,6 +197,32 @@ macro_rules! roundtrip_single {
             crate::reed_solomon::engine::NoSimd::new,
             &cfg,
         );
+
+        // Run every SIMD engine the host supports against the same pinned hashes.
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if crate::reed_solomon::engine::cpu_features::avx2() {
+                crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
+                    crate::reed_solomon::engine::Avx2::new,
+                    &cfg,
+                );
+            }
+            if crate::reed_solomon::engine::cpu_features::ssse3() {
+                crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
+                    crate::reed_solomon::engine::Ssse3::new,
+                    &cfg,
+                );
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if crate::reed_solomon::engine::cpu_features::neon() {
+                crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
+                    crate::reed_solomon::engine::Neon::new,
+                    &cfg,
+                );
+            }
+        }
     };
 }
 
@@ -275,6 +301,91 @@ macro_rules! roundtrip_two_rounds {
                 $seed_b,
             ),
         );
+
+        // Run every SIMD engine the host supports against the same pinned hashes.
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            use crate::reed_solomon::engine::{Avx2, Ssse3, cpu_features};
+            if cpu_features::avx2() {
+                roundtrip_two_rounds_inner!(
+                    $Rate,
+                    Avx2,
+                    $explicit_reset,
+                    (
+                        $original_count_a,
+                        $recovery_count_a,
+                        $shard_bytes_a,
+                        $recovery_hash_a,
+                        $decoder_original_a,
+                        $decoder_recovery_a,
+                        $seed_a,
+                    ),
+                    (
+                        $original_count_b,
+                        $recovery_count_b,
+                        $shard_bytes_b,
+                        $recovery_hash_b,
+                        $decoder_original_b,
+                        $decoder_recovery_b,
+                        $seed_b,
+                    ),
+                );
+            }
+            if cpu_features::ssse3() {
+                roundtrip_two_rounds_inner!(
+                    $Rate,
+                    Ssse3,
+                    $explicit_reset,
+                    (
+                        $original_count_a,
+                        $recovery_count_a,
+                        $shard_bytes_a,
+                        $recovery_hash_a,
+                        $decoder_original_a,
+                        $decoder_recovery_a,
+                        $seed_a,
+                    ),
+                    (
+                        $original_count_b,
+                        $recovery_count_b,
+                        $shard_bytes_b,
+                        $recovery_hash_b,
+                        $decoder_original_b,
+                        $decoder_recovery_b,
+                        $seed_b,
+                    ),
+                );
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            use crate::reed_solomon::engine::{Neon, cpu_features};
+            if cpu_features::neon() {
+                roundtrip_two_rounds_inner!(
+                    $Rate,
+                    Neon,
+                    $explicit_reset,
+                    (
+                        $original_count_a,
+                        $recovery_count_a,
+                        $shard_bytes_a,
+                        $recovery_hash_a,
+                        $decoder_original_a,
+                        $decoder_recovery_a,
+                        $seed_a,
+                    ),
+                    (
+                        $original_count_b,
+                        $recovery_count_b,
+                        $shard_bytes_b,
+                        $recovery_hash_b,
+                        $decoder_original_b,
+                        $decoder_recovery_b,
+                        $seed_b,
+                    ),
+                );
+            }
+        }
     };
 }
 
