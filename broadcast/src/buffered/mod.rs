@@ -57,7 +57,7 @@ mod tests {
         Feedback,
         mailbox::{Overflow, Policy},
     };
-    use commonware_codec::RangeCfg;
+    use commonware_codec::{Encode as _, RangeCfg};
     use commonware_cryptography::{
         Digested, Digestible, Hasher, Sha256, Signer as _,
         ed25519::{PrivateKey, PublicKey},
@@ -76,7 +76,10 @@ mod tests {
     use std::{
         collections::{BTreeMap, VecDeque},
         num::NonZeroU32,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -103,6 +106,21 @@ mod tests {
             Receiver<PublicKey>,
         ),
     >;
+
+    #[derive(Clone)]
+    struct CountingMessage {
+        value: u64,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Digestible for CountingMessage {
+        type Digest = <Sha256 as Hasher>::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Sha256::hash(&[&self.value.to_be_bytes()])
+        }
+    }
 
     async fn initialize_simulation(
         context: deterministic::Context,
@@ -242,6 +260,137 @@ mod tests {
     }
 
     #[test]
+    fn policy_coalesces_duplicate_broadcasts_and_merges_recipients() {
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = TestMessage::shared(b"duplicate broadcast");
+        let message = Digested::precomputed(message.clone(), message.digest());
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+
+        for _ in 0..1_000 {
+            <Message<PublicKey, TestMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::One(first.clone()),
+                    message: message.clone(),
+                },
+            );
+        }
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::Some(vec![second.clone()]),
+                message: message.clone(),
+            },
+        );
+
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        assert_eq!(drained.len(), 1);
+        let Message::Broadcast { recipients, .. } = drained.pop_front().unwrap() else {
+            panic!("coalesced entry is a broadcast");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients are merged");
+        };
+        assert_eq!(recipients, vec![first, second]);
+
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        for _ in 0..1_000 {
+            <Message<PublicKey, TestMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::All,
+                    message: message.clone(),
+                },
+            );
+        }
+        let mut count = 0;
+        overflow.drain(|message| {
+            count += usize::from(matches!(
+                message,
+                Message::Broadcast {
+                    recipients: Recipients::All,
+                    ..
+                }
+            ));
+            None
+        });
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn policy_reuses_carried_digests_of_overflow_broadcasts() {
+        const MESSAGES: usize = 1_000;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut overflow = <Message<PublicKey, CountingMessage> as Policy>::Overflow::default();
+        let recipient = PrivateKey::from_seed(1).public_key();
+
+        for value in 0..MESSAGES as u64 {
+            let message = CountingMessage {
+                value,
+                calls: Arc::clone(&calls),
+            };
+            let digest = Sha256::hash(&[&value.to_be_bytes()]);
+            <Message<PublicKey, CountingMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::One(recipient.clone()),
+                    message: Digested::precomputed(message, digest),
+                },
+            );
+        }
+        let mut drained = 0;
+        overflow.drain(|_| {
+            drained += 1;
+            None
+        });
+
+        assert_eq!(drained, MESSAGES);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rejected_broadcast_remains_indexed_for_coalescing() {
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = TestMessage::shared(b"rejected broadcast");
+        let message = Digested::precomputed(message.clone(), message.digest());
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(first.clone()),
+                message: message.clone(),
+            },
+        );
+        overflow.drain(Some);
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(second.clone()),
+                message,
+            },
+        );
+
+        let mut drained = None;
+        overflow.drain(|message| {
+            drained = Some(message);
+            None
+        });
+        let Some(Message::Broadcast { recipients, .. }) = drained else {
+            panic!("coalesced broadcast is retained");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients are merged");
+        };
+        assert_eq!(recipients, vec![first, second]);
+    }
+
+    #[test]
     fn policy_drain_continues_until_rejected_message() {
         let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
         let first = TestMessage::shared(b"first");
@@ -377,10 +526,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
                 strategy: Sequential,
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(context, config);
+                Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(context, config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             engine.start(network);
         }
@@ -1035,6 +1185,63 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_invalid_message_blocks_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 3, probability!(1.0)).await;
+
+            let attacker = peers[0].clone();
+            let honest = peers[1].clone();
+            let victim = peers[2].clone();
+
+            let (mut attacker_sender, _) = registrations.remove(&attacker).unwrap();
+            let mailboxes =
+                spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
+            let honest_mailbox = mailboxes.get(&honest).unwrap().clone();
+            let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
+
+            // Malformed bytes block the attacker at the victim.
+            let sent = attacker_sender.send(
+                Recipients::One(victim.clone()),
+                IoBuf::from(vec![0xFF]),
+                false,
+            );
+            assert_eq!(sent, vec![victim.clone()]);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            // A later well-formed message from the blocked attacker is never buffered.
+            let from_attacker = TestMessage::shared(b"from-blocked-peer");
+            let _ = attacker_sender.send(
+                Recipients::One(victim.clone()),
+                from_attacker.encode(),
+                false,
+            );
+            // Valid traffic from an honest peer still flows.
+            let from_honest = TestMessage::shared(b"from-honest-peer");
+            assert!(
+                honest_mailbox
+                    .broadcast(
+                        Recipients::One(victim.clone()),
+                        Digested::precomputed(from_honest.clone(), from_honest.digest())
+                    )
+                    .accepted()
+            );
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            let received = victim_mailbox
+                .subscribe(from_honest.digest())
+                .await
+                .expect("victim should receive valid traffic from honest peers");
+            assert_eq!(received.inner(), &from_honest);
+            assert!(
+                victim_mailbox.get(from_attacker.digest()).await.is_none(),
+                "messages from a blocked peer must not be buffered"
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_dropped_waiters_for_missing_digest_are_cleaned_up() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
@@ -1045,16 +1252,17 @@ mod tests {
 
             let engine_context = context.child("waiter_cleanup");
             let config = Config {
-                public_key: peer,
+                public_key: peer.clone(),
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
                 strategy: Sequential,
             };
             let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(engine_context, config);
+                Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(engine_context, config);
             engine.start((sender, receiver));
 
             let missing = TestMessage::shared(b"never-arrives");
@@ -1139,10 +1347,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
                 strategy: Sequential,
             };
             let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
+                Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(ctx, config);
             mailboxes.insert(peer.clone(), engine_mailbox);
             handles.push(engine.start(network));
         }
@@ -1299,9 +1508,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer_b.clone()),
                 strategy: Sequential,
             };
-            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(
                 context.child("peer_b"),
                 config_b,
             );
@@ -1319,10 +1529,11 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
                 let (engine, mailbox) =
-                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
+                    Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1429,9 +1640,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer_b.clone()),
                 strategy: Sequential,
             };
-            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(
                 context.child("peer_b"),
                 config_b,
             );
@@ -1448,10 +1660,11 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
                 let (engine, mailbox) =
-                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
+                    Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1602,9 +1815,10 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1652,10 +1866,11 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer.clone()),
                 strategy: Sequential,
             };
             let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _, Sequential>::new(context.child("peer"), config);
+                Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(context.child("peer"), config);
 
             // Enqueue a broadcast while the engine task is not running yet (only the mailbox channel)
             let msg = TestMessage::shared(b"queued-before-start");
@@ -1733,10 +1948,11 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
                 let (engine, mailbox) =
-                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
+                    Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1814,9 +2030,10 @@ mod tests {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                blocker: oracle.control(peer_b.clone()),
                 strategy: Sequential,
             };
-            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, Sequential>::new(
+            let (engine_b, mailbox_b) = Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(
                 context.child("peer_b"),
                 config_b,
             );
@@ -1834,10 +2051,11 @@ mod tests {
                     priority: false,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
+                    blocker: oracle.control(peer.clone()),
                     strategy: Sequential,
                 };
                 let (engine, mailbox) =
-                    Engine::<_, PublicKey, TestMessage, _, Sequential>::new(ctx, config);
+                    Engine::<_, PublicKey, TestMessage, _, _, Sequential>::new(ctx, config);
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
