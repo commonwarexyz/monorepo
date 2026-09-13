@@ -14,7 +14,7 @@ pub struct Sequencer<P: PublicKey> {
 pub struct Metrics<P: PublicKey> {
     /// Number of broadcasts received by peer
     pub peer: CounterFamily<Sequencer<P>>,
-    /// Number of received messages by status
+    /// Cache admission outcomes. Decode failures and ingress drops are counted by `ingress_decode`.
     pub receive: status::Counter,
     /// Number of `subscribe` requests by status
     pub subscribe: status::Counter,
