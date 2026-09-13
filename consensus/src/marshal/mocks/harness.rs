@@ -1946,6 +1946,7 @@ impl TestHarness for StandardHarness {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
@@ -2183,6 +2184,7 @@ impl TestHarness for StandardHarness {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: control.clone(),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =

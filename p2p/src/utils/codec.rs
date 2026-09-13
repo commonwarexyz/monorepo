@@ -6,7 +6,15 @@ use commonware_codec::{Codec, Decode, Encode, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
-use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell};
+use commonware_runtime::{
+    ContextCell, Handle, Metrics, Spawner,
+    iobuf::EncodeExt,
+    spawn_cell,
+    telemetry::metrics::{
+        MetricsExt as _,
+        status::{self, Status},
+    },
+};
 use commonware_utils::futures::Pool;
 use std::{collections::VecDeque, time::SystemTime};
 
@@ -177,6 +185,7 @@ where
     blocker: B,
     sender: mailbox::UnreliableSender<Decoded<P, V>>,
     strategy: T,
+    decode: status::Counter,
 }
 
 impl<E, P, B, R, V, T> WrappedBackgroundReceiver<E, P, B, R, V, T>
@@ -199,6 +208,7 @@ where
         let (tx, rx) = mailbox::new_unreliable(context.child("mailbox"), receiver.capacity());
         (
             Self {
+                decode: context.family("decode", "Inbound decode outcomes"),
                 context: ContextCell::new(context),
                 receiver,
                 codec_config,
@@ -234,7 +244,7 @@ where
                 if receiver_closed {
                     while !decode_pool.is_empty() {
                         let result = decode_pool.next_completed().await;
-                        Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
+                        self.handle_decode_result(result);
                     }
                     break;
                 }
@@ -242,7 +252,7 @@ where
             on_stopped => {},
             // Process decode completions as they arrive
             result = decode_pool.next_completed() => {
-                Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
+                self.handle_decode_result(result);
             },
             // Receive raw bytes and submit decode work to the strategy.
             Ok((peer, bytes)) = self.receiver.recv() else {
@@ -259,18 +269,20 @@ where
         }
     }
 
-    fn handle_decode_result(
-        blocker: &mut B,
-        sender: &mut mailbox::UnreliableSender<Decoded<P, V>>,
-        result: (P, Result<V, commonware_codec::Error>),
-    ) {
+    fn handle_decode_result(&mut self, result: (P, Result<V, commonware_codec::Error>)) {
         let (peer, decode_result) = result;
         match decode_result {
             Ok(value) => {
-                let _ = sender.enqueue(Decoded(peer, value));
+                self.decode
+                    .inc(if self.sender.enqueue(Decoded(peer, value)).accepted() {
+                        Status::Success
+                    } else {
+                        Status::Dropped
+                    });
             }
             Err(err) => {
-                crate::block!(blocker, peer, ?err, "received invalid message");
+                self.decode.inc(Status::Invalid);
+                crate::block!(self.blocker, peer, ?err, "received invalid message");
             }
         }
     }
@@ -498,6 +510,11 @@ mod tests {
 
                 context.sleep(Duration::from_millis(1)).await;
             }
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("bg_decode_total{status=\"Invalid\"} 1"),
+                "{metrics}"
+            );
         });
     }
 
@@ -674,6 +691,8 @@ mod tests {
                 NoopBlocker,
                 Sequential,
             );
+            // Keep the metric registered after the receiver exits.
+            let _decode = bg.decode.clone();
             let handle = bg.start();
             handle.await.expect("background receiver should complete");
 
@@ -684,6 +703,15 @@ mod tests {
                 assert_eq!(value, expected);
             }
             assert!(rx.recv().await.is_none());
+            let metrics = context.encode();
+            assert!(
+                metrics.contains("bg_decode_total{status=\"Dropped\"} 1"),
+                "{metrics}"
+            );
+            assert!(
+                metrics.contains("bg_decode_total{status=\"Success\"} 1"),
+                "{metrics}"
+            );
         });
     }
 
