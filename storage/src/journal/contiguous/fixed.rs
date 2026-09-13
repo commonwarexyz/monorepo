@@ -7663,8 +7663,9 @@ mod tests {
         executor.start(|context| async move {
             let mut cfg = test_cfg(&context, NZU64!(8));
             // Keep the whole batch resident so hit accounting is stable. Otherwise, the batch may
-            // evict a page that a later per-item probe still expects to hit.
-            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            // evict a page that a later per-item probe still expects to hit. Fewer than 16 pages
+            // keeps the cache to one shard, so no shard fills before the cache does.
+            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(15));
             let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..50u64 {
