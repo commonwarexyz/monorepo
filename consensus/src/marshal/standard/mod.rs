@@ -142,7 +142,7 @@ mod tests {
         translator::EightCap,
     };
     use commonware_utils::{
-        Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize,
+        Acknowledgement as _, NZDuration, NZU16, NZU32, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         non_empty,
@@ -10010,7 +10010,7 @@ mod tests {
             .await;
             let control = oracle.control(me.clone());
             let network_channel = control
-                .register(0, Quota::per_second(NonZeroU32::MAX))
+                .register(0, Quota::per_second(NZU32!(1_024)))
                 .await
                 .unwrap();
 
@@ -10077,6 +10077,7 @@ mod tests {
                 priority: false,
                 codec_config: (),
                 peer_provider: oracle.manager(),
+                blocker: control.clone(),
                 strategy: Sequential,
             };
             let (broadcast_engine, buffer) =
