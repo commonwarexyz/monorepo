@@ -189,119 +189,158 @@
     };
   }
 
+  function spatialCard(parent, width, height) {
+    const group = draw(parent, 'g', { class: 'log-space-card', 'data-state': 'empty' });
+    draw(group, 'rect', { width, height, rx: 4 });
+    const name = label(group, width / 2, 23, '', { 'text-anchor': 'middle', 'font-weight': 'bold' });
+    const status = label(group, width / 2, 42, '', { 'text-anchor': 'middle', class: 'log-small' });
+    return (x, y, state, identity, detail, visible = true) => {
+      group.style.transform = `translate(${x}px, ${y}px)`;
+      group.style.opacity = visible ? 1 : 0;
+      group.dataset.state = state;
+      name.textContent = identity;
+      status.textContent = detail;
+    };
+  }
+
   function forward(svg) {
+    svg.classList.add('log-spatial');
     const names = Array.from({ length: 6 }, (_, i) => `A${i + 1}`);
-    const x = i => 23 + i * 54;
-    const lane = y => names.map((name, i) => cell(svg, x(i), y, 44, name));
-    label(svg, 18, 23, 'Consensus', { 'font-weight': 'bold' });
-    const live = label(svg, 342, 23, 'Selected history', { 'text-anchor': 'end', class: 'log-small log-muted' });
-    const known = lane(39);
-    const handoff = draw(svg, 'g', { opacity: 0 });
-    [0, 1, 2, 3, 4, 5].forEach(i => draw(handoff, 'path', {
-      d: `M ${x(i) + 22} 73 V 96 m -4 -5 l 4 5 l 4 -5`, class: 'log-route',
-    }));
-    label(svg, 18, 119, 'Marshal: blocks to recover', { 'font-weight': 'bold' });
-    const headers = lane(131);
-    label(svg, 18, 193, 'Body acquisition', { 'font-weight': 'bold' });
-    const bodies = lane(205);
-    const windowLine = draw(svg, 'path', { class: 'log-window' });
-    const windowText = label(svg, 18, 265, 'Four slots, including waiting bodies', { class: 'log-small' });
-    label(svg, 18, 297, 'Consumed by marshal', { 'font-weight': 'bold' });
-    const consumed = lane(309);
-    draw(svg, 'path', { d: 'M 23 355 H 337 m -5 -4 l 5 4 l -5 4', class: 'log-wire' });
-    label(svg, 180, 376, 'Oldest to newest', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    label(svg, 18, 24, 'Consensus', { 'font-weight': 'bold' });
+    const live = label(svg, 342, 24, 'Selected references', { 'text-anchor': 'end', class: 'log-small log-muted' });
+    names.forEach((name, i) => cell(svg, 18 + i * 55, 40, 48, name)('produced'));
+    label(svg, 180, 88, 'Authenticated references · bodies needed', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    draw(svg, 'rect', { x: 18, y: 125, width: 246, height: 210, rx: 8, class: 'log-space-workspace' });
+    const feed = draw(svg, 'path', { d: 'M141 97 V113 M82 125 V113 H200 V125', class: 'log-space-feed' });
+    label(svg, 32, 146, 'Acquire concurrently', { 'font-weight': 'bold' });
+    const slotPositions = [[32, 165], [150, 165], [32, 251], [150, 251]];
+    slotPositions.forEach(([x, y], i) => {
+      label(svg, x, y - 7, `SLOT ${i + 1}`, { class: 'log-space-tiny log-muted' });
+      draw(svg, 'rect', { x, y, width: 100, height: 58, rx: 4, class: 'log-space-slot' });
+    });
+    label(svg, 141, 324, 'Pending + ready ≤ 4', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    label(svg, 303, 174, 'Next', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    const next = cell(svg, 280, 184, 46, 'A1');
+    const gate = label(svg, 303, 234, 'Waiting', { 'text-anchor': 'middle', class: 'log-small' });
+    const held = label(svg, 303, 252, 'for body', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    draw(svg, 'path', { d: 'M141 336 V367 m-4 -5 l4 5 l4 -5', class: 'log-space-feed' });
+    label(svg, 151, 355, 'Consume in chain order', { class: 'log-small' });
+    label(svg, 18, 389, 'Consumed by marshal', { 'font-weight': 'bold' });
+    const output = names.map((name, i) => cell(svg, 18 + i * 55, 403, 48, name));
+    draw(svg, 'path', { d: 'M18 445 H340 m-5 -4 l5 4 l-5 4', class: 'log-wire' });
+    label(svg, 180, 464, 'Fixed order · A1 → A2 → A3 → A4 → A5 → A6', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    const refill = label(svg, 18, 487, 'A freed slot admits the next reference', { class: 'log-small log-muted' });
+    const cards = names.map(() => spatialCard(svg, 100, 58));
     const arrival = [4, 8, 3, 6, 7, 10];
     const consumption = [5, 9, 11, 12, 13, 14];
     const captions = [
-      'Consensus already knows the complete authenticated stretch A1 through A6. Marshal still needs the bodies.',
-      'Consensus hands its known history to marshal and keeps running. Marshal reuses the authenticated commitments.',
-      'Request bodies A1 through A4 together. The window holds at most four outstanding requests or waiting bodies.',
-      'Body A3 arrives first. It occupies a slot while consumption waits for A1.',
-      'Body A1 arrives. A2 and A4 are still in flight, and A3 is waiting in the same bounded window.',
-      'Marshal consumes A1 and uses the freed slot to request A5. Ready A3 still waits for A2.',
-      'Body A4 arrives ahead of A2. Ready bodies occupy slots just as outstanding requests do.',
-      'Body A5 arrives too. The four slots hold missing A2 and ready A3, A4, and A5.',
-      'Body A2 arrives and closes the gap. Marshal can now consume the ready prefix.',
-      'Consume A2 and use its freed slot to request A6. A3, A4, and A5 are already available.',
-      'Body A6 arrives. All four bodies in the window are ready.',
+      'Consensus supplies authenticated references A1 through A6. Marshal still needs their bodies.',
+      'The references feed marshal’s acquisition workspace. Consensus continues without waiting for body acquisition.',
+      'Request A1 through A4 concurrently. Each pending request occupies one of four slots.',
+      'A3 arrives first. Its body stays in slot 3 while consumption waits for A1.',
+      'A1 arrives. A3 is ready too, but marshal must consume the bodies in chain order.',
+      'Consume A1 and refill its slot with a request for A5. A3 still waits behind missing A2.',
+      'A4 arrives ahead of A2. Ready bodies occupy slots just as pending requests do.',
+      'A5 arrives too. Missing A2 holds three ready bodies in the four-slot workspace.',
+      'A2 arrives and closes the gap. The ready bodies can now leave in chain order.',
+      'Consume A2 and refill its slot with a request for A6.',
+      'A6 arrives. All four occupied slots now contain ready bodies.',
       'Consume A3 next, following the selected chain.',
       'Consume A4. Response order has no effect on chain order.',
       'Consume A5 before A6.',
-      'Consume A6. All six bodies followed the selected chain order.',
-      'Marshal reused the known history. Body acquisition stayed within four slots, and consumption advanced in order.',
+      'Consume A6. The workspace is empty. All six bodies were consumed in chain order.',
+      'Consensus kept running. Marshal used at most four slots, refilling them as it consumed bodies.',
     ];
     return {
-      height: 392, steps: captions.length,
+      height: 502, steps: captions.length,
       render(step) {
-        known.forEach(set => set('produced'));
-        live.textContent = step ? 'Keeps running →' : 'Selected history';
-        handoff.setAttribute('opacity', step === 1 ? 1 : 0);
-        headers.forEach((set, i) => set(step >= 1 ? 'produced' : 'empty', step >= 1 ? names[i] : '·'));
-        bodies.forEach((set, i) => {
+        const prefix = consumption.filter(at => step >= at).length;
+        live.textContent = step ? 'Keeps running →' : 'Selected references';
+        feed.style.opacity = step >= 1 ? 1 : 0.2;
+        cards.forEach((set, i) => {
           const requested = step >= (i < 4 ? 2 : i === 4 ? 5 : 9);
           const done = step >= consumption[i];
-          set(done ? 'empty' : step >= arrival[i] ? 'ready' : requested ? 'pending' : 'empty', done ? '✓' : names[i]);
+          const ready = step >= arrival[i];
+          const [x, y] = slotPositions[i % 4];
+          set(x, done ? 382 : requested ? y : y - 14, ready ? 'ready' : 'pending', names[i], ready ? 'Body ready' : 'Requesting…', requested && !done);
         });
-        const prefix = consumption.filter(at => step >= at).length;
-        const end = Math.min(6, prefix + 4);
-        windowLine.setAttribute('d', step >= 2 && prefix < 6 ? `M ${x(prefix)} 238 v 6 H ${x(end - 1) + 44} v -6` : '');
-        windowText.textContent = step < 2 ? 'Four slots, including waiting bodies'
-          : prefix < 6 ? `Window A${prefix + 1}–A${end} · limit 4` : 'All six consumed · limit 4';
-        consumed.forEach((set, i) => set(step >= consumption[i] ? 'committed' : 'empty', step >= consumption[i] ? names[i] : '·'));
+        next(step < 2 ? 'produced' : prefix === 6 ? 'ready' : step >= arrival[prefix] ? 'ready' : 'pending', prefix === 6 ? '✓' : names[prefix]);
+        gate.textContent = step < 2 ? 'Not started' : prefix === 6 ? 'Done' : step >= arrival[prefix] ? 'Ready' : 'Waiting';
+        const waiting = arrival.filter((at, i) => i > prefix && step >= at && step < consumption[i]).length;
+        held.textContent = step < 2 ? '' : prefix === 6 ? '6 consumed' : waiting && step < arrival[prefix] ? `${waiting} held` : 'in order';
+        output.forEach((set, i) => set(i < prefix ? 'ready' : 'empty', i < prefix ? names[i] : '·'));
+        refill.textContent = step === 5 ? 'Slot 1 refills: A1 leaves → request A5' : step === 9 ? 'Slot 2 refills: A2 leaves → request A6' : 'A freed slot admits the next reference';
         return captions[step];
       },
     };
   }
 
   function repair(svg) {
-    label(svg, 18, 25, 'Marshal: selected history', { 'font-weight': 'bold' });
-    const headers = ['A2', 'A3', 'A4', 'A5'].map((name, i) => cell(svg, 28 + i * 80, 48, 64, name));
-    const route = draw(svg, 'path', { class: 'log-route', opacity: 0 });
-    const phase = label(svg, 180, 125, 'A3 and A4 headers are unknown', { 'text-anchor': 'middle', class: 'log-small' });
-    const peer = cell(svg, 100, 150, 160, 'Peer header repair');
-    const bodyPhase = label(svg, 18, 216, 'Bodies still missing', { 'font-weight': 'bold' });
-    const bodies = ['A3', 'A4'].map((name, i) => cell(svg, 108 + i * 80, 234, 64, name));
-    const forward = draw(svg, 'path', { d: 'M 108 282 H 252 m -5 -4 l 5 4 l -5 4', class: 'log-route', opacity: 0 });
+    svg.classList.add('log-spatial');
+    label(svg, 18, 24, 'Follow exact parents backward', { 'font-weight': 'bold' });
+    label(svg, 18, 44, 'Each returned header must match its child', { class: 'log-small log-muted' });
+    const paths = ['M278 126 V173 m-4 -5 l4 5 l4 -5', 'M222 204 H138 m5 -4 l-5 4 l5 4', 'M82 173 V126 m-4 5 l4 -5 l4 5'];
+    paths.forEach(d => draw(svg, 'path', { d, class: 'log-space-missing' }));
+    const links = paths.map(d => draw(svg, 'path', { d, class: 'log-space-link', pathLength: 1 }));
+    label(svg, 289, 152, 'parent', { class: 'log-space-tiny log-muted' });
+    label(svg, 180, 194, 'parent', { 'text-anchor': 'middle', class: 'log-space-tiny log-muted' });
+    label(svg, 26, 152, 'parent', { class: 'log-space-tiny log-muted' });
+    const positions = [[30, 68], [30, 175], [226, 175], [226, 68]];
+    const headers = positions.map(() => spatialCard(svg, 104, 58));
+    const phase = label(svg, 180, 264, 'Two missing headers', { 'text-anchor': 'middle', 'font-weight': 'bold' });
+    const detail = label(svg, 180, 284, 'A tip certificate does not carry every ancestor', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    draw(svg, 'path', { d: 'M18 303 H342', class: 'log-wire' });
+    label(svg, 18, 330, 'Then acquire bodies forward', { 'font-weight': 'bold' });
+    const bodyCards = [spatialCard(svg, 104, 58), spatialCard(svg, 104, 58)];
+    const bodyNote = label(svg, 180, 431, 'Header repair comes first', { 'text-anchor': 'middle', class: 'log-small log-muted' });
+    draw(svg, 'path', { d: 'M30 475 H330 m-5 -4 l5 4 l-5 4', class: 'log-wire' });
+    const consumed = [cell(svg, 98, 455, 64, 'A3'), cell(svg, 198, 455, 64, 'A4')];
+    label(svg, 180, 505, 'Consumed by marshal · A3 before A4', { 'text-anchor': 'middle', class: 'log-small log-muted' });
     const captions = [
-      'Marshal knows A2 and A5, but lacks the headers for A3 and A4. A tip certificate does not contain every ancestor.',
-      'A5 names its exact parent commitment. Request that header from a peer.',
-      'The returned A4 header matches A5’s parent commitment. A4 supplies the next parent commitment.',
+      'Marshal knows headers A2 and A5. The headers connecting them are missing. A5’s certificate does not contain every ancestor.',
+      'A5 names its exact parent commitment. Request the matching header from a peer.',
+      'The returned A4 header matches A5’s parent commitment. One link closes. A4 names the next parent.',
       'Request the exact parent header named by A4.',
-      'The returned A3 header matches A4’s parent commitment. A3 points back to A2.',
-      'A3’s parent matches the known A2 anchor. The repaired chain joins the known history exactly.',
-      'With A3 and A4 identified, marshal can acquire their bodies concurrently within its bounded window.',
-      'Body A4 arrives first. It waits for A3 before marshal can consume this stretch in order.',
-      'Body A3 arrives. Forward consumption can resume from A3 to A4.',
+      'The returned A3 header matches A4’s parent commitment. A3 now points toward the known A2 anchor.',
+      'A3’s parent matches A2. The repaired chain joins the known history exactly.',
+      'Now request the bodies of A3 and A4 concurrently, within marshal’s bounded acquisition window.',
+      'A4’s body arrives first. It waits while A3 is still missing.',
+      'A3’s body arrives. Both bodies are ready for consumption in chain order.',
+      'Consume A3 first. Repair followed parent commitments backward. Body consumption moves forward.',
+      'Consume A4 next. The repaired stretch has been consumed in order.',
     ];
     return {
-      height: 300, steps: captions.length,
+      height: 522, steps: captions.length,
       render(step) {
         headers.forEach((set, i) => {
           const known = i === 0 || i === 3;
           const found = (i === 2 && step >= 2) || (i === 1 && step >= 4);
-          set(known ? 'produced' : found ? 'acked' : 'empty', known || found ? `A${i + 2}` : '?');
+          const requesting = (i === 2 && step === 1) || (i === 1 && step === 3);
+          const [x, y] = positions[i];
+          set(x, y, known ? 'known' : found ? 'ready' : requesting ? 'pending' : 'empty', known || found ? `A${i + 2}` : '?', i === 0 ? 'Known anchor' : i === 3 ? 'Known tip' : found ? 'Verified header' : requesting ? 'From peer…' : 'Missing header');
         });
-        const source = step < 3 ? 3 : step < 5 ? 2 : 1;
-        const from = 60 + source * 80;
-        route.setAttribute('d', `M ${from} 79 V 100 H ${from - 80} V 79 m -4 5 l 4 -5 l 4 5`);
-        route.setAttribute('opacity', step >= 1 && step <= 5 ? 1 : 0);
-        phase.textContent = step === 0 ? 'A3 and A4 headers are unknown'
-          : step < 3 ? 'A5.parent → A4'
-          : step < 5 ? 'A4.parent → A3' : 'A3.parent matches A2';
-        peer(step === 1 || step === 3 ? 'pending' : step >= 2 ? 'acked' : 'empty',
-          step === 1 ? 'Request A4 header' : step === 2 ? 'A4 header verified'
-          : step === 3 ? 'Request A3 header' : step === 4 ? 'A3 header verified'
-          : step >= 5 ? 'Gap repaired' : 'Peer header repair');
-        bodyPhase.textContent = step >= 6 ? 'Acquire the missing bodies' : 'Bodies still missing';
-        bodies.forEach((set, i) => set(step >= (i ? 7 : 8) ? 'ready' : step >= 6 ? 'pending' : 'empty'));
-        forward.setAttribute('opacity', step >= 8 ? 1 : 0);
+        links.forEach((link, i) => {
+          const verified = step >= [2, 4, 5][i];
+          const active = step >= [1, 3, 5][i];
+          link.style.strokeDashoffset = active ? 0 : 1;
+          link.dataset.state = verified ? 'ready' : 'pending';
+        });
+        phase.textContent = step === 0 ? 'Two missing headers' : step === 1 ? 'Request A5’s exact parent' : step === 2 ? 'A4 verified against A5' : step === 3 ? 'Request A4’s exact parent' : step === 4 ? 'A3 verified against A4' : 'Connected to the known anchor';
+        detail.textContent = step === 0 ? 'A tip certificate does not carry every ancestor' : step < 5 ? 'A matching parent commitment closes each link' : 'A2 ← A3 ← A4 ← A5';
+        bodyCards.forEach((set, i) => {
+          const done = step >= 9 + i;
+          const ready = step >= (i ? 7 : 8);
+          set(48 + i * 160, done ? 448 : 351, ready ? 'ready' : step >= 6 ? 'pending' : 'empty', `A${i + 3}`, ready ? 'Body ready' : step >= 6 ? 'Requesting…' : 'Body needed', !done);
+        });
+        bodyNote.textContent = step < 6 ? 'Header repair comes first' : step === 6 ? 'Two concurrent requests · window limit 4' : step === 7 ? 'A4 waits behind missing A3' : step === 8 ? 'Gap closed · ready to consume' : step === 9 ? 'A3 consumed · A4 is next' : 'Both bodies consumed';
+        consumed.forEach((set, i) => set(step >= 9 + i ? 'ready' : 'empty', step >= 9 + i ? `A${i + 3}` : '·'));
         return captions[step];
       },
     };
   }
 
   const FIGURES = {
-    forward: { title: 'Start with what consensus knows', build: forward, description: 'Consensus hands the complete authenticated stretch A1 through A6 to marshal, then continues independently. A rolling four-slot window acquires bodies concurrently and refills as marshal consumes them. Responses arrive out of order, but marshal consumes A1 through A6 in order.' },
+    forward: { title: 'Start with what consensus knows', build: forward, description: 'Consensus supplies authenticated references A1 through A6 to marshal, then continues independently. A rolling four-slot window acquires bodies concurrently and refills as marshal consumes them. Responses arrive out of order, but marshal consumes A1 through A6 in order.' },
     repair: { title: 'Fill in the missing history', build: repair, description: 'Marshal knows headers A2 and A5. It requests A4 by the exact parent commitment in A5, verifies A4, then requests and verifies A3 using A4’s parent commitment. A3’s parent matches A2, joining the known history. Forward body acquisition can then resume within the bounded window.' },
     order: { title: 'Histories become positions', build: order, description: 'One settled pass over frontier [3, 2, 3] sweeps segment offsets, then producers, into A1 B1 C1 A2 B2 C2 A3 C3. The gold cursor selects a source row. A blue path connects its reference to an output position.' },
     fetch: { title: 'Ready, then durable publication', build: fetch, description: 'Broadcast bodies reach durable custody out of order. A five-position output window tracks their readiness. The ready prefix advances from 1 to 3 to 6. The output index and consensus history sync first, then the checkpoint syncs, then references are published for delivery.' },
