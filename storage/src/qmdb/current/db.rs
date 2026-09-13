@@ -54,6 +54,10 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
+/// Maximum ops-tree node positions fetched per `get_nodes` call when reading graft inputs. Bounds
+/// the node fetches, and the pages they hold, in flight at once.
+const GRAFT_READ_BATCH: usize = 1 << 18;
+
 /// `(position, digest)` pairs for a grafted tree's pinned nodes, in `Family::nodes_to_pin` order.
 type GraftedPinnedNodes<F, D> = Vec<(Position<F>, D)>;
 
@@ -1130,8 +1134,12 @@ pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: 
         .collect();
 
     // Chunk indices ascend and subtree roots ascend with their leaf ranges, satisfying
-    // `get_nodes`'s ordering requirement.
-    let nodes = ops_tree.get_nodes(&positions).await?;
+    // `get_nodes`'s ordering requirement. Every graftable chunk is read, so the fetch is issued in
+    // bounded batches rather than as one call over the whole range.
+    let mut nodes = Vec::with_capacity(positions.len());
+    for batch in positions.chunks(GRAFT_READ_BATCH) {
+        nodes.extend(ops_tree.get_nodes(batch).await?);
+    }
     Ok(chunks
         .into_iter()
         .zip(nodes)
