@@ -766,7 +766,7 @@ where
                         "reusing verified block from marshal on leader recovery"
                     );
                     gates
-                        .stage(round, commitment, Arc::new(block), tx, "recovered block")
+                        .stage(round, commitment, block, tx, "recovered block")
                         .await;
                     return;
                 }

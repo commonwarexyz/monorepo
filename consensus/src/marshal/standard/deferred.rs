@@ -576,7 +576,7 @@ where
                         .stage(
                             consensus_context.round,
                             digest,
-                            Arc::new(block),
+                            block,
                             tx,
                             "recovered block",
                         )

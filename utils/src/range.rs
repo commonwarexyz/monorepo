@@ -1,7 +1,7 @@
 //! Non-empty [`Range`] type that guarantees at least one element.
 
-use bytes::{Buf, BufMut};
-use commonware_codec::{BufsMut, EncodeSize, Error as CodecError, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, Read, Write};
 use core::{fmt, ops::Range};
 
 /// Error returned when attempting to create a non-empty range from an empty range.
@@ -193,7 +193,7 @@ mod tests {
             buf.extend_from_slice(&start.to_be_bytes());
             buf.extend_from_slice(&end.to_be_bytes());
             assert!(matches!(
-                NonEmptyRange::<u32>::decode(bytes::Bytes::from(buf)),
+                NonEmptyRange::<u32>::decode(buf),
                 Err(CodecError::Invalid("NonEmptyRange", "start must be < end"))
             ));
         }

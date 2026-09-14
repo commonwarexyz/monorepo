@@ -7,10 +7,10 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Error as CodecError, FixedSize, ReadExt as _, Write,
+    Buf, Error as CodecError, FixedSize, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 
 /// Fixed padded operation size: `Commit` is always the larger variant, so the uniform size is the
 /// commit size, which `Append` pads to match.
@@ -114,7 +114,7 @@ mod tests {
         let mut buf = vec![0u8; Op::SIZE];
         buf[0] = 0xFF;
         assert!(matches!(
-            Op::decode(buf.as_ref()).unwrap_err(),
+            Op::decode(buf).unwrap_err(),
             CodecError::InvalidEnum(0xFF)
         ));
     }
@@ -126,7 +126,7 @@ mod tests {
         let mut buf: Vec<u8> = op.encode().to_vec();
         // Padding is the last byte (part of the floor gap).
         *buf.last_mut().unwrap() = 0x01;
-        assert!(Op::decode(buf.as_ref()).is_err());
+        assert!(Op::decode(buf).is_err());
     }
 
     #[test]
@@ -134,7 +134,7 @@ mod tests {
         let op = Op::Append(U64::new(1));
         let buf = op.encode();
         // One byte short.
-        assert!(Op::decode(&buf[..buf.len() - 1]).is_err());
+        assert!(Op::decode(buf.slice(..buf.len() - 1)).is_err());
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
         let floor_offset = Op::SIZE - u64::SIZE;
         buf[floor_offset..].copy_from_slice(&floor_bytes);
         assert!(matches!(
-            Op::decode(buf.as_ref()).unwrap_err(),
+            Op::decode(buf).unwrap_err(),
             CodecError::Invalid(_, _)
         ));
     }
@@ -170,7 +170,7 @@ mod tests {
         buf[0] = COMMIT_CONTEXT;
         buf[2] = 0x01;
         assert!(matches!(
-            Op::decode(buf.as_ref()).unwrap_err(),
+            Op::decode(buf).unwrap_err(),
             CodecError::Invalid(_, _)
         ));
     }

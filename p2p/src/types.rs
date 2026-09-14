@@ -1,7 +1,7 @@
 //! Shared address types for p2p networking.
 
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Resolver};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_runtime::{BufMut, Error as RuntimeError, Resolver};
 use commonware_utils::{Hostname, IpAddrExt};
 use std::net::{IpAddr, SocketAddr};
 

@@ -78,7 +78,7 @@ pub async fn append_random(mut freezer: FreezerType, count: u64) -> (FreezerType
         let key = Key::new(key_buf);
         keys.push(key.clone());
         rng.fill_bytes(&mut val_buf);
-        (freezer, _) = freezer.put(key, Val::new(val_buf)).await.unwrap();
+        (freezer, _) = freezer.put(key, &Val::new(val_buf)).await.unwrap();
     }
     let (freezer, _) = freezer.sync().await.unwrap();
     (freezer, keys)

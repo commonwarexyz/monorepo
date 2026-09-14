@@ -69,7 +69,9 @@ mod tests {
             ancestry::{Ancestry, BlockProvider},
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
-                types::{CodedBlock, coding_config_for_participants, hash_context},
+                types::{
+                    CodedBlock, StoredCodedBlock, coding_config_for_participants, hash_context,
+                },
             },
             config::{Config, Start},
             core,
@@ -81,6 +83,7 @@ mod tests {
                     UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
                     setup_network_links, setup_network_with_participants,
                 },
+                store::{Op, Recording},
                 verifying::{GatedVerifyingApp, MockVerifyingApp},
             },
             resolver::handler,
@@ -88,7 +91,7 @@ mod tests {
         simplex::{
             Plan,
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
-            types::{Activity, Proposal},
+            types::{Activity, Finalization, Proposal},
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
     };
@@ -379,20 +382,31 @@ mod tests {
         }
     }
 
-    async fn start_coding_actor_with_recording(
-        context: deterministic::Context,
+    type Finalizations =
+        immutable::Archive<deterministic::Context, D, Finalization<S, TestCommitment>>;
+    type FinalizedBlocks = immutable::Archive<
+        deterministic::Context,
+        D,
+        StoredCodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+    >;
+
+    /// Builds a marshal actor configuration for tests.
+    fn test_config(
+        context: &deterministic::Context,
         partition_prefix: &str,
         provider: ConstantProvider<S, Epoch>,
-        buffer: RecordingCodingBuffer,
-    ) -> (
-        core::Mailbox<S, TestCodingVariant>,
-        RecordingResolver,
-        commonware_runtime::Handle<()>,
-    ) {
-        let config = Config {
+    ) -> Config<
+        ConstantProvider<S, Epoch>,
+        FixedEpocher,
+        Sequential,
+        CodingB,
+        Arc<TestCodedBlock>,
+        TestCommitment,
+    > {
+        Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16)),
+            start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -404,13 +418,27 @@ mod tests {
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(
-                &context,
+                context,
                 harness::PAGE_SIZE,
                 harness::PAGE_CACHE_SIZE,
             ),
             strategy: Sequential,
-        };
+        }
+    }
 
+    /// Initializes immutable finalized stores for tests.
+    async fn immutable_finalized_stores(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        config: &Config<
+            ConstantProvider<S, Epoch>,
+            FixedEpocher,
+            Sequential,
+            CodingB,
+            Arc<TestCodedBlock>,
+            TestCommitment,
+        >,
+    ) -> (Finalizations, FinalizedBlocks) {
         let finalizations_by_height = immutable::Archive::init(
             context.child("finalizations_by_height"),
             immutable::Config {
@@ -470,7 +498,22 @@ mod tests {
         )
         .await
         .expect("failed to initialize finalized blocks archive");
+        (finalizations_by_height, finalized_blocks)
+    }
 
+    async fn start_coding_actor_with_recording(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        buffer: RecordingCodingBuffer,
+    ) -> (
+        core::Mailbox<S, TestCodingVariant>,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    ) {
+        let config = test_config(&context, partition_prefix, provider);
+        let (finalizations_by_height, finalized_blocks) =
+            immutable_finalized_stores(&context, partition_prefix, &config).await;
         let (actor, mailbox, _) = core::Actor::init(
             context.child("actor"),
             finalizations_by_height,
@@ -1125,6 +1168,87 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_ack_pipeline_backlog_persists_on_restart() {
         harness::ack_pipeline_backlog_persists_on_restart::<CodingHarness>();
+    }
+
+    /// Dispatch uses the finalized coded block without rereading the finalized archive.
+    #[test_traced("WARN")]
+    fn test_coding_dispatch_delivers_staged_block_without_archive_read() {
+        const PARTITION_PREFIX: &str = "coding-staged-dispatch";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let config = test_config(
+                &context,
+                PARTITION_PREFIX,
+                ConstantProvider::new(schemes[0].clone()),
+            );
+            let (finalizations_by_height, finalized_blocks) =
+                immutable_finalized_stores(&context, PARTITION_PREFIX, &config).await;
+            let finalized_blocks = Recording::new(finalized_blocks, |block| {
+                std::ptr::from_ref(block.inner()).addr()
+            });
+            let ops = finalized_blocks.ops();
+            let (actor, mut mailbox, _) = core::Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<CodingB>::manual_ack();
+            let _actor_handle = actor.start(
+                application.clone(),
+                RecordingCodingBuffer::default(),
+                (resolver_rx, resolver),
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            // Store a verified block, then finalize it through consensus.
+            let genesis = genesis_block();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = CodingCtx {
+                round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
+            };
+            let block = make_coding_block(ctx, genesis.digest(), Height::new(1), 100);
+            let coded: TestCodedBlock = CodedBlock::new(
+                block.clone(),
+                coding_config_for_participants(NUM_VALIDATORS as u16),
+                &Sequential,
+            );
+            assert!(mailbox.verified(round, coded.clone()).await);
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(round, View::zero(), coded.commitment()),
+                &schemes,
+                QUORUM,
+            );
+            CodingHarness::report_finalization(&mut mailbox, finalization).await;
+            assert_eq!(application.acknowledged().await, Height::new(1));
+
+            let delivered = application
+                .blocks()
+                .get(&Height::new(1))
+                .cloned()
+                .expect("finalized block dispatched");
+            assert_eq!(delivered.digest(), block.digest());
+            let ops = ops.lock();
+            let written = ops
+                .iter()
+                .position(|op| matches!(op, Op::Put(height, _) if *height == Height::new(1)))
+                .expect("finalized block written");
+            assert_eq!(
+                ops[written],
+                Op::Put(Height::new(1), Arc::as_ptr(&delivered).addr()),
+                "storage must share the block payload dispatched to the application"
+            );
+            assert!(
+                !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
+                "dispatch must not read the finalized block back from the archive: {ops:?}"
+            );
+        });
     }
 
     #[test_traced("WARN")]
@@ -3222,7 +3346,7 @@ mod tests {
         // minimum_shards=0, extra_shards=0). Serialize it and attempt to
         // deserialize -- this must fail.
         let malformed_bytes = [0u8; <TestCommitment as FixedSize>::SIZE];
-        let result = TestCommitment::read(&mut &malformed_bytes[..]);
+        let result = TestCommitment::read(&mut commonware_codec::Copying(&malformed_bytes));
         assert!(
             result.is_err(),
             "deserialization of Commitment with zeroed CodingConfig must fail"
@@ -3236,9 +3360,9 @@ mod tests {
             Sha256::hash(&[b"context"]),
             coding_config,
         ));
-        let encoded = valid.encode();
+        let mut encoded = valid.encode();
         let decoded =
-            TestCommitment::read(&mut &encoded[..]).expect("valid Commitment must deserialize");
+            TestCommitment::read(&mut encoded).expect("valid Commitment must deserialize");
         assert_eq!(valid, decoded);
     }
 
