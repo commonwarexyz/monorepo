@@ -824,10 +824,14 @@ fn duplicated_reordered_certificates_converge_after_healing() {
                 TARGET,
                 View::new(target_view),
                 400,
-                |proof| matches!(proof, Served::Vqc(proof) if proof.as_ref() == &current),
+                |proof| match proof {
+                    Served::Vqc(proof) => proof.as_ref() == &current,
+                    Served::Lqc(proof) => proof.view() >= View::new(target_view),
+                    _ => false,
+                },
             )
             .await,
-            "target retained the current V-QC after recovery"
+            "recovery serves the current V-QC or a covering L-QC"
         );
         cluster.observe_finality_progress(&all, 20).await;
 

@@ -28,9 +28,9 @@ use crate::{
             CustodyCompletion, CustodyJob, DurabilityCapability, DurableEffect, EffectId,
             IdentifiedArtifact, InputTicket, JobId, LeaderCapability, LqcAggregateCompletion,
             NullificationRecoveryCompletion, ObservationStatus, PerChainValidator,
-            PersistDirective, ProducerCapability, ProducerProgress, ProductionTimer, Profile,
-            Rejection, ResolverCapability, Role, SignRequest, StepError, StepStatus, TaskClass,
-            TaskError, TaskPermit, TaskTerminal, Timer, VerificationCapability, ViewProof,
+            PersistDirective, ProducerCapability, ProducerProgress, ProductionTimer, Rejection,
+            ResolverCapability, Role, SignRequest, StepError, StepStatus, TaskClass, TaskError,
+            TaskPermit, TaskTerminal, Timer, VerificationCapability, ViewProof,
             VqcAggregateCompletion, contracts::Lane,
         },
         scheme::bls12381_threshold::{DaRecoveryError, Error as SchemeError, Scheme},
@@ -721,18 +721,6 @@ async fn wait_until<E: Clock>(context: &E, deadline: Option<SystemTime>) {
     }
 }
 
-const fn max_unsynced_journal_bytes<H: Hasher, V: Variant>(
-    profile: &Profile<H, V>,
-) -> NonZeroUsize {
-    NonZeroUsize::new(
-        profile
-            .resources()
-            .max_artifact_bytes()
-            .saturating_mul(super::journal::MAX_UNSYNCED),
-    )
-    .expect("artifact bounds reserve non-zero journal bytes")
-}
-
 /// The serial machine driver and effect executor for one fixed epoch.
 pub struct Actor<E, H, P, V, A, R, F, T, C>
 where
@@ -889,7 +877,6 @@ where
         let initial_view = machine.inspection().view();
         let journal_capacity = NonZeroUsize::new(profile.resources().max_outbox_effects())
             .expect("validated resources reserve journal commands");
-        let max_unsynced_bytes = max_unsynced_journal_bytes(profile);
         let round_span = round_span(epoch, initial_view);
         let view_started_at = if recovered {
             BTreeMap::new()
@@ -906,16 +893,12 @@ where
             driver_context.child("journal"),
             storage_journal,
             journal_capacity,
-            max_unsynced_bytes,
-            config.limits.retry_initial,
         );
         #[cfg(test)]
         let (journal, journal_monitor) = super::journal::spawn_with_gates(
             driver_context.child("journal"),
             storage_journal,
             journal_capacity,
-            max_unsynced_bytes,
-            config.limits.retry_initial,
             self.journal_gates.clone(),
         );
 
@@ -3195,7 +3178,7 @@ mod tests {
     use crate::multimmit::{
         config::Limits,
         engine::open_stores,
-        machine::{Role, Tuning, VerificationItem, VerificationTicket, VerifyJob},
+        machine::{Profile, Role, Tuning, VerificationItem, VerificationTicket, VerifyJob},
         mocks::{Committee, MockApplication, RecordingRelay, RecordingReporter},
     };
     use commonware_cryptography::{
@@ -3434,8 +3417,6 @@ mod tests {
                 context.child("journal"),
                 *journal,
                 NonZeroUsize::new(64).unwrap(),
-                NonZeroUsize::new(1024 * 1024).unwrap(),
-                Duration::ZERO,
             );
 
             // Issue real barriers without delivering their responses back to Core.
@@ -3914,22 +3895,6 @@ mod tests {
                 });
             });
         }
-    }
-
-    #[test]
-    fn extreme_artifact_bound_saturates_journal_byte_budget() {
-        let committee = Committee::<MinPk>::new(80, 6, Limits::new(2, 1).unwrap());
-        let profile = Profile::<Sha256, MinPk>::new(
-            committee.config,
-            Role::Observer,
-            Tuning {
-                max_artifact_bytes: NonZeroUsize::new(usize::MAX).unwrap(),
-                ..Tuning::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(max_unsynced_journal_bytes(&profile).get(), usize::MAX);
     }
 
     #[derive(Default)]

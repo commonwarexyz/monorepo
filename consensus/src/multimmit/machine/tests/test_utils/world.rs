@@ -3008,16 +3008,21 @@ mod successor_matrix {
         step: Step<MinPk, Digest>,
     ) -> Step<MinPk, Digest> {
         let mut step = step;
+        let mut pending = VecDeque::new();
         for _ in 0..8 {
-            if !step.capabilities().iter().any(|effect| {
-                matches!(
-                    effect,
-                    Capability::Durability(DurabilityCapability::Persist(_))
-                )
-            }) {
+            pending.extend(
+                step.capabilities()
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        Capability::Durability(DurabilityCapability::Persist(job)) => {
+                            Some(job.job().clone())
+                        }
+                        _ => None,
+                    }),
+            );
+            let Some(job) = pending.pop_front() else {
                 return step;
-            }
-            let job = only_persist(&step);
+            };
             let acknowledged = runner.persist(&job).unwrap();
             step = runner.settle(acknowledged).unwrap();
         }
@@ -3372,25 +3377,8 @@ mod successor_matrix {
                     ))))
                     .unwrap();
                 let completed = runner.settle(completed).unwrap();
-                let retained = runner.persist(&only_persist(&completed)).unwrap();
-                let retained = runner.settle(retained).unwrap();
-                let forwarding = retained
-                    .capabilities()
-                    .iter()
-                    .find_map(|effect| match effect {
-                        Capability::Durability(DurabilityCapability::Persist(job)) => {
-                            Some(job.clone())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "the retained V-QC did not stage forwarding: {:?}",
-                            retained.capabilities()
-                        )
-                    });
-                let forwarded = runner.persist(&forwarding).unwrap();
-                let forwarded = runner.settle(forwarded).unwrap();
+                let forwarded = drain_barriers(runner, completed);
+                assert!(runner.machine.durable.vqc_forwarded(View::new(2)));
                 assert!(forwarded.capabilities().iter().all(|effect| {
                     !matches!(
                         effect,

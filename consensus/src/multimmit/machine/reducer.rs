@@ -2816,6 +2816,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             artifact: Arc::clone(&artifact),
         })?;
         self.self_admit_at(artifact, id, observation, validated)?;
+        self.wake_components();
         Ok(step)
     }
 
@@ -3624,7 +3625,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     pub(crate) const MAX_BATCH_EVENTS: usize = 32;
     pub(crate) const MAX_BATCH_BYTES: usize = 1 << 20;
     /// Total unacknowledged batches retained by the synchronous owner: the journal pipeline,
-    /// one coalescing batch, and one urgent successor that must not merge behind it.
+    /// one coalescing batch, and one successor whose external release requires journal admission.
     pub(crate) const MAX_STAGED_BARRIERS: usize = MAX_INFLIGHT_BARRIERS + 2;
 
     /// Stages one durable change: applies it immediately and queues it for group commit.
@@ -3753,10 +3754,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     ///
     /// Eligible batches emit in cursor order, one per poll, so the caller needs exactly one journal
     /// command slot before entering the reducer. The open batch at the back emits only when it is
-    /// the sole staged batch: while any barrier is in flight it keeps absorbing non-urgent events,
+    /// the sole staged batch: while any barrier is in flight it keeps absorbing background events,
     /// so batch sizes scale with storage latency and an idle machine still emits immediately.
-    /// Urgent work makes every earlier batch eligible; repeated polls hand that prefix to the
-    /// journal without allowing a later range to overtake it.
+    /// Urgent work and publications awaiting enqueue make every earlier batch eligible; repeated
+    /// polls hand that prefix to the journal without allowing a later range to overtake it.
     fn next_staged_index(&self) -> Option<usize> {
         let staged = self.staged.len();
         let inflight = self.staged.iter().filter(|batch| batch.emitted).count();
@@ -3765,7 +3766,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, batch)| !batch.emitted && batch.job.urgent())
+            .find(|(_, batch)| {
+                !batch.emitted && (batch.job.urgent() || !batch.release_after_enqueue.is_empty())
+            })
             .map(|(index, _)| index);
         for (index, batch) in self.staged.iter().enumerate() {
             if batch.emitted {

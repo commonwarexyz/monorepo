@@ -25,15 +25,14 @@
 //!
 //! A sync captures every append visible when it starts. Later appends continue while that handle
 //! runs, but never borrow its durability. There is at most one sync handle. Once it completes, the
-//! task acknowledges exactly the captured prefix, then immediately starts another sync if the
-//! uncovered tail is urgent, has reached [`MAX_UNSYNCED`], has reached its encoded-byte budget,
-//! or passed its coalescing deadline.
+//! task acknowledges exactly the captured prefix. Whenever no sync is running and appends await
+//! acknowledgement, it drains already queued commands and syncs the resulting prefix. Appends
+//! coalesce both in the ready command queue and behind an in-flight sync.
 //!
 //! Byte charging uses the same barrier, generation, previous-cursor, event-count, and encoded
 //! event fields as the storage journal record. The storage configuration separately validates the
 //! maximum size of one record. Therefore the retained append queue's encoded payload is bounded
-//! by `command_capacity * max_record_bytes`, while the explicit byte threshold bounds the
-//! non-urgent uncovered tail that can accumulate before a sync starts.
+//! by `command_capacity * max_record_bytes`.
 //!
 //! Any append, sync-start, sync-handle, or prune error is terminal. The failed journal is never
 //! reused, every retained response receives the same fatal error, and queued responses are failed
@@ -44,7 +43,7 @@ use crate::multimmit::machine::{BarrierId, Change, Cursor, EffectId};
 use crate::{
     LATENCY,
     multimmit::{
-        machine::{BarrierAck, MAX_INFLIGHT_BARRIERS, PersistJob},
+        machine::{BarrierAck, PersistJob},
         storage::{JournalError, SafetyJournal},
     },
 };
@@ -76,9 +75,6 @@ use tracing::{Instrument as _, Span};
 /// An admitted append's durable response, or the returned command when the queue is full.
 type TryAppend<V, D> = Result<Response<Durable<V, D>>, Admission<Append<V, D>>>;
 
-/// Maximum uncovered barriers allowed before a prefix sync is forced.
-pub(super) const MAX_UNSYNCED: usize = MAX_INFLIGHT_BARRIERS;
-
 const PREFIX_DEPTH_BUCKETS: [f64; 10] = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0];
 
 /// Starts one bounded journal owner.
@@ -90,8 +86,6 @@ pub(super) fn spawn<E, V, D>(
     context: E,
     journal: SafetyJournal<E, V, D>,
     command_capacity: NonZeroUsize,
-    max_unsynced_bytes: NonZeroUsize,
-    flush_delay: Duration,
 ) -> (JournalClient<V, D>, JournalMonitor)
 where
     E: Clock + Metrics + Spawner + Storage,
@@ -102,8 +96,6 @@ where
         context,
         journal,
         command_capacity,
-        max_unsynced_bytes,
-        flush_delay,
         #[cfg(test)]
         TestGates::default(),
     )
@@ -405,8 +397,6 @@ pub(super) fn spawn_with_gates<E, V, D>(
     context: E,
     journal: SafetyJournal<E, V, D>,
     command_capacity: NonZeroUsize,
-    max_unsynced_bytes: NonZeroUsize,
-    flush_delay: Duration,
     gates: TestGates,
 ) -> (JournalClient<V, D>, JournalMonitor)
 where
@@ -414,22 +404,13 @@ where
     V: Variant,
     D: Digest,
 {
-    spawn_inner(
-        context,
-        journal,
-        command_capacity,
-        max_unsynced_bytes,
-        flush_delay,
-        gates,
-    )
+    spawn_inner(context, journal, command_capacity, gates)
 }
 
 fn spawn_inner<E, V, D>(
     context: E,
     journal: SafetyJournal<E, V, D>,
     command_capacity: NonZeroUsize,
-    max_unsynced_bytes: NonZeroUsize,
-    flush_delay: Duration,
     #[cfg(test)] gates: TestGates,
 ) -> (JournalClient<V, D>, JournalMonitor)
 where
@@ -452,10 +433,6 @@ where
             pending_bytes: 0,
             pending_limit,
             sync: None,
-            max_unsynced_bytes: max_unsynced_bytes.get(),
-            flush_delay,
-            flush_at: None,
-            flush_due: false,
             metrics,
             #[cfg(test)]
             gates,
@@ -789,8 +766,8 @@ impl JournalMetrics {
                 "time from safety journal append to durable acknowledgement",
                 LATENCY,
             ),
-            // A tuning signal for the urgent-tail heuristic, always well under a second, so
-            // it does not need the full consensus latency range.
+            // This measures local storage contention before signature publication, so it uses
+            // the local latency range.
             urgent_tail_latency: context.histogram(
                 "urgent_tail_latency",
                 "time from urgent tail append to its prefix sync start",
@@ -895,10 +872,6 @@ where
     pending_bytes: usize,
     pending_limit: usize,
     sync: Option<PrefixSync>,
-    max_unsynced_bytes: usize,
-    flush_delay: Duration,
-    flush_at: Option<SystemTime>,
-    flush_due: bool,
     metrics: JournalMetrics,
     #[cfg(test)]
     gates: TestGates,
@@ -922,6 +895,10 @@ where
 
     async fn serve(&mut self) -> Result<(), JournalFailure> {
         loop {
+            if self.sync.is_none() && !self.pending.is_empty() {
+                self.drain_ready_commands().await?;
+                self.start_sync().await?;
+            }
             if !self.commands_open && self.pending.is_empty() {
                 return Ok(());
             }
@@ -933,21 +910,9 @@ where
                     result.map_err(|error| JournalFailure::Sync(Arc::new(error)))?;
                     self.complete_sync().await?;
                 },
-                () = wait_for_deadline(&self.context, self.flush_at) => {
-                    self.flush_at = None;
-                    self.flush_due = true;
-                    if self.sync.is_none() {
-                        self.drain_ready_commands().await?;
-                        self.start_sync().await?;
-                    }
-                },
                 command = receive_command(&mut self.commands, receive_commands) => {
                     let Some(command) = command else {
                         self.commands_open = false;
-                        if !self.pending.is_empty() && self.sync.is_none() {
-                            self.flush_due = true;
-                            self.start_sync().await?;
-                        }
                         continue;
                     };
                     self.process(command).await?;
@@ -958,32 +923,19 @@ where
 
     async fn process(&mut self, command: Command<V, D>) -> Result<(), JournalFailure> {
         match command {
-            Command::Append { append, responder } => {
-                self.append(append, responder).await?;
-                if self.sync.is_none() && self.must_sync_uncovered() {
-                    self.drain_ready_commands().await?;
-                    self.start_sync().await?;
-                }
-                Ok(())
-            }
+            Command::Append { append, responder } => self.append(append, responder).await,
             Command::Roll { span, responder } => self.roll(responder).instrument(span).await,
             Command::Prune { span, responder } => self.prune(responder).instrument(span).await,
         }
     }
 
-    /// Appends every command already queued before one required prefix sync starts.
+    /// Appends every command already queued before capturing the next prefix for sync.
     async fn drain_ready_commands(&mut self) -> Result<(), JournalFailure> {
         while self.pending.len() < self.pending_limit {
             let Ok(command) = self.commands.try_recv() else {
                 break;
             };
-            match command {
-                Command::Append { append, responder } => self.append(append, responder).await?,
-                Command::Roll { span, responder } => self.roll(responder).instrument(span).await?,
-                Command::Prune { span, responder } => {
-                    self.prune(responder).instrument(span).await?
-                }
-            }
+            self.process(command).await?;
         }
         Ok(())
     }
@@ -1043,7 +995,6 @@ where
             .inc_by(u64::try_from(encoded_size).unwrap_or(u64::MAX));
         self.update_depth_metrics();
 
-        self.arm_deadline();
         Ok(())
     }
 
@@ -1107,11 +1058,10 @@ where
             point,
         });
         self.update_depth_metrics();
-        self.flush_at = None;
-        self.flush_due = false;
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(clippy::unused_async))]
     async fn complete_sync(&mut self) -> Result<(), JournalFailure> {
         let sync = self.sync.take().ok_or(JournalFailure::Closed)?;
         #[cfg(test)]
@@ -1144,16 +1094,6 @@ where
         }
         self.update_depth_metrics();
 
-        if self.pending.is_empty() {
-            self.flush_at = None;
-            self.flush_due = false;
-            return Ok(());
-        }
-        if self.must_sync_uncovered() {
-            self.drain_ready_commands().await?;
-            return self.start_sync().await;
-        }
-        self.arm_deadline();
         Ok(())
     }
 
@@ -1211,44 +1151,6 @@ where
         }
     }
 
-    fn must_sync_uncovered(&self) -> bool {
-        if self.flush_due {
-            return true;
-        }
-        let covered = self.sync.as_ref().map_or(0, |sync| sync.covered);
-        let uncovered = self.pending.len().saturating_sub(covered);
-        let uncovered_bytes = self
-            .pending
-            .iter()
-            .skip(covered)
-            .fold(0usize, |bytes, pending| {
-                bytes.saturating_add(pending.encoded_size)
-            });
-        uncovered >= MAX_UNSYNCED
-            || uncovered_bytes >= self.max_unsynced_bytes
-            || self
-                .pending
-                .iter()
-                .skip(covered)
-                .any(|pending| pending.append.job.urgent())
-    }
-
-    fn arm_deadline(&mut self) {
-        if self.flush_at.is_some() || self.must_sync_uncovered() {
-            return;
-        }
-        let covered = self.sync.as_ref().map_or(0, |sync| sync.covered);
-        let Some(oldest) = self.pending.get(covered) else {
-            return;
-        };
-        self.flush_at = Some(
-            oldest
-                .appended_at
-                .checked_add(self.flush_delay)
-                .unwrap_or(oldest.appended_at),
-        );
-    }
-
     fn update_depth_metrics(&self) {
         let (covered_barriers, covered_bytes) = self
             .sync
@@ -1301,13 +1203,6 @@ async fn wait_for_sync(sync: Option<&mut PrefixSync>) -> Result<(), RuntimeError
         return pending_forever().await;
     };
     (&mut sync.handle).await
-}
-
-async fn wait_for_deadline<E: Clock>(context: &E, deadline: Option<SystemTime>) {
-    let Some(deadline) = deadline else {
-        return pending_forever().await;
-    };
-    context.sleep_until(deadline).await;
 }
 
 async fn receive_command<V, D>(
@@ -1407,14 +1302,8 @@ mod tests {
                         open_delayed(context, "journal_tracing", epoch).await;
                     let gates = TestGates::default();
                     let mut gate = gates.arm_next_append();
-                    let (client, monitor) = spawn_with_gates(
-                        context.child("owner"),
-                        journal,
-                        NZUsize!(8),
-                        large_byte_budget(),
-                        Duration::from_secs(3600),
-                        gates,
-                    );
+                    let (client, monitor) =
+                        spawn_with_gates(context.child("owner"), journal, NZUsize!(8), gates);
                     let callers = [
                         tracing::info_span!("first_persist"),
                         tracing::info_span!("second_persist"),
@@ -1580,10 +1469,6 @@ mod tests {
         (context, journal, pending, baseline)
     }
 
-    fn large_byte_budget() -> NonZeroUsize {
-        NonZeroUsize::new(usize::MAX).unwrap()
-    }
-
     async fn wait_for_starts(pending: &PendingSyncs, expected: usize) {
         for _ in 0..128 {
             if pending.starts() >= expected {
@@ -1716,14 +1601,8 @@ mod tests {
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-performance-prefix", epoch).await;
             let gates = TestGates::default();
-            let (client, monitor) = spawn_with_gates(
-                context.child("owner"),
-                journal,
-                NZUsize!(16),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-                gates.clone(),
-            );
+            let (client, monitor) =
+                spawn_with_gates(context.child("owner"), journal, NZUsize!(16), gates.clone());
 
             let first = client
                 .try_append(Span::none(), job(epoch, 1, 0, true))
@@ -1923,13 +1802,7 @@ mod tests {
             let epoch = Epoch::new(8);
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-performance-capacity", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(CAPACITY),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(CAPACITY));
             let mut responses = Vec::with_capacity(CAPACITY * 2);
 
             responses.push(
@@ -1996,13 +1869,7 @@ mod tests {
             let epoch = Epoch::new(8);
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-pipeline", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(8),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(8));
 
             let first = client
                 .try_append(Span::none(), job(epoch, 1, 0, true))
@@ -2033,17 +1900,10 @@ mod tests {
             let epoch = Epoch::new(8);
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-minimum-signature-sync", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(8),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(8));
 
-            // The authorization starts private signing but exposes no signature, so it may wait
-            // for the completion. Once the signed result is appended, one sync is both necessary
-            // and sufficient to make the entire contiguous safety prefix durable.
+            // Both records are ready before the owner runs, so one sync covers the authorization
+            // and its signed result in the same contiguous prefix.
             let authorization = client
                 .try_append(Span::none(), job(epoch, 1, 0, false))
                 .unwrap();
@@ -2075,13 +1935,7 @@ mod tests {
             let epoch = Epoch::new(8);
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-ready-urgent-prefix", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(8),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(8));
 
             let first = client
                 .try_append(Span::none(), job(epoch, 1, 0, true))
@@ -2103,24 +1957,14 @@ mod tests {
     }
 
     #[test]
-    fn byte_flush_coalesces_the_ready_prefix() {
+    fn ready_nonurgent_prefix_uses_one_sync() {
         deterministic::Runner::default().start(|context| async move {
             let epoch = Epoch::new(8);
             let first_job = job(epoch, 1, 0, false);
             let second_job = job(epoch, 2, 1, false);
-            let threshold = NonZeroUsize::new(
-                encoded_size(&first_job).saturating_add(encoded_size(&second_job)),
-            )
-            .unwrap();
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-bytes", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(8),
-                threshold,
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(8));
 
             let first = client.try_append(Span::none(), first_job).unwrap();
             let second = client.try_append(Span::none(), second_job).unwrap();
@@ -2147,129 +1991,77 @@ mod tests {
     }
 
     #[test]
-    fn nonurgent_count_flushes_at_core_pipeline_limit() {
-        deterministic::Runner::default().start(|context| async move {
-            let epoch = Epoch::new(8);
-            let (context, journal, pending, baseline) =
-                open_delayed(context, "voter-journal-count", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(16),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
-            let mut responses = Vec::new();
-            for barrier in 1..MAX_INFLIGHT_BARRIERS as u64 {
-                responses.push(
-                    client
-                        .try_append(Span::none(), job(epoch, barrier, barrier - 1, false))
-                        .unwrap(),
+    fn nonurgent_demand_syncs_without_coalescing_delay() {
+        for capacity in 1..=3 {
+            deterministic::Runner::default().start(|context| async move {
+                let epoch = Epoch::new(8);
+                let (context, journal, pending, baseline) =
+                    open_delayed(context, "voter-journal-demand", epoch).await;
+                let gates = TestGates::default();
+                let (client, monitor) = spawn_with_gates(
+                    context.child("owner"),
+                    journal,
+                    NonZeroUsize::new(capacity).unwrap(),
+                    gates.clone(),
                 );
-            }
-            let busy = client.try_roll().unwrap();
-            assert!(matches!(busy.await, Err(JournalFailure::Busy)));
-            assert_eq!(pending.starts(), baseline);
-            assert_eq!(client.metrics().start_syncs.get(), 0);
-            assert_eq!(
-                client.metrics().appended_barriers.get(),
-                MAX_INFLIGHT_BARRIERS as u64 - 1
-            );
-            assert_eq!(
-                usize::try_from(client.metrics().uncovered_barriers.get()).unwrap(),
-                MAX_INFLIGHT_BARRIERS - 1
-            );
-
-            responses.push(
-                client
-                    .try_append(
-                        Span::none(),
-                        job(
-                            epoch,
-                            MAX_INFLIGHT_BARRIERS as u64,
-                            MAX_INFLIGHT_BARRIERS as u64 - 1,
-                            false,
-                        ),
-                    )
-                    .unwrap(),
-            );
-            select! {
-                () = wait_for_starts(&pending, baseline + 1) => {},
-                () = context.sleep(Duration::from_millis(25)) => {
-                    panic!("a full core pipeline must flush without waiting for its age limit");
-                },
-            }
-            assert_eq!(client.metrics().start_syncs.get(), 1);
-            assert_eq!(
-                client.metrics().appended_barriers.get(),
-                MAX_INFLIGHT_BARRIERS as u64
-            );
-            assert_histogram(
-                &context,
-                "owner_prefix_depth",
-                1,
-                MAX_INFLIGHT_BARRIERS as f64,
-            );
-            assert_eq!(
-                client.metrics().covered_barriers.get(),
-                MAX_INFLIGHT_BARRIERS as i64
-            );
-            assert_eq!(client.metrics().uncovered_barriers.get(), 0);
-            release_next(&pending).await;
-            for (index, response) in responses.into_iter().enumerate() {
-                assert_eq!(
-                    response.await.unwrap().ack.barrier(),
-                    BarrierId::new(index as u64 + 1)
+                let mut append_gate = gates.arm_after_append();
+                let mut start_gate = gates.arm_next_start_sync();
+                let response = client
+                    .try_append(Span::none(), job(epoch, 1, 0, false))
+                    .unwrap();
+                let appended_at = append_gate.wait_entered_at().await;
+                append_gate.release();
+                let started_at = start_gate.wait_entered_at().await;
+                assert!(
+                    started_at.duration_since(appended_at).unwrap() < Duration::from_millis(25)
                 );
-            }
-            finish(client, monitor, &pending).await;
-        });
+                start_gate.release();
+                wait_for_starts(&pending, baseline + 1).await;
+                release_next(&pending).await;
+                assert_eq!(response.await.unwrap().ack.barrier(), BarrierId::new(1));
+                finish(client, monitor, &pending).await;
+            });
+        }
     }
 
     #[test]
-    fn nonurgent_age_flushes_without_more_commands() {
+    fn nonurgent_tail_drains_after_close_without_coalescing_delay() {
         deterministic::Runner::default().start(|context| async move {
             let epoch = Epoch::new(8);
-            let delay = Duration::from_millis(25);
             let (context, journal, pending, baseline) =
-                open_delayed(context, "voter-journal-age", epoch).await;
+                open_delayed(context, "voter-journal-closed-tail", epoch).await;
             let gates = TestGates::default();
-            let (client, monitor) = spawn_with_gates(
-                context.child("owner"),
-                journal,
-                NZUsize!(4),
-                large_byte_budget(),
-                delay,
-                gates.clone(),
-            );
-            let mut append_gate = gates.arm_after_append();
-            let response = client
-                .try_append(Span::none(), job(epoch, 1, 0, false))
+            let (client, monitor) =
+                spawn_with_gates(context.child("owner"), journal, NZUsize!(4), gates.clone());
+            let first = client
+                .try_append(Span::none(), job(epoch, 1, 0, true))
                 .unwrap();
-            let appended_at = append_gate.wait_entered_at().await;
-            append_gate.release();
-            let busy = client.try_roll().unwrap();
-            assert!(matches!(busy.await, Err(JournalFailure::Busy)));
-            assert_eq!(pending.starts(), baseline);
-            assert_eq!(client.metrics().start_syncs.get(), 0);
-            assert_histogram(&context, "owner_prefix_depth", 0, 0.0);
-
-            let mut start_gate = gates.arm_next_start_sync();
-            let started_at = start_gate.wait_entered_at().await;
-            start_gate.release();
             wait_for_starts(&pending, baseline + 1).await;
-            assert_eq!(
-                started_at.duration_since(appended_at).unwrap(),
-                delay,
-                "the lazy tail must start at its exact coalescing deadline"
-            );
+            let second = client
+                .try_append(Span::none(), job(epoch, 2, 1, false))
+                .unwrap();
+            let third = client
+                .try_append(Span::none(), job(epoch, 3, 2, false))
+                .unwrap();
+            wait_for_pending(&client, 3).await;
             assert_eq!(client.metrics().start_syncs.get(), 1);
-            assert_histogram(&context, "owner_prefix_depth", 1, 1.0);
-            let DeferredSync { release, blocked } = next_pending_sync(&pending);
-            blocked.await.expect("the lazy sync handle must be polled");
-            release.send(Ok(())).expect("the lazy sync is waiting");
-            assert_eq!(response.await.unwrap().ack.barrier(), BarrierId::new(1));
-            finish(client, monitor, &pending).await;
+            drop(client);
+            for _ in 0..8 {
+                reschedule().await;
+            }
+            let mut start_gate = gates.arm_next_start_sync();
+            let released_at = context.current();
+            release_next(&pending).await;
+            assert_eq!(first.await.unwrap().ack.barrier(), BarrierId::new(1));
+            let started_at = start_gate.wait_entered_at().await;
+            assert!(started_at.duration_since(released_at).unwrap() < Duration::from_millis(25));
+            start_gate.release();
+            wait_for_starts(&pending, baseline + 2).await;
+            release_next(&pending).await;
+            assert_eq!(second.await.unwrap().ack.barrier(), BarrierId::new(2));
+            assert_eq!(third.await.unwrap().ack.barrier(), BarrierId::new(3));
+            monitor.await.unwrap();
+            assert_eq!(pending.starts(), baseline + 2);
         });
     }
 
@@ -2279,13 +2071,7 @@ mod tests {
             let epoch = Epoch::new(8);
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-full", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(1),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(1));
             let first = client
                 .try_append(Span::none(), job(epoch, 1, 0, true))
                 .unwrap();
@@ -2309,13 +2095,7 @@ mod tests {
             let epoch = Epoch::new(8);
             let (context, journal, pending, baseline) =
                 open_delayed(context, "voter-journal-controls", epoch).await;
-            let (client, mut monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(8),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, mut monitor) = spawn(context.child("owner"), journal, NZUsize!(8));
             let first = client
                 .try_append(Span::none(), job(epoch, 1, 0, true))
                 .unwrap();
@@ -2348,13 +2128,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let epoch = Epoch::new(8);
             let journal = open_empty(&context, "voter-journal-append-fail", epoch).await;
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(2),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(2));
             let first = client
                 .try_append(Span::none(), job(epoch, 1, 7, true))
                 .unwrap();
@@ -2377,13 +2151,7 @@ mod tests {
                 open_delayed(context, "voter-journal-sync-fail", epoch).await;
             pending.arm_fail();
             pending.unblock();
-            let (client, monitor) = spawn(
-                context.child("owner"),
-                journal,
-                NZUsize!(2),
-                large_byte_budget(),
-                Duration::from_secs(3600),
-            );
+            let (client, monitor) = spawn(context.child("owner"), journal, NZUsize!(2));
             let response = client
                 .try_append(Span::none(), job(epoch, 1, 0, true))
                 .unwrap();

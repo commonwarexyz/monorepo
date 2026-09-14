@@ -2789,6 +2789,13 @@ fn canceled_lqc_completion_is_not_committed_after_forwarding() {
         .unwrap();
 
     machine.poll(NonZeroUsize::MIN).unwrap();
+    // Isolate the crypto completion boundary before the component drives can forward the
+    // certificate, so cancellation interrupts a prepared L-QC awaiting its second phase.
+    let deferred = core::iter::from_fn(|| machine.scheduler.pop()).collect::<Vec<_>>();
+    machine.scheduler.enqueue(WorkKey::CompleteCrypto);
+    for key in deferred {
+        machine.scheduler.enqueue(key);
+    }
     machine.poll(NonZeroUsize::MIN).unwrap();
     assert!(machine.prepared_lqc.is_some());
 
@@ -2932,7 +2939,7 @@ fn locally_assembled_vqc_forwards_and_exits_in_one_work_quantum() {
     let drive = drive_to_exit(&mut machine, staged, View::new(1));
     assert_eq!(machine.durable.view, View::new(2));
     assert_eq!(drive.quanta, 3);
-    assert_eq!(drive.barriers, 1);
+    assert_eq!(drive.barriers, 0);
     assert_eq!(drive.exit, ["artifact forwarded", "view advanced"]);
 }
 
@@ -5945,6 +5952,62 @@ fn drive_unanimous_votes(
         vqc_aggregate.expect("a unanimous transcript reserves a view certificate"),
         lqc_aggregate.expect("a unanimous transcript reaches local finality"),
     )
+}
+
+#[test]
+fn idle_vqc_progress_does_not_wait_for_persistence() {
+    let (mut machine, _) = start_profile(profile_for(Role::Observer, 6, 2));
+    let proposed = leader(&machine, 1);
+    let (aggregate, _) = drive_unanimous_votes(&mut machine, &proposed);
+    assert!(!machine.scheduler.has_work());
+    assert!(machine.staged.is_empty());
+    let acknowledged = machine.acked;
+
+    let messages = aggregate.messages().collect::<Vec<_>>();
+    let certificate = vqc(&machine, aggregate.leader().clone(), &messages);
+    let certificate_id = Artifact::Vqc(certificate.clone()).id::<Sha256>();
+    let completed = machine
+        .step(Input::VqcAggregated(Box::new(VqcAggregateCompletion::new(
+            aggregate.id(),
+            aggregate.generation(),
+            certificate,
+        ))))
+        .unwrap();
+    assert!(completed.capabilities().is_empty());
+
+    // An observer has no fresh signatures to force a sync. Polling supplies neither journal
+    // acknowledgements nor external inputs that could wake otherwise stranded view work.
+    let mut directives = Vec::new();
+    for _ in 0..64 {
+        let result = machine.poll(NonZeroUsize::MIN).unwrap();
+        let work_remaining = result.work_remaining();
+        for capability in result.into_capabilities() {
+            if let Capability::Durability(DurabilityCapability::Persist(directive)) = capability {
+                directives.push(directive);
+            }
+        }
+        if !work_remaining {
+            break;
+        }
+    }
+    assert!(!machine.scheduler.has_work());
+    assert_eq!(machine.acked, acknowledged);
+    assert_eq!(
+        machine.inspect().view(),
+        View::new(2),
+        "an admitted V-QC must wake the view without a durability acknowledgement"
+    );
+    assert!(directives.iter().all(|directive| !directive.urgent()));
+    assert!(
+        directives.into_iter().any(|directive| {
+            let (_, _, released, _) = directive.into_parts();
+            released.iter().any(|job| {
+                matches!(job.request(), DurableEffect::Broadcast(artifact)
+                    if artifact.id::<Sha256>() == certificate_id)
+            })
+        }),
+        "forwarding must reach journal enqueue without acknowledging the certificate record"
+    );
 }
 
 #[test]
