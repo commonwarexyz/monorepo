@@ -27,7 +27,7 @@ One payment or a bajillion, each account settles once.
 
 If an API responds in milliseconds, no one will wait seconds to pay for it.
 
-Suppose $a$ has 100 and wants to pay 20 to $b$, who has 40. With Bajillion, $a$ sends its chosen operator a signed request $S$ advancing its running total for $b$. The operator checks the signature and funds, records acceptance, and returns its signed acknowledgment $R$ with a proof of $b$'s entry. In one round trip, $a$ has a receipt to forward to $b$, who can verify it locally and retain it as evidence. The operator can save a hop by sending the receipt directly to $b$. Settlement comes later, netting payments across all accounts using that operator without separate channels or funded routes.
+Bajillion lets an API provider verify a receipt locally and serve the response before settlement. The payer gets that receipt in one round trip to its chosen operator, which can also send it directly to the provider to save a hop. The operator later nets payments across its accounts, without separate channels or funded routes. For example, suppose a payer $a$ has 100 and wants to pay 20 to $b$, who has 40.
 
 ```{=html}
 <style>
@@ -81,7 +81,7 @@ Suppose $a$ has 100 and wants to pay 20 to $b$, who has 40. With Bajillion, $a$ 
 ```
 
 ::: {.image-caption}
-Figure 1: The operator verifies, commits, and countersigns locally. The payer verifies and retains the receipt before forwarding it. The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry accumulates amount and payment count.
+Figure 1: The operator verifies and records the signed request $S$, then countersigns it as $R$. The payer verifies and retains the receipt before forwarding it. The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry accumulates amount and payment count.
 :::
 
 An epoch groups accepted payments into a "close", the settlement package the operator builds when that epoch ends. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
@@ -308,17 +308,17 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
   <tbody>
     <tr>
       <td>Validator dealing</td>
-      <td style="text-align:right;"><strong>105 KB</strong><br><small>8.03 ms</small></td>
-      <td style="text-align:right;"><strong>1.03 MB</strong><br><small>57.7 ms</small></td>
-      <td style="text-align:right;"><strong>10.3 MB</strong><br><small>566 ms</small></td>
-      <td style="text-align:right;"><strong>103 MB</strong><br><small>6.54 s</small></td>
+      <td style="text-align:right;">105 KB<br><small>8.03 ms</small></td>
+      <td style="text-align:right;">1.03 MB<br><small>57.7 ms</small></td>
+      <td style="text-align:right;">10.3 MB<br><small>566 ms</small></td>
+      <td style="text-align:right;">103 MB<br><small>6.54 s</small></td>
     </tr>
     <tr>
       <td>Commitment + certificate</td>
-      <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
-      <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
-      <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
-      <td style="text-align:right;"><strong>101 B</strong><br><small>672 µs</small></td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
+      <td style="text-align:right;">101 B<br><small>672 µs</small></td>
     </tr>
   </tbody>
   <tbody>
@@ -419,11 +419,11 @@ A normal withdrawal opens a certified output in its close's BMT. Its proof grows
   <tbody>
     <tr>
       <td>Withdrawal-output claim</td>
-      <td style="text-align:right;"><strong>39 B</strong><br><small>0.314 µs</small></td>
-      <td style="text-align:right;"><strong>359 B</strong><br><small>1.18 µs</small></td>
-      <td style="text-align:right;"><strong>487 B</strong><br><small>1.52 µs</small></td>
-      <td style="text-align:right;"><strong>583 B</strong><br><small>1.79 µs</small></td>
-      <td style="text-align:right;"><strong>679 B</strong><br><small>2.05 µs</small></td>
+      <td style="text-align:right;">39 B<br><small>0.314 µs</small></td>
+      <td style="text-align:right;">359 B<br><small>1.18 µs</small></td>
+      <td style="text-align:right;">487 B<br><small>1.52 µs</small></td>
+      <td style="text-align:right;">583 B<br><small>1.79 µs</small></td>
+      <td style="text-align:right;">679 B<br><small>2.05 µs</small></td>
     </tr>
   </tbody>
 </table>
@@ -473,8 +473,8 @@ Each sender signs one batch of unit payments. Recipients per account averages ov
 
 ## A Bajillion Payments, One Settlement
 
-Repeated payments between the same pairs share settlement records. Each active account settles its net change across all counterparties.
+An agent can pay for a million API requests without giving the settlement chain a million transactions to process. Each request proceeds on a receipt, while the operator nets the accumulated payments across accounts. Repeated payments between the same counterparties share settlement records, spreading their cost over more requests.
 
-The payer's receipt arrives in one round trip and gives its holder evidence to challenge a dishonest close. Validators keep the state available so users can recover their funds if the operator disappears.
+Those receipts keep the operator accountable after the response arrives. Their holders can challenge a dishonest close, while onchain custody and retained account state give users a way to recover if the operator disappears.
 
 The settlement chain only keeps the change.
