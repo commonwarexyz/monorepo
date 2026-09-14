@@ -14,6 +14,7 @@ use std::{
 struct CountingKey {
     id: usize,
     hashes: Rc<Cell<usize>>,
+    comparisons: Rc<Cell<usize>>,
 }
 
 impl CountingKey {
@@ -21,16 +22,27 @@ impl CountingKey {
         Self {
             id,
             hashes: Rc::new(Cell::new(0)),
+            comparisons: Rc::new(Cell::new(0)),
         }
     }
 
     fn hashes(&self) -> usize {
         self.hashes.get()
     }
+
+    fn comparisons(&self) -> usize {
+        self.comparisons.get()
+    }
+
+    fn reset_counts(&self) {
+        self.hashes.set(0);
+        self.comparisons.set(0);
+    }
 }
 
 impl PartialEq for CountingKey {
     fn eq(&self, other: &Self) -> bool {
+        self.comparisons.set(self.comparisons.get() + 1);
         self.id == other.id
     }
 }
@@ -82,6 +94,28 @@ fn shared_hashes_without_rehash_steps() {
     cache.clear();
     assert_eq!(two.hashes(), 1);
     assert_eq!(three.hashes(), 1);
+}
+
+#[test]
+fn remove_if_reuses_the_resident_probe() {
+    let key = CountingKey::new(7);
+    let mut cache = Cache::<CountingKey, usize>::new(NonZeroUsize::new(1).unwrap());
+    cache.put(key.clone(), 70);
+
+    key.reset_counts();
+    assert_eq!(cache.remove_if(&key, |value| *value == 71), Some(false));
+    assert_eq!(key.hashes(), 1);
+    assert_eq!(key.comparisons(), 1);
+
+    key.reset_counts();
+    assert_eq!(cache.remove_if(&key, |value| *value == 70), Some(true));
+    assert_eq!(key.hashes(), 1);
+    assert_eq!(key.comparisons(), 1);
+
+    key.reset_counts();
+    assert_eq!(cache.remove_if(&key, |_| unreachable!()), None);
+    assert_eq!(key.hashes(), 1);
+    assert_eq!(key.comparisons(), 0);
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
@@ -179,6 +213,33 @@ fn collisions_rehash_and_stable_values_clock() {
 #[test]
 fn collisions_rehash_and_stable_values_clock2qplus() {
     exercise_rehash::<true, Clock2QPlus<ProbeKey<true>>>();
+}
+
+#[test]
+fn remove_if_validates_full_keys_under_collisions() {
+    let first = ProbeKey::<true>("first".into());
+    let second = ProbeKey::<true>("second".into());
+    let absent = ProbeKey::<true>("absent".into());
+    let mut cache = Cache::<_, usize>::new(NonZeroUsize::new(2).unwrap());
+    cache.put(first.clone(), 1);
+    cache.put(second.clone(), 2);
+
+    let calls = Cell::new(0);
+    assert_eq!(
+        cache.remove_if(&absent, |_| {
+            calls.set(calls.get() + 1);
+            true
+        }),
+        None
+    );
+    assert_eq!(calls.get(), 0);
+    assert_eq!(cache.peek(&first), Some(&1));
+    assert_eq!(cache.peek(&second), Some(&2));
+
+    assert_eq!(cache.remove_if(&second, |value| *value == 2), Some(true));
+    assert_eq!(cache.peek(&first), Some(&1));
+    assert!(!cache.contains(&second));
+    cache.check_cache_invariants();
 }
 
 #[derive(Default)]

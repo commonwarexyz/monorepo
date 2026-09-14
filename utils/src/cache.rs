@@ -523,6 +523,48 @@ impl<K: Hash + Eq, V, P: Policy<K>> Cache<K, V, P> {
         }
     }
 
+    /// Conditionally removes a resident `key`.
+    ///
+    /// Returns `None` when `key` is not resident. The predicate is not called
+    /// and policy-owned nonresident history is preserved. For a resident, the
+    /// predicate is called exactly once with its value. A rejected resident
+    /// records use and returns `Some(false)`, while an accepted resident is
+    /// removed without first recording use and returns `Some(true)`.
+    ///
+    /// The removed slot and its allocation are retained for reuse, so the
+    /// value is not returned.
+    ///
+    /// # Panics
+    ///
+    /// If `predicate` panics, this operation makes no structural or policy
+    /// mutation before unwinding.
+    #[inline]
+    pub fn remove_if<F: FnOnce(&V) -> bool>(&mut self, key: &K, predicate: F) -> Option<bool> {
+        let Self {
+            index,
+            hasher,
+            slots,
+            free,
+            policy,
+            ..
+        } = self;
+        let hash = hasher.hash_one(key);
+        let Ok(entry) = index.find_entry(hash, |&slot| slots[slot].key == *key) else {
+            return None;
+        };
+        let slot = *entry.get();
+        if !predicate(&slots[slot].value) {
+            policy.hit_mut(slot, &mut slots[slot].state);
+            return Some(false);
+        }
+
+        let slot = entry.remove().0;
+        policy.remove(Some(slot), HashContext::prehashed(key, hash, hasher));
+        slots[slot].live = false;
+        free.push(slot);
+        Some(true)
+    }
+
     /// Retains only the entries for which `keep` returns `true`.
     ///
     /// Dropped entries' slots and allocations are retained for reuse.
@@ -855,6 +897,120 @@ mod tests {
         assert_eq!(cache.slots.len(), 2);
         assert_eq!(cache.get(&3).copied(), Some(30));
         assert!(!cache.remove(&999));
+        cache.check_cache_invariants();
+    }
+
+    struct CallbackPolicy {
+        mutable_hits: usize,
+        removals: Vec<(Option<Slot>, u64)>,
+    }
+
+    impl Policy<u64> for CallbackPolicy {
+        type SlotState = usize;
+
+        fn new(_capacity: NonZeroUsize) -> Self {
+            Self {
+                mutable_hits: 0,
+                removals: Vec::new(),
+            }
+        }
+
+        fn hit(&self, _slot: Slot, _state: &usize) {}
+
+        fn hit_mut(&mut self, _slot: Slot, state: &mut usize) {
+            self.mutable_hits += 1;
+            *state += 1;
+        }
+
+        fn insert<'a, I, C>(
+            &mut self,
+            _states: &I,
+            _key: HashContext<'_, u64>,
+            has_vacancy: bool,
+            claim: C,
+        ) -> (Slot, usize)
+        where
+            I: Index<Slot, Output = usize>,
+            C: FnOnce(Option<Slot>) -> Claimed<'a, u64>,
+        {
+            assert!(has_vacancy);
+            let Claimed::Vacant(slot) = claim(None) else {
+                unreachable!("vacancy claim returned an eviction");
+            };
+            (slot, 0)
+        }
+
+        fn remove(&mut self, slot: Option<Slot>, key: HashContext<'_, u64>) {
+            self.removals.push((slot, *key.key()));
+        }
+
+        fn clear(&mut self) {
+            self.removals.clear();
+        }
+    }
+
+    #[test]
+    fn test_remove_if_outcomes_callbacks_panic_and_reuse() {
+        let mut cache = Cache::<u64, u64, CallbackPolicy>::new(NZUsize!(2));
+        let (slot, value) = cache.get_or_insert_mut(1, || 10);
+        assert_eq!(*value, 10);
+
+        let calls = Cell::new(0);
+        assert_eq!(
+            cache.remove_if(&2, |_| {
+                calls.set(calls.get() + 1);
+                true
+            }),
+            None
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(cache.policy.mutable_hits, 0);
+        assert!(cache.policy.removals.is_empty());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cache.remove_if(&1, |value| {
+                calls.set(calls.get() + 1);
+                assert_eq!(*value, 10);
+                panic!("predicate panic");
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(cache.peek(&1), Some(&10));
+        assert_eq!(cache.policy.mutable_hits, 0);
+        assert!(cache.policy.removals.is_empty());
+        assert!(cache.free.is_empty());
+        cache.check_cache_invariants();
+
+        assert_eq!(
+            cache.remove_if(&1, |value| {
+                calls.set(calls.get() + 1);
+                *value == 11
+            }),
+            Some(false)
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cache.peek(&1), Some(&10));
+        assert_eq!(cache.policy.mutable_hits, 1);
+        assert_eq!(cache.slots[slot].state, 1);
+        assert!(cache.policy.removals.is_empty());
+
+        assert_eq!(
+            cache.remove_if(&1, |value| {
+                calls.set(calls.get() + 1);
+                *value == 10
+            }),
+            Some(true)
+        );
+        assert_eq!(calls.get(), 3);
+        assert!(!cache.contains(&1));
+        assert_eq!(cache.policy.mutable_hits, 1);
+        assert_eq!(cache.policy.removals, vec![(Some(slot), 1)]);
+        assert_eq!(cache.free, vec![slot]);
+
+        let (reused, value) = cache.get_or_insert_mut(2, || unreachable!());
+        assert_eq!(reused, slot);
+        assert_eq!(*value, 10);
         cache.check_cache_invariants();
     }
 

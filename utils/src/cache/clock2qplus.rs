@@ -1255,6 +1255,33 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_if_miss_preserves_ghost_history() {
+        let mut cache = TestCache::new(NZUsize!(2));
+        for key in 1..=3u64 {
+            cache.put(key, key);
+        }
+        assert_eq!(cache.ghost_keys(), vec![1]);
+
+        assert_eq!(cache.remove_if(&1, |_| unreachable!()), None);
+        assert_eq!(cache.ghost_keys(), vec![1]);
+        cache.put(1, 10);
+        assert!(cache.main_keys().contains(&1));
+        assert!(!cache.ghost_keys().contains(&1));
+        cache.check_invariants();
+
+        let mut cache = TestCache::new(NZUsize!(2));
+        for key in 1..=3u64 {
+            cache.put(key, key);
+        }
+        assert!(!cache.remove(&1));
+        assert!(cache.ghost_keys().is_empty());
+        cache.put(1, 10);
+        assert!(cache.small_keys().contains(&1));
+        assert!(!cache.main_keys().contains(&1));
+        cache.check_invariants();
+    }
+
+    #[test]
     fn test_correlation_window_ignores_only_young_hits() {
         // Key 4 is at the Small head, inside the two-entry correlation window.
         // Its hit must not set the bit, so a scan ages and evicts it to Ghost.
