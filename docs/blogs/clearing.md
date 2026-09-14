@@ -359,10 +359,10 @@ We benchmarked the Commonware Library's [initial implementation](https://github.
 ```
 
 ::: {.image-caption}
-Figure 6: Measured on an AWS c8a.4xlarge with 16 workers, 32 GiB RAM, and a 100 GiB EBS gp3 SSD (3,000 IOPS, 125 MiB/s). Table timings use in-memory storage and exclude durable commit and networking. Certificate verification uses one thread. The SSD run uses a 4 MiB QMDB cache; the full dataset fits in RAM.
+Figure 6: Measured on an AWS c8a.4xlarge with 16 workers, 32 GiB RAM, and a 100 GiB EBS gp3 SSD (3,000 IOPS, 125 MiB/s). Table timings use in-memory storage and exclude networking and durable commit; the SSD timing below includes QMDB commit. Certificate verification uses one thread. The SSD run uses a 4 MiB QMDB cache; the full dataset fits in RAM.
 :::
 
-With only 1,024 of a million live accounts paying the same 512 recipients, each validator processes a 105 KB update in 8.69 ms in memory, or 20.5 ms including SSD commit.
+With only 1,024 of a million live accounts paying the same 512 recipients, each validator processes a 105 KB update in 8.69 ms in memory, or 20.5 ms on SSD.
 
 Repeated payments between the same pairs reuse these settlement records, spreading their byte cost over more payments.
 
