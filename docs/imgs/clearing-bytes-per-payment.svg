@@ -40,7 +40,7 @@
   <text class="axis-strong green-text" x="1178" y="39">N = 1,000,000</text>
 
   <rect class="frame" x="30" y="90" width="610" height="360" rx="3"/>
-  <text class="panel-title" x="335" y="122">Complete Update per Validator</text>
+  <text class="panel-title" x="335" y="122">Sent to Each Validator</text>
   <text class="axis" x="335" y="145" text-anchor="middle">modeled keyed encoding</text>
   <text class="axis" x="105" y="162">bytes/payment</text>
   <line class="grid" x1="105" y1="170" x2="500" y2="170"/>
@@ -100,7 +100,7 @@
   <text class="value green-text" x="512" y="274.27" text-anchor="start">0.107</text>
 
   <rect class="frame" x="670" y="90" width="620" height="360" rx="3"/>
-  <text class="panel-title" x="980" y="122">Commitment + Certificate</text>
+  <text class="panel-title" x="980" y="122">Posted Onchain</text>
   <text class="axis" x="770" y="145">bytes/payment</text>
   <line class="grid" x1="770" y1="150" x2="1255" y2="150"/>
   <line class="grid" x1="770" y1="186.67" x2="1255" y2="186.67"/>
