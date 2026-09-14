@@ -268,8 +268,9 @@ O’Grady</a></div>
         <p>Bajillion defines each payment as an update to the payer’s
         outgoing vector. This lets the operator accept payments from
         different payers in parallel, even when they share a recipient.
-        Incoming credit stays a promise until the epoch ends. A payment
-        of <span class="math inline">x</span> on the edge <span
+        Existing accounts can spend receipt-backed incoming credit
+        within the epoch, before settlement. A payment of <span
+        class="math inline">x</span> on the edge <span
         class="math inline">a\rightarrow b</span> advances only that
         edge’s entry in <span class="math inline">a</span>’s vector:</p>
         <p><span class="math display">
@@ -385,8 +386,8 @@ O’Grady</a></div>
         validator checks the payer signatures and the operator’s
         acceptance, derives every recipient’s credit, and applies the
         deposits and withdrawals fixed at epoch registration.</p>
-        <p>Validators derive the balance changes and apply the same
-        canonical QMDB batch to the same predecessor database. QMDB
+        <p>Validators derive the same candidate QMDB batch from their
+        prior state and apply it once the close is admitted. QMDB
         updates its authenticated state without rebuilding the tree over
         every live account. Validators already hold the prior state, so
         the operator needs no separate state-change proof.</p>
@@ -415,7 +416,7 @@ O’Grady</a></div>
         retains its evidence, and signs the same commitment. A
         certificate needs <span class="math inline">q=2f+1</span>
         signatures.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends identical bytes to 100 validators, shown as a grid. Green dots mark the 67 signatures forming the certificate. The expanded view shows the running example's four QMDB balances changing after a validator checks the whole close.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends identical bytes to 100 validators, shown as a grid. Green dots mark the 67 signatures forming the certificate. The expanded view shows the running example's four proposed QMDB balances after a validator checks the whole close.">
         <div class="image-caption">
         <p>Figure 4: Each validator checks the same update against its
         complete prior state. With 100 validators and at most 33 faulty
@@ -680,11 +681,12 @@ O’Grady</a></div>
         <p>Figure 6: One signed payment per account, with no boundary
         flows. Times are medians of ten successive closes after one
         warmup on an AWS c8a.4xlarge with 16 workers and in-memory
-        storage. Verification includes balance reads and construction of
-        the new QMDB root; the total also includes decoding and
-        application. Durable commit and networking are excluded. Egress
-        assumes 100 direct copies. Account records count 32-byte keys
-        and 8-byte balances, before QMDB indexes, history, and retained
+        storage. Preparation starts from signed terminal inputs.
+        Verification includes balance reads and construction of the new
+        QMDB root; the total also includes decoding and application.
+        Durable commit and networking are excluded. Egress assumes 100
+        direct copies. Account records count 32-byte keys and 8-byte
+        balances, before QMDB indexes, history, and retained
         evidence.</p>
         </div>
         <p>With a million live accounts but only 1,024 senders paying

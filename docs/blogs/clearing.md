@@ -102,7 +102,7 @@ The receipt lets the recipient verify acceptance locally before relying on the p
 
 ## Optimizing for Hot Accounts
 
-Bajillion defines each payment as an update to the payer's outgoing vector. This lets the operator accept payments from different payers in parallel, even when they share a recipient. Incoming credit stays a promise until the epoch ends. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
+Bajillion defines each payment as an update to the payer's outgoing vector. This lets the operator accept payments from different payers in parallel, even when they share a recipient. Existing accounts can spend receipt-backed incoming credit within the epoch, before settlement. A payment of $x$ on the edge $a\rightarrow b$ advances only that edge's entry in $a$'s vector:
 
 $$
 (G_{ab},J_{ab})\longrightarrow(G_{ab}+x,J_{ab}+1),
@@ -174,7 +174,7 @@ Every validator retains the complete operator account state. At each close, the 
 
 Accounts are named by public key, and payment entries refer to those accounts by their position within the close. Each validator checks the payer signatures and the operator's acceptance, derives every recipient's credit, and applies the deposits and withdrawals fixed at epoch registration.
 
-Validators derive the balance changes and apply the same canonical QMDB batch to the same predecessor database. QMDB updates its authenticated state without rebuilding the tree over every live account. Validators already hold the prior state, so the operator needs no separate state-change proof.
+Validators derive the same candidate QMDB batch from their prior state and apply it once the close is admitted. QMDB updates its authenticated state without rebuilding the tree over every live account. Validators already hold the prior state, so the operator needs no separate state-change proof.
 
 The payer vectors are the common source of truth for both sides of every payment. Validators build a BMT of the epoch's account activity, retaining terminal payment positions and settlement outputs for challenges and claims. This evidence includes accounts whose balances stay unchanged. A 32-byte commitment binds the activity BMT, withdrawal-output BMT, and QMDB state root to the epoch, predecessor, and checked settlement totals.
 
@@ -193,7 +193,7 @@ The settlement chain holds pooled custody and the certified state root. Validato
 A committee of $n=3f+1$ validators tolerates at most $f$ Byzantine members. Every signer checks the complete close, retains its evidence, and signs the same commitment. A certificate needs $q=2f+1$ signatures.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends identical bytes to 100 validators, shown as a grid. Green dots mark the 67 signatures forming the certificate. The expanded view shows the running example's four QMDB balances changing after a validator checks the whole close.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends identical bytes to 100 validators, shown as a grid. Green dots mark the 67 signatures forming the certificate. The expanded view shows the running example's four proposed QMDB balances after a validator checks the whole close.">
 ```
 
 ::: {.image-caption}
@@ -376,7 +376,7 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
 ```
 
 ::: {.image-caption}
-Figure 6: One signed payment per account, with no boundary flows. Times are medians of ten successive closes after one warmup on an AWS c8a.4xlarge with 16 workers and in-memory storage. Verification includes balance reads and construction of the new QMDB root; the total also includes decoding and application. Durable commit and networking are excluded. Egress assumes 100 direct copies. Account records count 32-byte keys and 8-byte balances, before QMDB indexes, history, and retained evidence.
+Figure 6: One signed payment per account, with no boundary flows. Times are medians of ten successive closes after one warmup on an AWS c8a.4xlarge with 16 workers and in-memory storage. Preparation starts from signed terminal inputs. Verification includes balance reads and construction of the new QMDB root; the total also includes decoding and application. Durable commit and networking are excluded. Egress assumes 100 direct copies. Account records count 32-byte keys and 8-byte balances, before QMDB indexes, history, and retained evidence.
 :::
 
 With a million live accounts but only 1,024 senders paying that same recipient pool, the dealing is still 105 KB and takes 8.69 ms to decode, verify, and apply.
