@@ -53,7 +53,7 @@ impl<K> Policy<K> for Clock {
     }
 
     #[inline]
-    fn insert<I, C>(
+    fn insert<'a, I, C>(
         &mut self,
         states: &I,
         _key: HashContext<'_, K>,
@@ -61,8 +61,9 @@ impl<K> Policy<K> for Clock {
         claim: C,
     ) -> (Slot, AtomicBool)
     where
+        K: 'a,
         I: Index<Slot, Output = AtomicBool>,
-        C: FnOnce(Option<Slot>) -> Claimed<K>,
+        C: FnOnce(Option<Slot>) -> Claimed<'a, K>,
     {
         if has_vacancy {
             // CLOCK admits into available capacity without scanning. Mark the
@@ -122,7 +123,7 @@ mod tests {
 
     type ClockCache<K, V> = Cache<K, V, Clock>;
 
-    impl<K: Hash + Eq + Clone, V> Cache<K, V, Clock> {
+    impl<K: Hash + Eq, V> Cache<K, V, Clock> {
         /// Asserts the CLOCK policy's invariants hold.
         pub(crate) fn check_policy_invariants(&self) {
             if self.slots.is_empty() {
@@ -137,6 +138,28 @@ mod tests {
             self.check_cache_invariants();
             self.check_policy_invariants();
         }
+    }
+
+    #[test]
+    fn test_keys_need_not_implement_clone() {
+        #[derive(Default, Eq, PartialEq, Hash)]
+        struct Key<'a>(&'a str);
+
+        let names = [
+            String::from("first"),
+            String::from("second"),
+            String::from("third"),
+        ];
+        let mut cache = Cache::<Key<'_>, u64>::new(NZUsize!(1));
+        cache.prefill(|| 0);
+        let (slot, value) = cache.get_or_insert_mut(Key(&names[0]), || unreachable!());
+        *value = 1;
+        cache.put(Key(&names[1]), 2);
+        assert!(cache.get_at(slot, &Key(&names[0])).is_none());
+        assert_eq!(cache.get_at(slot, &Key(&names[1])), Some(&2));
+        assert!(cache.remove(&Key(&names[1])));
+        assert_eq!(cache.get_or_insert_with(Key(&names[2]), || 3), &3);
+        cache.check_invariants();
     }
 
     #[test]
