@@ -292,7 +292,7 @@ Accounts with deposits or withdrawals must resolve their full admitted outcome b
 
 An [initial implementation](https://github.com/commonwarexyz/monorepo/pull/4664) is available in the Commonware Library.
 
-In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747), every account sends one unit payment to one of 512 recipients. Each of 100 validators receives the same update.
+In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4664), every account sends one unit payment to one of 512 recipients. Each of 100 validators receives the same update.
 
 ```{=html}
 <div class="clearing-benchmark-table">
