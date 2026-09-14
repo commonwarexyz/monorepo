@@ -1502,7 +1502,7 @@ where
             ) => (ReadinessCursor::SOURCES, RuntimeEvent::JournalCapacity(result)),
             result = wait_for_checkpoint(
                 self.pending_checkpoint.as_mut(),
-                journal_idle,
+                journal_idle && self.journal.has_capacity(),
             ) => (ReadinessCursor::SOURCES, RuntimeEvent::Checkpoint(result)),
             result = wait_for_prune(self.pending_prune.as_mut()) => {
                 (ReadinessCursor::SOURCES, RuntimeEvent::Prune(result))
@@ -1607,7 +1607,7 @@ where
         }
         if let Some(result) = wait_for_checkpoint(
             self.pending_checkpoint.as_mut(),
-            self.journal_responses.is_empty(),
+            self.journal_responses.is_empty() && self.journal.has_capacity(),
         )
         .now_or_never()
         {
@@ -3416,7 +3416,13 @@ mod tests {
         ready_runtime_source_between_actions(RuntimeSourceScenario::Verification);
     }
 
+    #[test]
+    fn checkpoint_prune_waits_for_journal_command_capacity() {
+        ready_runtime_source_between_actions(RuntimeSourceScenario::CheckpointAdmission);
+    }
+
     enum RuntimeSourceScenario {
+        CheckpointAdmission,
         Verification,
         Persistence,
         Heartbeat,
@@ -3524,6 +3530,30 @@ mod tests {
                 machine.persistence_completed(durable.ack).unwrap();
                 startup.extend(collect(&mut machine));
             }
+            let checkpoint = if matches!(scenario, RuntimeSourceScenario::CheckpointAdmission) {
+                let cut = machine.checkpoint_cut().expect("startup has drained");
+                let origin = CheckpointOrigin {
+                    epoch: committee.config.epoch(),
+                    view: machine.inspection().view(),
+                    cursor: cut.cursor(),
+                    retired_views: cut.retired_view(),
+                };
+                journal.try_roll().unwrap().await.unwrap();
+                let checkpoints = stores.checkpoints.store(cut.materialize()).await.unwrap();
+                let (ready, received) = oneshot::channel();
+                let store = context.child("checkpoint").spawn(move |_| async move {
+                    ready.send(()).unwrap();
+                    Ok(checkpoints)
+                });
+                received.await.unwrap();
+                Some(PendingCheckpoint {
+                    store: CheckpointProgress::Writing(store),
+                    span: origin.store_span(),
+                    origin,
+                })
+            } else {
+                None
+            };
             let mut responses = VecDeque::new();
             for view in 1..=3 {
                 let artifact = Artifact::Nullification(committee.nullification(view))
@@ -3621,6 +3651,51 @@ mod tests {
                 metrics: ActorMetrics::new(&context.child("metrics"), committee.identities.len()),
                 test_hooks: hooks.clone(),
             };
+            if let Some(checkpoint) = checkpoint {
+                driver.pending_checkpoint = Some(checkpoint);
+                while !driver.journal_responses.is_empty() {
+                    let (_, response) = next_journal_response(true, &mut driver.journal_responses)
+                        .now_or_never()
+                        .expect("the FIFO witness made every append response ready");
+                    response.unwrap();
+                }
+                // A sender can run after the last append reply, before the owner drains queued
+                // Flush commands. No await below lets the owner consume these command slots.
+                let capacity = driver.journal.capacity();
+                assert!(capacity > 0);
+                for _ in 0..capacity {
+                    driver.journal.try_flush().unwrap();
+                }
+                assert!(!driver.journal.has_capacity());
+                let (_completions_tx, mut completions) = mailbox::new(context.child("completions"), NonZeroUsize::new(4).unwrap());
+                let (_mailbox_tx, mut mailbox) = mailbox::new(context.child("mailbox"), NonZeroUsize::new(4).unwrap());
+                let (_observations_tx, mut observations) = mailbox::new_unreliable(context.child("observations"), NonZeroUsize::new(4).unwrap());
+                let (_queries_tx, mut queries) = mailbox::new_unreliable(context.child("queries"), NonZeroUsize::new(4).unwrap());
+                let mut readiness = ReadinessCursor::default();
+                let written = driver.try_ready_event(&mut readiness, &mut completions, &mut mailbox, &mut observations, &mut queries, None).unwrap();
+                assert!(matches!(written, RuntimeEvent::Checkpoint(Ok(false))),
+                    "checkpoint writes must be observed even without command capacity");
+                driver.handle_runtime_event(written).unwrap();
+                assert!(driver.checkpoint_fenced());
+                let ready = driver.try_ready_event(&mut readiness, &mut completions, &mut mailbox, &mut observations, &mut queries, None);
+                if let Some(event) = ready {
+                    driver.handle_runtime_event(event).unwrap();
+                }
+                assert_eq!(driver.metrics.fatal.get(), 0,
+                    "prune admission must wait for a command slot after append replies drain");
+                assert!(driver.next_runtime_event(&mut readiness, &mut completions, &mut mailbox, &mut observations, &mut queries).now_or_never().is_none(),
+                    "the blocking readiness path must wait for journal capacity");
+                driver.journal.wait_for_capacity().await.unwrap();
+                let ready = driver.try_ready_event(&mut readiness, &mut completions, &mut mailbox, &mut observations, &mut queries, None).unwrap();
+                assert!(matches!(ready, RuntimeEvent::Checkpoint(Ok(true))));
+                driver.handle_runtime_event(ready).unwrap();
+                let pruned = wait_for_prune(driver.pending_prune.as_mut()).await;
+                driver.handle_runtime_event(RuntimeEvent::Prune(pruned)).unwrap();
+                assert_eq!(driver.metrics.fatal.get(), 0);
+                assert!(driver.pending_checkpoint.is_none());
+                assert!(driver.pending_prune.is_none());
+                return;
+            }
             driver.persistence_completed(first_durable, &Span::none()).unwrap();
             assert!(!driver.can_admit(Lane::PersistenceCompletion));
             if matches!(scenario, RuntimeSourceScenario::Verification) {
