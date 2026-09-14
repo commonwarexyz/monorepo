@@ -457,7 +457,7 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert!(!buf.is_empty());
 
                 let mut cursor = bytes::Bytes::from(buf);
-                if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &(MAX_SIZE as u64)) {
+                if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &(..=MAX_SIZE as u64).into()) {
                     assert_eq!(decoded.len(), v.len());
                     for i in 0..decoded.len() {
                         assert_eq!(decoded.get(i), v.get(i));
