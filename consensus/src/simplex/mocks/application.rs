@@ -137,9 +137,6 @@ type Latency = (f64, f64);
 /// detect spurious propose calls.
 type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
 
-/// Observer invoked on every handoff proposal request.
-type HandoffProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Send + 'static>;
-
 /// Handler that takes ownership of a proposal response so tests can decide
 /// when it completes.
 type ProposeController<D> = Box<dyn Fn(D, oneshot::Sender<D>) + Send + 'static>;
@@ -223,7 +220,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     propose_observer: Option<ProposeObserver<H, P>>,
 
     /// Invoked on every handoff proposal request received by the application.
-    handoff_propose_observer: Option<HandoffProposeObserver<H, P>>,
+    handoff_propose_observer: Option<ProposeObserver<H, P>>,
 
     /// Takes ownership of regular proposal responses when configured.
     propose_controller: Option<ProposeController<H::Digest>>,
@@ -324,7 +321,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.propose_observer = Some(observer);
     }
 
-    pub fn set_handoff_propose_observer(&mut self, observer: HandoffProposeObserver<H, P>) {
+    pub fn set_handoff_propose_observer(&mut self, observer: ProposeObserver<H, P>) {
         self.handoff_propose_observer = Some(observer);
     }
 
