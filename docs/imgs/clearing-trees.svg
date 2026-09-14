@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 930" role="img" aria-labelledby="title description">
   <title id="title">The Trees Behind a Close</title>
-  <desc id="description">The certified close binds the QMDB account-state root, an account-activity BMT root, and a withdrawal-output BMT root, together with the epoch, predecessor, and settlement totals. QMDB retains account balances between epochs: a has 85, b 58, c 26, and d 31 in the running example. Each activity record commits the terminal payer position and settlement output, including accounts with no net balance change. Account c's record has debit 11, sequence 2, no output, and the root of its payment BMT. That nested tree contains b with amount 4 and count 1, and d with amount 7 and count 1. Withdrawal outputs, when requested, contain a destination and amount. Lines show commitment relationships and logical contents, not QMDB's physical storage layout.</desc>
+  <desc id="description">Each validator derives the balance, activity, and withdrawal roots from the dealing and its retained state. The certified commitment binds these roots to the epoch, prior state, and withdrawal total. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and its payment-tree root. That tree records one payment of 4 to b and one of 7 to d. Activity records support receipt challenges even when an account's balance does not change. No withdrawals were requested. The right panel shows the destination and amount a withdrawal would record. The lines show commitment relationships.</desc>
   <rect width="1320" height="930" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -21,16 +21,16 @@
   </style>
 
   <text class="title" x="30" y="40">The Trees Behind a Close</text>
-  <text class="note" x="30" y="69">Logical contents and commitment links</text>
+  <text class="note" x="30" y="69">Three roots derived by each validator</text>
 
   <rect class="selected" x="427" y="98" width="466" height="90" rx="5"/>
-  <text class="heading center blue" x="660" y="133">Certified close</text>
-  <text class="note center" x="660" y="164">epoch · predecessor · settlement totals</text>
+  <text class="heading center blue" x="660" y="133">Certified commitment</text>
+  <text class="note center" x="660" y="164">epoch · prior state · withdrawal total</text>
   <path class="focus" d="M660 188 V219 M214 244 V219 H1106 V244 M660 219 V244"/>
 
   <rect class="panel" x="30" y="244" width="368" height="568" rx="5"/>
   <text class="heading center" x="214" y="284">Account balances</text>
-  <text class="note center" x="214" y="313">QMDB Current Ordered · MMB</text>
+  <text class="note center" x="214" y="313">QMDB · all live accounts</text>
   <rect class="record" x="122" y="346" width="184" height="42" rx="3"/>
   <text class="label center" x="214" y="373">State root</text>
   <path class="link" d="M214 388 V422"/>
@@ -47,13 +47,13 @@
   <text class="mono right blue" x="335" y="595">26</text>
   <text class="mono" x="94" y="640">d</text>
   <text class="mono right" x="335" y="640">31</text>
-  <text class="label center" x="214" y="710">Carried between epochs</text>
-  <text class="note center" x="214" y="749">Balance proofs</text>
-  <text class="note center" x="214" y="775">and recovery</text>
+  <text class="label center" x="214" y="710">Kept across closes</text>
+  <text class="note center" x="214" y="749">Prove a balance</text>
+  <text class="note center" x="214" y="775">for withdrawal or recovery</text>
 
   <rect class="panel" x="430" y="244" width="460" height="654" rx="5"/>
   <text class="heading center" x="660" y="284">Account activity</text>
-  <text class="note center" x="660" y="313">BMT · one record per active account</text>
+  <text class="note center" x="660" y="313">BMT · accounts active this close</text>
   <rect class="record" x="568" y="346" width="184" height="42" rx="3"/>
   <text class="label center" x="660" y="373">Activity root</text>
   <path class="link" d="M660 388 L550 414 L502 447 M550 414 L602 447 M660 388 L770 414 L718 447 M770 414 L818 447"/>
@@ -70,32 +70,34 @@
   <text class="mono center" x="818" y="475">d</text>
   <path class="focus" d="M718 489 V522"/>
   <rect class="selected" x="468" y="522" width="384" height="136" rx="3"/>
-  <text class="label blue" x="490" y="552">c's terminal record</text>
-  <text class="label" x="490" y="584">sent 11 · sequence 2</text>
-  <text class="note" x="490" y="614">output: none</text>
-  <text class="label center blue" x="660" y="643">payment root</text>
+  <text class="label blue" x="490" y="552">c at the end of the epoch</text>
+  <text class="label" x="490" y="584">sent 11 · last batch #2</text>
+  <text class="note" x="490" y="614">withdrawal: none</text>
+  <text class="label center blue" x="660" y="643">Payment root</text>
   <path class="focus" d="M660 658 V709 M660 748 L565 787 M660 748 L755 787"/>
   <rect class="selected" x="553" y="709" width="214" height="39" rx="3"/>
-  <text class="label center blue" x="660" y="735">c's payment BMT</text>
-  <rect class="record" x="478" y="787" width="174" height="43" rx="3"/>
-  <rect class="record" x="668" y="787" width="174" height="43" rx="3"/>
-  <text class="mono center" x="565" y="816">b: (4, 1)</text>
-  <text class="mono center" x="755" y="816">d: (7, 1)</text>
-  <text class="note center" x="660" y="862">recipient: (amount, count)</text>
+  <text class="label center blue" x="660" y="735">c's payments</text>
+  <rect class="record" x="478" y="787" width="174" height="64" rx="3"/>
+  <rect class="record" x="668" y="787" width="174" height="64" rx="3"/>
+  <text class="label center" x="565" y="812">to b: 4</text>
+  <text class="note center" x="565" y="838">1 payment</text>
+  <text class="label center" x="755" y="812">to d: 7</text>
+  <text class="note center" x="755" y="838">1 payment</text>
+  <text class="note center" x="660" y="877">Check receipts against the close</text>
 
   <rect class="panel" x="922" y="244" width="368" height="568" rx="5"/>
-  <text class="heading center" x="1106" y="284">Withdrawal outputs</text>
-  <text class="note center" x="1106" y="313">BMT · one output per request</text>
+  <text class="heading center" x="1106" y="284">Withdrawals</text>
+  <text class="note center" x="1106" y="313">BMT · one record per request</text>
   <rect class="record" x="987" y="346" width="238" height="42" rx="3"/>
   <text class="label center" x="1106" y="373">Withdrawal root</text>
   <path class="link" d="M1106 388 V409"/>
-  <text class="note center" x="1106" y="434">Empty in this example</text>
+  <text class="note center" x="1106" y="434">No withdrawals in this example</text>
   <path class="rule" d="M946 465 H1266"/>
-  <text class="note center" x="1106" y="504">Output format when requested</text>
+  <text class="note center" x="1106" y="504">Each withdrawal records</text>
   <rect class="record" x="999" y="526" width="214" height="100" rx="3"/>
   <text class="label center" x="1106" y="566">destination</text>
   <text class="label center" x="1106" y="602">amount</text>
-  <text class="label center" x="1106" y="710">Created for each close</text>
-  <text class="note center" x="1106" y="749">Payout claims</text>
+  <text class="label center" x="1106" y="710">Recorded in the close</text>
+  <text class="note center" x="1106" y="749">Claim with a proof</text>
   <text class="note center" x="1106" y="775">after finalization</text>
 </svg>
