@@ -78,10 +78,13 @@ impl<const N: usize> ChunkOverlay<N> {
     /// Create an overlay of `len` total bits on top of `base`. The `base` handed to later
     /// `set_bit` / `clear_bit` / `chunk_mut` calls must be the bitmap given here.
     fn new<B: bitmap::Readable<N>>(base: &B, len: u64, capacity: usize) -> Self {
+        let parent = Dimensions::of(base);
+        // Every dirty chunk is unpruned and below len, including the final partial chunk.
+        let max_chunks = (len.div_ceil(Self::CHUNK_BITS) - parent.pruned_chunks as u64) as usize;
         Self {
-            chunks: AHashMap::with_capacity(capacity),
+            chunks: AHashMap::with_capacity(capacity.min(max_chunks)),
             len,
-            parent: Dimensions::of(base),
+            parent,
         }
     }
 
