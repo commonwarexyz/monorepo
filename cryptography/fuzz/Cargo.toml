@@ -226,3 +226,31 @@ path = "fuzz_targets/bls12381_certificate_multisig_minsig.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "reed_solomon_engine_nosimd"
+path = "fuzz_targets/reed_solomon_engine_nosimd.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reed_solomon_engine_ssse3"
+path = "fuzz_targets/reed_solomon_engine_ssse3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reed_solomon_engine_avx2"
+path = "fuzz_targets/reed_solomon_engine_avx2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reed_solomon_engine_neon"
+path = "fuzz_targets/reed_solomon_engine_neon.rs"
+test = false
+doc = false
+bench = false
