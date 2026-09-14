@@ -375,30 +375,28 @@ O’Grady</a></div>
         before authorizing a sweep.</p>
         <h2 id="keep-the-state-send-the-changes">Keep the State, Send
         the Changes</h2>
-        <p>Every validator retains the complete operator account state.
-        At each close, the operator sends the same compact update to all
-        of them: the sending accounts’ terminal signed endpoints, their
-        cumulative payment entries, and the accounts involved. This
-        shared dealing can be cached on a CDN for efficient, inexpensive
-        distribution.</p>
-        <p>Accounts are named by public key, and payment entries refer
-        to those accounts by their position within the close. Each
-        validator checks the payer signatures and the operator’s
-        acceptance, derives every recipient’s credit, and applies the
-        deposits and withdrawals fixed at epoch registration.</p>
-        <p>Validators derive the same candidate QMDB batch from their
-        prior state and apply it once the close is admitted. QMDB
-        updates its authenticated state without rebuilding the tree over
-        every live account. Validators already hold the prior state, so
-        the operator needs no separate state-change proof.</p>
-        <p>Validators build a binary Merkle tree (BMT) of account
-        activity so receipts can be checked against the close, even when
-        payments leave an account’s balance unchanged. Each record binds
-        the account’s final payment totals and any withdrawal. A 32-byte
-        commitment binds this activity tree, the withdrawal tree, and
-        the QMDB state root to the epoch, prior state, and withdrawal
-        total.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="The certified commitment binds the balance, activity, and withdrawal roots. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested; the withdrawal panel shows the destination and amount a claim would prove.">
+        <p>Every validator retains the complete account state in QMDB.
+        At each close, the operator publishes one dealing for all of
+        them: active account keys, senders’ terminal signed endpoints,
+        and cumulative payment entries. Recipients are identified by
+        position in the account list. A CDN can cache this shared
+        dealing for efficient distribution.</p>
+        <p>Each validator checks the payer signatures and the operator’s
+        countersignatures, derives incoming credits, and combines them
+        with its stored balances and the deposits and withdrawals fixed
+        at epoch registration.</p>
+        <p>From these results, the validator builds the activity and
+        withdrawal binary Merkle trees (BMTs) and computes the next QMDB
+        state root. The activity tree includes accounts whose payments
+        leave their balances unchanged, so those receipts remain
+        challengeable. QMDB updates the balance tree incrementally,
+        without rebuilding it over every live account.</p>
+        <p>All three roots are results of validation. A 32-byte
+        commitment binds them to the epoch, prior state, and withdrawal
+        total. Validators already hold the balances needed to compute
+        the new state, so the dealing needs no state-change proof. They
+        install the candidate state once the close is admitted.</p>
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the balance, activity, and withdrawal roots bound by the certified commitment. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested; the withdrawal panel shows the destination and amount a claim would prove.">
         <div class="image-caption">
         <p>Figure 3: The certified commitment links the three roots.
         Expanding <span class="math inline">c</span>’s activity record
@@ -416,12 +414,11 @@ O’Grady</a></div>
         retains its evidence, and signs the same commitment. A
         certificate needs <span class="math inline">q=2f+1</span>
         signatures.</p>
-        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends identical bytes to 100 validators, shown as a grid. Green dots mark the 67 signatures forming the certificate. The expanded view shows the running example's four proposed QMDB balances after a validator checks the whole close.">
+        <img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four acknowledgment cards show the operator's signatures accepting the final endpoints of a, b, c, and d. The c card is highlighted. An Aggregate arrow leads to the single aggregate signature included in the dealing. Validators derive the final commitment. The green callout shows the state, activity, and withdrawal roots bound to the epoch, prior state, and zero withdrawal total by a 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate.">
         <div class="image-caption">
-        <p>Figure 4: Each validator checks the same update against its
-        complete prior state. With 100 validators and at most 33 faulty
-        members, a 67-signature certificate includes at least 34 honest
-        validators that checked and retain the entire close.</p>
+        <p>Figure 4: Validators derive the three roots from the shared
+        dealing. The certified close carries these roots and a
+        67-signature certificate.</p>
         </div>
         <p>An honest signer retains the close and its predecessor state
         durably before publishing its vote. It keeps predecessor and
