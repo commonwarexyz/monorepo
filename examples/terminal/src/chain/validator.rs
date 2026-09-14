@@ -175,8 +175,8 @@ pub(crate) const fn sync_config() -> SyncEngineConfig {
 /// State sync source that never answers.
 ///
 /// Peer state sync is disabled for the demo: a late joiner replays finalized
-/// blocks through marshal backfill instead. Serving QMDB operations to peers
-/// is a drop-in from the reshare example's qmdb resolver actor.
+/// blocks through marshal backfill instead. Machine checkpoints can exceed the channel's
+/// message budget, so peer QMDB sync requires a protocol that frames larger operations.
 #[derive(Clone)]
 pub(crate) struct NoopResolver;
 

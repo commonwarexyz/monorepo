@@ -18,8 +18,8 @@ use crate::{
         validator::{IO_BUFFER_SIZE, MAILBOX_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE},
     },
     protocol::{
-        Deployment, Key, MAX_ACCOUNTS, MAX_DESTINATION_BYTES, MAX_WITHDRAWALS, genesis_balances,
-        state_config,
+        Deployment, Key, MAX_ACTIVITY_ROWS, MAX_DEPOSIT_EVENTS, MAX_DESTINATION_BYTES,
+        MAX_WITHDRAWALS, WithdrawalWitness, genesis_balances, state_config,
     },
     rpc,
 };
@@ -32,14 +32,14 @@ use commonware_clearing::bajillion::{
     qmdb::{Mutations, State, StateLookup, StateOpening, account_key},
     serve::{Index, ServeError},
     transition::{
-        Close, CloseAmounts, CloseContext, Header, PreparedClose, RootBundle, TransitionError,
+        Close, CloseContext, EpochContext, Header, PreparedClose, RootBundle, TransitionError,
     },
 };
 use commonware_codec::{
     DecodeExt as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
     Write,
 };
-use commonware_cryptography::{Sha256, ed25519, sha256::Digest};
+use commonware_cryptography::{Hasher as _, Sha256, ed25519, sha256::Digest};
 use commonware_cryptography_curve25519::signing::BatchVerifier as PaymentBatchVerifier;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -61,19 +61,28 @@ use rand_core::CryptoRng;
 use std::{collections::VecDeque, time::Duration};
 use tracing::{debug, error, warn};
 
+const DEALING_NAMESPACE: &[u8] = b"_COMMONWARE_TERMINAL_DEALING";
+
 /// One immutable complete dealing, shared by every validator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Dealing {
     pub(crate) deployment: Digest,
     pub(crate) epoch: u64,
-    pub(crate) header: Header<Digest>,
+    pub(crate) context: EpochContext<Key, Digest>,
     pub(crate) bytes: Bytes,
+}
+impl Dealing {
+    pub(crate) fn id(&self) -> Digest {
+        let context = self.context.encode();
+        let bytes = self.bytes.encode();
+        Sha256::hash(&[DEALING_NAMESPACE, &context, &bytes])
+    }
 }
 impl Write for Dealing {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
         self.epoch.write(buf);
-        self.header.write(buf);
+        self.context.write(buf);
         self.bytes.write(buf);
     }
 }
@@ -81,7 +90,7 @@ impl EncodeSize for Dealing {
     fn encode_size(&self) -> usize {
         self.deployment.encode_size()
             + self.epoch.encode_size()
-            + self.header.encode_size()
+            + self.context.encode_size()
             + self.bytes.encode_size()
     }
 }
@@ -91,7 +100,7 @@ impl Read for Dealing {
         Ok(Self {
             deployment: Digest::read(buf)?,
             epoch: u64::read(buf)?,
-            header: Header::read(buf)?,
+            context: EpochContext::read(buf)?,
             bytes: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
         })
     }
@@ -100,14 +109,22 @@ impl Read for Dealing {
 pub(crate) struct Ballot {
     pub(crate) deployment: Digest,
     pub(crate) epoch: u64,
+    pub(crate) proposal: Digest,
+    pub(crate) context: CloseContext<Key, Digest>,
     pub(crate) header: Header<Digest>,
+    pub(crate) roots: RootBundle<Digest>,
+    pub(crate) withdrawal_total: u64,
     pub(crate) vote: Vote,
 }
 impl Write for Ballot {
     fn write(&self, buf: &mut impl BufMut) {
         self.deployment.write(buf);
         self.epoch.write(buf);
+        self.proposal.write(buf);
+        self.context.write(buf);
         self.header.write(buf);
+        self.roots.write(buf);
+        self.withdrawal_total.write(buf);
         self.vote.write(buf);
     }
 }
@@ -115,7 +132,11 @@ impl EncodeSize for Ballot {
     fn encode_size(&self) -> usize {
         self.deployment.encode_size()
             + self.epoch.encode_size()
+            + self.proposal.encode_size()
+            + self.context.encode_size()
             + self.header.encode_size()
+            + self.roots.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.vote.encode_size()
     }
 }
@@ -125,14 +146,18 @@ impl Read for Ballot {
         Ok(Self {
             deployment: Digest::read(buf)?,
             epoch: u64::read(buf)?,
+            proposal: Digest::read(buf)?,
+            context: CloseContext::read(buf)?,
             header: Header::read(buf)?,
+            roots: RootBundle::read(buf)?,
+            withdrawal_total: u64::read(buf)?,
             vote: Vote::read(buf)?,
         })
     }
 }
 pub(crate) enum Message {
-    Dealing(Dealing),
-    Vote(Ballot),
+    Dealing(Box<Dealing>),
+    Vote(Box<Ballot>),
 }
 impl Write for Message {
     fn write(&self, buf: &mut impl BufMut) {
@@ -160,9 +185,76 @@ impl Read for Message {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            0 => Ok(Self::Dealing(Dealing::read(buf)?)),
-            1 => Ok(Self::Vote(Ballot::read(buf)?)),
+            0 => Ok(Self::Dealing(Box::new(Dealing::read(buf)?))),
+            1 => Ok(Self::Vote(Box::new(Ballot::read(buf)?))),
             v => Err(CodecError::InvalidEnum(v)),
+        }
+    }
+}
+
+/// Authenticated close inputs used to rebuild a successor locally.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Replay {
+    pub(crate) context: CloseContext<Key, Digest>,
+    pub(crate) header: Header<Digest>,
+    pub(crate) roots: RootBundle<Digest>,
+    pub(crate) withdrawal_total: u64,
+    pub(crate) deposits: DepositBatch<Key>,
+    pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
+    pub(crate) dealing: Bytes,
+}
+impl Write for Replay {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.context.write(buf);
+        self.header.write(buf);
+        self.roots.write(buf);
+        self.withdrawal_total.write(buf);
+        self.deposits.write(buf);
+        self.withdrawals.write(buf);
+        self.dealing.write(buf);
+    }
+}
+impl EncodeSize for Replay {
+    fn encode_size(&self) -> usize {
+        self.context.encode_size()
+            + self.header.encode_size()
+            + self.roots.encode_size()
+            + self.withdrawal_total.encode_size()
+            + self.deposits.encode_size()
+            + self.withdrawals.encode_size()
+            + self.dealing.encode_size()
+    }
+}
+impl Read for Replay {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            context: CloseContext::read(buf)?,
+            header: Header::read(buf)?,
+            roots: RootBundle::read(buf)?,
+            withdrawal_total: u64::read(buf)?,
+            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_DEPOSIT_EVENTS))?,
+            withdrawals: WithdrawalBatch::read_cfg(
+                buf,
+                &(
+                    RangeCfg::new(0..=MAX_WITHDRAWALS),
+                    RangeCfg::new(0..=MAX_DESTINATION_BYTES),
+                ),
+            )?,
+            dealing: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
+        })
+    }
+}
+impl From<Sealed> for Replay {
+    fn from(record: Sealed) -> Self {
+        Self {
+            context: record.context,
+            header: record.header,
+            roots: record.roots,
+            withdrawal_total: record.withdrawal_total,
+            deposits: record.deposits,
+            withdrawals: record.withdrawals,
+            dealing: record.dealing,
         }
     }
 }
@@ -173,7 +265,7 @@ pub(crate) struct Sealed {
     pub(crate) context: CloseContext<Key, Digest>,
     pub(crate) header: Header<Digest>,
     pub(crate) roots: RootBundle<Digest>,
-    pub(crate) amounts: CloseAmounts,
+    pub(crate) withdrawal_total: u64,
     pub(crate) deposits: DepositBatch<Key>,
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
     pub(crate) dealing: Bytes,
@@ -187,7 +279,7 @@ impl Write for Sealed {
         self.context.write(buf);
         self.header.write(buf);
         self.roots.write(buf);
-        self.amounts.write(buf);
+        self.withdrawal_total.write(buf);
         self.deposits.write(buf);
         self.withdrawals.write(buf);
         self.dealing.write(buf);
@@ -202,7 +294,7 @@ impl EncodeSize for Sealed {
         self.context.encode_size()
             + self.header.encode_size()
             + self.roots.encode_size()
-            + self.amounts.encode_size()
+            + self.withdrawal_total.encode_size()
             + self.deposits.encode_size()
             + self.withdrawals.encode_size()
             + self.dealing.encode_size()
@@ -219,8 +311,8 @@ impl Read for Sealed {
             context: CloseContext::read(buf)?,
             header: Header::read(buf)?,
             roots: RootBundle::read(buf)?,
-            amounts: CloseAmounts::read(buf)?,
-            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_ACCOUNTS))?,
+            withdrawal_total: u64::read(buf)?,
+            deposits: DepositBatch::read_cfg(buf, &RangeCfg::new(0..=MAX_DEPOSIT_EVENTS))?,
             withdrawals: WithdrawalBatch::read_cfg(
                 buf,
                 &(
@@ -230,17 +322,30 @@ impl Read for Sealed {
             )?,
             dealing: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
             evidence: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
-            mutations: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_ACCOUNTS), ((), ())))?,
+            mutations: Vec::read_cfg(buf, &(RangeCfg::new(0..=MAX_ACTIVITY_ROWS), ((), ())))?,
             operations: u64::read(buf)?,
             predecessor_operations: u64::read(buf)?,
         })
     }
 }
 impl Sealed {
+    fn ballot(&self, proposal: Digest, vote: Vote) -> Ballot {
+        Ballot {
+            deployment: *self.context.deployment(),
+            epoch: self.context.payment().epoch(),
+            proposal,
+            context: self.context.clone(),
+            header: self.header,
+            roots: self.roots,
+            withdrawal_total: self.withdrawal_total,
+            vote,
+        }
+    }
+
     fn close(&self) -> Result<Close<Key, Digest>> {
         ensure!(
             self.header
-                .verify::<Sha256, Key>(&self.context, &self.roots, &self.amounts),
+                .verify::<Sha256, Key>(&self.context, &self.roots, self.withdrawal_total),
             "retained header mismatch"
         );
         let close =
@@ -248,7 +353,7 @@ impl Sealed {
         ensure!(
             close.header == self.header
                 && close.roots == self.roots
-                && close.amounts == self.amounts,
+                && close.withdrawal_total == self.withdrawal_total,
             "retained evidence mismatch"
         );
         Ok(close)
@@ -283,6 +388,8 @@ pub(crate) async fn store<E: StorageContext>(
 
 /// Per-close activity proofs are independent of historical balance proofs.
 pub(crate) fn answer(
+    context: &CloseContext<Key, Digest>,
+    withdrawals: &WithdrawalBatch<Key, Digest>,
     close: &Close<Key, Digest>,
     lookup: &EvidenceLookup,
 ) -> Result<EvidenceResponse> {
@@ -299,12 +406,17 @@ pub(crate) fn answer(
         } => index
             .higher_entry_lookup::<Sha256>(payer, recipient)
             .map(EvidenceBody::CommittedEntry),
-        EvidenceLookup::WithdrawalOutput { account, .. } => index
-            .withdrawal_claim::<Sha256>(account)
-            .map(EvidenceBody::WithdrawalOutput),
-        EvidenceLookup::ExternalPayout { account, .. } => index
-            .external_payout_claim::<Sha256>(account)
-            .map(EvidenceBody::ExternalPayout),
+        EvidenceLookup::WithdrawalOutput { account, .. } => {
+            match index.withdrawal_claim::<Sha256>(account) {
+                Ok(claim) => Ok(EvidenceBody::WithdrawalOutput(WithdrawalWitness::new(
+                    context,
+                    close.withdrawal_total,
+                    withdrawals,
+                    claim,
+                )?)),
+                Err(error) => Err(error),
+            }
+        }
         _ => anyhow::bail!("balance or history lookup passed to activity service"),
     };
     Ok(match body {
@@ -313,10 +425,9 @@ pub(crate) fn answer(
             roots: close.roots,
             body,
         }),
-        Err(
-            ServeError::Absent
-            | ServeError::Transition(TransitionError::WithdrawalClaim | TransitionError::PayoutClaim),
-        ) => EvidenceResponse::Absent,
+        Err(ServeError::Absent | ServeError::Transition(TransitionError::WithdrawalClaim)) => {
+            EvidenceResponse::Absent
+        }
         Err(error) => return Err(error.into()),
     })
 }
@@ -421,7 +532,7 @@ struct Lane<E: StorageContext + Spawner> {
     state: Option<State<E, Sha256>>,
     next: u64,
 }
-type Recoveries = FuturesUnordered<BoxFuture<'static, (usize, usize, Option<Sealed>)>>;
+type Recoveries = FuturesUnordered<BoxFuture<'static, (usize, usize, Option<Replay>)>>;
 pub(crate) struct Serve {
     request: EvidenceRequest,
     response: oneshot::Sender<EvidenceResponse>,
@@ -566,7 +677,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             return Ok(());
         };
         let position = self.lane(lanes, &entry.deployment).await?;
-        self.deal(lanes, recoveries, position, dealing, sender)
+        self.deal(lanes, recoveries, position, *dealing, sender)
             .await
     }
 
@@ -574,7 +685,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         &mut self,
         lanes: &mut [Lane<E>],
         recoveries: &mut Recoveries,
-        (position, holder, saved): (usize, usize, Option<Sealed>),
+        (position, holder, saved): (usize, usize, Option<Replay>),
         sender: &mut Se,
     ) -> Result<()> {
         lanes[position].fetching = false;
@@ -627,16 +738,23 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             .expect("authorized deployment")
             .network_key
             .clone();
-        let batch = dealing.header.batch_id::<Sha256>().into_digest();
+        if dealing.deployment != deployment
+            || dealing.context.deployment() != &deployment
+            || dealing.context.payment().epoch() != dealing.epoch
+        {
+            return Ok(());
+        }
+        let proposal = dealing.id();
         if let Some(saved) = lanes[position]
             .votes
             .as_ref()
             .unwrap()
-            .get(Identifier::Key(&batch))
+            .get(Identifier::Index(dealing.epoch))
             .await?
         {
-            if saved.dealing == dealing.bytes && saved.context.payment().epoch() == dealing.epoch {
-                self.vote(sender, &peer, deployment, dealing.epoch, saved.header);
+            if saved.dealing == dealing.bytes && saved.context.epoch_context() == &dealing.context {
+                let vote = self.scheme.sign(&saved.header).expect("clearing signer");
+                Self::vote(sender, &peer, saved.ballot(proposal, vote));
             }
             return Ok(());
         }
@@ -655,7 +773,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         let Some(registered) = machine.registered() else {
             return Ok(());
         };
-        if registered.context.payment().epoch() != dealing.epoch
+        if registered.context.epoch_context() != &dealing.context
             || height > registered.context.admission_deadline()
         {
             return Ok(());
@@ -679,34 +797,24 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             &lane.deployment.operator_ack,
             registered.deposits,
             registered.withdrawals,
-            dealing.bytes,
+            dealing.bytes.clone(),
             self.context.as_mut(),
             &Sequential,
         )
         .await;
-        let Ok((_, prepared)) = checked else {
+        let Ok((vote, prepared)) = checked else {
             warn!(epoch = dealing.epoch, "complete dealing validation failed");
             return Ok(());
         };
-        if prepared.close().header != dealing.header {
-            return Ok(());
-        }
-        if lane
-            .votes
-            .as_ref()
-            .unwrap()
-            .get(Identifier::Index(dealing.epoch))
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
         let record = Self::record(
             registered.context.clone(),
             registered.deposits.clone(),
             registered.withdrawals.clone(),
+            dealing.bytes,
             &prepared,
         );
+        let ballot = record.ballot(proposal, vote);
+        let batch = record.header.batch_id::<Sha256>().into_digest();
         let archive = lane.votes.take().expect("vote archive owner");
         let archive = archive.put_sync(dealing.epoch, batch, record).await?;
         ensure!(
@@ -714,7 +822,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             "vote evidence was not retained"
         );
         lane.votes = Some(archive);
-        self.vote(sender, &peer, deployment, dealing.epoch, dealing.header);
+        Self::vote(sender, &peer, ballot);
         Ok(())
     }
 
@@ -800,12 +908,12 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                     else {
                         return None;
                     };
-                    let dealing_size = Message::Dealing(Dealing {
+                    let dealing_size = Message::Dealing(Box::new(Dealing {
                         deployment,
                         epoch,
-                        header: saved.header,
+                        context: saved.context.epoch_context().clone(),
                         bytes: saved.dealing.clone(),
-                    })
+                    }))
                     .encode_size();
                     if dealing_size > max_dealing_bytes
                         || saved.context.deployment() != &deployment
@@ -828,6 +936,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         context: CloseContext<Key, Digest>,
         deposits: DepositBatch<Key>,
         withdrawals: WithdrawalBatch<Key, Digest>,
+        dealing: Bytes,
         prepared: &PreparedClose<Key, Digest>,
     ) -> Sealed {
         let close = prepared.close();
@@ -835,10 +944,10 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
             context,
             header: close.header,
             roots: close.roots,
-            amounts: close.amounts,
+            withdrawal_total: close.withdrawal_total,
             deposits,
             withdrawals,
-            dealing: close.encoded().clone(),
+            dealing,
             evidence: close.encode_evidence(),
             mutations: prepared.state().mutations().to_vec(),
             operations: prepared.state().head().operations(),
@@ -851,7 +960,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
         &mut self,
         lanes: &mut [Lane<E>],
         position: usize,
-        mut fetched: Option<Sealed>,
+        mut fetched: Option<Replay>,
     ) -> Result<Option<super::state::AdmittedRootsResponse>> {
         loop {
             let deployment = *lanes[position].deployment.digest();
@@ -869,7 +978,7 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 .unwrap()
                 .get(Identifier::Key(&certified.batch_id.into_digest()))
                 .await?;
-            let prepared = if let Some(saved) = fetched.take().or(local) {
+            let prepared = if let Some(saved) = fetched.take().or_else(|| local.map(Replay::from)) {
                 if saved.context.deployment() != &deployment
                     || saved.context.payment().epoch() != epoch
                     || saved.header.batch_id::<Sha256>() != certified.batch_id
@@ -903,7 +1012,14 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 return Ok(Some(certified));
             }
             let lane = &mut lanes[position];
-            let record = Self::record(saved.context, saved.deposits, saved.withdrawals, &prepared);
+            let dealing = saved.dealing.clone();
+            let record = Self::record(
+                saved.context,
+                saved.deposits,
+                saved.withdrawals,
+                dealing,
+                &prepared,
+            );
             let batch = record.header.batch_id::<Sha256>().into_digest();
             let archive = lane.store.take().expect("canonical archive owner");
             ensure!(
@@ -968,8 +1084,35 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                     .get(Identifier::Index(*epoch))
                     .await?)
                 .map_or(EvidenceResponse::Unsealed, |record| {
-                    EvidenceResponse::Served(Evidence::Dealing(Box::new(record)))
+                    EvidenceResponse::Served(Evidence::Dealing(Box::new(record.into())))
                 }));
+        }
+        if let EvidenceLookup::CloseEvidence { batch_id } = &request.lookup {
+            let record = lane
+                .store
+                .as_ref()
+                .unwrap()
+                .get(Identifier::Key(batch_id.digest()))
+                .await?;
+            let record = if record.is_some() {
+                record
+            } else {
+                lane.votes
+                    .as_ref()
+                    .unwrap()
+                    .get(Identifier::Key(batch_id.digest()))
+                    .await?
+            };
+            return Ok(record.map_or(EvidenceResponse::Unsealed, |record| {
+                EvidenceResponse::Served(Evidence::Close {
+                    header: record.header,
+                    roots: record.roots,
+                    body: EvidenceBody::Complete {
+                        context: record.context,
+                        evidence: record.evidence,
+                    },
+                })
+            }));
         }
         let batch = request.lookup.batch().expect("close lookup");
         let Some(record) = lane
@@ -1013,26 +1156,22 @@ impl<E: Spawner + Metrics + Network + StorageContext + CryptoRng> Sealer<E> {
                 body,
             }));
         }
-        answer(&record.close()?, &request.lookup)
+        answer(
+            &record.context,
+            &record.withdrawals,
+            &record.close()?,
+            &request.lookup,
+        )
     }
     fn vote<Se: Sender<PublicKey = ed25519::PublicKey>>(
-        &self,
         sender: &mut Se,
         operator: &ed25519::PublicKey,
-        deployment: Digest,
-        epoch: u64,
-        header: Header<Digest>,
+        ballot: Ballot,
     ) {
-        let vote = self.scheme.sign(&header).expect("clearing signer");
+        let epoch = ballot.epoch;
         let sent = sender.send(
             Recipients::One(operator.clone()),
-            Message::Vote(Ballot {
-                deployment,
-                epoch,
-                header,
-                vote,
-            })
-            .encode(),
+            Message::Vote(Box::new(ballot)).encode(),
             true,
         );
         if sent.is_empty() {
@@ -1058,7 +1197,7 @@ mod tests {
     };
     use commonware_codec::{FixedSize, varint::UInt};
     use commonware_consensus::types::Height;
-    use commonware_cryptography::{Digest as _, Signer as _};
+    use commonware_cryptography::Signer as _;
     use commonware_glue::stateful::db::DatabaseSet;
     use commonware_p2p::{
         CheckedSender, LimitedSender,
@@ -1084,25 +1223,30 @@ mod tests {
         let rows = limits.max_rows() as usize;
         let entries = limits.max_total_entries() as usize;
         let integer = UInt(u64::MAX).encode_size();
-        // posted::encode charges keys and terminal signatures per row, indexed entries,
-        // and one optional aggregate. Independent maximum widths give an upper bound.
-        let payload = Header::<Digest>::SIZE
-            + rows.encode_size()
-            + rows
-                * (Key::SIZE
-                    + 1
-                    + integer
+        // Every activity row contributes a key, outgoing tag, and vector length. Native
+        // sender terminals and merged edges each consume at least one accepted entry slot.
+        let payload = rows.encode_size()
+            + rows * (Key::SIZE + 1 + (limits.max_account_entries() as usize).encode_size())
+            + entries
+                * (integer
                     + commonware_cryptography_curve25519::signing::Signature::SIZE
-                    + (limits.max_account_entries() as usize).encode_size())
-            + entries * ((rows - 1).encode_size() + 2 * integer)
+                    + (rows - 1).encode_size()
+                    + 2 * integer)
             + 1
             + commonware_clearing::bajillion::transition::OperatorAggregate::SIZE;
-        let message = Message::Dealing(Dealing {
-            deployment: Digest::EMPTY,
-            epoch: u64::MAX,
-            header: Header::decode(Digest::EMPTY.encode()).unwrap(),
+        let deposits = DepositBatch::empty();
+        let withdrawals = WithdrawalBatch::empty();
+        let context = Protocol::new(NZUsize!(1))
+            .unwrap()
+            .registration_at(0, deposits, withdrawals, 400, 11, 12)
+            .unwrap()
+            .context;
+        let message = Message::Dealing(Box::new(Dealing {
+            deployment: *context.deployment(),
+            epoch: context.payment().epoch(),
+            context,
             bytes: Bytes::from(vec![0; payload]),
-        });
+        }));
         assert_eq!(message.encode_size(), message.encode().len());
         assert!(message.encode_size() <= crate::protocol::MIN_DEALING_BYTES as usize);
     }
@@ -1290,8 +1434,10 @@ mod tests {
                 }
                 counted.fetch_add(1, Ordering::SeqCst);
                 let response = rpc::Response::Success {
-                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(record.clone())))
-                        .encode(),
+                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(
+                        record.clone().into(),
+                    )))
+                    .encode(),
                 };
                 let _ = rpc::send_response(&mut sink, &response).await;
             }
@@ -1321,18 +1467,11 @@ mod tests {
                     epoch: 0,
                     predecessor_liability: 400,
                     deposits_root: root,
-                    staged_root: root,
+
                     withdrawals: withdrawals.clone(),
                     openings: Vec::new(),
                     fee: 4096,
-                    signature: protocol.sign_chain_registration(
-                        0,
-                        400,
-                        &root,
-                        &root,
-                        &withdrawals,
-                        4096,
-                    ),
+                    signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
                 },
             );
             let db = <Database<deterministic::Context> as DatabaseSet<_>>::init(
@@ -1360,7 +1499,6 @@ mod tests {
                 .context;
             let close_context = epoch
                 .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-                .await
                 .unwrap();
             let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
@@ -1373,13 +1511,14 @@ mod tests {
             .await
             .unwrap();
             let header = prepared.close().header;
-            let wire = Message::Dealing(Dealing {
+            let dealing = Dealing {
                 deployment: *deployment.digest(),
                 epoch: 0,
-                header,
+                context: close_context.epoch_context().clone(),
                 bytes: prepared.encoded().clone(),
-            })
-            .encode();
+            };
+            let proposal = dealing.id();
+            let wire = Message::Dealing(Box::new(dealing)).encode();
             assert_eq!(Message::decode(wire.clone()).unwrap().encode(), wire);
             let operator = ed25519::PrivateKey::from_seed(90).public_key();
             let validator = ed25519::PrivateKey::from_seed(91).public_key();
@@ -1406,18 +1545,46 @@ mod tests {
                     },
                 );
                 let handle = sealer.start(validator_channel);
-                let bad = Message::Dealing(Dealing {
+                let bad = Message::Dealing(Box::new(Dealing {
                     deployment: *deployment.digest(),
                     epoch: 0,
-                    header,
+                    context: close_context.epoch_context().clone(),
                     bytes: Bytes::from_static(&[0]),
-                })
+                }))
+                .encode();
+                let wrong_context = protocol
+                    .registration_at(
+                        0,
+                        deposits.clone(),
+                        withdrawals.clone(),
+                        400,
+                        10,
+                        12,
+                    )
+                    .unwrap()
+                    .context;
+                assert_ne!(&wrong_context, close_context.epoch_context());
+                let wrong_context = Message::Dealing(Box::new(Dealing {
+                    deployment: *deployment.digest(),
+                    epoch: 0,
+                    context: wrong_context,
+                    bytes: prepared.encoded().clone(),
+                }))
                 .encode();
                 assert!(
                     !send
                         .send(Recipients::One(validator.clone()), bad, true)
                         .is_empty()
                 );
+                assert!(
+                    !send
+                        .send(Recipients::One(validator.clone()), wrong_context, true)
+                        .is_empty()
+                );
+                select! {
+                    vote = receive.recv() => panic!("wrong-context/input replay produced a vote: {vote:?}"),
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                }
                 assert!(
                     !send
                         .send(Recipients::One(validator.clone()), wire.clone(), true)
@@ -1427,7 +1594,48 @@ mod tests {
                 let Message::Vote(ballot) = Message::decode(voted).unwrap() else {
                     panic!("expected vote")
                 };
+                assert_eq!(ballot.deployment, *deployment.digest());
+                assert_eq!(ballot.epoch, 0);
+                assert_eq!(ballot.proposal, proposal);
+                assert_eq!(ballot.context, close_context);
                 assert_eq!(ballot.header, header);
+                assert_eq!(ballot.roots, prepared.close().roots);
+                assert_eq!(ballot.withdrawal_total, prepared.close().withdrawal_total);
+                select! {
+                    vote = receive.recv() => panic!("one dealing produced multiple votes: {vote:?}"),
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                }
+                let EvidenceResponse::Served(Evidence::Close {
+                    header: retained_header,
+                    roots,
+                    body:
+                        EvidenceBody::Complete {
+                            context: retained_context,
+                            evidence,
+                        },
+                }) = mailbox
+                    .serve(EvidenceRequest::new(
+                        *deployment.digest(),
+                        EvidenceLookup::CloseEvidence {
+                            batch_id: header.batch_id::<Sha256>(),
+                        },
+                    ))
+                    .await
+                    .unwrap()
+                else {
+                    panic!("durable pre-admission close evidence")
+                };
+                assert_eq!(retained_header, header);
+                assert_eq!(roots, prepared.close().roots);
+                assert_eq!(retained_context, close_context);
+                assert_eq!(evidence, prepared.close().encode_evidence());
+                let retained = Close::<Key, Digest>::decode_evidence::<Sha256>(
+                    evidence,
+                    &retained_context,
+                    &retained_header,
+                )
+                .unwrap();
+                assert_eq!(retained.encoded(), prepared.encoded());
                 let EvidenceResponse::Served(Evidence::Dealing(saved)) = mailbox
                     .serve(EvidenceRequest::new(
                         *deployment.digest(),
@@ -1439,7 +1647,7 @@ mod tests {
                     panic!("durable vote evidence")
                 };
                 assert_eq!(saved.dealing, prepared.encoded().clone());
-                assert_eq!(saved.close().unwrap().header, header);
+                assert_eq!(saved.header, header);
                 assert_eq!(
                     mailbox
                         .serve(EvidenceRequest::new(
@@ -1504,7 +1712,6 @@ mod tests {
                 .context;
             let close_context = epoch
                 .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-                .await
                 .unwrap();
             let a = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
@@ -1555,12 +1762,14 @@ mod tests {
                 close_context.clone(),
                 deposits.clone(),
                 withdrawals.clone(),
+                a.encoded().clone(),
                 &a,
             );
             let record_b = Sealer::<deterministic::Context>::record(
                 close_context.clone(),
                 deposits.clone(),
                 withdrawals.clone(),
+                b.encoded().clone(),
                 &b,
             );
             assert_ne!(record_a.header, record_b.header);
@@ -1568,6 +1777,20 @@ mod tests {
             let encoded = record_b.encode();
             assert_eq!(Sealed::decode(encoded.clone()).unwrap(), record_b);
             assert!(Sealed::decode(encoded.slice(..encoded.len() - 1)).is_err());
+            let capacity = 2 * crate::protocol::MAX_ACCEPTED_PAYMENTS
+                + crate::protocol::MAX_DEPOSIT_EVENTS
+                + crate::protocol::MAX_WITHDRAWALS;
+            let mut wide = record_b.clone();
+            wide.mutations = (0..capacity)
+                .map(|index| {
+                    let wallet = crate::protocol::Wallet::from_seed("codec-owner", index as u64);
+                    (account_key(&wallet.public_key()).unwrap(), Some(std::num::NonZeroU64::MIN))
+                })
+                .collect();
+            wide.mutations.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(Sealed::decode(wide.encode()).unwrap(), wide);
+            wide.mutations.push(wide.mutations[0].clone());
+            assert!(Sealed::decode(wide.encode()).is_err());
             let evidence = b.close().encode_evidence();
             assert!(
                 Close::<Key, Digest>::decode_evidence::<Sha256>(
@@ -1630,12 +1853,12 @@ mod tests {
                     epoch,
                     predecessor_liability: 400,
                     deposits_root: root,
-                    staged_root: root,
+
                     withdrawals: withdrawals.clone(),
                     openings: Vec::new(),
                     fee: 4096,
                     signature: protocol.sign_chain_registration(
-                        epoch, 400, &root, &root, &withdrawals, 4096,
+                        epoch, 400, &root, &withdrawals, 4096,
                     ),
                 })
             };
@@ -1666,12 +1889,9 @@ mod tests {
                     SettlementTx::Admit(AdmitRequest {
                         deployment: *deployment.digest(),
                         epoch: 0,
-                        predecessor_liability: 400,
-                        deposits: deposits.clone(),
-                        withdrawals: withdrawals.clone(),
                         header: record_b.header,
                         roots: record_b.roots,
-                        amounts: record_b.amounts,
+                        withdrawal_total: record_b.withdrawal_total,
                         certificate,
                     }),
                 ],
@@ -1741,6 +1961,33 @@ mod tests {
                 lanes[0].store.as_ref().unwrap().get(Identifier::Index(0)).await.unwrap().unwrap().predecessor_operations,
                 record_b.predecessor_operations,
             );
+            let EvidenceResponse::Served(Evidence::Close {
+                header,
+                roots,
+                body:
+                    EvidenceBody::Complete {
+                        context: retained_context,
+                        evidence,
+                    },
+            }) = sealer
+                .serve(
+                    &lanes,
+                    EvidenceRequest::new(
+                        *deployment.digest(),
+                        EvidenceLookup::CloseEvidence {
+                            batch_id: record_b.header.batch_id::<Sha256>(),
+                        },
+                    ),
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("canonical recovery retained complete evidence")
+            };
+            assert_eq!(header, record_b.header);
+            assert_eq!(roots, record_b.roots);
+            assert_eq!(retained_context, record_b.context);
+            assert_eq!(evidence, record_b.evidence);
             assert!(invalid_hits.load(Ordering::SeqCst) > 0);
             assert!(honest_hits.load(Ordering::SeqCst) > 0);
             assert!(
@@ -2056,12 +2303,12 @@ mod tests {
             .await
             .unwrap();
             let next_header = next.close().header;
-            let next_wire = Message::Dealing(Dealing {
+            let next_wire = Message::Dealing(Box::new(Dealing {
                 deployment: *deployment.digest(),
                 epoch: 1,
-                header: next_header,
+                context: next_context.epoch_context().clone(),
                 bytes: next.encoded().clone(),
-            })
+            }))
             .encode();
             drop(state);
             drop(lanes);
@@ -2170,18 +2417,19 @@ mod tests {
                     let root = deposits.root::<Sha256>().unwrap();
                     let registration = SettlementTx::RegisterEpoch(RegisterEpochRequest {
                         deployment: *deployment.digest(), epoch, predecessor_liability: 400,
-                        deposits_root: root, staged_root: root, withdrawals: withdrawals.clone(), openings: Vec::new(), fee: 4096,
-                        signature: protocol.sign_chain_registration(epoch, 400, &root, &root, &withdrawals, 4096),
+                        deposits_root: root, withdrawals: withdrawals.clone(), openings: Vec::new(), fee: 4096,
+                        signature: protocol.sign_chain_registration(epoch, 400, &root, &withdrawals, 4096),
                     });
                     let height = [1, 2, 4][epoch as usize];
                     let registered = protocol.registration_at(epoch, deposits.clone(), withdrawals.clone(), 400, height + 10, height + 11).unwrap().context;
-                    let close_context = registered.bind::<Sha256, _, _>(&state, &deposits, &withdrawals).await.unwrap();
+                    let close_context = registered.bind::<Sha256, _, _>(&state, &deposits, &withdrawals).unwrap();
                     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(&state, &close_context, &deposits, &withdrawals, Vec::new(), &Sequential).await.unwrap();
+                    let dealing = prepared.encoded().clone();
                     if epoch == 0 {
                         registrations.push(registration);
-                        records.push(Sealer::<deterministic::Context>::record(close_context, deposits, withdrawals, &prepared));
+                        records.push(Sealer::<deterministic::Context>::record(close_context, deposits, withdrawals, dealing, &prepared));
                     } else {
-                        successors.push((registration, Sealer::<deterministic::Context>::record(close_context, deposits, withdrawals, &prepared)));
+                        successors.push((registration, Sealer::<deterministic::Context>::record(close_context, deposits, withdrawals, dealing, &prepared)));
                     }
                     if epoch + 1 < epochs {
                         (state, _) = prepared.apply(state).await.unwrap();
@@ -2197,9 +2445,8 @@ mod tests {
                     bls12381::Scheme::signer(committee().unwrap(), clearing_private(index).unwrap()).unwrap().sign(&record.header).unwrap()
                 })).unwrap();
                 SettlementTx::Admit(AdmitRequest {
-                    deployment: *record.context.deployment(), epoch: record.context.payment().epoch(), predecessor_liability: 400,
-                    deposits: record.deposits.clone(), withdrawals: record.withdrawals.clone(),
-                    header: record.header, roots: record.roots, amounts: record.amounts, certificate,
+                    deployment: *record.context.deployment(), epoch: record.context.payment().epoch(),
+                    header: record.header, roots: record.roots, withdrawal_total: record.withdrawal_total, certificate,
                 })
             };
             registrations.push(admission(&first));
@@ -2242,7 +2489,7 @@ mod tests {
                 if !busy_start { released.await.unwrap(); }
                 }
                 let response = rpc::Response::Success {
-                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(record))).encode(),
+                    body: EvidenceResponse::Served(Evidence::Dealing(Box::new(record.into()))).encode(),
                 };
                 let send = rpc::send_response(&mut sink, &response);
                 if let Some(activate) = activate.take() {
@@ -2259,7 +2506,7 @@ mod tests {
             let ((mut send, mut receive), channel) = network(&context, &peer, &validator, true, true).await;
             let busy = matches!(case, RecoveryCase::BusyStart | RecoveryCase::BusyResponse);
             let (sender, receiver) = channel;
-            let second_wire = Message::Dealing(Dealing { deployment: second_id, epoch: 0, header: second.header, bytes: second.dealing.clone() }).encode();
+            let second_wire = Message::Dealing(Box::new(Dealing { deployment: second_id, epoch: 0, context: second.context.epoch_context().clone(), bytes: second.dealing.clone() })).encode();
             let channel = (ObservedVotes { inner: sender, deployment: busy.then_some(first_id), remaining: backlog.clone() }, Backlogged {
                 inner: receiver, peer: peer.clone(), bytes: if busy_start { Bytes::from_static(&[0]) } else { second_wire.clone() }, remaining: backlog.clone(), arm_on_first: busy_start,
                 trigger: matches!(case, RecoveryCase::BusyResponse).then_some(activation),
@@ -2271,7 +2518,7 @@ mod tests {
                 fetch_timeout: Duration::from_secs(10),
             });
             let handle = sealer.start(channel);
-            let first_wire = Message::Dealing(Dealing { deployment: first_id, epoch: 1, header: successor.header, bytes: successor.dealing.clone() }).encode();
+            let first_wire = Message::Dealing(Box::new(Dealing { deployment: first_id, epoch: 1, context: successor.context.epoch_context().clone(), bytes: successor.dealing.clone() })).encode();
             assert!(!send.send(Recipients::One(validator.clone()), first_wire.clone(), true).is_empty());
             select! {
                 result = pending => result.unwrap(),
@@ -2287,7 +2534,7 @@ mod tests {
                 let Some(Record::Machine(machine)) = db.read().await.get(&machine_key(&first_id)).await.unwrap() else { panic!("A machine"); };
                 assert_eq!(Machine::decode(machine).unwrap().registered().unwrap().context.payment().epoch(), 2);
                 expected = (2, successor.header);
-                let wire = Message::Dealing(Dealing { deployment: first_id, epoch: 2, header: successor.header, bytes: successor.dealing }).encode();
+                let wire = Message::Dealing(Box::new(Dealing { deployment: first_id, epoch: 2, context: successor.context.epoch_context().clone(), bytes: successor.dealing })).encode();
                 assert!(!send.send(Recipients::One(validator.clone()), wire, true).is_empty());
                 assert!(!send.send(Recipients::One(validator.clone()), first_wire, true).is_empty());
             }

@@ -203,6 +203,7 @@ struct Node {
     scheme: Scheme,
     leader: ed25519::PublicKey,
     native: NativeGenesis,
+    timing: Timing,
     prefix: String,
     /// Each configured deployment's account owner and next canonical epoch.
     genesis: BTreeMap<Digest, (State<deterministic::Context, Sha256>, u64)>,
@@ -235,7 +236,7 @@ impl Node {
             batch,
             Height::new(height),
             timestamp,
-            &Timing::DEFAULT,
+            &self.timing,
             &self.native,
             &transactions,
         )
@@ -384,6 +385,19 @@ impl Node {
         }
         let genesis_head = entry.deployment.genesis();
         let response = match &request.lookup {
+            EvidenceLookup::CloseEvidence { batch_id } => relevant
+                .iter()
+                .find(|retained| retained.header.batch_id::<Sha256>() == *batch_id)
+                .map_or(EvidenceResponse::Unsealed, |retained| {
+                    EvidenceResponse::Served(Evidence::Close {
+                        header: retained.header,
+                        roots: retained.roots,
+                        body: super::query::EvidenceBody::Complete {
+                            context: retained.context.clone(),
+                            evidence: retained.close.encode_evidence(),
+                        },
+                    })
+                }),
             EvidenceLookup::GenesisState { account } => {
                 let root = genesis_head.root();
                 match state
@@ -407,28 +421,42 @@ impl Node {
                     }
                 }
             }
-            EvidenceLookup::Dealing { epoch } => relevant
-                .iter()
-                .find(|retained| retained.context.payment().epoch() == *epoch)
-                .map_or_else(
-                    || EvidenceResponse::Unsealed,
-                    |retained| {
-                        let close = &retained.close;
-                        EvidenceResponse::Served(Evidence::Dealing(Box::new(super::da::Sealed {
-                            context: retained.context.clone(),
-                            header: close.header,
-                            roots: close.roots,
-                            amounts: close.amounts,
-                            deposits: retained.deposits.clone(),
-                            withdrawals: retained.withdrawals.clone(),
-                            dealing: close.encoded().clone(),
-                            evidence: close.encode_evidence(),
-                            mutations: retained.mutations.clone(),
-                            operations: retained.operations,
-                            predecessor_operations: retained.predecessor_operations,
-                        })))
-                    },
-                ),
+            EvidenceLookup::Dealing { epoch } => {
+                if let Some(Record::Admitted(admitted)) = self
+                    .db
+                    .read()
+                    .await
+                    .get(&admitted_key(&request.deployment, *epoch))
+                    .await
+                    .unwrap()
+                {
+                    relevant
+                        .iter()
+                        .find(|retained| {
+                            retained.context.payment().epoch() == *epoch
+                                && retained.header.batch_id::<Sha256>() == admitted.batch_id
+                        })
+                        .map_or_else(
+                            || EvidenceResponse::Unsealed,
+                            |retained| {
+                                let close = &retained.close;
+                                EvidenceResponse::Served(Evidence::Dealing(Box::new(
+                                    super::da::Replay {
+                                        context: retained.context.clone(),
+                                        header: close.header,
+                                        roots: close.roots,
+                                        withdrawal_total: close.withdrawal_total,
+                                        deposits: retained.deposits.clone(),
+                                        withdrawals: retained.withdrawals.clone(),
+                                        dealing: close.encoded().clone(),
+                                    },
+                                )))
+                            },
+                        )
+                } else {
+                    EvidenceResponse::Unsealed
+                }
+            }
             lookup => {
                 let batch = lookup.batch().unwrap();
                 match relevant
@@ -486,7 +514,13 @@ impl Node {
                                 })
                             }
                         } else {
-                            answer(&retained.close, lookup).expect("retained activity proof")
+                            answer(
+                                &retained.context,
+                                &retained.withdrawals,
+                                &retained.close,
+                                lookup,
+                            )
+                            .expect("retained activity proof")
                         }
                     }
                 }
@@ -548,7 +582,14 @@ pub(crate) async fn start_with(
     prefix: &str,
     configured: Vec<Deployment>,
 ) -> Control {
-    start_with_native(context, address, prefix, native(configured)).await
+    start_with_native(
+        context,
+        address,
+        prefix,
+        native(configured),
+        crate::protocol::Timing::DEFAULT,
+    )
+    .await
 }
 
 /// Generates trusted native genesis for deterministic fixtures.
@@ -581,6 +622,7 @@ pub(crate) async fn start_with_native(
     address: SocketAddr,
     prefix: &str,
     native: NativeGenesis,
+    timing: Timing,
 ) -> Control {
     let mut balances = BTreeMap::new();
     for entry in &native.deployments {
@@ -607,7 +649,7 @@ pub(crate) async fn start_with_native(
     let identity = Genesis::new(
         identity,
         now(context),
-        Timing::DEFAULT,
+        timing,
         native.clone(),
         validators(address),
     );
@@ -635,6 +677,7 @@ pub(crate) async fn start_with_native(
         leader: signer.public_key(),
         genesis: balances,
         native,
+        timing,
         prefix: prefix.into(),
         latest: None,
         reads: 0,
@@ -653,8 +696,13 @@ pub(crate) async fn start_with_native(
     // The chain task: seals, reads, and the idle ticker in one owner.
     context.child("harness_chain").spawn({
         move |context| async move {
+            let mut tick_at = context.current() + TICK;
             loop {
                 select! {
+                    _ = context.sleep_until(tick_at) => {
+                        node.seal(now(&context), Vec::new()).await;
+                        tick_at = context.current() + TICK;
+                    },
                     message = mailbox.recv() => {
                         let Some(message) = message else {
                             return;
@@ -663,12 +711,14 @@ pub(crate) async fn start_with_native(
                             #[cfg(test)]
                             Message::SealBatch { transactions, response } => {
                                 node.seal(now(&context), transactions).await;
+                                tick_at = context.current() + TICK;
                                 response.send_lossy(Block::decode_cfg(node.latest.as_ref().unwrap().block.clone(), &()).unwrap());
                             }
 
                             Message::Submit { tx, response } => {
                                 node.submissions += 1;
                                 let height = node.seal(now(&context), vec![*tx]).await;
+                                tick_at = context.current() + TICK;
                                 response.send_lossy(height);
                             }
                             #[cfg(test)]
@@ -679,6 +729,7 @@ pub(crate) async fn start_with_native(
                                     .map_or(0, |latest| latest.height);
                                 for _ in 0..blocks {
                                     height = node.seal(now(&context), Vec::new()).await;
+                                    tick_at = context.current() + TICK;
                                 }
                                 response.send_lossy(height);
                             }
@@ -702,9 +753,6 @@ pub(crate) async fn start_with_native(
                                 response.send_lossy((node.reads, node.submissions));
                             }
                         }
-                    },
-                    _ = context.sleep(TICK) => {
-                        node.seal(now(&context), Vec::new()).await;
                     },
                 }
             }
@@ -766,5 +814,42 @@ pub(crate) async fn start_with_native(
 fn respond(body: &impl commonware_codec::Encode) -> rpc::Response {
     rpc::Response::Success {
         body: body.encode(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{chain::query::Lookup, protocol::deployment};
+
+    #[test]
+    fn status_reads_do_not_postpone_empty_blocks() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let control = start(&context, SocketAddr::from(([127, 0, 0, 1], 9991)), "tick").await;
+            let started = context.current();
+            let request = ReadRequest::new(deployment(), Lookup::Status);
+            let mut first = None;
+            let mut last_height = 0;
+            let mut last_read = started;
+            for step in 0..=10 {
+                context
+                    .sleep_until(started + Duration::from_millis(step * 100))
+                    .await;
+                let ReadResponse::Certified(read) = control.read(request.clone()).await else {
+                    panic!("the initialized harness must serve a certified read");
+                };
+                let block = Block::decode_cfg(read.block, &()).unwrap();
+                first.get_or_insert(block.height.get());
+                last_height = block.height.get();
+                let completed = context.current();
+                assert!(completed.duration_since(last_read).unwrap() < TICK);
+                last_read = completed;
+            }
+            assert_eq!(control.counts().await, (11, 0));
+            assert!(
+                last_height >= first.unwrap() + 2,
+                "reads suppressed empty blocks"
+            );
+        });
     }
 }

@@ -154,10 +154,6 @@ impl Genesis {
             .collect()
     }
 
-    pub(crate) fn holders_for_account(&self, _: &Key) -> anyhow::Result<Vec<SocketAddr>> {
-        self.holders()
-    }
-
     /// The committee players holding dealt shares.
     pub(crate) const fn players(&self) -> &Set<PublicKey> {
         self.identity.players()
@@ -557,6 +553,10 @@ pub(crate) fn read_genesis_file(path: &Path) -> anyhow::Result<Genesis> {
         encoded.challenge_duration >= 1,
         "the genesis challenge duration must be at least one block"
     );
+    crate::protocol::settlement_config(&Timing {
+        admission_offset: encoded.admission_offset,
+        challenge_duration: encoded.challenge_duration,
+    })?;
     let native = NativeGenesis::try_from(encoded.native)?;
     anyhow::ensure!(
         native.validate(),
@@ -625,10 +625,10 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generate every validator directory with node, network, and genesis config.
+/// Generate validator and operator directories plus the local demo launcher.
 #[derive(Args)]
 pub struct Setup {
-    /// Directory where validator subdirectories will be generated.
+    /// Directory for node configs, demo databases, and mprocs launchers.
     #[arg(long, default_value = "./data")]
     pub node_dir: PathBuf,
 
@@ -652,12 +652,16 @@ pub struct Setup {
     #[arg(long, default_value_t = 3400)]
     pub(crate) operator_port: u16,
 
+    /// First local RPC port assigned to operator-0 in the demo launcher.
+    #[arg(long, default_value_t = 7001)]
+    pub(crate) operator_rpc_port: u16,
+
     /// IP address used for generated listen and dial addresses.
     #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     pub(crate) host: IpAddr,
 }
 
-/// Generate the validator directories and print the commands to run next.
+/// Generate the demo and print its launch instructions.
 pub fn run(args: Setup) {
     run_inner(args).expect("setup failed");
 }
@@ -710,7 +714,6 @@ pub fn prepare_operator(args: OperatorSetup) -> anyhow::Result<()> {
         Digest::random(&mut rng),
         compute_public::<MinSig>(&ack),
         signing_key.public_key(),
-        accounts().into_iter().map(|account| account.key).collect(),
         args.max_dealing_bytes,
         genesis.native.registration_fee,
         &clearing,
@@ -1001,42 +1004,120 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         write_json(&operator_dir.join("genesis.json"), &encoded(output.clone()))?;
     }
 
-    println!("Run the cluster with:");
+    let node_dir = fs::canonicalize(&args.node_dir)?;
+    let executable = std::env::current_exe()?;
+    let deployments = native
+        .deployments
+        .iter()
+        .map(|entry| *entry.deployment.digest())
+        .collect::<Vec<_>>();
+    for (name, scripted) in [("mprocs.yaml", true), ("mprocs-wallets.yaml", false)] {
+        write_json(
+            &node_dir.join(name),
+            &demo_launcher(&args, &node_dir, &executable, &deployments, scripted)?,
+        )?;
+    }
     println!(
-        "mprocs {}",
-        (0..args.peers)
-            .map(|index| {
-                format!(
-                    "\"cargo run --bin terminal-chain -- validator --node-dir {}\"",
-                    args.node_dir.join(format!("validator-{index}")).display()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        "Bajillion demo ready / validators: {} / operators: {}",
+        args.peers, args.operators
     );
-    for index in 0..args.operators {
-        println!(
-            "Run operator {index} with: --node-dir {}",
-            args.node_dir.join(format!("operator-{index}")).display()
+    println!("From {} (mprocs 0.9.6 or newer):", node_dir.display());
+    println!("  Walkthrough: mprocs");
+    println!("  Interactive wallets: mprocs --config mprocs-wallets.yaml");
+    println!("Validators and operators start automatically. Wait for Operator ready, then");
+    println!("select a wallet or Walkthrough pane and press s. Ctrl-a switches focus.");
+    println!("Run one launcher at a time; both use the same services and wallet databases.");
+
+    Ok(())
+}
+
+/// JSON is valid YAML; argv arrays keep generated paths out of a shell.
+fn demo_launcher(
+    args: &Setup,
+    node_dir: &Path,
+    executable: &Path,
+    deployments: &[Digest],
+    scripted: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let node_dir = node_dir.to_str().context("demo directory must be UTF-8")?;
+    let binary_dir = executable
+        .parent()
+        .context("setup executable has no parent directory")?
+        .to_str()
+        .context("binary directory must be UTF-8")?;
+    let binary = |name: &str| {
+        Path::new(binary_dir)
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+            .display()
+            .to_string()
+    };
+    let mut procs = serde_json::Map::new();
+    for index in 0..args.peers {
+        procs.insert(
+            format!("Validator {index}"),
+            serde_json::json!({
+                "cmd": [binary("terminal-chain"), "validator", "--node-dir",
+                    Path::new(node_dir).join(format!("validator-{index}"))],
+                "cwd": node_dir,
+                "autostart": true,
+            }),
         );
     }
-
-    // The wallet agents verify certified reads against the shared genesis
-    // identity and query the validators' certified query servers, each bound
-    // to one operator's deployment.
-    let queries = (0..args.peers)
-        .map(|index| {
-            port(args.base_query_port, index)
-                .map(|port| format!("--query {}", SocketAddr::new(args.host, port)))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .join(" ");
-    let genesis = args.node_dir.join("validator-0").join("genesis.json");
-    println!(
-        "Point the agents at the chain with: --genesis {} {queries} --deployment <deployment ID or index>",
-        genesis.display()
-    );
-    Ok(())
+    for (index, deployment) in deployments.iter().enumerate() {
+        let operator_dir = Path::new(node_dir).join(format!("operator-{index}"));
+        let address = SocketAddr::new(args.host, port(args.operator_rpc_port, index)?);
+        procs.insert(
+            format!("Operator {index}"),
+            serde_json::json!({
+                "cmd": [binary("terminal-operator"), "--node-dir", operator_dir,
+                    "--bind", address.to_string(), "--database", operator_dir.join("operator.sqlite")],
+                "cwd": node_dir,
+                "autostart": true,
+            }),
+        );
+        let wallets: &[(usize, &str)] = if scripted {
+            &[(0, "Walkthrough")]
+        } else {
+            &[(0, "Alice"), (1, "Bob"), (4, "Eve")]
+        };
+        for &(identity, name) in wallets {
+            let database = match identity {
+                0 => "alice.sqlite".to_owned(),
+                1 => "bob.sqlite".to_owned(),
+                _ => format!("terminal-agent-{deployment}-{identity}.sqlite"),
+            };
+            let mut command = vec![binary("terminal-agent")];
+            if scripted {
+                command.push("--scripted".to_owned());
+            }
+            command.extend([
+                "--identity".to_owned(),
+                identity.to_string(),
+                "--deployment".to_owned(),
+                index.to_string(),
+                "--operator".to_owned(),
+                address.to_string(),
+                "--genesis".to_owned(),
+                Path::new(node_dir)
+                    .join("validator-0/genesis.json")
+                    .display()
+                    .to_string(),
+                "--database".to_owned(),
+                operator_dir.join(database).display().to_string(),
+            ]);
+            for peer in 0..args.peers {
+                command.extend([
+                    "--query".to_owned(),
+                    SocketAddr::new(args.host, port(args.base_query_port, peer)?).to_string(),
+                ]);
+            }
+            procs.insert(
+                format!("{name} {index}"),
+                serde_json::json!({"cmd": command, "cwd": node_dir, "autostart": false}),
+            );
+        }
+    }
+    Ok(serde_json::json!({"procs": procs}))
 }
 
 fn validate(args: &Setup) -> anyhow::Result<()> {
@@ -1061,6 +1142,7 @@ fn validate(args: &Setup) -> anyhow::Result<()> {
     port(args.base_port, args.peers - 1)?;
     port(args.base_query_port, args.peers - 1)?;
     port(args.operator_port, args.operators - 1)?;
+    port(args.operator_rpc_port, args.operators - 1)?;
     Ok(())
 }
 
@@ -1332,6 +1414,135 @@ mod tests {
     }
 
     #[test]
+    fn demo_launcher_keeps_argv_ports_and_databases_isolated() {
+        let root = std::env::temp_dir().join("demo space ' $value ; `command`");
+        let executable = root.join("redirected target/release/terminal-chain");
+        let args = Setup {
+            node_dir: root.clone(),
+            peers: 4,
+            base_port: 4300,
+            base_query_port: 4400,
+            operators: 2,
+            operator_port: 4500,
+            operator_rpc_port: 7100,
+            host: IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        };
+        let deployments = [Sha256::hash(&[b"first"]), Sha256::hash(&[b"second"])];
+        let launcher = demo_launcher(&args, &root, &executable, &deployments, true).unwrap();
+        let procs = launcher["procs"].as_object().unwrap();
+        assert_eq!(procs.len(), 8);
+        let mut databases = std::collections::BTreeSet::new();
+        for (name, process) in procs {
+            assert_eq!(
+                process
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["autostart", "cmd", "cwd"]
+            );
+            assert_eq!(process["cwd"], root.to_str().unwrap());
+            assert_eq!(process["autostart"], !name.starts_with("Walkthrough"));
+            let argv = process["cmd"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect::<Vec<_>>();
+            let binary = Path::new(argv[0]);
+            assert_eq!(binary.parent(), executable.parent());
+            assert!(binary.is_absolute());
+            if let Some(index) = argv.iter().position(|arg| *arg == "--database") {
+                let database = Path::new(argv[index + 1]);
+                assert!(database.is_absolute());
+                assert!(database.starts_with(&root));
+                assert!(databases.insert(database.to_path_buf()));
+            }
+        }
+        assert_eq!(databases.len(), 4);
+        let interactive = demo_launcher(&args, &root, &executable, &deployments, false).unwrap();
+        assert_eq!(interactive["procs"].as_object().unwrap().len(), 12);
+        for index in 0..2 {
+            let operator = &procs[&format!("Operator {index}")]["cmd"];
+            assert_eq!(
+                operator[0],
+                executable
+                    .with_file_name(format!("terminal-operator{}", std::env::consts::EXE_SUFFIX))
+                    .to_str()
+                    .unwrap()
+            );
+            assert_eq!(
+                operator[2],
+                root.join(format!("operator-{index}")).to_str().unwrap()
+            );
+            assert_eq!(operator[4], format!("[::1]:{}", 7100 + index));
+            let walkthrough = procs[&format!("Walkthrough {index}")]["cmd"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                walkthrough[0],
+                executable
+                    .with_file_name(format!("terminal-agent{}", std::env::consts::EXE_SUFFIX))
+                    .to_str()
+                    .unwrap()
+            );
+            assert_eq!(walkthrough[1], "--scripted");
+            assert_eq!(walkthrough[5], index.to_string());
+            assert_eq!(walkthrough[7], operator[4]);
+            assert_eq!(
+                walkthrough[9],
+                root.join("validator-0/genesis.json").to_str().unwrap()
+            );
+            assert_eq!(
+                walkthrough[11],
+                root.join(format!("operator-{index}/alice.sqlite"))
+                    .to_str()
+                    .unwrap()
+            );
+            for peer in 0..4 {
+                assert_eq!(walkthrough[12 + peer * 2], "--query");
+                assert_eq!(walkthrough[13 + peer * 2], format!("[::1]:{}", 4400 + peer));
+            }
+            for (name, identity, database) in [
+                ("Alice", 0, "alice.sqlite".to_owned()),
+                ("Bob", 1, "bob.sqlite".to_owned()),
+                (
+                    "Eve",
+                    4,
+                    format!("terminal-agent-{}-4.sqlite", deployments[index]),
+                ),
+            ] {
+                let process = &interactive["procs"][format!("{name} {index}")];
+                assert_eq!(process["autostart"], false);
+                assert_eq!(process["cwd"], root.to_str().unwrap());
+                let mut expected = walkthrough.clone();
+                expected.remove(1);
+                expected[2] = identity.to_string().into();
+                expected[10] = root
+                    .join(format!("operator-{index}"))
+                    .join(database)
+                    .to_str()
+                    .unwrap()
+                    .into();
+                assert_eq!(process["cmd"], serde_json::Value::Array(expected));
+            }
+        }
+        let other = root.with_file_name("second demo");
+        let other_launcher = demo_launcher(&args, &other, &executable, &deployments, true).unwrap();
+        for process in other_launcher["procs"].as_object().unwrap().values() {
+            let argv = process["cmd"].as_array().unwrap();
+            if let Some(index) = argv.iter().position(|arg| arg == "--database") {
+                assert!(!databases.contains(Path::new(argv[index + 1].as_str().unwrap())));
+            }
+        }
+        let mut overflow = args;
+        overflow.operator_rpc_port = u16::MAX;
+        assert!(validate(&overflow).is_err());
+        assert!(demo_launcher(&overflow, &root, &executable, &deployments, true).is_err());
+    }
+
+    #[test]
     fn setup_writes_node_network_operator_and_genesis() {
         let node_dir =
             std::env::temp_dir().join(format!("terminal-chain-setup-{}", std::process::id()));
@@ -1343,9 +1554,24 @@ mod tests {
             base_query_port: 4400,
             operators: 2,
             operator_port: 4500,
+            operator_rpc_port: 7001,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         })
         .unwrap();
+
+        let launcher: serde_json::Value = read_json(&node_dir.join("mprocs.yaml")).unwrap();
+        let interactive: serde_json::Value =
+            read_json(&node_dir.join("mprocs-wallets.yaml")).unwrap();
+        assert_eq!(launcher["procs"].as_object().unwrap().len(), 8);
+        assert_eq!(interactive["procs"].as_object().unwrap().len(), 12);
+        assert_eq!(
+            launcher["procs"]["Validator 0"]["cmd"][3],
+            fs::canonicalize(&node_dir)
+                .unwrap()
+                .join("validator-0")
+                .to_str()
+                .unwrap()
+        );
 
         let first = node_dir.join("validator-0");
         let node = NodeConfig::load(&first).unwrap();
@@ -1363,6 +1589,14 @@ mod tests {
         for index in 0..2u16 {
             let operator_dir = node_dir.join(format!("operator-{index}"));
             let operator = OperatorConfig::load(&operator_dir).unwrap();
+            assert_eq!(
+                interactive["procs"][format!("Eve {index}")]["cmd"][10],
+                fs::canonicalize(&operator_dir)
+                    .unwrap()
+                    .join(format!("terminal-agent-{}-4.sqlite", operator.deployment))
+                    .to_str()
+                    .unwrap()
+            );
             assert_eq!(operator.listen.port(), 4500 + index);
             let listed = &network.operators[usize::from(index)];
             assert_eq!(listed.public_key, operator.public_key());
@@ -1491,9 +1725,6 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), holders.len());
-        for account in accounts() {
-            assert_eq!(genesis.holders_for_account(&account.key).unwrap(), holders);
-        }
 
         let undersized = node_dir.join("undersized");
         assert!(
@@ -1657,6 +1888,7 @@ mod tests {
                 base_query_port: 4600,
                 operators: 2,
                 operator_port: 4700,
+                operator_rpc_port: 7001,
                 host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             })
             .is_err()
@@ -1678,6 +1910,7 @@ mod tests {
             base_query_port: 4900,
             operators: 2,
             operator_port: 5000,
+            operator_rpc_port: 7001,
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         })
         .unwrap_err();

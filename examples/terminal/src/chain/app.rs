@@ -14,6 +14,7 @@ use crate::{
 use commonware_codec::EncodeSize as _;
 use commonware_consensus::{Heightable as _, marshal::ancestry::Ancestry, simplex::types::Context};
 use commonware_cryptography::{Digestible as _, certificate::Scheme, ed25519, sha256::Digest};
+use commonware_formatting::Hex;
 use commonware_glue::stateful::{
     Application, Input, Proposed,
     db::{DatabaseSet, ManagedDb, Merkleized as _},
@@ -24,6 +25,7 @@ use commonware_utils::{non_empty_range, sync::Mutex};
 use futures::StreamExt as _;
 use rand_core::Rng;
 use std::{marker::PhantomData, sync::Arc, time::Duration};
+use tracing::info;
 
 /// Maximum milliseconds a block's timestamp may lead the verifier's clock at
 /// vote time.
@@ -275,11 +277,18 @@ where
         block: &Self::Block,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
+        let digest = block.digest();
         self.finalized.record(
             block.height().get(),
-            block.digest(),
+            digest,
             block.state_root,
             block.timestamp,
+        );
+        info!(
+            height = block.height().get(),
+            digest = %Hex(&digest[..6]),
+            transactions = block.transactions.len(),
+            "finalized block"
         );
     }
 }

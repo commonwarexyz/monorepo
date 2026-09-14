@@ -44,7 +44,7 @@ impl QualifiedFixture {
         );
         let challenge = SettlementTx::Challenge(ChallengeRequest {
             deployment: deployment(),
-            batch_id: fixture.result.finalized.batch_id,
+            batch_id: fixture.result.header.batch_id::<Sha256>(),
             evidence: ack_fork(&fixture.result, &protocol, (2, 3)).encode(),
         });
         let honest = SettlementTx::Deposit(signed_deposit(
@@ -485,7 +485,7 @@ fn cross_target_claims_share_the_source_reservation() {
             .unwrap();
         let compound = |target| {
             SettlementTx::ClaimDeposit(ClaimDepositRequest {
-                claim: FinalizedClaim::Withdrawal(claim.clone()),
+                claim: claim.clone(),
                 deposit: DepositRequest::sign(
                     native.chain_id(),
                     target,

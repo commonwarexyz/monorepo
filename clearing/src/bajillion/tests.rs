@@ -45,6 +45,7 @@ mod challenges;
 mod ordering;
 mod rotation;
 mod state;
+mod virtual_balances;
 mod wire;
 
 const EPOCH: u64 = 7;
@@ -215,7 +216,6 @@ async fn fixture(
     )
     .unwrap()
     .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-    .await
     .unwrap();
     let mut acks = Vec::new();
     let mut terminals = Vec::new();
@@ -360,7 +360,7 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
                     &fixture.context,
                     &close.header,
                     &close.roots,
-                    &close.amounts,
+                    close.withdrawal_total,
                     &Challenge::HigherAckDebit {
                         ack: Box::new(AckWitness::from_ack(ack)),
                         payer: Box::new(payer)
@@ -384,7 +384,6 @@ fn zero_net_activity_and_empty_epochs_append_canonical_batches() {
         )
         .unwrap()
         .bind::<Sha256, _, _>(&state, &fixture.deposits, &fixture.withdrawals)
-        .await
         .unwrap();
         let empty = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
@@ -600,7 +599,6 @@ mod conformance {
                 )
                 .unwrap()
                 .bind::<Sha256, _, _>(&fixture.state, &deposits, &withdrawals)
-                .await
                 .unwrap();
                 let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                     &fixture.state,

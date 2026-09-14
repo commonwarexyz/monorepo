@@ -5,7 +5,7 @@
 
 use crate::bajillion::{
     challenge::{self, AccountLookup, ChangeAbsence, ChangeOpening, HigherEntryLookup},
-    transition::{ChangeParts, Close, ExternalPayoutClaim, TransitionError, WithdrawalClaim},
+    transition::{ChangeParts, Close, TransitionError, WithdrawalClaim},
 };
 use alloc::boxed::Box;
 use commonware_cryptography::{Digest, Hasher, PublicKey};
@@ -100,15 +100,6 @@ impl<'a, P: PublicKey, D: Digest> Index<'a, P, D> {
     ) -> Result<WithdrawalClaim<D>, ServeError> {
         let claim = self.close.withdrawal_claim(account)?;
         claim.verify::<H>(&self.close.roots.withdrawal_outputs)?;
-        Ok(claim)
-    }
-    /// Opens a positive external payout.
-    pub fn external_payout_claim<H: Hasher<Digest = D>>(
-        &self,
-        account: &P,
-    ) -> Result<ExternalPayoutClaim<P, D>, ServeError> {
-        let claim = self.close.external_payout_claim(account)?;
-        claim.verify::<H>(&self.close.roots.change)?;
         Ok(claim)
     }
 }

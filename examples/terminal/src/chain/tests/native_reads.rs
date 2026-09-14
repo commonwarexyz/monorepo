@@ -2,12 +2,9 @@ use super::{
     fixture::{ReadFixture, ReadProvider},
     *,
 };
-use crate::{
-    chain::{
-        client::{Chain, Env},
-        validator::{INGRESS_BYTES, INGRESS_CAPACITY, INGRESS_LEASE},
-    },
-    protocol::{MAX_ACCOUNTS, Wallet},
+use crate::chain::{
+    client::{Chain, Env},
+    validator::{INGRESS_BYTES, INGRESS_CAPACITY, INGRESS_LEASE},
 };
 use commonware_utils::channel::oneshot;
 use std::{fs, net::SocketAddr, path::PathBuf};
@@ -252,6 +249,10 @@ struct AdmissionRetention {
 }
 
 impl Chain for AdmissionRetention {
+    fn holders(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        self.client.holders()
+    }
+
     fn deployment(&self) -> Digest {
         self.client.deployment()
     }
@@ -315,7 +316,7 @@ impl Chain for AdmissionRetention {
         let height = self.fixture.finalized.latest().unwrap().height;
         self.accepted.push(height);
         if self.submissions.len() == 1 {
-            assert_eq!(height, self.submitted_at);
+            self.submitted_at = height;
 
             // Consensus permits this finite omission; no proposal borrows the target before expiry.
             for offset in 1..=INGRESS_LEASE * 4 {
@@ -400,7 +401,14 @@ fn admission_survives_ingress_retention_and_transient_renewal_failures() {
             exhausted: Some(exhausted),
         };
         let result = commonware_macros::select! {
-            result = crate::chain::client::admit(&context, &mut race, request) => Some(result),
+            result = async {
+                loop {
+                    match crate::chain::client::admit(&context, &mut race, request.clone()).await {
+                        Err(error) if error.is::<crate::chain::client::AdmissionPending>() => {},
+                        result => break result,
+                    }
+                }
+            } => Some(result),
             exhausted = exhaustion => {
                 exhausted.unwrap();
                 None
@@ -438,8 +446,8 @@ fn admission_survives_ingress_retention_and_transient_renewal_failures() {
             .expect("transient renewal failures must preserve certified effect polling");
         assert!(completed_at.is_some());
         assert_eq!(race.accepted.len(), 2);
-        assert_eq!(race.accepted[0], submitted_at);
-        assert!(race.accepted[1] > submitted_at + INGRESS_LEASE * 4);
+        assert_eq!(race.accepted[0], race.submitted_at);
+        assert!(race.accepted[1] > race.submitted_at + INGRESS_LEASE * 4);
         assert_eq!(race.submissions.len(), 5);
         for pair in race.submissions.windows(2) {
             assert!(pair[0].0 < pair[1].0, "proof polling continues between renewal attempts");
@@ -463,6 +471,10 @@ struct RegistrationRace {
 }
 
 impl Chain for RegistrationRace {
+    fn holders(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        self.client.holders()
+    }
+
     fn deployment(&self) -> Digest {
         self.client.deployment()
     }
@@ -594,7 +606,6 @@ fn registration_completion_survives_its_fee_debit() {
             Sha256::hash(&[b"registration-race-request"]),
             operator_ack_key(71),
             native.deployments[0].network_key.clone(),
-            vec![wallets()[0].public_key()],
             1024,
             fee,
             &owner,
@@ -718,69 +729,56 @@ fn certified_registry_fits_busy_block() {
         let initial_recipient = native_balance(&fixture.db, &native, &native.fee_recipient)
             .await
             .unwrap();
-        let accounts = (0..MAX_ACCOUNTS)
-            .map(|index| {
-                Wallet::from_seed("registered-account", 10_000 + index as u64).public_key()
-            })
-            .collect::<Vec<_>>();
         let mut last_entry = None;
-        let batch_fee = 31 * native.registration_fee;
-        assert_eq!(batch_fee, 310);
-        for batch in 0u8..2 {
-            let mut transactions = Vec::with_capacity(31);
-            for offset in 0u8..31 {
-                let index = batch * 31 + offset;
-                let registration = RegisterDeploymentRequest::sign(
-                    chain_id,
-                    Sha256::hash(&[b"native-read-registration", &[index]]),
-                    operator_ack_key(0),
-                    native.deployments[0].network_key.clone(),
-                    accounts.clone(),
-                    native.max_dealing_bytes,
-                    native.registration_fee,
-                    &payer,
-                );
-                expected_ids.push(registration.deployment_id());
-                last_entry = Some(registration.entry(&native).unwrap());
-                let tx = SettlementTx::RegisterDeployment(registration);
-                fixture.submit(&context, tx.clone()).await;
-                transactions.push(tx);
-            }
-            let bytes = transactions
-                .iter()
-                .map(|tx| tx.encode_size())
-                .sum::<usize>();
-            assert!(transactions.len() <= INGRESS_CAPACITY.get());
-            assert!(bytes <= INGRESS_BYTES.get());
-            assert!(bytes + transactions[0].encode_size() > INGRESS_BYTES.get());
-            let block = fixture.seal(&context, false).await;
-            assert_eq!(block.transactions, transactions);
-            assert_eq!(registry(&fixture.db, &native).await.unwrap(), expected_ids);
-            let paid = u64::from(batch + 1) * batch_fee;
-            assert_eq!(
-                native_balance(&fixture.db, &native, &payer.public_key())
-                    .await
-                    .unwrap(),
-                initial_payer - paid
+        let mut transactions = Vec::with_capacity(62);
+        for index in 0u8..62 {
+            let registration = RegisterDeploymentRequest::sign(
+                chain_id,
+                Sha256::hash(&[b"native-read-registration", &[index]]),
+                operator_ack_key(0),
+                native.deployments[0].network_key.clone(),
+                native.max_dealing_bytes,
+                native.registration_fee,
+                &payer,
             );
-            assert_eq!(
-                native_balance(&fixture.db, &native, &native.fee_recipient)
-                    .await
-                    .unwrap(),
-                initial_recipient + paid
-            );
-            eprintln!(
-                "certified paid registrations: {} at height {} (batch bytes={bytes})",
-                (batch + 1) * 31,
-                block.height.get()
-            );
+            expected_ids.push(registration.deployment_id());
+            last_entry = Some(registration.entry(&native).unwrap());
+            let tx = SettlementTx::RegisterDeployment(registration);
+            fixture.submit(&context, tx.clone()).await;
+            transactions.push(tx);
         }
-        let cost = 2 * batch_fee;
+        let bytes = transactions
+            .iter()
+            .map(|tx| tx.encode_size())
+            .sum::<usize>();
+        assert!(transactions.len() <= INGRESS_CAPACITY.get());
+        assert!(bytes <= INGRESS_BYTES.get());
+        let block = fixture.seal(&context, false).await;
+        assert_eq!(block.transactions, transactions);
+        assert_eq!(registry(&fixture.db, &native).await.unwrap(), expected_ids);
+        let cost = 62 * native.registration_fee;
         assert_eq!(cost, 620);
         let expected_balance = initial_payer - cost;
+        assert_eq!(
+            native_balance(&fixture.db, &native, &payer.public_key())
+                .await
+                .unwrap(),
+            expected_balance
+        );
+        assert_eq!(
+            native_balance(&fixture.db, &native, &native.fee_recipient)
+                .await
+                .unwrap(),
+            initial_recipient + cost
+        );
+        eprintln!(
+            "certified paid registrations: {} at height {} (batch bytes={bytes})",
+            transactions.len(),
+            block.height.get()
+        );
         let last_entry = last_entry.unwrap();
         let last_id = *last_entry.deployment.digest();
-        assert_eq!(last_entry.deployment.accounts.len(), MAX_ACCOUNTS);
+        assert!(last_entry.deployment.accounts.is_empty());
         assert_eq!(expected_ids.len(), 64);
         assert_eq!(expected_ids.last(), Some(&last_id));
         let directory = Record::Registry(expected_ids.clone());

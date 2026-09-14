@@ -1,5 +1,29 @@
 use super::*;
+use crate::bajillion::transition::prepare_dealing;
 use commonware_codec::{FixedSize as _, Read as _, ReadExt as _, varint::UInt};
+use commonware_parallel::Rayon;
+use std::sync::OnceLock;
+
+fn decode_with_each_strategy(
+    wire: Bytes,
+    context: &CloseContext<VerifyingKey, ShaDigest>,
+) -> Result<posted::Dealing<VerifyingKey>, commonware_codec::Error> {
+    static STRATEGY: OnceLock<Rayon> = OnceLock::new();
+    let parallel = STRATEGY.get_or_init(|| Rayon::new(NZUsize!(4)).unwrap());
+    let serial = posted::decode(wire.clone(), context);
+    let concurrent = posted::decode_with_strategy(wire, context, parallel);
+    assert_eq!(serial.is_ok(), concurrent.is_ok());
+    if let (Ok(serial), Ok(concurrent)) = (&serial, &concurrent) {
+        assert_eq!(serial.aggregate, concurrent.aggregate);
+        assert_eq!(serial.rows.len(), concurrent.rows.len());
+        for (serial, concurrent) in serial.rows.iter().zip(&concurrent.rows) {
+            assert_eq!(serial.account, concurrent.account);
+            assert_eq!(serial.outgoing, concurrent.outgoing);
+            assert_eq!(serial.vector, concurrent.vector);
+        }
+    }
+    concurrent
+}
 
 struct Offsets {
     accounts: Vec<usize>,
@@ -9,16 +33,137 @@ struct Offsets {
     aggregate: usize,
 }
 
+#[test]
+fn empty_dealing_contains_only_activity_and_operator_acceptance() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let fixture = fixture(runtime, 4, 0, 4, 1).await;
+        assert_eq!(fixture.prepared.encoded().as_ref(), &[0, 0]);
+    });
+}
+
+#[test]
+fn validators_derive_the_commitment_from_their_registered_predecessor() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let fixture = fixture(runtime.child("fixture"), 4, 4, 2, 1).await;
+        let dealing = prepare_dealing::<Sha256, _, _>(
+            fixture.context.epoch_context(),
+            &fixture.deposits,
+            &fixture.withdrawals,
+            fixture.terminals.clone(),
+        )
+        .unwrap();
+        assert_eq!(dealing.encoded(), fixture.prepared.encoded());
+
+        let balances = fixture
+            .accounts
+            .iter()
+            .enumerate()
+            .map(|(index, (key, _))| {
+                let balance = match index {
+                    0 => OPENING_BALANCE + 1,
+                    1 => OPENING_BALANCE - 1,
+                    _ => OPENING_BALANCE,
+                };
+                (key.clone(), balance)
+            })
+            .collect();
+        let state = new_state(runtime, "other-predecessor", balances).await;
+        let context = fixture
+            .context
+            .epoch_context()
+            .clone()
+            .bind::<Sha256, _, _>(&state, &fixture.deposits, &fixture.withdrawals)
+            .unwrap();
+        let original = state.root();
+        let candidate = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+            &state,
+            &context,
+            &fixture.operator_bls,
+            &fixture.deposits,
+            &fixture.withdrawals,
+            dealing,
+            &mut TestRng::new(5),
+            &Sequential,
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.root(), original);
+        assert_ne!(
+            candidate.close().roots.successor,
+            fixture.prepared.close().roots.successor
+        );
+        assert_ne!(candidate.close().header, fixture.prepared.close().header);
+        assert_eq!(
+            candidate.close().roots.change,
+            fixture.prepared.close().roots.change
+        );
+        assert!(candidate.close().header.verify::<Sha256, VerifyingKey>(
+            &context,
+            &candidate.close().roots,
+            candidate.close().withdrawal_total,
+        ));
+    });
+}
+
+#[test]
+fn preparing_dealing_enforces_the_sender_entry_limit() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let fixture = fixture(runtime, 4, 1, 2, 2).await;
+        for limit in [1, 2] {
+            let context = EpochContext::new::<Sha256>(
+                *fixture.context.deployment(),
+                EPOCH,
+                fixture.operator.public_key(),
+                &fixture.deposits,
+                &fixture.withdrawals,
+                fixture.state.liability(),
+                98,
+                99,
+                CloseLimits::new(4, 4, 0, limit, 4, 100, 0, 0),
+                *fixture.context.committee(),
+            )
+            .unwrap();
+            let mut terminal = fixture.terminals[0].clone();
+            let body = VectorSendBody::new(
+                context.payment(),
+                fixture.accounts[0].0.clone(),
+                0,
+                2,
+                terminal.vector.root::<Sha256, ShaDigest>().unwrap(),
+            );
+            let ack =
+                VectorAck::sign_by_authorities(body, &fixture.accounts[0].1, &fixture.operator);
+            terminal.authorization = SendAuthorization::from_raw_unchecked(
+                ack.body().clone(),
+                ack.payer_signature().clone(),
+            );
+            terminal.operator_signature = bls_ack(&fixture.operator_bls_private, ack.body());
+            let result = prepare_dealing::<Sha256, _, _>(
+                &context,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                vec![terminal],
+            );
+            if limit == 1 {
+                assert!(matches!(result, Err(CloseError::CloseLimit)));
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    });
+}
+
 fn offsets(wire: &Bytes) -> Offsets {
     let mut reader = wire.clone();
     let position = |reader: &Bytes| wire.len() - reader.len();
-    crate::bajillion::transition::Header::<ShaDigest>::read(&mut reader).unwrap();
-    let count = usize::read_cfg(&mut reader, &(0..=100).into()).unwrap();
+    let count = usize::read_cfg(&mut reader, &(0..=wire.len()).into()).unwrap();
     let mut accounts = Vec::new();
     let mut outgoing = Vec::new();
     for _ in 0..count {
         accounts.push(position(&reader));
         VerifyingKey::read(&mut reader).unwrap();
+    }
+    for _ in 0..count {
         outgoing.push(position(&reader));
         if u8::read(&mut reader).unwrap() == 1 {
             UInt::<u64>::read(&mut reader).unwrap();
@@ -50,6 +195,49 @@ fn offsets(wire: &Bytes) -> Offsets {
         entries,
         aggregate: position(&reader),
     }
+}
+
+#[test]
+fn keyed_dealing_validates_unsigned_account_keys() {
+    deterministic::Runner::default().start(|runtime| async move {
+        let fixture = fixture(runtime, 4, 4, 2, 1).await;
+        let encode = |key: &[u8]| {
+            let mut wire = Vec::new();
+            wire.push(1);
+            wire.extend_from_slice(key);
+            wire.extend_from_slice(&[0, 0, 0]);
+            Bytes::from(wire)
+        };
+        assert!(
+            decode_with_each_strategy(encode(fixture.accounts[0].0.as_ref()), &fixture.context)
+                .is_ok()
+        );
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        let mut negative_zero = identity;
+        negative_zero[31] = 0x80;
+        let mut order_four = [0; 32];
+        order_four[31] = 0x80;
+        let mut order_two = [0xff; 32];
+        order_two[0] = 0xec;
+        order_two[31] = 0x7f;
+        let mut noncanonical = [0xff; 32];
+        noncanonical[0] = 0xed;
+        noncanonical[31] = 0x7f;
+        for key in [
+            identity,
+            negative_zero,
+            [0; 32],
+            order_four,
+            order_two,
+            noncanonical,
+        ] {
+            assert!(
+                decode_with_each_strategy(encode(&key), &fixture.context).is_err(),
+                "unsigned key {key:?}"
+            );
+        }
+    });
 }
 
 #[test]
@@ -94,7 +282,7 @@ fn keyed_dealing_rejects_noncanonical_keys_indices_tags_and_infeasible_edges() {
         cases.push(("missing aggregate", missing));
         for (name, wire) in cases {
             assert!(
-                posted::decode::<VerifyingKey, ShaDigest>(wire.into(), &fixture.context).is_err(),
+                decode_with_each_strategy(wire.into(), &fixture.context).is_err(),
                 "{name}"
             );
         }
@@ -121,22 +309,61 @@ fn keyed_dealing_binds_resource_limits_before_allocating_rows_or_edges() {
             )
             .unwrap()
             .bind::<Sha256, _, _>(&fixture.state, &fixture.deposits, &fixture.withdrawals)
-            .await
             .unwrap();
             assert!(
-                posted::decode::<VerifyingKey, ShaDigest>(
-                    fixture.prepared.encoded().clone(),
-                    &context
-                )
-                .is_err()
+                decode_with_each_strategy(fixture.prepared.encoded().clone(), &context).is_err()
             );
         }
         // The claimed row count cannot exceed what the remaining bytes can encode, even
         // when the authenticated context permits the protocol maximum.
-        let mut huge = fixture.prepared.encoded()[..32].to_vec();
+        let mut huge = Vec::new();
         huge.extend_from_slice(&[0xff; 10]);
-        assert!(posted::decode::<VerifyingKey, ShaDigest>(huge.into(), &fixture.context).is_err());
+        assert!(decode_with_each_strategy(huge.into(), &fixture.context).is_err());
     });
+}
+
+#[test]
+fn keyed_dealing_strategies_preserve_alignment_and_authenticated_state() {
+    for (senders, recipients, degree) in [(0, 8, 1), (96, 129, 4), (129, 64, 2)] {
+        deterministic::Runner::default().start(|runtime| async move {
+            let fixture = fixture(runtime, 129, senders, recipients, degree).await;
+            let wire = fixture.prepared.encoded();
+            let dealing = decode_with_each_strategy(wire.clone(), &fixture.context).unwrap();
+            let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                &fixture.state,
+                &fixture.context,
+                &fixture.operator_bls,
+                &fixture.deposits,
+                &fixture.withdrawals,
+                dealing,
+                &mut TestRng::new(5),
+                &Sequential,
+            )
+            .await
+            .unwrap();
+            assert_eq!(prepared.close().header, fixture.prepared.close().header);
+            assert_eq!(prepared.close().roots, fixture.prepared.close().roots);
+            assert_eq!(
+                prepared.state().mutations(),
+                fixture.prepared.state().mutations()
+            );
+            let offsets = offsets(wire);
+            let cuts = [0, 1, wire.len() - 1].into_iter().chain(
+                [&offsets.accounts, &offsets.outgoing, &offsets.vectors]
+                    .into_iter()
+                    .flat_map(|positions| {
+                        [0, positions.len() / 2, positions.len().saturating_sub(1)]
+                            .into_iter()
+                            .filter_map(move |index| positions.get(index).copied())
+                    }),
+            );
+            for length in cuts {
+                assert!(decode_with_each_strategy(wire.slice(..length), &fixture.context).is_err());
+            }
+            let (state, close) = prepared.apply(fixture.state).await.unwrap();
+            assert_eq!(state.root(), close.roots.successor);
+        });
+    }
 }
 
 #[test]
@@ -147,7 +374,7 @@ fn headers_bind_every_root_amount_and_registered_context() {
         assert!(close.header.verify::<Sha256, VerifyingKey>(
             &fixture.context,
             &close.roots,
-            &close.amounts
+            close.withdrawal_total
         ));
         let foreign = Sha256::hash(&[b"changed-root"]);
         for which in 0..3 {
@@ -160,22 +387,14 @@ fn headers_bind_every_root_amount_and_registered_context() {
             assert!(!close.header.verify::<Sha256, VerifyingKey>(
                 &fixture.context,
                 &roots,
-                &close.amounts
+                close.withdrawal_total
             ));
         }
-        for which in 0..2 {
-            let mut amounts = close.amounts;
-            if which == 0 {
-                amounts.withdrawal += 1;
-            } else {
-                amounts.payout += 1;
-            }
-            assert!(!close.header.verify::<Sha256, VerifyingKey>(
-                &fixture.context,
-                &close.roots,
-                &amounts
-            ));
-        }
+        assert!(!close.header.verify::<Sha256, VerifyingKey>(
+            &fixture.context,
+            &close.roots,
+            close.withdrawal_total + 1
+        ));
         let next = EpochContext::new::<Sha256>(
             *fixture.context.deployment(),
             EPOCH + 1,
@@ -190,13 +409,12 @@ fn headers_bind_every_root_amount_and_registered_context() {
         )
         .unwrap()
         .bind::<Sha256, _, _>(&fixture.state, &fixture.deposits, &fixture.withdrawals)
-        .await
         .unwrap();
-        assert!(
-            !close
-                .header
-                .verify::<Sha256, VerifyingKey>(&next, &close.roots, &close.amounts)
-        );
+        assert!(!close.header.verify::<Sha256, VerifyingKey>(
+            &next,
+            &close.roots,
+            close.withdrawal_total
+        ));
     });
 }
 
@@ -212,7 +430,7 @@ fn retained_evidence_round_trips_and_rejects_corruption_or_foreign_headers() {
         assert_eq!(restored.encoded(), close.encoded());
         assert_eq!(restored.header, close.header);
         assert_eq!(restored.roots, close.roots);
-        assert_eq!(restored.amounts, close.amounts);
+        assert_eq!(restored.withdrawal_total, close.withdrawal_total);
         let original = ChallengeIndex::new::<Sha256>(&fixture.context, close).unwrap();
         let reopened = ChallengeIndex::new::<Sha256>(&fixture.context, &restored).unwrap();
         for (account, _) in &fixture.accounts {
@@ -254,12 +472,10 @@ fn retained_evidence_round_trips_and_rejects_corruption_or_foreign_headers() {
             )
             .is_err()
         );
-        let mut amounts = close.amounts;
-        amounts.payout += 1;
         let wrong = crate::bajillion::transition::Header::new::<Sha256, VerifyingKey>(
             &fixture.context,
             &close.roots,
-            &amounts,
+            close.withdrawal_total + 1,
         );
         assert!(
             Close::<VerifyingKey, ShaDigest>::decode_evidence::<Sha256>(
@@ -398,7 +614,7 @@ fn decoded_context_cannot_change_limits_or_deadlines_behind_the_signed_anchor() 
             assert!(!close.header.verify::<Sha256, VerifyingKey>(
                 &context,
                 &close.roots,
-                &close.amounts
+                close.withdrawal_total
             ));
             let dealing = posted::decode(fixture.prepared.encoded().clone(), &context).unwrap();
             assert!(

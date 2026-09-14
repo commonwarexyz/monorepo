@@ -2,16 +2,16 @@
 //! `validator` runs one validator with the certified query server.
 
 use clap::{Parser, Subcommand};
-use commonware_runtime::{
-    Runner as _, Supervisor as _,
-    tokio::{self, telemetry::Logs},
-};
+use commonware_runtime::{Runner as _, tokio};
 use commonware_terminal::chain_main::{
     OperatorSetup, RegisterOperator, Setup, Validator, prepare_operator, register_operator,
     run_setup, run_validator,
 };
 use std::path::PathBuf;
 use tracing::Level;
+use tracing_subscriber::{
+    Layer as _, filter::filter_fn, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+};
 
 #[derive(Parser)]
 struct Cli {
@@ -61,15 +61,17 @@ fn main() {
         .with_storage_directory(runtime_dir);
     let runner = tokio::Runner::new(config);
     runner.start(|context| async move {
-        tokio::telemetry::init(
-            context.child("telemetry"),
-            Logs {
-                level: cli.log_level,
-                json: false,
-            },
-            None,
-            None,
-        );
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .compact()
+                    .without_time()
+                    .with_target(false)
+                    .with_filter(filter_fn(move |metadata| {
+                        metadata.is_event() && *metadata.level() <= cli.log_level
+                    })),
+            )
+            .init();
 
         match command {
             Command::Setup(_) | Command::Operator(_) => unreachable!("synchronous setup completed"),

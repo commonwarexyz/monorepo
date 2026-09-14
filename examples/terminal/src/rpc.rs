@@ -2,12 +2,10 @@
 
 use anyhow::{Context as _, bail};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{
-    BufsMut, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write,
-};
+use commonware_codec::{Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 #[cfg(test)]
-use commonware_runtime::{Clock, Listener};
-use commonware_runtime::{Network, Sink, Stream};
+use commonware_runtime::Listener;
+use commonware_runtime::{Clock, Network, Sink, Stream};
 use commonware_stream::{
     encrypted::Error,
     utils::codec::{recv_frame, send_frame},
@@ -21,6 +19,7 @@ const MAX_REQUEST_BODY_SIZE: usize = MAX_REQUEST_FRAME_SIZE as usize - 16;
 
 /// Pause before retrying a failed accept so a persistently failing listener cannot spin hot.
 pub(crate) const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum response body/error accepted by the codec.
 ///
@@ -63,20 +62,11 @@ impl Write for Request {
         self.method.write(buf);
         self.body.write(buf);
     }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.method.write_bufs(buf);
-        self.body.write_bufs(buf);
-    }
 }
 
 impl EncodeSize for Request {
     fn encode_size(&self) -> usize {
         self.method.encode_size() + self.body.encode_size()
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        self.method.encode_size() + self.body.encode_inline_size()
     }
 }
 
@@ -111,19 +101,6 @@ impl Write for Response {
             }
         }
     }
-
-    fn write_bufs(&self, buf: &mut impl BufsMut) {
-        match self {
-            Self::Success { body } => {
-                0u8.write_bufs(buf);
-                body.write_bufs(buf);
-            }
-            Self::Error { error } => {
-                1u8.write_bufs(buf);
-                error.write_bufs(buf);
-            }
-        }
-    }
 }
 
 impl EncodeSize for Response {
@@ -131,13 +108,6 @@ impl EncodeSize for Response {
         1 + match self {
             Self::Success { body } => body.encode_size(),
             Self::Error { error } => error.encode_size(),
-        }
-    }
-
-    fn encode_inline_size(&self) -> usize {
-        1 + match self {
-            Self::Success { body } => body.encode_inline_size(),
-            Self::Error { error } => error.encode_inline_size(),
         }
     }
 }
@@ -195,18 +165,23 @@ pub(crate) async fn recv_response<T: Stream>(stream: &mut T) -> Result<Response,
 }
 
 /// Executes one request on a fresh connection.
-pub(crate) async fn call<E: Network>(
+pub(crate) async fn call<E: Network + Clock>(
     network: &E,
     address: std::net::SocketAddr,
     request: &Request,
 ) -> anyhow::Result<Response> {
-    let (mut sink, mut stream) = network.dial(address).await?;
-    send_request(&mut sink, request).await?;
-    recv_response(&mut stream).await.map_err(Into::into)
+    commonware_macros::select! {
+        result = async {
+            let (mut sink, mut stream) = network.dial(address).await?;
+            send_request(&mut sink, request).await?;
+            recv_response(&mut stream).await.map_err(Into::into)
+        } => result,
+        _ = network.sleep(REQUEST_TIMEOUT) => bail!("request timed out"),
+    }
 }
 
 /// Executes one request against the named role and unwraps its response envelope.
-pub(crate) async fn invoke<E: Network>(
+pub(crate) async fn invoke<E: Network + Clock>(
     network: &E,
     address: std::net::SocketAddr,
     role: &'static str,
