@@ -170,6 +170,15 @@ As the chain produces more data, each replica has more to receive, store, and de
 
 We use [tracer](https://github.com/clabby/tracer) to study these tradeoffs across deployed clusters. It aggregates traces from every replica so we can compare the same consensus round on a shared timeline, see which replicas lag, and identify the phases responsible. Diffing round traces before and after a change shows whether speeding up one operation made another wait longer.
 
+```{=html}
+<figure aria-describedby="tracer-caption">
+  <img src="/imgs/tracer.png" />
+  <figcaption id="tracer-caption">
+    Figure 8. A visualized aggregation of consensus round traces across several instances using the tracer tool.
+  </figcaption>
+</figure>
+```
+
 Traces include time spent waiting for disk, so we use [samply](https://github.com/mstange/samply) alongside them to find where the CPU is busy. Its profiles show time spent decoding records, copying buffers, or maintaining indexes. Combined with resource metrics, these can lead us into the codec, archive, and runtime primitives beneath marshal, where improvements benefit other components too.
 
 Multimmit's Marshal gives us a demanding place to test the primitives we build at Commonware. We want the next application to benefit from this work without its developers having to repeat it.

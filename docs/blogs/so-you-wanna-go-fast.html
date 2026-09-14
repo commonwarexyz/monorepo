@@ -346,6 +346,12 @@ Clabby</a></div>
         the phases responsible. Diffing round traces before and after a
         change shows whether speeding up one operation made another wait
         longer.</p>
+        <figure aria-describedby="tracer-caption">
+          <img src="/imgs/tracer.png" />
+          <figcaption id="tracer-caption">
+            Figure 8. A visualized aggregation of consensus round traces across several instances using the tracer tool.
+          </figcaption>
+        </figure>
         <p>Traces include time spent waiting for disk, so we use <a
         href="https://github.com/mstange/samply">samply</a> alongside
         them to find where the CPU is busy. Its profiles show time spent
