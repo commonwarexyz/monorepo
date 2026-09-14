@@ -1,5 +1,6 @@
 mod code;
 mod field;
+mod impl16;
 mod kernel;
 mod scheme;
 mod transform;
@@ -10,213 +11,231 @@ use code::Impl;
 use commonware_cryptography::{Hasher, transcript::Summary};
 use commonware_parallel::Strategy;
 use field::gf8::{GF8, GF8Vec};
+use impl16::Impl16;
 use kernel::{Kernel, WithKernel, with_kernel};
 pub use scheme::Error;
 use scheme::{CheckedShard, CheckingData, OcelotX, StrongShard, WeakShard};
 use std::{fmt, marker::PhantomData, ops::Range};
 
-/// Reed-Solomon coding over GF(2^8), with commitments using `H`.
-///
-/// Arithmetic kernels are selected internally for the current CPU.
-/// The encoder commits to all encoded shards before deriving 16 independent
-/// checksum projections with Fiat-Shamir. A strong shard carries the unencoded
-/// checksums; participants encode them locally and use the resulting checksum
-/// codeword alongside Merkle proofs to check forwarded shards.
-///
-/// Encoding and decoding process large shards in independent byte stripes
-/// using the supplied strategy. Checksums use tiles spanning shards and column
-/// ranges, including when checking a single shard. Encoding also parallelizes
-/// shard hashing through that strategy.
-///
-/// A successful shard check does not prove that the entire encoding is
-/// available. Availability is established only when decoding succeeds from
-/// enough checked shards, so this type does not implement `ValidatingScheme`.
-pub struct Ocelot8<H> {
-    _marker: PhantomData<H>,
+macro_rules! ocelot {
+    ($module:ident, $name:ident, $implementation:ident, $checksum_bytes:literal, $field:literal, $order:literal) => {
+        mod $module {
+            use super::*;
+
+            #[doc = concat!("Reed-Solomon coding over ", $field, ", with commitments using `H`.")]
+            ///
+            /// The original count plus the extra count rounded up to a power of two must
+            #[doc = concat!("not exceed ", $order, ".")]
+            ///
+            /// Arithmetic kernels are selected internally for the current CPU.
+            /// The encoder commits to all encoded shards before deriving 16 independent
+            /// checksum projections with Fiat-Shamir, each providing 8 bits of soundness.
+            /// A strong shard carries the unencoded checksums; participants encode
+            /// them locally and use the resulting checksum
+            /// codeword alongside Merkle proofs to check forwarded shards.
+            #[doc = concat!("Each original shard contributes ", stringify!($checksum_bytes), " bytes of checksums.")]
+            ///
+            /// Encoding and decoding process large shards in independent byte stripes
+            /// using the supplied strategy. Checksums use tiles spanning shards and column
+            /// ranges, including when checking a single shard. Encoding also parallelizes
+            /// shard hashing through that strategy.
+            ///
+            /// A successful shard check does not prove that the entire encoding is
+            /// available. Availability is established only when decoding succeeds from
+            /// enough checked shards, so this type does not implement `ValidatingScheme`.
+            pub struct $name<H> {
+                _marker: PhantomData<H>,
+            }
+
+            impl<H> Clone for $name<H> {
+                fn clone(&self) -> Self {
+                    *self
+                }
+            }
+
+            impl<H> Copy for $name<H> {}
+
+            impl<H> fmt::Debug for $name<H> {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.debug_struct(stringify!($name)).finish()
+                }
+            }
+
+            impl<H: Hasher> PhasedScheme for $name<H> {
+                type Commitment = Summary;
+                type StrongShard = StrongShard<H::Digest>;
+                type WeakShard = WeakShard<H::Digest>;
+                type CheckingData = CheckingData<H::Digest>;
+                type CheckedShard = CheckedShard;
+                type Error = Error;
+
+                fn encode(
+                    namespace: &[u8],
+                    config: &Config,
+                    data: impl Buf,
+                    strategy: &impl Strategy,
+                ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
+                    with_kernel(Encode::<H, _, _> {
+                        namespace,
+                        config,
+                        data,
+                        strategy,
+                        _marker: PhantomData,
+                    })
+                }
+
+                fn weaken(
+                    namespace: &[u8],
+                    config: &Config,
+                    commitment: &Self::Commitment,
+                    index: u16,
+                    shard: Self::StrongShard,
+                    strategy: &impl Strategy,
+                ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
+                    with_kernel(Weaken::<H, _> {
+                        namespace,
+                        config,
+                        commitment,
+                        index,
+                        shard,
+                        strategy,
+                    })
+                }
+
+                fn check(
+                    config: &Config,
+                    commitment: &Self::Commitment,
+                    checking_data: &Self::CheckingData,
+                    index: u16,
+                    weak_shard: Self::WeakShard,
+                    strategy: &impl Strategy,
+                ) -> Result<Self::CheckedShard, Self::Error> {
+                    with_kernel(Check::<H, _> {
+                        config,
+                        commitment,
+                        checking_data,
+                        index,
+                        weak_shard,
+                        strategy,
+                    })
+                }
+
+                fn decode<'a>(
+                    config: &Config,
+                    commitment: &Self::Commitment,
+                    checking_data: Self::CheckingData,
+                    shards: impl Iterator<Item = &'a Self::CheckedShard>,
+                    strategy: &impl Strategy,
+                ) -> Result<Vec<u8>, Self::Error> {
+                    with_kernel(Decode::<H, _, _> {
+                        config,
+                        commitment,
+                        checking_data,
+                        shards,
+                        strategy,
+                    })
+                }
+            }
+
+            struct Encode<'a, H, B, S> {
+                namespace: &'a [u8],
+                config: &'a Config,
+                data: B,
+                strategy: &'a S,
+                _marker: PhantomData<H>,
+            }
+
+            impl<H: Hasher, B: Buf, S: Strategy> WithKernel for Encode<'_, H, B, S> {
+                type Output = Result<(Summary, Vec<StrongShard<H::Digest>>), Error>;
+
+                fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).encode(
+                        self.namespace,
+                        self.config,
+                        self.data,
+                        self.strategy,
+                    )
+                }
+            }
+
+            struct Decode<'a, H: Hasher, T, S> {
+                config: &'a Config,
+                commitment: &'a Summary,
+                checking_data: CheckingData<H::Digest>,
+                shards: T,
+                strategy: &'a S,
+            }
+
+            impl<'a, H: Hasher, T: Iterator<Item = &'a CheckedShard>, S: Strategy> WithKernel
+                for Decode<'_, H, T, S>
+            {
+                type Output = Result<Vec<u8>, Error>;
+
+                fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).decode(
+                        self.config,
+                        self.commitment,
+                        self.checking_data,
+                        self.shards,
+                        self.strategy,
+                    )
+                }
+            }
+
+            struct Weaken<'a, H: Hasher, S> {
+                namespace: &'a [u8],
+                config: &'a Config,
+                commitment: &'a Summary,
+                index: u16,
+                shard: StrongShard<H::Digest>,
+                strategy: &'a S,
+            }
+
+            impl<H: Hasher, S: Strategy> WithKernel for Weaken<'_, H, S> {
+                type Output = Result<(CheckingData<H::Digest>, CheckedShard, WeakShard<H::Digest>), Error>;
+
+                fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).weaken(
+                        self.namespace,
+                        self.config,
+                        self.commitment,
+                        self.index,
+                        self.shard,
+                        self.strategy,
+                    )
+                }
+            }
+
+            struct Check<'a, H: Hasher, S> {
+                config: &'a Config,
+                commitment: &'a Summary,
+                checking_data: &'a CheckingData<H::Digest>,
+                index: u16,
+                weak_shard: WeakShard<H::Digest>,
+                strategy: &'a S,
+            }
+
+            impl<H: Hasher, S: Strategy> WithKernel for Check<'_, H, S> {
+                type Output = Result<CheckedShard, Error>;
+
+                fn call<K: Kernel>(self, kernel: K) -> Self::Output {
+                    OcelotX::<_, H, $checksum_bytes>::new($implementation::new(kernel)).check(
+                        self.config,
+                        self.commitment,
+                        self.checking_data,
+                        self.index,
+                        self.weak_shard,
+                        self.strategy,
+                    )
+                }
+            }
+        }
+        pub use $module::$name;
+    };
 }
 
-impl<H> Clone for Ocelot8<H> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<H> Copy for Ocelot8<H> {}
-
-impl<H> fmt::Debug for Ocelot8<H> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Ocelot8").finish()
-    }
-}
-
-impl<H: Hasher> PhasedScheme for Ocelot8<H> {
-    type Commitment = Summary;
-    type StrongShard = StrongShard<H::Digest>;
-    type WeakShard = WeakShard<H::Digest>;
-    type CheckingData = CheckingData<H::Digest>;
-    type CheckedShard = CheckedShard;
-    type Error = Error;
-
-    fn encode(
-        namespace: &[u8],
-        config: &Config,
-        data: impl Buf,
-        strategy: &impl Strategy,
-    ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
-        with_kernel(Encode::<H, _, _> {
-            namespace,
-            config,
-            data,
-            strategy,
-            _marker: PhantomData,
-        })
-    }
-
-    fn weaken(
-        namespace: &[u8],
-        config: &Config,
-        commitment: &Self::Commitment,
-        index: u16,
-        shard: Self::StrongShard,
-        strategy: &impl Strategy,
-    ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
-        with_kernel(Weaken::<H, _> {
-            namespace,
-            config,
-            commitment,
-            index,
-            shard,
-            strategy,
-        })
-    }
-
-    fn check(
-        config: &Config,
-        commitment: &Self::Commitment,
-        checking_data: &Self::CheckingData,
-        index: u16,
-        weak_shard: Self::WeakShard,
-        strategy: &impl Strategy,
-    ) -> Result<Self::CheckedShard, Self::Error> {
-        with_kernel(Check::<H, _> {
-            config,
-            commitment,
-            checking_data,
-            index,
-            weak_shard,
-            strategy,
-        })
-    }
-
-    fn decode<'a>(
-        config: &Config,
-        commitment: &Self::Commitment,
-        checking_data: Self::CheckingData,
-        shards: impl Iterator<Item = &'a Self::CheckedShard>,
-        strategy: &impl Strategy,
-    ) -> Result<Vec<u8>, Self::Error> {
-        with_kernel(Decode::<H, _, _> {
-            config,
-            commitment,
-            checking_data,
-            shards,
-            strategy,
-        })
-    }
-}
-
-struct Encode<'a, H, B, S> {
-    namespace: &'a [u8],
-    config: &'a Config,
-    data: B,
-    strategy: &'a S,
-    _marker: PhantomData<H>,
-}
-
-impl<H: Hasher, B: Buf, S: Strategy> WithKernel for Encode<'_, H, B, S> {
-    type Output = Result<(Summary, Vec<StrongShard<H::Digest>>), Error>;
-
-    fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).encode(
-            self.namespace,
-            self.config,
-            self.data,
-            self.strategy,
-        )
-    }
-}
-
-struct Decode<'a, H: Hasher, T, S> {
-    config: &'a Config,
-    commitment: &'a Summary,
-    checking_data: CheckingData<H::Digest>,
-    shards: T,
-    strategy: &'a S,
-}
-
-impl<'a, H: Hasher, T: Iterator<Item = &'a CheckedShard>, S: Strategy> WithKernel
-    for Decode<'_, H, T, S>
-{
-    type Output = Result<Vec<u8>, Error>;
-
-    fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).decode(
-            self.config,
-            self.commitment,
-            self.checking_data,
-            self.shards,
-            self.strategy,
-        )
-    }
-}
-
-struct Weaken<'a, H: Hasher, S> {
-    namespace: &'a [u8],
-    config: &'a Config,
-    commitment: &'a Summary,
-    index: u16,
-    shard: StrongShard<H::Digest>,
-    strategy: &'a S,
-}
-
-impl<H: Hasher, S: Strategy> WithKernel for Weaken<'_, H, S> {
-    type Output = Result<(CheckingData<H::Digest>, CheckedShard, WeakShard<H::Digest>), Error>;
-
-    fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).weaken(
-            self.namespace,
-            self.config,
-            self.commitment,
-            self.index,
-            self.shard,
-            self.strategy,
-        )
-    }
-}
-
-struct Check<'a, H: Hasher, S> {
-    config: &'a Config,
-    commitment: &'a Summary,
-    checking_data: &'a CheckingData<H::Digest>,
-    index: u16,
-    weak_shard: WeakShard<H::Digest>,
-    strategy: &'a S,
-}
-
-impl<H: Hasher, S: Strategy> WithKernel for Check<'_, H, S> {
-    type Output = Result<CheckedShard, Error>;
-
-    fn call<K: Kernel>(self, kernel: K) -> Self::Output {
-        OcelotX::<_, H, 16>::new(Impl8::new(kernel)).check(
-            self.config,
-            self.commitment,
-            self.checking_data,
-            self.index,
-            self.weak_shard,
-            self.strategy,
-        )
-    }
-}
+ocelot!(ocelot8, Ocelot8, Impl8, 16, "GF(2^8)", "256");
+ocelot!(ocelot16, Ocelot16, Impl16, 32, "GF(2^16)", "65,536");
 
 /// Ocelot's GF(2^8) arithmetic, using a concrete byte kernel.
 #[derive(Clone, Copy)]
@@ -285,6 +304,32 @@ impl<K: Kernel> Impl for Impl8<K> {
             self.add_into(y, x);
             self.mul_add(x, y, c);
         }
+    }
+
+    fn fft_butterfly_two_layers(
+        self,
+        quarters: [&mut [u8]; 4],
+        shard_len: usize,
+        coefficients: [GF8; 3],
+    ) {
+        self.kernel.run(ButterflyTwoLayers::<false> {
+            quarters,
+            shard_len,
+            coefficients,
+        });
+    }
+
+    fn ifft_butterfly_two_layers(
+        self,
+        quarters: [&mut [u8]; 4],
+        shard_len: usize,
+        coefficients: [GF8; 3],
+    ) {
+        self.kernel.run(ButterflyTwoLayers::<true> {
+            quarters,
+            shard_len,
+            coefficients,
+        });
     }
 
     fn checksum_range(
@@ -434,6 +479,163 @@ impl<const INVERSE: bool> Butterfly<'_, INVERSE> {
     }
 }
 
+struct ButterflyTwoLayers<'a, const INVERSE: bool> {
+    quarters: [&'a mut [u8]; 4],
+    shard_len: usize,
+    coefficients: [GF8; 3],
+}
+
+// K::LANES cannot be used as a const generic argument to as_chunks.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+impl<const INVERSE: bool> WithKernel for ButterflyTwoLayers<'_, INVERSE> {
+    type Output = ();
+
+    #[inline(always)]
+    fn call<K: Kernel>(self, kernel: K) {
+        let Self {
+            quarters,
+            shard_len,
+            coefficients,
+        } = self;
+        let [q0, q1, q2, q3] = quarters;
+        assert!(shard_len > 0, "shard length is zero");
+        assert_eq!(q0.len(), q1.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q2.len(), "quarter lengths differ");
+        assert_eq!(q0.len(), q3.len(), "quarter lengths differ");
+        assert!(q0.len().is_multiple_of(shard_len), "partial shard group");
+
+        let constants = coefficients.map(|c| kernel.splat(c.0));
+        let mut q0 = q0.chunks_exact_mut(K::LANES);
+        let mut q1 = q1.chunks_exact_mut(K::LANES);
+        let mut q2 = q2.chunks_exact_mut(K::LANES);
+        let mut q3 = q3.chunks_exact_mut(K::LANES);
+        for (((x0, x1), x2), x3) in q0
+            .by_ref()
+            .zip(q1.by_ref())
+            .zip(q2.by_ref())
+            .zip(q3.by_ref())
+        {
+            let values = [
+                kernel.load(x0),
+                kernel.load(x1),
+                kernel.load(x2),
+                kernel.load(x3),
+            ];
+            let values = Self::apply(kernel, values, coefficients, constants);
+            kernel.store(values[0], x0);
+            kernel.store(values[1], x1);
+            kernel.store(values[2], x2);
+            kernel.store(values[3], x3);
+        }
+
+        let [x0, x1, x2, x3] = [
+            q0.into_remainder(),
+            q1.into_remainder(),
+            q2.into_remainder(),
+            q3.into_remainder(),
+        ];
+        let partial = x0.len() / K::PARTIAL_GRANULARITY * K::PARTIAL_GRANULARITY;
+        if partial > 0 {
+            let values = [
+                kernel.load_partial(&x0[..partial]),
+                kernel.load_partial(&x1[..partial]),
+                kernel.load_partial(&x2[..partial]),
+                kernel.load_partial(&x3[..partial]),
+            ];
+            let values = Self::apply(kernel, values, coefficients, constants);
+            kernel.store_partial(values[0], &mut x0[..partial]);
+            kernel.store_partial(values[1], &mut x1[..partial]);
+            kernel.store_partial(values[2], &mut x2[..partial]);
+            kernel.store_partial(values[3], &mut x3[..partial]);
+        }
+        for i in partial..x0.len() {
+            let mut values = [GF8(x0[i]), GF8(x1[i]), GF8(x2[i]), GF8(x3[i])];
+            Self::apply_scalar(&mut values, coefficients);
+            x0[i] = values[0].0;
+            x1[i] = values[1].0;
+            x2[i] = values[2].0;
+            x3[i] = values[3].0;
+        }
+    }
+}
+
+impl<const INVERSE: bool> ButterflyTwoLayers<'_, INVERSE> {
+    #[inline(always)]
+    fn apply<K: Kernel>(
+        kernel: K,
+        mut values: [K::Vector; 4],
+        coefficients: [GF8; 3],
+        constants: [K::Constant; 3],
+    ) -> [K::Vector; 4] {
+        if INVERSE {
+            Self::apply_pair(kernel, &mut values, 0, 1, coefficients[0], constants[0]);
+            Self::apply_pair(kernel, &mut values, 2, 3, coefficients[1], constants[1]);
+            Self::apply_pair(kernel, &mut values, 0, 2, coefficients[2], constants[2]);
+            Self::apply_pair(kernel, &mut values, 1, 3, coefficients[2], constants[2]);
+        } else {
+            Self::apply_pair(kernel, &mut values, 0, 2, coefficients[2], constants[2]);
+            Self::apply_pair(kernel, &mut values, 1, 3, coefficients[2], constants[2]);
+            Self::apply_pair(kernel, &mut values, 0, 1, coefficients[0], constants[0]);
+            Self::apply_pair(kernel, &mut values, 2, 3, coefficients[1], constants[1]);
+        }
+        values
+    }
+
+    #[inline(always)]
+    fn apply_pair<K: Kernel>(
+        kernel: K,
+        values: &mut [K::Vector; 4],
+        x: usize,
+        y: usize,
+        c: GF8,
+        constant: K::Constant,
+    ) {
+        let mut a = values[x];
+        let mut b = values[y];
+        if INVERSE {
+            b = kernel.xor(b, a);
+            if c != GF8(0) {
+                a = kernel.xor(a, kernel.gf8_mul_constant(b, constant));
+            }
+        } else {
+            if c != GF8(0) {
+                a = kernel.xor(a, kernel.gf8_mul_constant(b, constant));
+            }
+            b = kernel.xor(b, a);
+        }
+        values[x] = a;
+        values[y] = b;
+    }
+
+    #[inline(always)]
+    fn apply_scalar(values: &mut [GF8; 4], coefficients: [GF8; 3]) {
+        let apply_pair = |values: &mut [GF8; 4], x: usize, y: usize, c: GF8| {
+            let mut a = values[x];
+            let mut b = values[y];
+            if INVERSE {
+                b += &a;
+                a += &(b * c);
+            } else {
+                a += &(b * c);
+                b += &a;
+            }
+            values[x] = a;
+            values[y] = b;
+        };
+        if INVERSE {
+            apply_pair(values, 0, 1, coefficients[0]);
+            apply_pair(values, 2, 3, coefficients[1]);
+            apply_pair(values, 0, 2, coefficients[2]);
+            apply_pair(values, 1, 3, coefficients[2]);
+        } else {
+            apply_pair(values, 0, 2, coefficients[2]);
+            apply_pair(values, 1, 3, coefficients[2]);
+            apply_pair(values, 0, 1, coefficients[0]);
+            apply_pair(values, 2, 3, coefficients[1]);
+        }
+    }
+}
+
 struct ChecksumRange<'a> {
     shard: &'a [u8],
     coefficients: &'a [u8],
@@ -549,6 +751,67 @@ mod tests {
                     );
                     assert_eq!(actual_x, x);
                     assert_eq!(actual_y, y);
+                }
+            }
+
+            for shard_len in [1, 3, K::LANES, K::LANES + 1, 2 * K::LANES + 3] {
+                let shard_count = 3;
+                let len = shard_len * shard_count;
+                let mut original: [Vec<u8>; 4] = std::array::from_fn(|_| vec![0; len + 2]);
+                for quarter in &mut original {
+                    rng.fill_bytes(quarter);
+                }
+                for coefficients in [[GF8(0), GF8(1), GF8(0)], [GF8(0x53), GF8(0xff), GF8(0x80)]] {
+                    let mut actual = original.clone();
+                    let mut expected = original.clone();
+                    for i in 1..=len {
+                        let mut values = [
+                            GF8(expected[0][i]),
+                            GF8(expected[1][i]),
+                            GF8(expected[2][i]),
+                            GF8(expected[3][i]),
+                        ];
+                        let [c0, c1, c2] = coefficients;
+                        let apply = |values: &mut [GF8; 4], x: usize, y: usize, c: GF8| {
+                            let mut a = values[x];
+                            let mut b = values[y];
+                            a += &(b * c);
+                            b += &a;
+                            values[x] = a;
+                            values[y] = b;
+                        };
+                        apply(&mut values, 0, 2, c2);
+                        apply(&mut values, 1, 3, c2);
+                        apply(&mut values, 0, 1, c0);
+                        apply(&mut values, 2, 3, c1);
+                        for (quarter, value) in expected.iter_mut().zip(values) {
+                            quarter[i] = value.0;
+                        }
+                    }
+                    let [q0, q1, q2, q3] = &mut actual;
+                    imp.fft_butterfly_two_layers(
+                        [
+                            &mut q0[1..=len],
+                            &mut q1[1..=len],
+                            &mut q2[1..=len],
+                            &mut q3[1..=len],
+                        ],
+                        shard_len,
+                        coefficients,
+                    );
+                    assert_eq!(actual, expected);
+                    let [q0, q1, q2, q3] = &mut actual;
+                    imp.ifft_butterfly_two_layers(
+                        [
+                            &mut q0[1..=len],
+                            &mut q1[1..=len],
+                            &mut q2[1..=len],
+                            &mut q3[1..=len],
+                        ],
+                        shard_len,
+                        coefficients,
+                    );
+                    assert_eq!(actual, original);
                 }
             }
         }
