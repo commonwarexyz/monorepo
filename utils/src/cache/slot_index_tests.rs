@@ -230,6 +230,20 @@ impl Drop for OwnedValue {
 }
 
 #[test]
+fn clock_eviction_does_not_clone_keys() {
+    let counts = Rc::new(Counts::default());
+    let mut cache = Cache::<OwnedKey, OwnedValue>::new(NonZeroUsize::new(2).unwrap());
+    for id in 0..8 {
+        cache.put(OwnedKey::new(id, &counts), OwnedValue(Rc::clone(&counts)));
+    }
+    assert!(counts.clones.borrow().is_empty());
+    assert_eq!(counts.values.get(), 6);
+    drop(cache);
+    assert!(counts.owners.borrow().values().all(|&n| n == 0));
+    assert_eq!(counts.values.get(), 8);
+}
+
+#[test]
 fn canonical_key_clone_and_ghost_drop_ownership() {
     let counts = Rc::new(Counts::default());
     let mut cache =
@@ -255,7 +269,7 @@ fn canonical_key_clone_and_ghost_drop_ownership() {
     cache.get_or_insert_mut(OwnedKey::new(0, &counts), || {
         panic!("Ghost hit must reuse V")
     });
-    assert_eq!(*counts.clones.borrow(), [0, 1]);
+    assert_eq!(*counts.clones.borrow(), [0]);
     assert_eq!(
         *counts.owners.borrow(),
         HashMap::from([(0, 1), (1, 0), (2, 1)])
@@ -271,7 +285,7 @@ fn canonical_key_clone_and_ghost_drop_ownership() {
     });
     assert_eq!(
         *counts.clones.borrow(),
-        [0, 1],
+        [0],
         "free reuse does not clone either key"
     );
     assert_eq!(counts.owners.borrow()[&2], 0);

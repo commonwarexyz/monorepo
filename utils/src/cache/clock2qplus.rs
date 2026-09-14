@@ -808,7 +808,7 @@ impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
         state.record_hit_mut();
     }
 
-    fn insert<I, C>(
+    fn insert<'a, I, C>(
         &mut self,
         states: &I,
         key: HashContext<'_, K>,
@@ -816,8 +816,9 @@ impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
         claim: C,
     ) -> (Slot, SlotState)
     where
+        K: 'a,
         I: Index<Slot, Output = SlotState>,
-        C: FnOnce(Option<Slot>) -> Claimed<K>,
+        C: FnOnce(Option<Slot>) -> Claimed<'a, K>,
     {
         // Consult and consume exact Ghost history at insertion time. Keeping
         // this separate makes partition selection free of hidden mutation.
@@ -826,7 +827,7 @@ impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
         let plan = self.plan(states, admission, has_vacancy);
         let victim = plan.victim();
 
-        // The claim yields an owned victim key for possible Ghost retention.
+        // The victim key remains available throughout the policy transition.
         let slot = match (plan, claim(victim)) {
             (InsertionPlan::Vacant, Claimed::Vacant(slot)) => slot,
             (
@@ -838,7 +839,7 @@ impl<K: Hash + Eq + Clone> Policy<K> for Clock2QPlus<K> {
                 // Only Small evictions become Ghost evidence. Main victims
                 // have already passed the admission filter.
                 if location == Location::Small {
-                    self.ghost.push(evicted, hash, &key);
+                    self.ghost.push(evicted.clone(), hash, &key);
                 }
                 victim
             }
