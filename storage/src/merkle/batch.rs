@@ -103,6 +103,7 @@ use core::{iter::Peekable, ops::Range};
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
 
+/// Push a node position into the list for its height, growing the outer Vec as needed.
 fn push_node<F: Family>(levels: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
     let h = height as usize;
     if levels.len() <= h {
