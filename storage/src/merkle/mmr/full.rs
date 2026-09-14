@@ -7,7 +7,7 @@
 //! This module is a thin wrapper around the generic `Merkle` type, specialized for the
 //! MMR [Family]. It re-exports [Config], [SyncConfig], and the append-only
 //! [`UnmerkleizedBatch`] wrapper from `merkle::full`. Async proof methods (`proof`,
-//! `range_proof`, `historical_proof`, `historical_range_proof`) and the `Storage<F>` impl are
+//! `range_proof`, `historical_proof`, `historical_range_proof`) and the `Storage` impl are
 //! provided by the generic `Merkle` in `merkle::full`.
 
 /// Configuration for a journal-backed MMR.

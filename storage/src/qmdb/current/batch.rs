@@ -162,7 +162,7 @@ struct BatchStorageAdapter<
     F: Graftable,
     D: Digest,
     R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
+    S: MerkleStorage<Family = F, Digest = D>,
 > {
     batch: &'a R,
     base: &'a S,
@@ -174,7 +174,7 @@ impl<
     F: Graftable,
     D: Digest,
     R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
+    S: MerkleStorage<Family = F, Digest = D>,
 > BatchStorageAdapter<'a, F, D, R, S>
 {
     const fn new(batch: &'a R, base: &'a S) -> Self {
@@ -186,9 +186,14 @@ impl<
     }
 }
 
-impl<F: Graftable, D: Digest, R: Readable<Family = F, Digest = D>, S: MerkleStorage<F, Digest = D>>
-    MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
+impl<
+    F: Graftable,
+    D: Digest,
+    R: Readable<Family = F, Digest = D>,
+    S: MerkleStorage<Family = F, Digest = D>,
+> MerkleStorage for BatchStorageAdapter<'_, F, D, R, S>
 {
+    type Family = F;
     type Digest = D;
 
     fn size(&self) -> Position<F> {

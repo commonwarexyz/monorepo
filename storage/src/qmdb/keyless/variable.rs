@@ -221,6 +221,7 @@ mod tests {
         test_keyless_variable_get_many => run_get_many, db;
         test_keyless_variable_partial_ancestor_commit => run_partial_ancestor_commit, db;
         test_keyless_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, db;
+        test_keyless_variable_snapshot => run_snapshot, db;
     }
 
     /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,

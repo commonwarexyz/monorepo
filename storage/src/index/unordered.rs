@@ -76,7 +76,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 
     /// Create an empty index with this index's translator and metric handles. Parallel
-    /// snapshot-build workers use it for their partition slots.
+    /// index-build workers use it for their partition slots.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
         Self {

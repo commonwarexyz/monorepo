@@ -63,7 +63,7 @@ async fn build_db<F, E, U, I, H, C, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_concurrency: <I as crate::qmdb::IndexBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, { crate::qmdb::any::BITMAP_CHUNK_BYTES }, S>, qmdb::Error<F>>
@@ -71,7 +71,7 @@ where
     F: merkle::Family,
     E: Context + Spawner,
     U: Update,
-    I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory + crate::qmdb::IndexBuild<F>,
     H: Hasher,
     C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
@@ -98,10 +98,10 @@ where
         apply_batch_size.get(),
     )
     .await?;
-    let snapshot_context = context.child("snapshot");
+    let index_context = context.child("index");
     let metrics = Metrics::new(context);
     let db = Db::init_from_log(
-        snapshot_context,
+        index_context,
         index,
         log,
         None,
