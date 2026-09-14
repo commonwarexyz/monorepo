@@ -14,8 +14,8 @@
 //! runs stays as Bitmap.
 
 use super::{array, run};
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::ops::Range;
 
 /// Number of 64-bit words needed to store 65536 bits.

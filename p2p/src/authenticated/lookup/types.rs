@@ -1,6 +1,6 @@
 use crate::authenticated::data::Data;
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
-use commonware_runtime::{Buf, BufMut};
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_runtime::BufMut;
 
 /// Prefix that identifies the message as a Data message.
 pub const DATA_PREFIX: u8 = crate::authenticated::data::DATA_PREFIX; // 0

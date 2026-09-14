@@ -7,7 +7,10 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
+    qmdb::{
+        any::value::FixedEncoding,
+        current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
+    },
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -421,12 +424,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     match db.key_value_proof(k.clone()).await {
                         Ok(proof) => {
                             let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
-                            let verification_result = Db::<F>::verify_key_value_proof(
-                                k,
-                                value,
-                                &proof,
-                                &current_root,
-                            );
+                            let verification_result = proof.verify::<Sha256, FixedEncoding<Value>>(k, value, &current_root);
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }
                         Err(commonware_storage::qmdb::Error::KeyNotFound) => {
@@ -451,11 +449,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
 
                     match db.exclusion_proof(&k).await {
                         Ok(proof) => {
-                            let verification_result = Db::<F>::verify_exclusion_proof(
-                                &k,
-                                &proof,
-                                &current_root,
-                            );
+                            let verification_result = proof.verify::<Sha256>(&k, &current_root);
                             assert!(verification_result, "Exclusion proof verification failed for key {key:?}");
                         }
                         Err(commonware_storage::qmdb::Error::KeyExists) => {

@@ -6,7 +6,6 @@
 //!
 //! See [Db] for the main database type.
 
-pub use super::db::KeyValueProof;
 use crate::{
     Context,
     index::unordered::Index,

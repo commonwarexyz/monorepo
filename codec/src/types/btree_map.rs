@@ -6,13 +6,13 @@
 extern crate alloc;
 
 use crate::{
-    RangeCfg,
+    Buf, RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_map,
 };
 use alloc::collections::BTreeMap;
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 
 const BTREEMAP_TYPE: &str = "BTreeMap";
 

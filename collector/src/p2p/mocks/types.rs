@@ -1,6 +1,6 @@
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_cryptography::{Committable, Digestible, Hasher, Sha256, sha256::Digest};
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 
 /// A mock request for testing
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
