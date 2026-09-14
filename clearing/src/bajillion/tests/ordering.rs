@@ -280,7 +280,6 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         )
         .unwrap()
         .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-        .await
         .unwrap();
         let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
@@ -482,7 +481,6 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         )
         .unwrap()
         .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-        .await
         .unwrap();
         let operator_private = BlsPrivate::new(Scalar::from(8));
         let operator =

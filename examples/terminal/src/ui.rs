@@ -450,11 +450,12 @@ pub(crate) async fn run_with_io<E: Env>(
 async fn handle_hard_fault_recovery<E: Env>(
     ctx: &E,
     chain: &mut Client,
-    agent: &Agent,
+    agent: &mut Agent,
     state: &mut UiState,
 ) {
     match agent.recover_hard_fault(ctx, chain).await {
-        Ok(release) => state.log(format!(
+        Ok(None) => state.log("No balance remains at the frozen root; finalized withdrawal claims and deposit refunds remain available".to_string()),
+        Ok(Some(release)) => state.log(format!(
             "hard-fault recovery released {} (residual {})",
             release.released_custody, release.residual
         )),
@@ -1228,6 +1229,7 @@ mod tests {
         protocol::{INITIAL_BALANCE, deployment},
         rpc,
     };
+    use commonware_clearing::bajillion::boundary::WithdrawalBatch;
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_runtime::{
         Clock as _, Listener as _, Network as _, Runner as _, Spawner as _, Supervisor as _,
@@ -1286,7 +1288,9 @@ mod tests {
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
             control
                 .submit(SettlementTx::RegisterEpoch(
-                    operator.signed_registration().unwrap(),
+                    operator
+                        .signed_registration(&WithdrawalBatch::empty())
+                        .unwrap(),
                 ))
                 .await;
             operator
@@ -1525,7 +1529,7 @@ mod tests {
             assert!(!settlement.hard_faulted);
             assert_eq!(settlement.custody, 400);
 
-            handle_hard_fault_recovery(&context, &mut chain, &agent, &mut state).await;
+            handle_hard_fault_recovery(&context, &mut chain, &mut agent, &mut state).await;
             let logged = state.activity.back().unwrap().clone();
             assert!(
                 logged.contains("terminal settlement never certifiably began"),

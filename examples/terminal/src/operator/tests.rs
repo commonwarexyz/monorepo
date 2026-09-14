@@ -127,7 +127,7 @@ fn virtual_credit_to_fresh_key_survives_retry_restart_and_close() {
     drop(operator);
 
     let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
-    assert_eq!(operator.balances.startup_work().unwrap(), (vec![], vec![]));
+
     assert_eq!(operator.payment_head(&key).unwrap().balance, 25);
     let (send, entries) = sign_send_at(
         operator.registration.context.payment(),
@@ -281,7 +281,7 @@ fn withdrawal_intake_rejects_non_native_destinations_without_mutation() {
         );
         request.verify_signature().unwrap();
         assert!(
-            operator.apply_withdrawal(request).is_err(),
+            operator.apply_withdrawal(request, false).is_err(),
             "operator accepted a destination the native settlement cannot credit"
         );
         let after = operator.payment_head(&account).unwrap();
@@ -326,10 +326,10 @@ fn withdrawal_intake_accepts_arbitrary_native_destination() {
             50,
             wallet.signer(),
         );
-        let applied = operator.apply_withdrawal(request.clone()).unwrap();
+        let applied = operator.apply_withdrawal(request.clone(), false).unwrap();
         assert_eq!(applied.action, amount(3));
         assert_eq!(
-            operator.apply_withdrawal(request).unwrap().epoch,
+            operator.apply_withdrawal(request, false).unwrap().epoch,
             applied.epoch
         );
         assert!(chain.try_register(&mut operator).await.is_some());
@@ -379,8 +379,14 @@ fn configured_operator_balances_survive_reopen() {
                 }
                 let head = operator.payment_head(&identity.key).unwrap();
                 assert_eq!(head.balance, balance);
-                assert_eq!(head.opening.balance.get(), balance);
-                assert_eq!(head.root, operator.genesis_root);
+                let opening = operator.balances.opening(0, &identity.key).unwrap();
+                assert_eq!(
+                    opening
+                        .verify::<Sha256>(&operator.genesis_root)
+                        .unwrap()
+                        .get(),
+                    balance
+                );
             }
         }
     }
@@ -421,9 +427,12 @@ fn empty_deployment_funding_closes_before_positive_payment_evidence() {
     assert!(operator.payment_head(&account).is_err());
     assert_eq!(operator.balances.root(0).unwrap(), empty);
     let result = operator.complete_close(17).unwrap();
-    let head = operator.payment_head(&account).unwrap();
+    assert_eq!(operator.payment_head(&account).unwrap().balance, 20);
     assert_eq!(
-        head.opening
+        operator
+            .balances
+            .opening(1, &account)
+            .unwrap()
             .verify::<Sha256>(&result.roots.successor)
             .unwrap()
             .get(),
@@ -442,7 +451,7 @@ fn empty_deployment_funding_closes_before_positive_payment_evidence() {
         4096,
     )
     .unwrap();
-    assert_eq!(operator.balances.startup_work().unwrap(), (vec![], vec![]));
+
     assert_eq!(operator.payment_head(&account).unwrap().balance, 20);
 }
 
@@ -547,7 +556,6 @@ fn genesis_allocations_allow_shared_display_labels() {
         assert_eq!(operator.store.current_liability().unwrap(), 14);
         for identity in &identities {
             let head = operator.payment_head(&identity.key).unwrap();
-            assert_eq!(head.opening.account, identity.key);
             assert_eq!(head.balance, 7);
         }
     }
@@ -565,6 +573,10 @@ struct AmbiguousAdmission {
 }
 
 impl ChainBackend for AmbiguousAdmission {
+    fn holders(&self) -> Result<Vec<SocketAddr>> {
+        self.client.holders()
+    }
+
     fn deployment(&self) -> Digest {
         deployment()
     }
@@ -604,14 +616,13 @@ fn uncertain_admission_reuses_the_durable_close_until_its_effect_is_visible() {
                 chain.register(&mut operator).await;
                 operator.pay(0, 1, 5).unwrap();
                 let prepared = operator
-                    .balances
-                    .prepare(
+                    .prepare_epoch(
                         operator.store.load_current().unwrap(),
                         operator.registration.clone(),
                     )
                     .unwrap();
                 rotate_epoch(&mut operator, 0);
-                saved = operator.balances.complete(prepared, 0).unwrap().encode();
+                saved = operator.complete_prepared(prepared, 0).unwrap().encode();
             }
             let visible = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let reads = Arc::new(AtomicU64::new(0));
@@ -653,7 +664,7 @@ fn uncertain_admission_reuses_the_durable_close_until_its_effect_is_visible() {
                 4096,
             )
             .unwrap();
-            assert_eq!(recovered.balances.startup_work().unwrap(), (vec![], vec![]));
+
             let mut released_after_retry = false;
             for _ in 0..40_000 {
                 if let Err(error) = recovered.advance_close() {
@@ -674,12 +685,7 @@ fn uncertain_admission_reuses_the_durable_close_until_its_effect_is_visible() {
                     && reads.load(Ordering::SeqCst) > client::SUBMIT_ATTEMPTS as u64
                 {
                     assert_eq!(
-                        recovered
-                            .balances
-                            .stored_result(0)
-                            .unwrap()
-                            .unwrap()
-                            .encode(),
+                        recovered.store.stored_result(0).unwrap().unwrap().encode(),
                         saved
                     );
                     released_after_retry = true;
@@ -719,15 +725,10 @@ fn uncertain_admission_reuses_the_durable_close_until_its_effect_is_visible() {
             }
             assert_eq!(recovered.admitted.len(), 1);
             assert_eq!(
-                recovered
-                    .balances
-                    .stored_result(0)
-                    .unwrap()
-                    .unwrap()
-                    .encode(),
+                recovered.store.stored_result(0).unwrap().unwrap().encode(),
                 saved
             );
-            assert_eq!(recovered.balances.startup_work().unwrap(), (vec![], vec![]));
+
             assert!(matches!(
                 chain.control.record(admitted_key(&deployment(), 0)).await,
                 Some(Record::Admitted(_))
@@ -743,14 +744,13 @@ fn uncertain_admission_reuses_the_durable_close_until_its_effect_is_visible() {
 fn admit_pending(operator: &mut Operator) -> AdmittedRootsResponse {
     let epoch = operator.registration.context.payment().epoch();
     let prepared = operator
-        .balances
-        .prepare(
+        .prepare_epoch(
             operator.store.load_current().unwrap(),
             operator.registration.clone(),
         )
         .unwrap();
     rotate_epoch(operator, epoch);
-    let result = operator.balances.complete(prepared, epoch).unwrap();
+    let result = operator.complete_prepared(prepared, epoch).unwrap();
     let record = AdmittedRootsResponse {
         batch_id: result.header.batch_id::<Sha256>(),
         roots: result.roots,
@@ -820,7 +820,7 @@ async fn reopen_admitted(
         4096,
     )
     .unwrap();
-    assert_eq!(recovered.balances.startup_work().unwrap(), (vec![], vec![]));
+
     while recovered.active_close.is_some() {
         recovered.advance_close().unwrap();
         std::thread::yield_now();
@@ -873,7 +873,7 @@ fn admitted_ancestors_recover_before_finality_without_recertification() {
             Some((1, second.roots.successor))
         );
         assert!(recovered.pending_epochs().unwrap().is_empty());
-        assert!(recovered.balances.stored_result(0).unwrap().is_some());
+        assert!(recovered.store.stored_result(0).unwrap().is_some());
     });
 }
 
@@ -891,7 +891,13 @@ fn unfinalized_closes_allow_successor_batches_and_restart() {
         // Admission advances the spendable head while every earlier close remains
         // challengeable. Repeated batches in each successor use that head immediately.
         for epoch in 0..8 {
-            assert_eq!(operator.signed_registration().unwrap().epoch, epoch);
+            assert_eq!(
+                operator
+                    .signed_registration(&WithdrawalBatch::empty())
+                    .unwrap()
+                    .epoch,
+                epoch
+            );
             for _ in 0..2 {
                 let (send, entries) = operator.sign_send(0, &recipients).unwrap();
                 let accepted = operator.accept_send(send, entries).unwrap().into_accepted();
@@ -910,7 +916,13 @@ fn unfinalized_closes_allow_successor_batches_and_restart() {
         // Restart authenticates the retained admissions without requiring finality.
         // Their evidence survives until the ordinary finalization observations arrive.
         let mut operator = reopen_admitted(&context, database.path(), records.clone()).await;
-        assert_eq!(operator.signed_registration().unwrap().epoch, 8);
+        assert_eq!(
+            operator
+                .signed_registration(&WithdrawalBatch::empty())
+                .unwrap()
+                .epoch,
+            8
+        );
         let (send, entries) = operator.sign_send(0, &recipients).unwrap();
         assert_eq!(
             operator
@@ -933,7 +945,7 @@ fn unfinalized_closes_allow_successor_batches_and_restart() {
             operator.observe_admitted(epoch, &record).unwrap();
         }
         assert!(operator.pending_epochs().unwrap().is_empty());
-        assert!(operator.balances.stored_result(0).unwrap().is_some());
+        assert!(operator.store.stored_result(0).unwrap().is_some());
     });
 }
 
@@ -974,7 +986,7 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
                 chain.register(&mut operator).await;
                 operator.pay(1, 2, 1).unwrap();
                 let pending = admit_pending(&mut operator);
-                let result = operator.balances.stored_result(epoch).unwrap().unwrap();
+                let result = operator.store.stored_result(epoch).unwrap().unwrap();
                 chain.control.submit(SettlementTx::Admit(AdmitRequest::from(&result))).await;
                 assert_eq!(client.admitted(&context, epoch).await.unwrap(), Some(pending));
             }
@@ -1019,7 +1031,7 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
                     panic!("unavailable operator acknowledged withdrawal");
                 };
                 assert_eq!(agent.escalate_withdrawal(&context, &mut client).await.unwrap(), request);
-                let deadline = operator.balances.stored_result(5).unwrap().unwrap().context.challenge_deadline();
+                let deadline = operator.store.stored_result(5).unwrap().unwrap().context.challenge_deadline();
                 let height = chain.control.advance(0).await;
                 chain.control.advance(deadline.saturating_sub(height) + 1).await;
                 for epoch in 0..6 {
@@ -1056,16 +1068,20 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
                 while applies < 3 {
                     let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                     let request = operator_rpc::decode_request(rpc::recv_request(&mut stream).await.unwrap()).unwrap();
-                    if let operator_rpc::OperatorRequest::ApplyWithdrawal(body) = &request {
-                        assert_eq!(body.request.body().state_root(), &finalized.state_root.digest);
-                        match &expected {
-                            Some(expected) => assert_eq!(&body.request, expected),
-                            None => expected = Some(body.request.clone()),
-                        }
-                        applies += 1;
-                    } else {
-                        assert!(matches!(request, operator_rpc::OperatorRequest::WithdrawalOpening(_)));
+                    if matches!(&request, operator_rpc::OperatorRequest::WithdrawalOpening(_)) {
+                        let response = operator_rpc::handle_decoded(&mut operator.lock(), request);
+                        rpc::send_response(&mut sink, &response).await.unwrap();
+                        continue;
                     }
+                    let operator_rpc::OperatorRequest::ApplyWithdrawal(body) = &request else {
+                        panic!("unexpected withdrawal request");
+                    };
+                    assert_eq!(body.request.body().state_root(), &finalized.state_root.digest);
+                    match &expected {
+                        Some(expected) => assert_eq!(&body.request, expected),
+                        None => expected = Some(body.request.clone()),
+                    }
+                    applies += 1;
                     let prepared = service::prepare_request(&context, &mut serving_chain, &operator, &request, timing).await.unwrap();
                     let response = prepared.unwrap_or_else(|| operator_rpc::handle_decoded(&mut operator.lock(), request));
                     if applies != 2 {
@@ -1091,7 +1107,7 @@ fn wallet_withdrawal_uses_finalized_root_across_pending_closes() {
             let mut operator = server.await.unwrap();
             chain.register(&mut operator).await;
             admit_pending(&mut operator);
-            let result = operator.balances.stored_result(6).unwrap().unwrap();
+            let result = operator.store.stored_result(6).unwrap().unwrap();
             chain.admit(&result).await;
             for epoch in 0..=6 {
                 let admitted = client.admitted(&context, epoch).await.unwrap().unwrap();
@@ -1164,7 +1180,14 @@ fn active_successor_cannot_finalize_after_ancestor_challenge() {
         .fence_suffix(0, "certified challenge of epoch 0".to_string())
         .unwrap();
     release.send(()).unwrap();
-    assert!(operator.wait_for_closes().is_err());
+    let events = operator.wait_for_closes().unwrap();
+    assert!(!events.is_empty());
+    assert!(
+        events
+            .iter()
+            .all(|event| matches!(event, CloseEvent::Failed { epoch: 1, .. }))
+    );
+    assert!(operator.store.stored_result(1).unwrap().is_none());
     assert!(operator.store.latest_finalized_root().unwrap().is_none());
     assert!(operator.admitted.is_empty());
     assert!(operator.pending_epochs().unwrap().is_empty());
@@ -1212,7 +1235,7 @@ fn service_observer_follows_terminal_invalidation_boundary() {
                 chain.register(&mut operator).await;
                 operator.pay(1, 2, 1).unwrap();
                 admit_pending(&mut operator);
-                let close = operator.balances.stored_result(epoch).unwrap().unwrap();
+                let close = operator.store.stored_result(epoch).unwrap().unwrap();
                 chain
                     .control
                     .submit(SettlementTx::Admit(AdmitRequest::from(&close)))
@@ -1374,7 +1397,7 @@ fn active_successor_storage_failure_remains_fatal_after_ancestor_fault() {
     operator.pay(0, 1, 5).unwrap();
     admit_pending(&mut operator);
     operator.pay(1, 2, 5).unwrap();
-    operator.balances.fail_after_journal().unwrap();
+    operator.fail_next_result_read();
     let (started, release) = operator.pause_next_close();
     operator.start_close(1).unwrap();
     started.recv().unwrap();
@@ -1385,7 +1408,7 @@ fn active_successor_storage_failure_remains_fatal_after_ancestor_fault() {
     assert!(operator.wait_for_closes().is_err());
     assert!(
         operator.ensure_store_usable().is_err(),
-        "a durable fault must not hide a failed balance owner"
+        "a durable fault must not hide a failed close-result store"
     );
 }
 
@@ -1472,6 +1495,10 @@ fn automatic_cut_releases_capacity() {
 }
 
 impl ChainBackend for PendingAdmission {
+    fn holders(&self) -> Result<Vec<SocketAddr>> {
+        anyhow::bail!("admission-only fixture has no evidence holders")
+    }
+
     fn deployment(&self) -> Digest {
         deployment()
     }
@@ -1564,13 +1591,13 @@ impl Chain {
     async fn queue_withdrawal(
         &self,
         request: SignedWithdrawal<Key, Digest>,
-        openings: Vec<StateOpening<Key, Digest>>,
+        opening: StateOpening<Key, Digest>,
     ) {
         let account = request.account().clone();
         self.control
             .submit(SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
                 request: request.clone(),
-                openings,
+                opening,
             }))
             .await;
         assert!(matches!(
@@ -1583,7 +1610,18 @@ impl Chain {
     /// the registration record it landed, or `None` when the registration
     /// left no effect.
     async fn try_register(&self, operator: &mut Operator) -> Option<RegistrationRecord> {
-        let register = operator.signed_registration().unwrap();
+        let (_, withdrawals) = operator.registration_boundary().unwrap();
+        let mut queued = Vec::new();
+        for request in withdrawals.requests() {
+            if matches!(self.control.record(withdrawal_key(&deployment(), request.account())).await,
+                Some(Record::Withdrawal(accepted)) if accepted == *request)
+            {
+                queued.push(request.clone());
+            }
+        }
+        let register = operator
+            .signed_registration(&WithdrawalBatch::new(queued).unwrap())
+            .unwrap();
         let epoch = register.epoch;
         self.control
             .submit(SettlementTx::RegisterEpoch(register))
@@ -1806,7 +1844,10 @@ fn arbitrary_absent_receiver_is_credited_and_persisted_at_close() {
     let head = operator.payment_head(&receiver).unwrap();
     assert_eq!(head.balance, 25);
     assert_eq!(
-        head.opening
+        operator
+            .balances
+            .opening(1, &receiver)
+            .unwrap()
             .verify::<Sha256>(&result.roots.successor)
             .unwrap()
             .get(),
@@ -1832,7 +1873,7 @@ fn compact_status_does_not_materialize_epoch_artifacts() {
 }
 
 #[test]
-fn payment_head_serves_the_retained_predecessor_root() {
+fn payment_head_reads_the_live_ledger_without_replaying_accepted_entries() {
     let database = TempDatabase::new();
     let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
     let payer = operator.wallets[0].public_key();
@@ -1841,11 +1882,9 @@ fn payment_head_serves_the_retained_predecessor_root() {
         operator.pay(0, 1, amount).unwrap();
     }
 
-    // The predecessor commitment is constant across the epoch. Only the live account
-    // state moves with accepted payments.
+    // Accepted payments advance the live balance within one signing context.
     let after = operator.payment_head(&payer).unwrap();
-    assert_eq!(after.root, before.root);
-    assert_eq!(after.opening, before.opening);
+    assert_eq!(after.context, before.context);
     assert_eq!(after.balance, before.balance - 12);
     assert_eq!(
         operator
@@ -1856,9 +1895,8 @@ fn payment_head_serves_the_retained_predecessor_root() {
         12
     );
 
-    // Head reads open QMDB and never replay the acknowledgment log:
-    // tampering with a stored row is invisible here. Startup replays and verifies every
-    // row, so the reopened operator must reject the same database loudly.
+    // Head reads use the materialized ledger; startup authenticates its immutable
+    // acknowledgment log before accepting new work.
     let connection = rusqlite::Connection::open(database.path()).unwrap();
     let mut tampered: Vec<u8> = connection
         .query_row("SELECT ack FROM acks WHERE seq = 1", [], |row| row.get(0))
@@ -1871,9 +1909,8 @@ fn payment_head_serves_the_retained_predecessor_root() {
         )
         .unwrap();
     let reread = operator.payment_head(&payer).unwrap();
-    assert_eq!(reread.root, after.root);
+    assert_eq!(reread.context, after.context);
     assert_eq!(reread.balance, after.balance);
-    assert_eq!(reread.opening, after.opening);
     drop(operator);
     drop(connection);
 
@@ -1885,7 +1922,7 @@ fn payment_head_serves_the_retained_predecessor_root() {
 }
 
 #[test]
-fn current_balance_restart_does_not_prepare_or_apply_history() {
+fn finalized_result_and_live_balance_survive_restart() {
     let database = TempDatabase::new();
     let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
     operator.pay(0, 1, 7).unwrap();
@@ -1894,12 +1931,12 @@ fn current_balance_restart_does_not_prepare_or_apply_history() {
     drop(operator);
 
     let operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
-    assert_eq!(operator.balances.startup_work().unwrap(), (vec![], vec![]));
+
     assert_eq!(operator.balances.root(1).unwrap(), root);
 }
 
 #[test]
-fn historical_balance_reads_preserve_the_current_close_owner() {
+fn historical_replica_proofs_do_not_change_operator_accounting() {
     let database = TempDatabase::new();
     let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
     let payer = operator.wallets[0].public_key();
@@ -1944,77 +1981,246 @@ fn historical_balance_reads_preserve_the_current_close_owner() {
 }
 
 #[test]
-fn journaled_qmdb_close_replays_after_crash_before_apply() {
-    for after_journal in [false, true] {
-        let database = TempDatabase::new();
-        let expected;
-        {
-            let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
-            operator.pay(0, 1, 7).unwrap();
-            let prepared = operator
-                .balances
-                .prepare(
-                    operator.store.load_current().unwrap(),
-                    operator.registration.clone(),
-                )
-                .unwrap();
-            expected = prepared.close().roots.successor;
-            drop(prepared);
-            if after_journal {
-                operator.balances.fail_after_journal().unwrap();
-            } else {
-                operator.balances.fail_read().unwrap();
-            }
-            start_current_close(&mut operator).unwrap();
-            let error = match operator.wait_for_closes() {
-                Ok(_) => panic!("injected crash completed"),
-                Err(error) => error,
-            };
-            assert!(format!("{error:#}").contains("injected"));
-            assert!(operator.store.failed_close().unwrap().is_none());
-            assert_eq!(operator.store.closing_epoch_from(0).unwrap(), Some(0));
-        }
+fn certified_close_survives_unknown_retention_commit_without_recertification() {
+    let database = TempDatabase::new();
+    let saved;
+    {
         let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
-        let expected_replay = if after_journal { vec![1] } else { vec![] };
+        operator.pay(0, 1, 7).unwrap();
+        operator.fail_next_result_commit();
+        start_current_close(&mut operator).unwrap();
+        let error = operator
+            .wait_for_closes()
+            .err()
+            .expect("injected unknown commit completed");
+        assert!(error.downcast_ref::<CommitUnknown>().is_some(), "{error:#}");
+        assert!(operator.ensure_store_usable().is_err());
+        assert!(operator.store.failed_close().unwrap().is_none());
+        assert_eq!(operator.store.closing_epoch_from(0).unwrap(), Some(0));
+        saved = operator.store.stored_result(0).unwrap().unwrap().encode();
+    }
+    let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
+    let closes = operator.wait_for_closes().unwrap();
+    assert!(matches!(closes.as_slice(), [CloseEvent::Finished(close)] if close.epoch == 0));
+    assert_eq!(
+        operator.store.stored_result(0).unwrap().unwrap().encode(),
+        saved
+    );
+    let payer = operator.wallets[0].public_key();
+    assert_eq!(
+        operator.payment_head(&payer).unwrap().balance,
+        INITIAL_BALANCE - 7
+    );
+    operator.pay(0, 1, 3).unwrap();
+    operator.complete_close(18).unwrap();
+    assert_eq!(
+        operator.payment_head(&payer).unwrap().balance,
+        INITIAL_BALANCE - 10
+    );
+    drop(operator);
+    let operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
+    let evidence = operator
+        .committed_entry(&payer, &operator.wallets[1].public_key(), 0)
+        .unwrap();
+    assert_eq!(
+        evidence
+            .lookup
+            .resolve::<Sha256>(
+                &evidence.change_root,
+                &payer,
+                &operator.wallets[1].public_key()
+            )
+            .unwrap(),
+        (7, 1)
+    );
+}
+
+#[test]
+fn retained_certified_close_rejects_replacement_and_preserves_exact_bytes() {
+    let mut operator = operator();
+    operator.pay(0, 1, 7).unwrap();
+    admit_pending(&mut operator);
+    let mut result = operator.store.stored_result(0).unwrap().unwrap();
+    let saved = result.encode();
+    operator
+        .store
+        .record_result(&result, operator.genesis_root)
+        .unwrap();
+    result.prepare_micros += 1;
+    let error = operator
+        .store
+        .record_result(&result, operator.genesis_root)
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("conflicts with retained result"));
+    assert_eq!(
+        operator.store.stored_result(0).unwrap().unwrap().encode(),
+        saved
+    );
+    assert_eq!(
+        operator
+            .payment_head(&operator.wallets[0].public_key())
+            .unwrap()
+            .balance,
+        INITIAL_BALANCE - 7
+    );
+}
+
+#[test]
+fn certified_closes_progress_while_the_proof_replica_is_held() {
+    let mut operator = operator();
+    let (started, release) = operator.balances.pause_next_catch_up().unwrap();
+    for epoch in 0..6 {
+        operator.pay(0, 1, 1).unwrap();
+        start_current_close(&mut operator).unwrap();
+        let events = operator.wait_for_closes().unwrap();
+        assert!(matches!(events.as_slice(), [CloseEvent::Finished(close)] if close.epoch == epoch));
+        if epoch == 0 {
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
         assert_eq!(
-            operator.balances.startup_work().unwrap(),
-            (expected_replay.clone(), expected_replay)
+            operator.store.latest_finalized_root().unwrap().unwrap().0,
+            epoch
         );
-        let closes = operator.wait_for_closes().unwrap();
-        assert!(matches!(closes.as_slice(), [CloseEvent::Finished(close)] if close.epoch == 0));
-        assert_eq!(operator.balances.root(1).unwrap(), expected);
-        let payer = operator.wallets[0].public_key();
         assert_eq!(
-            operator.payment_head(&payer).unwrap().balance,
-            INITIAL_BALANCE - 7
+            operator
+                .store
+                .current_account(&operator.wallets[0].public_key())
+                .unwrap()
+                .unwrap()
+                .current,
+            INITIAL_BALANCE - epoch - 1
         );
-        operator.pay(0, 1, 3).unwrap();
-        operator.complete_close(18).unwrap();
-        assert_eq!(
-            operator.payment_head(&payer).unwrap().balance,
-            INITIAL_BALANCE - 10
-        );
-        drop(operator);
-        let operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
-        let evidence = operator
-            .committed_entry(&payer, &operator.wallets[1].public_key(), 0)
+    }
+    assert_eq!(
+        operator.store.epoch_reader().load(0).unwrap().edges.len(),
+        1
+    );
+    release.send(()).unwrap();
+    operator.balances.catch_up().unwrap();
+    for epoch in 0..=6 {
+        let root = operator.balances.root(epoch).unwrap();
+        let opening = operator
+            .balances
+            .opening(epoch, &operator.wallets[0].public_key())
             .unwrap();
         assert_eq!(
-            evidence
-                .lookup
-                .resolve::<Sha256>(
-                    &evidence.change_root,
-                    &payer,
-                    &operator.wallets[1].public_key()
-                )
-                .unwrap(),
-            (7, 1)
+            opening.verify::<Sha256>(&root).unwrap().get(),
+            INITIAL_BALANCE - epoch
         );
     }
 }
 
 #[test]
-fn balance_database_has_one_live_owner() {
+fn asynchronous_proof_sql_failure_fences_foreground_payments() {
+    let database = TempDatabase::new();
+    let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
+    let (send, entries) = operator
+        .sign_send(0, &[(operator.wallets[1].public_key(), 7)])
+        .unwrap();
+    operator.accept_send(send.clone(), entries.clone()).unwrap();
+    let (started, release) = operator.balances.pause_next_catch_up().unwrap();
+    start_current_close(&mut operator).unwrap();
+    operator.wait_for_closes().unwrap();
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let connection = rusqlite::Connection::open(database.path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_proof_retirement BEFORE DELETE ON out_entries
+         BEGIN SELECT RAISE(ABORT, 'injected proof retirement failure'); END;",
+        )
+        .unwrap();
+    release.send(()).unwrap();
+    assert!(operator.balances.catch_up().is_err());
+    assert!(operator.pay(0, 1, 1).is_err());
+    assert!(operator.ensure_store_usable().is_err());
+    assert!(operator.accepted_batch(&send, &entries).is_err());
+    assert!(operator.store.epoch_reader().load(1).is_err());
+    assert!(operator.fault().is_some());
+}
+
+#[test]
+fn poisoned_evidence_metadata_cannot_poison_replica_recovery() {
+    deterministic::Runner::default().start(|context| async move {
+        let database = TempDatabase::new();
+        let chain = Chain::new(&context).await;
+        let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
+        chain.register(&mut operator).await;
+        operator.pay(0, 1, 7).unwrap();
+        let prepared = operator
+            .prepare_epoch(
+                operator.store.load_current().unwrap(),
+                operator.registration.clone(),
+            )
+            .unwrap();
+        rotate_epoch(&mut operator, 0);
+        let mut result = operator
+            .protocol
+            .fixture_complete(&operator.initial_accounts, &[], prepared, 73)
+            .unwrap();
+        let mut close = Close::decode_evidence::<Sha256>(
+            result.evidence.clone(),
+            &result.context,
+            &result.header,
+        )
+        .unwrap();
+        close.rows[0].successor = close.rows[0].successor.checked_add(1).unwrap();
+        result.evidence = close.encode_evidence();
+        operator
+            .store
+            .record_result(&result, operator.genesis_root)
+            .unwrap();
+        chain
+            .control
+            .submit(SettlementTx::Admit(AdmitRequest::from(&result)))
+            .await;
+        let Some(Record::Admitted(record)) =
+            chain.control.record(admitted_key(&deployment(), 0)).await
+        else {
+            panic!("certified close was not admitted");
+        };
+        assert_eq!(record.batch_id, result.header.batch_id::<Sha256>());
+        assert_eq!(record.roots, result.roots);
+        assert!(!record.finalized);
+        let admitted = AdmittedRootsResponse {
+            batch_id: record.batch_id,
+            roots: record.roots,
+            finalized: record.finalized,
+        };
+        operator.record_admission(result.clone()).unwrap();
+        assert!(operator.store.latest_finalized_root().unwrap().is_none());
+        let saved = result.encode();
+        drop(operator);
+
+        let recovered = reopen_admitted(&context, database.path(), [(0, admitted)].into()).await;
+        assert_eq!(
+            recovered.balances.startup_work().unwrap(),
+            (vec![1], vec![1])
+        );
+        assert_eq!(
+            recovered.store.stored_result(0).unwrap().unwrap().encode(),
+            saved
+        );
+        let opening = recovered
+            .balances
+            .opening(1, &recovered.wallets[0].public_key())
+            .unwrap();
+        assert_eq!(
+            opening
+                .verify::<Sha256>(&result.roots.successor)
+                .unwrap()
+                .get(),
+            INITIAL_BALANCE - 7
+        );
+        drop(recovered);
+
+        let recovered = reopen_admitted(&context, database.path(), [(0, admitted)].into()).await;
+        assert_eq!(recovered.balances.startup_work().unwrap(), (vec![], vec![]));
+        assert_eq!(recovered.balances.root(1).unwrap(), result.roots.successor);
+    });
+}
+
+#[test]
+fn operator_store_has_one_live_owner() {
     let database = TempDatabase::new();
     let operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
     assert!(Operator::open(database.path(), NonZeroUsize::MIN).is_err());
@@ -2024,7 +2230,32 @@ fn balance_database_has_one_live_owner() {
 }
 
 #[test]
-fn unapplied_successor_root_is_unavailable_while_sql_payments_continue() {
+fn operator_paths_with_shared_stem_keep_distinct_proof_replicas() {
+    let database = TempDatabase::new();
+    let other_path = database.path().with_extension("db");
+    let mut first = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
+    let mut second = Operator::open(&other_path, NonZeroUsize::MIN).unwrap();
+    first.pay(0, 1, 7).unwrap();
+    second.pay(0, 1, 13).unwrap();
+    first.complete_close(1).unwrap();
+    second.complete_close(2).unwrap();
+    let payer = first.wallets[0].public_key();
+    assert_eq!(
+        first.payment_head(&payer).unwrap().balance,
+        INITIAL_BALANCE - 7
+    );
+    assert_eq!(
+        second.payment_head(&payer).unwrap().balance,
+        INITIAL_BALANCE - 13
+    );
+    assert_ne!(
+        first.balances.root(1).unwrap(),
+        second.balances.root(1).unwrap()
+    );
+}
+
+#[test]
+fn payments_continue_while_the_successor_proof_is_unavailable() {
     let mut operator = operator();
     operator.pay(0, 1, 7).unwrap();
     let (started, release) = operator.pause_next_close();
@@ -2038,7 +2269,13 @@ fn unapplied_successor_root_is_unavailable_while_sql_payments_continue() {
     let head = operator.payment_head(&payer).unwrap();
     assert_eq!(head.balance, INITIAL_BALANCE - 10);
     assert_eq!(
-        head.opening.verify::<Sha256>(&head.root).unwrap().get(),
+        operator
+            .balances
+            .opening(1, &payer)
+            .unwrap()
+            .verify::<Sha256>(&operator.balances.root(1).unwrap())
+            .unwrap()
+            .get(),
         INITIAL_BALANCE - 7
     );
 }
@@ -2250,8 +2487,7 @@ fn finalized_cache_retirement_preserves_receipts_and_live_vectors() {
         .map(|v| (v.sequence, v.receipt.encode()))
         .collect::<Vec<_>>();
     let prepared = operator
-        .balances
-        .prepare(
+        .prepare_epoch(
             operator.store.load_current().unwrap(),
             operator.registration.clone(),
         )
@@ -2475,7 +2711,9 @@ fn registered_empty_epoch_survives_restart_and_finalizes() {
             let request = {
                 let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
                 assert_eq!(operator.automatic_epoch().unwrap(), None);
-                let request = operator.signed_registration().unwrap();
+                let request = operator
+                    .signed_registration(&WithdrawalBatch::empty())
+                    .unwrap();
                 if cut == 1 {
                     assert!(chain.try_register(&mut operator).await.is_some());
                 } else if cut == 2 {
@@ -2484,7 +2722,12 @@ fn registered_empty_epoch_survives_restart_and_finalizes() {
                 request
             };
             let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
-            assert_eq!(operator.signed_registration().unwrap(), request);
+            assert_eq!(
+                operator
+                    .signed_registration(&WithdrawalBatch::empty())
+                    .unwrap(),
+                request
+            );
             chain.register(&mut operator).await;
             operator.start_close(0).unwrap();
             let events = operator.wait_for_closes().unwrap();
@@ -2493,7 +2736,7 @@ fn registered_empty_epoch_survives_restart_and_finalizes() {
                 [CloseEvent::Failed { error, .. }] => panic!("{error}"),
                 _ => panic!("expected exactly one close"),
             }
-            let result = operator.balances.stored_result(0).unwrap().unwrap();
+            let result = operator.store.stored_result(0).unwrap().unwrap();
             assert_eq!(result.rows, 0);
             assert_eq!(result.withdrawal_total, 0);
             for wallet in &operator.wallets {
@@ -2632,7 +2875,7 @@ fn registered_epoch_restart_resumes_the_cut_and_admits() {
         ));
 
         // The durable certified result admits inside the driven window.
-        let result = recovered.balances.stored_result(0).unwrap().unwrap();
+        let result = recovered.store.stored_result(0).unwrap().unwrap();
         chain.admit(&result).await;
     });
 }
@@ -2661,7 +2904,7 @@ fn close_construction_binds_adopted_deadlines() {
         500,
         wallet.signer(),
     );
-    operator.apply_withdrawal(request).unwrap();
+    operator.apply_withdrawal(request, false).unwrap();
 
     let admission_deadline = 40;
     let challenge_deadline = admission_deadline + 420;
@@ -2730,7 +2973,11 @@ fn intake_stops_before_the_terminal_clock_exhausts() {
             .is_err()
     );
     assert!(operator.validate_close_start(terminal_epoch).is_err());
-    assert!(operator.signed_registration().is_err());
+    assert!(
+        operator
+            .signed_registration(&WithdrawalBatch::empty())
+            .is_err()
+    );
     assert_eq!(operator.snapshot().unwrap().payments.len(), 1);
 }
 
@@ -2767,7 +3014,13 @@ fn balance_intake_stops_while_the_current_epoch_can_still_close() {
             .payment_head(&operator.wallets[0].public_key())
             .is_err()
     );
-    assert_eq!(operator.signed_registration().unwrap().epoch, epoch);
+    assert_eq!(
+        operator
+            .signed_registration(&WithdrawalBatch::empty())
+            .unwrap()
+            .epoch,
+        epoch
+    );
     operator.validate_close_start(epoch).unwrap();
     assert!(operator.snapshot().unwrap().payments.is_empty());
 }
@@ -2784,7 +3037,13 @@ fn amountless_close_outlives_amount_intake_at_the_clock_horizon() {
     operator
         .ensure_withdrawal_intake_horizon(&WithdrawalAction::Close)
         .unwrap();
-    assert_eq!(operator.signed_registration().unwrap().epoch, epoch);
+    assert_eq!(
+        operator
+            .signed_registration(&WithdrawalBatch::empty())
+            .unwrap()
+            .epoch,
+        epoch
+    );
     operator.validate_close_start(epoch).unwrap();
 }
 
@@ -2797,7 +3056,7 @@ fn withdrawal_retry_survives_epoch_cutover() {
         .clone();
     rotate_epoch(&mut operator, 0);
 
-    let retry = operator.apply_withdrawal(request).unwrap();
+    let retry = operator.apply_withdrawal(request, false).unwrap();
     assert_eq!(retry.epoch, first.epoch);
     assert_eq!(retry.account, first.account);
     assert_eq!(retry.action, first.action);
@@ -2816,7 +3075,7 @@ fn close_authorization_response_loss_retries_after_cutover_and_restart() {
 
     let mut recovered = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
     recovered.wait_for_closes().unwrap();
-    let retry = recovered.apply_withdrawal(request).unwrap();
+    let retry = recovered.apply_withdrawal(request, false).unwrap();
     assert_eq!(retry.epoch, first.epoch);
     assert_eq!(retry.account, first.account);
     assert_eq!(retry.action, WithdrawalAction::Close);
@@ -2872,8 +3131,7 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
         12
     );
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
 
     rotate_epoch(&mut operator, 0);
@@ -2888,7 +3146,7 @@ fn staged_close_keeps_incoming_and_outgoing_activity_live_until_cutover() {
     assert_eq!(bob.current, 0);
     assert_eq!(frozen.withdrawals[0].applied_amount, Some(95));
 
-    let result = operator.balances.complete(prepared, 44).unwrap();
+    let result = operator.complete_prepared(prepared, 44).unwrap();
     assert_eq!(result.withdrawal_total, 95);
     assert_eq!(
         result.withdrawal_claims[0]
@@ -2912,13 +3170,12 @@ fn close_can_spend_to_zero_without_creating_withdrawal_work() {
 
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     rotate_epoch(&mut operator, 0);
     assert_eq!(operator.store.current_liability().unwrap(), 400);
 
-    let result = operator.balances.complete(prepared, 45).unwrap();
+    let result = operator.complete_prepared(prepared, 45).unwrap();
     assert_eq!(result.withdrawal_total, 0);
     assert_eq!(
         result.withdrawal_claims[0]
@@ -3064,8 +3321,7 @@ fn unknown_cutover_commit_fences_the_connection_before_balance_read() {
     operator.pay(0, operator.wallet_count(), 100).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     let epoch = prepared.epoch();
     rotate_epoch(&mut operator, epoch);
@@ -3138,8 +3394,7 @@ fn finalization_prunes_obsolete_balance_versions() {
     operator.pay(1, 2, 1).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     rotate_epoch(&mut operator, prepared.epoch());
     operator
@@ -3153,8 +3408,7 @@ fn finalization_prunes_obsolete_balance_versions() {
     operator.pay(1, 2, 10).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     rotate_epoch(&mut operator, prepared.epoch());
 
@@ -3180,8 +3434,7 @@ fn finalization_prunes_obsolete_balance_versions() {
         operator.pay(1, 2, 1).unwrap();
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
         assert_eq!(prepared.epoch(), epoch);
         rotate_epoch(&mut operator, epoch);
@@ -3200,8 +3453,7 @@ fn pruning_ignores_unfinalized_successor_versions() {
     operator.pay(1, 2, 1).unwrap();
     let data = operator.store.load_current().unwrap();
     let first = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     rotate_epoch(&mut operator, first.epoch());
 
@@ -3225,10 +3477,7 @@ fn pruning_ignores_unfinalized_successor_versions() {
             .iter()
             .any(|account| { account.name == operator.wallets[0].name && account.current == 0 })
     );
-    let second = operator
-        .balances
-        .prepare(frozen, second_registration)
-        .unwrap();
+    let second = operator.prepare_epoch(frozen, second_registration).unwrap();
     operator
         .finish_prepared(second, &mut TestRng::new(43))
         .unwrap();
@@ -3261,20 +3510,6 @@ fn frozen_epoch_scan_does_not_walk_account_history() {
 fn ephemeral_terminal_database_uses_wal() {
     let operator = operator();
     assert_eq!(operator.store.journal_mode().unwrap(), "wal");
-}
-
-#[test]
-fn non_wal_sqlite_sources_are_rejected() {
-    let id = TEMP_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
-    let path = PathBuf::from(format!(
-        "file:commonware-terminal-{}-{id}?mode=memory&cache=shared",
-        std::process::id()
-    ));
-    let error = match Operator::open(&path, NonZeroUsize::new(2).unwrap()) {
-        Ok(_) => panic!("non-WAL database was accepted"),
-        Err(error) => error,
-    };
-    assert!(format!("{error:#}").contains("WAL"));
 }
 
 #[test]
@@ -3520,11 +3755,14 @@ fn finalization_write_failure_fences_the_successor_epoch() {
     let mut operator = operator();
     operator.pay(0, 1, 10).unwrap();
     let (started, release) = operator.pause_next_close();
-    let close = start_current_close(&mut operator).unwrap();
+    start_current_close(&mut operator).unwrap();
     started.recv_timeout(Duration::from_secs(1)).unwrap();
-    operator
-        .store
-        .fail_close(close.epoch, "injected finalization failure")
+    let connection = rusqlite::Connection::open(operator.store.database_path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_finalization BEFORE INSERT ON settlements
+         BEGIN SELECT RAISE(ABORT, 'injected finalization write failure'); END;",
+        )
         .unwrap();
     release.send(()).unwrap();
 
@@ -3604,6 +3842,7 @@ fn recovery_finishes_an_unfailed_ancestor_below_a_descendant_fault() {
             .fail_close(2, "injected descendant fault")
             .unwrap();
         drop(release);
+        operator.active_close.take().unwrap().thread.join().unwrap();
     }
 
     let mut recovered = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
@@ -3669,114 +3908,88 @@ fn recovery_rejects_unreplayed_current_state() {
 }
 
 #[test]
-fn recovery_rejects_same_liability_state_substitution() {
+fn reopen_rejects_different_genesis_allocations_at_same_liability() {
     let database = TempDatabase::new();
-    {
-        let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
-        operator.pay(0, 1, 10).unwrap();
-        start_current_close(&mut operator).unwrap();
-        operator.wait_for_closes().unwrap();
-    }
-    let connection = rusqlite::Connection::open(database.path()).unwrap();
-    connection
-        .execute(
-            "UPDATE account_states
-             SET current_balance = current_balance + CASE
-                 WHEN public_key = (
-                     SELECT public_key FROM account_identities WHERE name = 'Alice'
-                 ) THEN -1 ELSE 1 END
-             WHERE epoch = 0 AND public_key IN (
-                 SELECT public_key FROM account_identities WHERE name IN ('Alice', 'Bob')
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-
-    let error = match Operator::open(database.path(), NonZeroUsize::new(2).unwrap()) {
-        Ok(_) => panic!("same-liability predecessor substitution was accepted"),
+    drop(Operator::open(database.path(), NonZeroUsize::MIN).unwrap());
+    let mut replacement = accounts();
+    replacement[0].balance -= 1;
+    replacement[1].balance += 1;
+    let error = match Store::open_configured(database.path(), &identities(), &replacement) {
+        Ok(_) => panic!("different genesis allocations reopened"),
         Err(error) => error,
     };
-    assert!(format!("{error:#}").contains("predecessor root"));
+    assert!(format!("{error:#}").contains("wrong genesis allocations"));
 }
 
 #[test]
-fn pending_genesis_close_rejects_same_liability_predecessor_substitution() {
-    let database = TempDatabase::new();
-    {
-        let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
-        operator.pay(0, 1, 10).unwrap();
-        rotate_epoch(&mut operator, 0);
-    }
-    let connection = rusqlite::Connection::open(database.path()).unwrap();
-    connection
-        .execute(
-            "UPDATE account_states
-             SET predecessor_balance = predecessor_balance + CASE
-                     WHEN public_key = (
-                         SELECT public_key FROM account_identities WHERE name = 'Alice'
-                     ) THEN -1 ELSE 1 END,
-                 current_balance = current_balance + CASE
-                     WHEN public_key = (
-                         SELECT public_key FROM account_identities WHERE name = 'Alice'
-                     ) THEN -1 ELSE 1 END
-             WHERE epoch = 0 AND public_key IN (
-                 SELECT public_key FROM account_identities WHERE name IN ('Alice', 'Bob')
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-
-    let mut recovered = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
-    assert!(matches!(
-        recovered.wait_for_closes().unwrap().as_slice(),
-        [CloseEvent::Failed { epoch: 0, error }] if error.contains("predecessor root")
-    ));
-    assert!(recovered.store.failed_close().unwrap().is_some());
-}
-
-#[test]
-fn predecessor_root_rejection_is_durable() {
-    let database = TempDatabase::new();
-    {
-        let mut operator = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
-        operator.pay(0, 1, 10).unwrap();
-        start_current_close(&mut operator).unwrap();
-        operator.wait_for_closes().unwrap();
+fn certified_result_retention_checks_the_frozen_context_and_predecessor() {
+    for epoch in [0, 1] {
+        let mut operator = operator();
+        if epoch == 1 {
+            operator.pay(0, 1, 10).unwrap();
+            operator.complete_close(100).unwrap();
+        }
         operator.pay(0, 1, 5).unwrap();
-        rotate_epoch(&mut operator, 1);
+        let prepared = operator
+            .prepare_epoch(
+                operator.store.load_current().unwrap(),
+                operator.registration.clone(),
+            )
+            .unwrap();
+        rotate_epoch(&mut operator, epoch);
+        let history = operator.validator_history(epoch).unwrap();
+        let mut result = operator
+            .protocol
+            .fixture_complete(&operator.initial_accounts, &history, prepared, 101)
+            .unwrap();
+        let expected = result.context.clone();
+        let wrong_root = StateRoot::new(Sha256::hash(&[b"different predecessor"]));
+        result.context =
+            commonware_clearing::bajillion::transition::CloseContext::decode(Bytes::from(
+                [
+                    expected.epoch_context().encode().as_ref(),
+                    wrong_root.encode().as_ref(),
+                ]
+                .concat(),
+            ))
+            .unwrap();
+        let error = operator
+            .store
+            .record_result(&result, operator.genesis_root)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("does not extend the retained predecessor"));
+        assert!(operator.store.stored_result(epoch).unwrap().is_none());
+        result.context =
+            commonware_clearing::bajillion::transition::CloseContext::decode(Bytes::from(
+                [
+                    operator.registration.context.encode().as_ref(),
+                    expected.predecessor_root().encode().as_ref(),
+                ]
+                .concat(),
+            ))
+            .unwrap();
+        assert!(
+            operator
+                .store
+                .record_result(&result, operator.genesis_root)
+                .is_err()
+        );
+        assert!(operator.store.stored_result(epoch).unwrap().is_none());
+        result.context = expected;
+        operator
+            .store
+            .record_result(&result, operator.genesis_root)
+            .unwrap();
+        assert_eq!(
+            operator
+                .store
+                .stored_result(epoch)
+                .unwrap()
+                .unwrap()
+                .encode(),
+            result.encode()
+        );
     }
-    let connection = rusqlite::Connection::open(database.path()).unwrap();
-    connection
-        .execute(
-            "UPDATE account_states
-             SET predecessor_balance = predecessor_balance + CASE
-                     WHEN public_key = (
-                         SELECT public_key FROM account_identities WHERE name = 'Alice'
-                     ) THEN -1 ELSE 1 END,
-                 current_balance = current_balance + CASE
-                     WHEN public_key = (
-                         SELECT public_key FROM account_identities WHERE name = 'Alice'
-                     ) THEN -1 ELSE 1 END
-             WHERE epoch = 1 AND public_key IN (
-                 SELECT public_key FROM account_identities WHERE name IN ('Alice', 'Bob')
-             )",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-
-    let mut recovered = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
-    assert!(matches!(
-        recovered.wait_for_closes().unwrap().as_slice(),
-        [CloseEvent::Failed { epoch: 1, error }] if error.contains("predecessor root")
-    ));
-    drop(recovered);
-
-    let mut reopened = Operator::open(database.path(), NonZeroUsize::new(2).unwrap()).unwrap();
-    assert!(reopened.fault().is_some());
-    assert!(reopened.pay(0, 1, 1).is_err());
 }
 
 #[test]
@@ -3912,12 +4125,11 @@ fn virtual_credit_creates_a_successor_without_a_withdrawal_reserve() {
         operator.pay(0, operator.wallet_count(), 100).unwrap();
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
         let epoch = prepared.epoch();
         rotate_epoch(&mut operator, epoch);
-        let result = operator.balances.complete(prepared, 8).unwrap();
+        let result = operator.complete_prepared(prepared, 8).unwrap();
         assert_eq!(result.withdrawal_total, 0);
         chain.admit(&result).await;
         let status = chain.status().await;
@@ -3937,7 +4149,10 @@ fn virtual_credit_creates_a_successor_without_a_withdrawal_reserve() {
         let eve = operator.payment_head(&eve_identity().key).unwrap();
         assert_eq!(eve.balance, 100);
         assert_eq!(
-            eve.opening
+            operator
+                .balances
+                .opening(result.context.payment().epoch() + 1, &eve_identity().key)
+                .unwrap()
                 .verify::<Sha256>(&result.roots.successor)
                 .unwrap()
                 .get(),
@@ -3956,12 +4171,11 @@ fn virtual_credit_batch_does_not_block_later_finalization() {
         operator.pay(0, operator.wallet_count(), 10).unwrap();
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
         let epoch = prepared.epoch();
         rotate_epoch(&mut operator, epoch);
-        let first = operator.balances.complete(prepared, 31).unwrap();
+        let first = operator.complete_prepared(prepared, 31).unwrap();
         chain.admit(&first).await;
         let machine_key = crate::chain::state::machine_key(&deployment());
         let Some(Record::Machine(first_machine)) = chain.control.record(machine_key.clone()).await
@@ -3977,12 +4191,11 @@ fn virtual_credit_batch_does_not_block_later_finalization() {
         operator.pay(1, operator.wallet_count(), 20).unwrap();
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
         let epoch = prepared.epoch();
         rotate_epoch(&mut operator, epoch);
-        let second = operator.balances.complete(prepared, 32).unwrap();
+        let second = operator.complete_prepared(prepared, 32).unwrap();
         chain.admit(&second).await;
         assert_eq!(chain.status().await.claimable, 0);
         assert_eq!(chain.status().await.custody, 400);
@@ -4013,20 +4226,16 @@ fn finalized_withdrawal_replays_after_a_later_claim() {
         let first_opening = operator.withdrawal_opening(&first_account).unwrap();
         let data = operator.store.load_current().unwrap();
         chain
-            .queue_withdrawal(
-                data.withdrawals[0].request.clone(),
-                vec![first_opening.opening],
-            )
+            .queue_withdrawal(data.withdrawals[0].request.clone(), first_opening.opening)
             .await;
         chain.register(&mut operator).await;
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
         let epoch = prepared.epoch();
         rotate_epoch(&mut operator, epoch);
-        let first = operator.balances.complete(prepared, 33).unwrap();
+        let first = operator.complete_prepared(prepared, 33).unwrap();
         chain.admit(&first).await;
         assert_eq!(chain.status().await.claimable, 25);
         operator
@@ -4056,20 +4265,16 @@ fn finalized_withdrawal_replays_after_a_later_claim() {
         let second_opening = operator.withdrawal_opening(&second_account).unwrap();
         let data = operator.store.load_current().unwrap();
         chain
-            .queue_withdrawal(
-                data.withdrawals[0].request.clone(),
-                vec![second_opening.opening],
-            )
+            .queue_withdrawal(data.withdrawals[0].request.clone(), second_opening.opening)
             .await;
         chain.register(&mut operator).await;
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
         let epoch = prepared.epoch();
         rotate_epoch(&mut operator, epoch);
-        let second = operator.balances.complete(prepared, 34).unwrap();
+        let second = operator.complete_prepared(prepared, 34).unwrap();
         chain.admit(&second).await;
         assert_eq!(chain.status().await.claimable, 30);
 
@@ -4107,8 +4312,7 @@ fn virtual_credit_survives_restart_without_claim_work() {
     operator.pay(0, operator.wallet_count(), 100).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     let epoch = prepared.epoch();
     rotate_epoch(&mut operator, epoch);
@@ -4123,7 +4327,6 @@ fn virtual_credit_survives_restart_without_claim_work() {
         100
     );
     assert_eq!(recovered.store.current_liability().unwrap(), 400);
-    assert_eq!(recovered.balances.startup_work().unwrap(), (vec![], vec![]));
 }
 
 #[test]
@@ -4146,16 +4349,15 @@ fn ordinary_withdrawal_is_included_and_claimable() {
         let request = data.withdrawals[0].request.clone();
         let account = operator.wallets[0].public_key();
         let opening = operator.withdrawal_opening(&account).unwrap();
-        chain.queue_withdrawal(request, vec![opening.opening]).await;
+        chain.queue_withdrawal(request, opening.opening).await;
         chain.register(&mut operator).await;
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
         let epoch = prepared.epoch();
         rotate_epoch(&mut operator, epoch);
-        let result = operator.balances.complete(prepared, 21).unwrap();
+        let result = operator.complete_prepared(prepared, 21).unwrap();
         let batch_id = result.header.batch_id::<Sha256>();
         operator
             .store
@@ -4215,8 +4417,8 @@ fn offset_boundaries_settle_in_their_registered_epoch() {
 
         let frozen = operator.store.epoch_reader().load(0).unwrap();
         let recovered = registration_for(&operator.protocol, &frozen).unwrap();
-        let prepared = operator.balances.prepare(frozen, recovered).unwrap();
-        let result = operator.balances.complete(prepared, 51).unwrap();
+        let prepared = operator.prepare_epoch(frozen, recovered).unwrap();
+        let result = operator.complete_prepared(prepared, 51).unwrap();
         chain.admit(&result).await;
         operator
             .store
@@ -4289,8 +4491,8 @@ fn queued_withdrawal_uses_the_settled_offset_balance() {
             rotate_epoch(operator, epoch);
             let frozen = operator.store.epoch_reader().load(epoch).unwrap();
             let recovered = registration_for(&operator.protocol, &frozen).unwrap();
-            let prepared = operator.balances.prepare(frozen, recovered).unwrap();
-            let result = operator.balances.complete(prepared, seed).unwrap();
+            let prepared = operator.prepare_epoch(frozen, recovered).unwrap();
+            let result = operator.complete_prepared(prepared, seed).unwrap();
             chain.admit(&result).await;
             operator
                 .store
@@ -4321,9 +4523,9 @@ fn queued_withdrawal_uses_the_settled_offset_balance() {
             operator.wallets[0].signer(),
         );
         chain
-            .queue_withdrawal(queued.clone(), vec![opening.opening])
+            .queue_withdrawal(queued.clone(), opening.opening)
             .await;
-        operator.apply_withdrawal(queued).unwrap();
+        operator.apply_withdrawal(queued, false).unwrap();
         assert_eq!(operator.payment_head(&account).unwrap().balance, 93);
         assert!(operator.registration.deposits.records().is_empty());
         chain.register(&mut operator).await;
@@ -4363,7 +4565,10 @@ fn missing_deposit_is_rejected_at_registration_until_credited() {
         chain.deposit(event.clone()).await;
         operator.withdraw(0, amount(7)).unwrap();
         assert_eq!(
-            operator.signed_registration().unwrap().deposits_root,
+            operator
+                .signed_registration(&WithdrawalBatch::empty())
+                .unwrap()
+                .deposits_root,
             DepositBatch::<Key>::empty().root::<Sha256>().unwrap()
         );
         assert_eq!(chain.try_register(&mut operator).await, None);
@@ -4381,7 +4586,9 @@ fn divergent_deposit_boundary_is_rejected_without_consuming_the_slot() {
 
         // A signer that agrees on the staged view but commits a boundary the
         // chain cannot derive is rejected on the boundary check alone.
-        let mut register = operator.signed_registration().unwrap();
+        let mut register = operator
+            .signed_registration(&WithdrawalBatch::empty())
+            .unwrap();
         let record = DepositRecord::new(operator.wallets[0].public_key(), 7).unwrap();
         let divergent = DepositBatch::new(vec![record])
             .unwrap()
@@ -4411,13 +4618,43 @@ fn divergent_deposit_boundary_is_rejected_without_consuming_the_slot() {
 }
 
 #[test]
+fn withdrawal_reconciliation_requires_the_observed_boundary() {
+    let mut operator = operator();
+    operator.withdraw(0, amount(7)).unwrap();
+    let (observed, discarded) = operator.unregistered_withdrawals().unwrap().unwrap();
+    operator.withdraw(1, amount(3)).unwrap();
+    let (current, retained) = operator.unregistered_withdrawals().unwrap().unwrap();
+    assert_ne!(observed, current);
+
+    operator
+        .discard_unregistered_withdrawals(&observed, &discarded)
+        .unwrap();
+    assert_eq!(
+        operator.unregistered_withdrawals().unwrap(),
+        Some((current.clone(), retained))
+    );
+    let first = operator.wallets[0].public_key();
+    let second = operator.wallets[1].public_key();
+    assert_eq!(operator.payment_head(&first).unwrap().balance, 93);
+    assert_eq!(operator.payment_head(&second).unwrap().balance, 97);
+
+    operator
+        .discard_unregistered_withdrawals(&current, &discarded)
+        .unwrap();
+    assert_eq!(operator.payment_head(&first).unwrap().balance, 100);
+    assert_eq!(operator.payment_head(&second).unwrap().balance, 97);
+    let (_, remaining) = operator.unregistered_withdrawals().unwrap().unwrap();
+    assert_eq!(remaining.requests().len(), 1);
+    assert_eq!(remaining.requests()[0].account(), &second);
+}
+
+#[test]
 fn acknowledged_withdrawal_evidence_advances_to_the_next_epoch() {
     let mut operator = operator();
     operator.withdraw(0, amount(25)).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     let epoch = prepared.epoch();
     rotate_epoch(&mut operator, epoch);
@@ -4431,8 +4668,7 @@ fn acknowledged_withdrawal_evidence_advances_to_the_next_epoch() {
     operator.withdraw(0, amount(10)).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     let epoch = prepared.epoch();
     rotate_epoch(&mut operator, epoch);
@@ -4503,10 +4739,10 @@ fn malformed_admission_does_not_poison_valid_retry() {
         operator.pay(0, 1, 1).unwrap();
         let data = operator.store.load_current().unwrap();
         let prepared = operator
-            .balances
-            .prepare(data, operator.registration.clone())
+            .prepare_epoch(data, operator.registration.clone())
             .unwrap();
-        let result = operator.balances.complete(prepared, 25).unwrap();
+        rotate_epoch(&mut operator, 0);
+        let result = operator.complete_prepared(prepared, 25).unwrap();
         let mut malformed = AdmitRequest::from(&result);
         malformed.roots.change.digest = Sha256::hash(&[b"malformed-change-root"]);
         let epoch = malformed.epoch;
@@ -4532,8 +4768,7 @@ fn close_removes_the_account_and_claims_the_final_tail() {
     assert_eq!(staged.action, WithdrawalAction::Close);
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     let epoch = prepared.epoch();
     rotate_epoch(&mut operator, epoch);
@@ -4567,8 +4802,7 @@ fn deposit_recreates_an_absent_account() {
     operator.pay(0, operator.wallet_count(), 100).unwrap();
     let data = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(data, operator.registration.clone())
+        .prepare_epoch(data, operator.registration.clone())
         .unwrap();
     let epoch = prepared.epoch();
     rotate_epoch(&mut operator, epoch);
@@ -4709,8 +4943,8 @@ fn virtual_first_credit_waits_for_admission_across_multiple_cutovers() {
 
     let frozen = operator.store.epoch_reader().load(0).unwrap();
     let registration = registration_for(&operator.protocol, &frozen).unwrap();
-    let prepared = operator.balances.prepare(frozen, registration).unwrap();
-    let result = operator.balances.complete(prepared, 91).unwrap();
+    let prepared = operator.prepare_epoch(frozen, registration).unwrap();
+    let result = operator.complete_prepared(prepared, 91).unwrap();
     assert_eq!(
         operator
             .balances
@@ -4751,7 +4985,7 @@ fn virtual_first_credit_waits_for_admission_across_multiple_cutovers() {
     drop(operator);
 
     let mut operator = Operator::open(database.path(), NonZeroUsize::MIN).unwrap();
-    assert_eq!(operator.balances.startup_work().unwrap(), (vec![], vec![]));
+
     assert!(operator.payment_head(&key).is_err());
     operator.wait_for_closes().unwrap();
     assert_eq!(operator.payment_head(&key).unwrap().balance, 23);
@@ -4830,7 +5064,7 @@ fn virtual_credits_accumulate_before_one_owner_exit_and_recreate_afterward() {
         crate::protocol::epoch_start(3).unwrap() + 50,
         recipient.signer(),
     );
-    operator.apply_withdrawal(request.clone()).unwrap();
+    operator.apply_withdrawal(request.clone(), false).unwrap();
     let closed = operator.complete_close(103).unwrap();
     assert_eq!(closed.withdrawal_total, 90);
     assert_eq!(closed.withdrawal_claims.len(), 1);
@@ -4839,7 +5073,7 @@ fn virtual_credits_accumulate_before_one_owner_exit_and_recreate_afterward() {
     let (send, entries) = operator.sign_send(3, &[(key.clone(), 8)]).unwrap();
     operator.accept_send(send, entries).unwrap();
     assert!(operator.payment_head(&key).is_err());
-    assert_eq!(operator.apply_withdrawal(request).unwrap().epoch, 3);
+    assert_eq!(operator.apply_withdrawal(request, false).unwrap().epoch, 3);
     let recreated = operator.complete_close(104).unwrap();
     assert_eq!(recreated.withdrawal_total, 0);
     assert!(recreated.withdrawal_claims.is_empty());
@@ -4866,11 +5100,10 @@ fn virtual_first_credit_rejects_unadmitted_withdrawal() {
     assert!(operator.withdrawal_opening(&key).is_err());
     let frozen = operator.store.load_current().unwrap();
     let prepared = operator
-        .balances
-        .prepare(frozen, operator.registration.clone())
+        .prepare_epoch(frozen, operator.registration.clone())
         .unwrap();
     rotate_epoch(&mut operator, 0);
-    let result = operator.balances.complete(prepared, 105).unwrap();
+    let result = operator.complete_prepared(prepared, 105).unwrap();
     let request = SignedWithdrawal::sign(
         operator.protocol.deployment(),
         result.roots.successor.digest,
@@ -4881,7 +5114,7 @@ fn virtual_first_credit_rejects_unadmitted_withdrawal() {
     );
     let changes = operator.store.total_changes();
     assert!(operator.withdrawal_opening(&key).is_err());
-    assert!(operator.apply_withdrawal(request).is_err());
+    assert!(operator.apply_withdrawal(request, false).is_err());
     assert_eq!(operator.store.total_changes(), changes);
     assert!(
         operator
@@ -5014,11 +5247,11 @@ fn virtual_capacity_allows_more_activity_rows_without_more_live_accounts() {
 }
 
 #[test]
-fn virtual_capacity_replays_a_large_missing_checkpoint_once() {
+fn virtual_capacity_reuses_a_large_retained_close_after_unknown_commit() {
     let database = TempDatabase::new();
     let (mut operator, wallets) = capacity_genesis(database.path());
     let recipients = capacity_transfers(&mut operator, &wallets, 512);
-    operator.balances.fail_after_journal().unwrap();
+    operator.fail_next_result_commit();
     start_current_close(&mut operator).unwrap();
     let failed = operator
         .wait_for_closes()
@@ -5028,14 +5261,10 @@ fn virtual_capacity_replays_a_large_missing_checkpoint_once() {
     drop(operator);
 
     let (mut operator, _) = capacity_genesis(database.path());
-    assert_eq!(
-        operator.balances.startup_work().unwrap(),
-        (vec![1], vec![1])
-    );
     operator.wait_for_closes().unwrap();
     assert_eq!(operator.store.load_current().unwrap().accounts.len(), 1_023);
     assert_eq!(operator.payment_head(&recipients[0]).unwrap().balance, 2);
-    let result = operator.balances.stored_result(0).unwrap().unwrap();
+    let result = operator.store.stored_result(0).unwrap().unwrap();
     assert_eq!(result.rows, 1_025);
     assert_eq!(
         SettlementResult::decode(result.encode()).unwrap().rows,
@@ -5044,7 +5273,7 @@ fn virtual_capacity_replays_a_large_missing_checkpoint_once() {
     drop(operator);
 
     let (operator, _) = capacity_genesis(database.path());
-    assert_eq!(operator.balances.startup_work().unwrap(), (vec![], vec![]));
+
     assert_eq!(operator.payment_head(&recipients[0]).unwrap().balance, 2);
 }
 
@@ -5094,7 +5323,7 @@ fn virtual_empty_bootstrap_deposits_and_receives_without_enrollment() {
     drop(operator);
 
     let operator = open();
-    assert_eq!(operator.balances.startup_work().unwrap(), (vec![], vec![]));
+
     assert_eq!(operator.store.current_liability().unwrap(), 2);
     assert_eq!(
         operator.payment_head(&owner.public_key()).unwrap().balance,

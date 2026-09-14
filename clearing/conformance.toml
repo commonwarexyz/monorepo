@@ -1,10 +1,10 @@
 ["commonware_clearing::bajillion::tests::conformance::FullDealing"]
 n_cases = 64
-hash = "6053516b7e7515c053d68f95c3a20b242433f9b746f84c1c264649b166650c95"
+hash = "4eb88831c7999c2c465fe3771664e30e247e4f188f629c162f870bbe5a174144"
 
 ["commonware_clearing::bajillion::tests::conformance::RetainedEvidence"]
 n_cases = 64
-hash = "82fdd66337aedea1a64a635d923d981c3db7e464cd8a7d61c4979af1c9f18899"
+hash = "868f4a10e74a9f47fd618afb6a5c646d57a348a06c8359a7a84b7a31d91026ff"
 
 ["conformance::CodecConformance<AccountChange<VerifyingKey,Sha256Digest>>"]
 n_cases = 1024

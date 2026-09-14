@@ -427,8 +427,8 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             && self.compute_anchor::<H>() == *self.payment.anchor()
     }
 
-    /// Binds registration to the locally validated predecessor and its boundary eligibility.
-    pub async fn bind<H, E, S>(
+    /// Binds registration to the locally validated predecessor and exact boundary.
+    pub fn bind<H, E, S>(
         self,
         state: &State<E, H, S>,
         deposits: &DepositBatch<P>,
@@ -443,16 +443,16 @@ impl<P: PublicKey, D: Digest> EpochContext<P, D> {
             epoch: self,
             predecessor_root: state.root(),
         };
-        validate_predecessor::<H, P, D, E, S>(state, &context, deposits, withdrawals).await?;
+        validate_predecessor::<H, P, D, E, S>(state, &context, deposits, withdrawals)?;
         Ok(context)
     }
 
     /// Binds the root already owned by the settlement state machine.
     ///
-    /// Settlement intake establishes each request's start affordability, through safety openings
-    /// when queueing and through one predecessor-root opening for operator-carried requests.
-    /// Later epoch spending can still lower the tail, which certification settles with a zero
-    /// release. Callers outside that owner must use [`Self::bind`] with the complete balance database.
+    /// Settlement intake checks one finalized-root opening for queued requests and one
+    /// predecessor-root opening for each fresh operator-carried request. Certification derives
+    /// releases from the epoch's final balances. Callers outside settlement must use [`Self::bind`]
+    /// with the balance database.
     pub(crate) const fn bind_settlement_root(
         self,
         predecessor_root: StateRoot<D>,
@@ -891,7 +891,7 @@ pub struct Terminal<P: PublicKey, D: Digest> {
 /// Complete derived activity and reusable proof material for one close.
 #[derive(Clone, Debug)]
 pub struct Close<P: PublicKey, D: Digest> {
-    /// Certified proposal identifier.
+    /// Commitment to the validated close.
     pub header: Header<D>,
     /// State and claim commitments.
     pub roots: RootBundle<D>,
@@ -945,9 +945,6 @@ impl<P: PublicKey, D: Digest> Close<P, D> {
         let available = encoded.remaining();
         let wire = Bytes::read_cfg(&mut encoded, &RangeCfg::new(..=available))?;
         let dealing = posted::decode(wire, context)?;
-        if dealing.header != *expected {
-            return Err(TransitionError::HeaderRoot);
-        }
         if dealing.rows.len() > encoded.remaining() / 17 {
             return Err(TransitionError::Codec(CodecError::Invalid(
                 "clearing::Evidence",
@@ -1178,10 +1175,10 @@ pub enum ChangeParts<P: PublicKey, D: Digest> {
     },
 }
 
-/// Constructs one canonical dealing and its incremental state candidate.
+/// Constructs a state candidate from terminal activity without authenticating signatures.
 ///
-/// Preparation checks body/vector consistency. Signature authentication belongs to validation.
-#[allow(clippy::too_many_arguments)]
+/// Validators authenticate an untrusted dealing with [`validate_close_with_strategy`].
+/// This constructor is useful when the caller already owns the accepted endpoints.
 pub async fn prepare_close_with_strategy<H, P, D, E, S>(
     state: &State<E, H, S>,
     context: &CloseContext<P, D>,
@@ -1197,6 +1194,23 @@ where
     E: Context + Spawner,
     S: Strategy,
 {
+    let dealing =
+        prepare_dealing::<H, P, D>(context.epoch_context(), deposits, withdrawals, terminals)?;
+    derive::<H, P, D, E, S>(state, context, deposits, withdrawals, dealing, strategy).await
+}
+
+/// Encodes accepted activity for every validator without reading account state.
+///
+/// The dealing contains account keys, terminal payer authorizations and vectors, and aggregated
+/// operator acceptance. Validators derive balances, claim trees, and the final commitment.
+/// This constructor checks canonical structure and endpoint consistency, not signatures.
+pub fn prepare_dealing<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
+    context: &EpochContext<P, D>,
+    deposits: &DepositBatch<P>,
+    withdrawals: &WithdrawalBatch<P, D>,
+    terminals: Vec<Terminal<P, D>>,
+) -> Result<Dealing<P>, TransitionError> {
+    validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
     let limits = context.limits();
     if terminals.len() as u64 > limits.max_rows()
         || terminals.windows(2).any(|pair| {
@@ -1211,6 +1225,9 @@ where
     let mut accounts = BTreeMap::new();
     let mut total_entries = 0_u64;
     for terminal in &terminals {
+        if terminal.vector.entries().len() as u64 > limits.max_account_entries() {
+            return Err(TransitionError::CloseLimit);
+        }
         let body = terminal.authorization.body();
         body.validate_context(context.payment())?;
         if terminal.vector.payer() != body.payer()
@@ -1284,17 +1301,12 @@ where
         return Err(TransitionError::NonCanonicalRows);
     }
     let aggregate = NonEmpty::try_new(signatures.iter()).map(combine_signatures);
-    derive::<H, P, D, E, S>(
-        state,
-        context,
-        deposits,
-        withdrawals,
+    let encoded = posted::encode(&rows, &aggregate)?;
+    Ok(Dealing {
         rows,
         aggregate,
-        None,
-        strategy,
-    )
-    .await
+        encoded,
+    })
 }
 
 /// Authenticates the full dealing against the retained predecessor before any state installation.
@@ -1305,7 +1317,7 @@ pub async fn validate_close_with_strategy<H, P, D, E, S, B, R>(
     operator: &OperatorKey,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
-    dealing: Dealing<P, D>,
+    dealing: Dealing<P>,
     rng: &mut R,
     strategy: &S,
 ) -> Result<PreparedClose<P, D, S>, TransitionError>
@@ -1318,22 +1330,9 @@ where
     B: BatchVerifier<PublicKey = P>,
     R: CryptoRng,
 {
-    let expected = dealing.header;
-    let aggregate = dealing.aggregate;
-    let prepared = derive::<H, P, D, E, S>(
-        state,
-        context,
-        deposits,
-        withdrawals,
-        dealing.rows,
-        aggregate.clone(),
-        Some(dealing.encoded),
-        strategy,
-    )
-    .await?;
-    if expected != prepared.close.header {
-        return Err(TransitionError::HeaderRoot);
-    }
+    let aggregate = dealing.aggregate.clone();
+    let prepared =
+        derive::<H, P, D, E, S>(state, context, deposits, withdrawals, dealing, strategy).await?;
     if !verify_ack_signatures::<P, D, B, R, _>(
         prepared
             .close
@@ -1349,15 +1348,12 @@ where
     Ok(prepared)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn derive<H, P, D, E, S>(
     state: &State<E, H, S>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
-    input: Vec<posted::Row<P>>,
-    aggregate: Option<OperatorAggregate>,
-    encoded: Option<Bytes>,
+    dealing: Dealing<P>,
     strategy: &S,
 ) -> Result<PreparedClose<P, D, S>, TransitionError>
 where
@@ -1367,7 +1363,12 @@ where
     E: Context + Spawner,
     S: Strategy,
 {
-    validate_predecessor::<H, P, D, E, S>(state, context, deposits, withdrawals).await?;
+    validate_predecessor::<H, P, D, E, S>(state, context, deposits, withdrawals)?;
+    let Dealing {
+        rows: input,
+        encoded,
+        ..
+    } = dealing;
     let limits = context.limits();
     if input.len() as u64 > limits.max_rows()
         || input.len() > commitment::MAX_VECTOR_LENGTH as usize
@@ -1455,7 +1456,7 @@ where
 
         // Only a predecessor balance or sealed deposit authorizes this epoch's spending.
         let eligible = predecessor != 0 || deposit != 0;
-        if !eligible && (request.is_some() || debit != 0) {
+        if !eligible && debit != 0 {
             return Err(TransitionError::AccountActivity);
         }
         let tail = (u128::from(predecessor) + u128::from(deposit) + u128::from(credit))
@@ -1555,10 +1556,6 @@ where
         return Err(TransitionError::LiabilityEquation);
     }
     let header = Header::new::<H, P>(context, &roots, withdrawal_total);
-    let encoded = match encoded {
-        Some(encoded) => encoded,
-        None => posted::encode(&header, &rows, &vectors, &aggregate)?,
-    };
     Ok(PreparedClose {
         close: Close {
             header,
@@ -1576,7 +1573,7 @@ where
     })
 }
 
-async fn validate_predecessor<H, P, D, E, S>(
+fn validate_predecessor<H, P, D, E, S>(
     state: &State<E, H, S>,
     context: &CloseContext<P, D>,
     deposits: &DepositBatch<P>,
@@ -1598,28 +1595,7 @@ where
     if state.live_accounts() > context.limits().max_states() {
         return Err(TransitionError::CloseLimit);
     }
-    validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
-    let keys = withdrawals
-        .requests()
-        .iter()
-        .map(|request| account_key(request.account()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let balances = state.get_many(&keys.iter().collect::<Vec<_>>()).await?;
-    for (request, balance) in withdrawals.requests().iter().zip(balances) {
-        let balance = balance.map_or(0, NonZeroU64::get);
-        let deposit = deposits.amount_for(request.account());
-        match request.body().action() {
-            WithdrawalAction::Amount(amount)
-                if u128::from(amount.get()) > u128::from(balance) + u128::from(deposit) =>
-            {
-                return Err(TransitionError::WithdrawalCoverage);
-            }
-            WithdrawalAction::Close if balance == 0 && deposit == 0 => {
-                return Err(TransitionError::BoundaryNoStateChange);
-            }
-            _ => {}
-        }
-    }
+    validate_boundary_roots::<H, P, D>(context.epoch_context(), deposits, withdrawals)?;
     Ok(())
 }
 
@@ -1671,7 +1647,7 @@ pub fn validate_close_amounts<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     roots: &RootBundle<D>,
     withdrawal_total: u64,
 ) -> Result<u64, TransitionError> {
-    validate_boundary_roots::<H, P, D>(context, deposits, withdrawals)?;
+    validate_boundary_roots::<H, P, D>(context.epoch_context(), deposits, withdrawals)?;
     let limits = context.limits();
     if withdrawal_total > limits.max_withdrawal_total() {
         return Err(TransitionError::CloseLimit);
@@ -1690,11 +1666,11 @@ pub fn validate_close_amounts<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
     )
 }
 pub(crate) fn validate_boundary_roots<H: Hasher<Digest = D>, P: PublicKey, D: Digest>(
-    context: &CloseContext<P, D>,
+    context: &EpochContext<P, D>,
     deposits: &DepositBatch<P>,
     withdrawals: &WithdrawalBatch<P, D>,
 ) -> Result<(), TransitionError> {
-    if !context.epoch.verify_anchor::<H>() {
+    if !context.verify_anchor::<H>() {
         return Err(TransitionError::EpochAnchor);
     }
     if deposits.root::<H>()? != *context.deposit_root()
@@ -1788,12 +1764,6 @@ pub enum TransitionError {
     /// A registered participant was omitted.
     #[error("missing boundary participant")]
     BoundaryAccountMissing,
-    /// An absent account cannot request closure without a deposit.
-    #[error("withdrawal has no eligible account")]
-    BoundaryNoStateChange,
-    /// Initial funds do not cover a requested amount.
-    #[error("uncovered withdrawal")]
-    WithdrawalCoverage,
     /// The derived output has the wrong action.
     #[error("invalid settlement output")]
     SettlementOutput,

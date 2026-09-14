@@ -527,15 +527,13 @@ fn build_fixture(
     let (prepared, successor) = deterministic::Runner::default().start(move |context| async move {
         let config = crate::protocol::state_config("prepare", &context, owned.strategy().clone());
         let state = replay_state(context.child("state"), config, &history).await;
-        let prepared = owned
-            .prepare(registration, &state, Vec::new())
+        let prepared = owned.prepare(registration, Vec::new()).unwrap();
+        let (result, candidate) = owned
+            .complete(prepared.clone(), &state, &mut TestRng::new(91))
             .await
             .unwrap();
         let mut next = history;
-        next.push((
-            prepared.close().roots.successor,
-            prepared.mutations().to_vec(),
-        ));
+        next.push((result.roots.successor, candidate.mutations().to_vec()));
         let successor = TestState::replay(context.child("successor"), next).await;
         (prepared, successor)
     });
@@ -1267,10 +1265,7 @@ pub(super) fn withdrawal_fixture() -> (SettlementTx, SettlementTx, WithdrawalCla
         let config =
             crate::protocol::state_config("withdrawal", &context, protocol.strategy().clone());
         let balances = replay_state(context, config, &state.history).await;
-        let prepared = protocol
-            .prepare(registration, &balances, Vec::new())
-            .await
-            .unwrap();
+        let prepared = protocol.prepare(registration, Vec::new()).unwrap();
         protocol
             .complete(prepared, &balances, &mut TestRng::new(91))
             .await
@@ -2126,7 +2121,7 @@ fn expired_withdrawal_faults_the_deployment() {
         let opening = state.opening(&account).unwrap();
         let withdrawal = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: request.clone(),
-            openings: vec![opening],
+            opening,
         });
         seal(&db, 1, std::slice::from_ref(&withdrawal)).await;
         assert_eq!(
@@ -2158,7 +2153,7 @@ fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
             let wallet = wallets().remove(3);
             let account = wallet.public_key();
             let mut state = genesis_cache();
-            let mut openings = vec![state.opening(&account).unwrap()];
+            let opening = state.opening(&account).unwrap();
             let deadline = 4 + crate::protocol::settlement_config(&timing)
                 .unwrap()
                 .minimum_withdrawal_notice
@@ -2186,12 +2181,11 @@ fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
                     height + timing.admission_offset + timing.challenge_duration,
                 );
                 state = close.successor;
-                openings.push(state.opening(&account).unwrap());
                 let mut txs = vec![close.deposit_tx, close.register_tx, close.admit_tx];
                 if epoch == 3 {
                     txs.push(SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
                         request: request.clone(),
-                        openings: openings.clone(),
+                        opening: opening.clone(),
                     }));
                 }
                 seal_at(&db, height, &timing, &txs).await;
@@ -2222,7 +2216,7 @@ fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
                 predecessor_liability: state.liability(),
                 deposits_root: root,
                 withdrawals: withdrawals.clone(),
-                openings: vec![state.opening(&account).unwrap()],
+                openings: Vec::new(),
                 fee: 4096,
                 signature: protocol.sign_chain_registration(
                     4,
@@ -2247,10 +2241,7 @@ fn minimum_withdrawal_notice_covers_a_full_native_pipeline() {
                 let config =
                     crate::protocol::state_config("carrying", &context, owned.strategy().clone());
                 let balances = replay_state(context, config, &state.history).await;
-                let prepared = owned
-                    .prepare(registration, &balances, Vec::new())
-                    .await
-                    .unwrap();
+                let prepared = owned.prepare(registration, Vec::new()).unwrap();
                 owned
                     .complete(prepared, &balances, &mut TestRng::new(91))
                     .await
@@ -2317,7 +2308,7 @@ fn deployment_fault_is_isolated() {
         );
         let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: request.clone(),
-            openings: vec![state.opening(&account).unwrap()],
+            opening: state.opening(&account).unwrap(),
         });
         let first = close_fixture(
             native_for(configured.clone()).chain_id(),
@@ -2544,16 +2535,17 @@ fn unconfigured_deployment_txs_are_rejected() {
         // A queued withdrawal signs its deployment, so naming an
         // unconfigured one is derivable and rejected identically.
         let wallet = wallets().remove(0);
+        let state = genesis_cache();
         let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: SignedWithdrawal::sign(
                 foreign.deployment(),
-                genesis_cache().root().digest,
+                state.root().digest,
                 wallet.public_key().encode(),
                 WithdrawalAction::Amount(NonZeroU64::new(1).unwrap()),
                 50,
                 wallet.signer(),
             ),
-            openings: Vec::new(),
+            opening: state.opening(&wallet.public_key()).unwrap(),
         });
 
         seal(&db, 3, std::slice::from_ref(&queue)).await;
@@ -2891,7 +2883,13 @@ fn node_read_waits_for_the_finalized_index() {
         let db = open(context.child("db"), "node-catchup").await;
         let finalized = Finalized::default();
         let (sender, _) = commonware_p2p::utils::mocks::inert_channel::<ed25519::PublicKey>([]);
-        let mut node = Node::new(deployment(), db.clone(), finalized.clone(), sender);
+        let mut node = Node::new(
+            deployment(),
+            db.clone(),
+            finalized.clone(),
+            sender,
+            Vec::new(),
+        );
 
         // The applied database runs ahead of the still-empty finalized index,
         // and the delayed report closes the gap: the read must wait out the
@@ -2936,6 +2934,7 @@ fn node_read_waits_for_the_finalized_index() {
             open(context.child("stalled"), "node-stalled").await,
             Finalized::default(),
             sender,
+            Vec::new(),
         );
         assert!(stalled.read(&context, &req(Lookup::Status)).await.is_err());
     });
@@ -3100,7 +3099,13 @@ fn node_recent_read_detects_a_stalled_tip() {
         let db = open(context.child("db"), "node-stall").await;
         let finalized = Finalized::default();
         let (sender, _) = commonware_p2p::utils::mocks::inert_channel::<ed25519::PublicKey>([]);
-        let mut node = Node::new(deployment(), db.clone(), finalized.clone(), sender);
+        let mut node = Node::new(
+            deployment(),
+            db.clone(),
+            finalized.clone(),
+            sender,
+            Vec::new(),
+        );
 
         // The follower applied a block whose timestamp matches the local
         // clock: the tip is live and the read passes.
@@ -4849,7 +4854,13 @@ impl EngineDefinition for Distributed {
 
             // The local chain backend and the close pipeline.
             let db = stateful_mailbox.subscribe_databases().await;
-            let backend = Node::new(deployment(), db, finalized.clone(), settlement_tx_network.0);
+            let backend = Node::new(
+                deployment(),
+                db,
+                finalized.clone(),
+                settlement_tx_network.0,
+                (0..validators.len()).map(Engine::query_address).collect(),
+            );
             let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
             let (certifier, pipeline) = node::Certifier::new(
                 context.child("certifier"),
@@ -5175,8 +5186,7 @@ async fn drive(
         let admission_deadline = record.admission_deadline;
 
         // Disseminate one complete packet; a validator planned to miss this close is omitted.
-        let dealing = build.prepared.encoded().clone();
-        let header = build.prepared.close().header;
+        let prepared = build.prepared.clone();
         let mut deals = Vec::new();
         for (index, peer) in validators.iter().enumerate() {
             if plan.undealt.get(&epoch) == Some(&index) {
@@ -5197,11 +5207,7 @@ async fn drive(
             {
                 let certified = certified.clone();
                 context.child("certify").spawn(move |_| async move {
-                    if pipeline
-                        .certify(deployment(), 0, header, dealing, deals)
-                        .await
-                        .is_ok()
-                    {
+                    if pipeline.certify(prepared, deals).await.is_ok() {
                         *certified.lock() = Some(());
                     }
                 });
@@ -5233,8 +5239,8 @@ async fn drive(
         }
 
         // Certification, local completion, and certified admission.
-        let certificate = commonware_macros::select! {
-            result = pipeline.certify(deployment(), epoch, header, dealing, deals) => result?,
+        let result = commonware_macros::select! {
+            result = pipeline.certify(prepared, deals) => result?,
             fault = async {
                 loop {
                     let status = chain.status(&context).await?;
@@ -5248,7 +5254,6 @@ async fn drive(
                 anyhow::bail!("epoch {epoch} certification pending at height {height}, deadline {admission_deadline}, faulted {faulted}");
             },
         };
-        let (result, _) = protocol.certify(build.prepared, certificate, 0, 0)?;
         pipeline
             .admit(crate::chain::tx::AdmitRequest::from(&result))
             .await?;
@@ -5626,7 +5631,7 @@ fn registration_consumes_exactly_its_withdrawal_openings() {
 }
 
 #[test]
-fn registration_requires_every_queued_withdrawal_and_openings() {
+fn registration_requires_every_queued_withdrawal_and_fresh_extra_openings() {
     deterministic::Runner::default().start(|context| async move {
         let db = open(context.child("carriage"), "carriage").await;
         let protocol = Protocol::new(std::num::NonZeroUsize::MIN).unwrap();
@@ -5647,7 +5652,7 @@ fn registration_requires_every_queued_withdrawal_and_openings() {
         );
         let queue_tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: queued.clone(),
-            openings: vec![state.opening(&account).unwrap()],
+            opening: state.opening(&account).unwrap(),
         });
         seal(&db, 1, std::slice::from_ref(&queue_tx)).await;
         assert_eq!(
@@ -5676,20 +5681,31 @@ fn registration_requires_every_queued_withdrawal_and_openings() {
         assert_eq!(read(&db, &registration_key(&deployment())).await, None);
         assert_eq!(read(&db, &anchor_key(&deployment(), 0)).await, None);
 
-        // The native registration carries predecessor openings for both queued
-        // and operator-collected withdrawals.
-        let extra_wallet = wallets().remove(1);
-        let extra = SignedWithdrawal::sign(
-            deployment(),
-            state.root().digest,
-            wallet.public_key().encode(),
-            commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
-                std::num::NonZeroU64::new(3).unwrap(),
-            ),
-            60,
-            extra_wallet.signer(),
-        );
-        let withdrawals = WithdrawalBatch::new(vec![queued.clone(), extra.clone()]).unwrap();
+        // Only operator-collected extras carry predecessor openings. The exact
+        // queued request is skipped while preserving canonical withdrawal order.
+        let extras = wallets()
+            .into_iter()
+            .skip(1)
+            .take(2)
+            .map(|extra_wallet| {
+                SignedWithdrawal::sign(
+                    deployment(),
+                    state.root().digest,
+                    wallet.public_key().encode(),
+                    commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
+                        std::num::NonZeroU64::new(3).unwrap(),
+                    ),
+                    60,
+                    extra_wallet.signer(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let withdrawals = WithdrawalBatch::new(
+            std::iter::once(queued.clone())
+                .chain(extras.iter().cloned())
+                .collect(),
+        )
+        .unwrap();
         let unopened = SettlementTx::RegisterEpoch(RegisterEpochRequest {
             fee: 4096,
             deployment: deployment(),
@@ -5704,7 +5720,8 @@ fn registration_requires_every_queued_withdrawal_and_openings() {
         seal(&db, 3, std::slice::from_ref(&unopened)).await;
         assert_eq!(read(&db, &registration_key(&deployment())).await, None);
 
-        // The complete ordered list binds every opening to its withdrawal.
+        // The complete ordered list binds one opening to each fresh extra and
+        // none to exact chain-queued requests.
         let opened = RegisterEpochRequest {
             fee: 4096,
             deployment: deployment(),
@@ -5716,6 +5733,7 @@ fn registration_requires_every_queued_withdrawal_and_openings() {
             openings: withdrawals
                 .requests()
                 .iter()
+                .filter(|request| request.account() != &account)
                 .map(|request| state.opening(request.account()).unwrap())
                 .collect(),
             signature: protocol.sign_chain_registration(0, 400, &root, &withdrawals, 4096),
@@ -5731,15 +5749,15 @@ fn registration_requires_every_queued_withdrawal_and_openings() {
         reversed.reverse();
         variants.push(reversed);
         let mut extra = opened.openings.clone();
-        extra.push(extra[0].clone());
+        extra.push(state.opening(&account).unwrap());
         variants.push(extra);
-        let mut invalid_queued = opened.openings.clone();
-        let opening = invalid_queued
-            .iter_mut()
-            .find(|opening| opening.account == account)
-            .unwrap();
+        let mut queued_instead = opened.openings.clone();
+        queued_instead[0] = state.opening(&account).unwrap();
+        variants.push(queued_instead);
+        let mut invalid_extra = opened.openings.clone();
+        let opening = &mut invalid_extra[0];
         opening.balance = NonZeroU64::new(opening.balance.get() + 1).unwrap();
-        variants.push(invalid_queued);
+        variants.push(invalid_extra);
         for (index, openings) in variants.into_iter().enumerate() {
             let mut request = opened.clone();
             request.openings = openings;
@@ -5755,7 +5773,7 @@ fn registration_requires_every_queued_withdrawal_and_openings() {
                 Some(Record::Withdrawal(queued.clone()))
             );
         }
-        seal(&db, 9, &[SettlementTx::RegisterEpoch(opened)]).await;
+        seal(&db, 10, &[SettlementTx::RegisterEpoch(opened)]).await;
         assert!(matches!(
             read(&db, &registration_key(&deployment())).await,
             Some(Record::Registration(_))
@@ -5888,7 +5906,7 @@ fn live_obligations_keep_registration_available() {
         );
         let queue_tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: withdrawal.clone(),
-            openings: vec![state.opening(&wallet.public_key()).unwrap()],
+            opening: state.opening(&wallet.public_key()).unwrap(),
         });
         seal(&db, 1, &[deposit.clone(), queue_tx.clone()]).await;
         assert!(matches!(
@@ -5925,7 +5943,7 @@ fn live_obligations_keep_registration_available() {
             deposits_root,
 
             withdrawals: withdrawals.clone(),
-            openings: vec![state.opening(&wallet.public_key()).unwrap()],
+            openings: Vec::new(),
             signature: protocol.sign_chain_registration(0, 400, &deposits_root, &withdrawals, 4096),
         });
         seal(&db, 6, std::slice::from_ref(&register)).await;
@@ -6752,7 +6770,13 @@ impl EngineDefinition for Walkthrough {
 
             // The local chain backend and the close pipeline.
             let db = stateful_mailbox.subscribe_databases().await;
-            let backend = Node::new(digest, db, finalized.clone(), settlement_tx_network.0);
+            let backend = Node::new(
+                digest,
+                db,
+                finalized.clone(),
+                settlement_tx_network.0,
+                self.genesis.holders().unwrap(),
+            );
             let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
             let (certifier, certify_mailbox) = node::Certifier::new(
                 context.child("certifier"),

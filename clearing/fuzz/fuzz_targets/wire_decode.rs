@@ -81,8 +81,7 @@ async fn semantic_header(
         u64::from(seed) + 1,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"wire-decode-committee"]),
-    )
-    .await;
+    );
     let roots = RootBundle {
         change: empty_root::<Sha256>(VectorKind::Change),
         withdrawal_outputs: empty_root::<Sha256>(VectorKind::WithdrawalOutput),
@@ -124,13 +123,12 @@ async fn dealing_roundtrip(bytes: &[u8], limits: CloseLimits, runtime: determini
         1,
         limits,
         Sha256::hash(&[b"committee"]),
-    )
-    .await;
+    );
     if let Ok(dealing) = posted::decode::<VerifyingKey, Digest>(bytes.to_vec().into(), &context) {
         assert_eq!(dealing.encoded().as_ref(), bytes);
         let decoded =
             posted::decode::<VerifyingKey, Digest>(dealing.encoded().clone(), &context).unwrap();
-        assert_eq!(decoded.header(), dealing.header());
+        assert_eq!(decoded.encoded(), dealing.encoded());
         let mut trailing = bytes.to_vec();
         trailing.push(0);
         assert!(posted::decode::<VerifyingKey, Digest>(trailing.into(), &context).is_err());

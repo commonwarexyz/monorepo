@@ -48,7 +48,6 @@ fn field<T: Encode>(wire: &mut Bytes, value: &T) -> usize {
 
 #[derive(Debug, Default)]
 struct DealingBytes {
-    header: usize,
     row_count: usize,
     account_keys: usize,
     outgoing_flags: usize,
@@ -71,7 +70,7 @@ impl DealingBytes {
     }
 
     const fn total(&self) -> usize {
-        self.header + self.rows() + self.payer_signatures + self.entries() + self.operator_aggregate
+        self.rows() + self.payer_signatures + self.entries() + self.operator_aggregate
     }
 }
 
@@ -79,7 +78,6 @@ impl DealingBytes {
 fn dealing_bytes(close: &Close<VerifyingKey, Digest>) -> DealingBytes {
     let mut wire = close.encoded().clone();
     let mut sizes = DealingBytes {
-        header: field(&mut wire, &close.header),
         row_count: field(&mut wire, &close.rows.len()),
         ..DealingBytes::default()
     };
@@ -380,9 +378,9 @@ fn calculator_parity() {
                 let parts = dealing_bytes(close);
                 let graph = if sparse { "sparse_first_last" } else { "cyclic" };
                 println!(
-                    "clearing calculator parity: graph={graph} N={live_accounts} S={senders} K={degree} E={} A={} rows_bytes={} signatures_bytes={} entries_bytes={} operator_bytes={} metadata_bytes={} dealing_bytes={}",
+                    "clearing calculator parity: graph={graph} N={live_accounts} S={senders} K={degree} E={} A={} rows_bytes={} signatures_bytes={} entries_bytes={} operator_bytes={} dealing_bytes={}",
                     senders * degree, close.rows.len(), parts.rows(), parts.payer_signatures,
-                    parts.entries(), parts.operator_aggregate, parts.header, parts.total(),
+                    parts.entries(), parts.operator_aggregate, parts.total(),
                 );
             }
         });
@@ -400,7 +398,6 @@ pub(crate) fn benches(challenges_only: bool) {
             let decoded = posted::decode::<VerifyingKey, Digest>(close.encoded().clone(), &fixture.context)
                 .expect("complete dealing decodes");
             assert_eq!(decoded.encoded(), close.encoded());
-            assert_eq!(decoded.header(), &close.header);
             assert_eq!(validators.committee().members().len(), VALIDATORS);
             let dealings = vec![close.encoded().clone(); VALIDATORS];
             assert!(dealings.iter().all(|wire| wire == close.encoded()));

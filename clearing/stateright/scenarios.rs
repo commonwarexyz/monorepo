@@ -135,28 +135,9 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         SettlementAction::QueueWithdrawal(ineligible_destination),
     );
 
-    // Every safety root requires one authenticated opening for the exact account and state.
-    let mut wrong_count = valid;
-    wrong_count.safety_openings[0] = None;
-    rejected(
-        model,
-        &state,
-        SettlementAction::QueueWithdrawal(wrong_count),
-    );
-
-    let mut extra_opening = valid;
-    extra_opening.safety_openings[1] = extra_opening.safety_openings[0];
-    rejected(
-        model,
-        &state,
-        SettlementAction::QueueWithdrawal(extra_opening),
-    );
-
+    // Intake requires one authenticated opening for the exact account and finalized root.
     let mut unauthenticated = valid;
-    unauthenticated.safety_openings[0]
-        .as_mut()
-        .unwrap()
-        .authenticated_state = false;
+    unauthenticated.opening.authenticated_state = false;
     rejected(
         model,
         &state,
@@ -164,7 +145,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     );
 
     let mut wrong_account = valid;
-    wrong_account.safety_openings[0].as_mut().unwrap().account = Account::Bob;
+    wrong_account.opening.account = Account::Bob;
     rejected(
         model,
         &state,
@@ -172,11 +153,11 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     );
 
     let mut wrong_root = valid;
-    wrong_root.safety_openings[0].as_mut().unwrap().root = Root::R1;
+    wrong_root.opening.root = Root::R1;
     rejected(model, &state, SettlementAction::QueueWithdrawal(wrong_root));
 
     let mut wrong_state = valid;
-    wrong_state.safety_openings[0].as_mut().unwrap().state = AccountState {
+    wrong_state.opening.state = AccountState {
         active: false,
         balance: 0,
     };
@@ -186,7 +167,7 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
         SettlementAction::QueueWithdrawal(wrong_state),
     );
 
-    // Replay identity binds the full body, whose action must be affordable at every safety root.
+    // Replay identity binds the full body, whose amount must be affordable at the finalized root.
     let mut mismatched_replay_key = valid;
     mismatched_replay_key.request.action = WithdrawalAction::Amount(1);
     rejected(
@@ -222,34 +203,6 @@ fn invalid_withdrawal_authorization_dimensions_do_not_mutate_state() {
     too_late.request.deadline = 13;
     too_late.replay_key = too_late.request.replay_key();
     rejected(model, &state, SettlementAction::QueueWithdrawal(too_late));
-
-    let mut with_successor = SettlementState::default();
-    step(
-        model,
-        &mut with_successor,
-        SettlementAction::RecordDeposit(DepositId::BobTwo),
-    );
-    register_and_admit(model, &mut with_successor, Batch::B0);
-    let mut unaffordable_successor =
-        SettlementModel::withdrawal_attempt(&with_successor, WithdrawalId::CloseAfterFault);
-    unaffordable_successor.request.action = WithdrawalAction::Amount(9);
-    unaffordable_successor.replay_key = unaffordable_successor.request.replay_key();
-    rejected(
-        model,
-        &with_successor,
-        SettlementAction::QueueWithdrawal(unaffordable_successor),
-    );
-
-    register_and_admit(model, &mut with_successor, Batch::B1);
-    let mut unaffordable_tail =
-        SettlementModel::withdrawal_attempt(&with_successor, WithdrawalId::CloseAfterFault);
-    unaffordable_tail.request.action = WithdrawalAction::Amount(8);
-    unaffordable_tail.replay_key = unaffordable_tail.request.replay_key();
-    rejected(
-        model,
-        &with_successor,
-        SettlementAction::QueueWithdrawal(unaffordable_tail),
-    );
 
     let mut accepted = state;
     step(
@@ -399,6 +352,79 @@ fn admitted_closes_allow_successor_registration_before_finality() {
     register_and_admit(model, &mut state, Batch::B2);
     assert_eq!(state.pipeline, vec![Batch::B0, Batch::B1, Batch::B2]);
     assert_eq!(state.expected_epoch, 0);
+}
+
+#[test]
+fn withdrawal_queued_during_registration_waits_for_the_next_boundary() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::B0),
+    );
+
+    let queued = SettlementModel::withdrawal_attempt(&state, WithdrawalId::CloseAfterFault);
+    let request = queued.request;
+    step(model, &mut state, SettlementAction::QueueWithdrawal(queued));
+    assert_eq!(state.registered, Some(RegistrationId::B0));
+    assert_eq!(
+        state.pending_withdrawals[Account::Alice.index()],
+        Some(request)
+    );
+
+    step(model, &mut state, admission(Batch::B0));
+    assert_eq!(state.pipeline, vec![Batch::B0]);
+    assert_eq!(
+        state.pending_withdrawals[Account::Alice.index()],
+        Some(request)
+    );
+    assert_eq!(
+        state.outstanding_withdrawals[Account::Alice.index()],
+        Some(request)
+    );
+
+    // The admitted boundary did not carry the later request. A successor
+    // registration must include it verbatim instead of silently consuming it.
+    rejected(
+        model,
+        &state,
+        SettlementAction::Register(RegistrationId::B1),
+    );
+}
+
+#[test]
+fn registered_withdrawal_blocks_another_request_for_the_same_account() {
+    let model = SettlementModel::default();
+    let mut state = SettlementState::default();
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobTwo),
+    );
+    register_and_admit(model, &mut state, Batch::B0);
+    finalize_b0(model, &mut state);
+    step(
+        model,
+        &mut state,
+        SettlementAction::RecordDeposit(DepositId::BobOne),
+    );
+    step(
+        model,
+        &mut state,
+        SettlementAction::Register(RegistrationId::B1C),
+    );
+
+    let mut duplicate = SettlementModel::withdrawal_attempt(&state, WithdrawalId::Carried);
+    duplicate.request.action = WithdrawalAction::Amount(1);
+    duplicate.replay_key = duplicate.request.replay_key();
+    rejected(model, &state, SettlementAction::QueueWithdrawal(duplicate));
+    assert_eq!(state.pending_withdrawals, [None, None, None]);
 }
 
 #[test]

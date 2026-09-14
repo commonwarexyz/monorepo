@@ -1034,23 +1034,7 @@ fn dispatch(operator: &mut Operator, request: OperatorRequest) -> Result<Bytes> 
             }
             .encode())
         }
-        OperatorRequest::ApplyWithdrawal(request) => {
-            let account = request.request.account().clone();
-            let action = *request.request.body().action();
-            let digest = withdrawal_digest(&request.request);
-            let staged = operator
-                .apply_withdrawal(request.request)
-                .context("apply withdrawal")?;
-            anyhow::ensure!(
-                staged.account == account && staged.action == action,
-                "operator staged another withdrawal"
-            );
-            Ok(WithdrawalAck {
-                epoch: staged.epoch,
-                digest,
-            }
-            .encode())
-        }
+        OperatorRequest::ApplyWithdrawal(request) => stage_withdrawal(operator, request, false),
         OperatorRequest::StartClose(request) => {
             let started = operator
                 .start_close(request.expected_epoch)
@@ -1109,6 +1093,40 @@ pub(crate) fn handle(operator: &mut Operator, request: rpc::Request) -> rpc::Res
 
 pub(crate) fn handle_decoded(operator: &mut Operator, request: OperatorRequest) -> rpc::Response {
     match dispatch(operator, request) {
+        Ok(body) => rpc::Response::Success { body },
+        Err(error) => rpc::error_response(format!("{error:#}")),
+    }
+}
+
+fn stage_withdrawal(
+    operator: &mut Operator,
+    request: ApplyWithdrawalRequest,
+    queued: bool,
+) -> Result<Bytes> {
+    let account = request.request.account().clone();
+    let action = *request.request.body().action();
+    let digest = withdrawal_digest(&request.request);
+    let staged = operator
+        .apply_withdrawal(request.request, queued)
+        .context("apply withdrawal")?;
+    anyhow::ensure!(
+        staged.account == account && staged.action == action,
+        "operator staged another withdrawal"
+    );
+    Ok(WithdrawalAck {
+        epoch: staged.epoch,
+        digest,
+    }
+    .encode())
+}
+
+/// Dispatches an authorization whose queue eligibility was authenticated by the service.
+pub(crate) fn apply_withdrawal_confirmed(
+    operator: &mut Operator,
+    request: ApplyWithdrawalRequest,
+    queued: bool,
+) -> rpc::Response {
+    match stage_withdrawal(operator, request, queued) {
         Ok(body) => rpc::Response::Success { body },
         Err(error) => rpc::error_response(format!("{error:#}")),
     }

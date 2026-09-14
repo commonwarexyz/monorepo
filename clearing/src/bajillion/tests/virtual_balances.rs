@@ -1,7 +1,7 @@
 use super::*;
 use crate::bajillion::state::SettlementOutput;
 
-async fn epoch(
+fn epoch(
     state: &TestState,
     epoch: u64,
     deposits: &DepositBatch<VerifyingKey>,
@@ -21,7 +21,6 @@ async fn epoch(
     )
     .unwrap()
     .bind::<Sha256, _, _>(state, deposits, withdrawals)
-    .await
     .unwrap()
 }
 
@@ -109,7 +108,7 @@ fn absent_credit_and_multilateral_payments_create_virtual_balances() {
         .await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals).await;
+        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
         let prepared = verify(
             &state,
             &context,
@@ -162,7 +161,7 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
         let state = new_state(runtime, "eligibility", vec![(a.public_key(), 100)]).await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals).await;
+        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
         let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
             &state,
             &context,
@@ -193,7 +192,7 @@ fn absent_recipient_cannot_originate_until_successor_epoch() {
                 .map(NonZeroU64::get),
             Some(20)
         );
-        let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals).await;
+        let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals);
         let second = verify(
             &state,
             &next,
@@ -226,7 +225,7 @@ fn eligible_recipient_reuses_incoming_credit() {
         .await;
         let deposits = DepositBatch::empty();
         let withdrawals = WithdrawalBatch::empty();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals).await;
+        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
         let close = verify(
             &state,
             &context,
@@ -278,7 +277,7 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
             &b,
         )])
         .unwrap();
-        let context = epoch(&state, EPOCH, &deposits, &withdrawals).await;
+        let context = epoch(&state, EPOCH, &deposits, &withdrawals);
         let first = verify(
             &state,
             &context,
@@ -304,7 +303,7 @@ fn close_deletes_balance_and_recredit_recreates_same_owner() {
                 .is_none()
         );
         let withdrawals = WithdrawalBatch::empty();
-        let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals).await;
+        let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals);
         let second = verify(
             &state,
             &next,
@@ -347,7 +346,7 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
             };
             let deposits = DepositBatch::empty();
             let withdrawals = WithdrawalBatch::empty();
-            let context = epoch(&state, EPOCH, &deposits, &withdrawals).await;
+            let context = epoch(&state, EPOCH, &deposits, &withdrawals);
             let first = verify(
                 &state,
                 &context,
@@ -364,7 +363,7 @@ fn new_balance_recovery_replays_only_missing_suffix_and_retains_historical_proof
             let evidence = first.close().encode_evidence();
             let (state, _) = first.apply::<_, Sha256>(state).await.unwrap();
             let state = state.commit().await.unwrap();
-            let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals).await;
+            let next = epoch(&state, EPOCH + 1, &deposits, &withdrawals);
             let second = verify(
                 &state,
                 &next,
@@ -442,7 +441,6 @@ fn receiving_balance_creation_respects_live_account_limit() {
         )
         .unwrap()
         .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-        .await
         .unwrap();
         let before = *state.head();
         let rejected = prepare_close_with_strategy::<Sha256, _, _, _, _>(

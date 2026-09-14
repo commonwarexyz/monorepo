@@ -1,5 +1,8 @@
 //! Runtime-owning service loops for the terminal role binaries.
 
+#[cfg(test)]
+mod lifecycle;
+
 use crate::{
     agent::Agent,
     chain::{
@@ -8,7 +11,7 @@ use crate::{
         node,
         query::Lookup,
         state::{FaultRecord, HardFaultReasonResponse, Record},
-        tx::SettlementTx,
+        tx::{RegisterEpochRequest, SettlementTx},
     },
     operator::{Operator, StagedDeposit, rpc as operator_rpc},
     protocol::{MIN_DEALING_BYTES, Timing, short_digest},
@@ -16,6 +19,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use commonware_actor::mailbox::Receiver as MailboxReceiver;
+use commonware_clearing::bajillion::boundary::WithdrawalBatch;
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_runtime::{
@@ -350,7 +354,7 @@ async fn drive_closes<E: Env, C: Chain>(
     timing: Timing,
 ) -> Result<()> {
     observe_closes(ctx, chain, operator).await?;
-    discard_expired_withdrawals(ctx, chain, operator).await?;
+    reconcile_withdrawals(ctx, chain, operator).await?;
     let Some(epoch) = operator.lock().automatic_epoch()? else {
         return Ok(());
     };
@@ -368,13 +372,10 @@ async fn drive_closes<E: Env, C: Chain>(
     }
 
     // One attempt leaves admission/finality observation live while registration is pending.
-    let registration = {
-        let mut operator = operator.lock();
-        if operator.automatic_epoch()? != Some(epoch) {
-            return Ok(());
-        }
-        operator.signed_registration()?
-    };
+    if operator.lock().automatic_epoch()? != Some(epoch) {
+        return Ok(());
+    }
+    let registration = registration_request(ctx, chain, operator, epoch).await?;
     chain
         .submit(ctx, &SettlementTx::RegisterEpoch(registration))
         .await?;
@@ -470,31 +471,62 @@ pub(crate) fn run_agent(
     Ok(())
 }
 
-/// Full expiry fences old signed bytes; permanent anchor absence proves this boundary never registered.
-async fn discard_expired_withdrawals<E: Env, C: Chain>(
+/// Releases unregistered reservations after their signed intake context is permanently invalid.
+async fn reconcile_withdrawals<E: Env, C: Chain>(
     ctx: &E,
     chain: &mut C,
     operator: &Mutex<Operator>,
 ) -> Result<()> {
-    let Some((expected, deadline)) = operator.lock().withdrawal_expiry()? else {
+    let Some((expected, withdrawals)) = operator.lock().unregistered_withdrawals()? else {
         return Ok(());
     };
     let status = chain.recent_status(ctx).await?;
-    if status.hard_faulted || status.height < deadline {
+    if status.hard_faulted {
         return Ok(());
     }
+    let mut barrier = status.height;
+    let mut discarded = Vec::new();
+    for request in withdrawals.requests() {
+        // Finalized QMDB roots commit a growing operation history and cannot recur.
+        // Exact queued requests retain their root and deadline until settlement consumes them.
+        if request.body().deadline() > status.height
+            && request.body().state_root() == &status.state_root.digest
+        {
+            continue;
+        }
+        let lookup = chain.request(Lookup::Withdrawal {
+            account: request.account().clone(),
+        });
+        let queued = chain.recent(ctx, &lookup).await?;
+        ensure!(
+            queued.height >= status.height,
+            "withdrawal queue predates the intake barrier"
+        );
+        barrier = barrier.max(queued.height);
+        match queued.record {
+            Some(Record::Withdrawal(accepted)) if accepted == *request => {}
+            Some(Record::Withdrawal(_)) | None => discarded.push(request.clone()),
+            Some(_) => bail!("certified withdrawal read returned a foreign record"),
+        }
+    }
+    if discarded.is_empty() {
+        return Ok(());
+    }
+
+    // Registration can consume a queued request between reads. Its permanent anchor must
+    // therefore be absent at or after every queue exclusion before reservations are restored.
     let anchor = chain.request(Lookup::Anchor {
         epoch: expected.epoch(),
     });
     let verified = chain.recent(ctx, &anchor).await?;
     ensure!(
-        verified.height >= status.height,
-        "withdrawal anchor predates the expiry barrier"
+        verified.height >= barrier,
+        "withdrawal anchor predates the intake barrier"
     );
     if verified.record.is_none() {
         operator
             .lock()
-            .discard_expired_withdrawals(&expected, status.height)?;
+            .discard_unregistered_withdrawals(&expected, &WithdrawalBatch::new(discarded)?)?;
     }
     Ok(())
 }
@@ -525,6 +557,7 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
                 {
                     return Ok(None);
                 }
+                let expected = operator.lock().registration_boundary()?.0;
                 let status = chain.recent_status(ctx).await?;
                 ensure!(
                     !status.hard_faulted,
@@ -547,39 +580,43 @@ pub(crate) async fn prepare_request<E: Env, C: Chain>(
                 let current_root = request.request.body().state_root() == &status.state_root.digest;
                 let valid_notice = (minimum..=maximum).contains(&deadline);
 
-                // A queued authorization keeps its exact root and deadline as finality advances.
-                // A fresh request must satisfy the current certified intake conditions.
-                if !current_root || !valid_notice {
-                    let lookup = chain.request(Lookup::Withdrawal {
-                        account: request.request.account().clone(),
-                    });
-                    let queued = chain.recent(ctx, &lookup).await?;
+                let lookup = chain.request(Lookup::Withdrawal {
+                    account: request.request.account().clone(),
+                });
+                let queued = chain.recent(ctx, &lookup).await?;
+                ensure!(
+                    queued.height >= status.height && deadline > queued.height,
+                    "withdrawal has expired"
+                );
+                let queued = match queued.record {
+                    Some(Record::Withdrawal(accepted)) => accepted == request.request,
+                    None => false,
+                    Some(_) => bail!("certified withdrawal read returned a foreign record"),
+                };
+                if !queued {
                     ensure!(
-                        queued.height >= status.height && deadline > queued.height,
-                        "withdrawal has expired"
+                        current_root,
+                        "withdrawal reference root differs from the current finalized state"
                     );
-                    if !matches!(queued.record, Some(Record::Withdrawal(ref accepted)) if accepted == &request.request)
-                    {
-                        ensure!(
-                            current_root,
-                            "withdrawal reference root differs from the current finalized state"
-                        );
-                        ensure!(
-                            valid_notice,
-                            "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
-                            status.height
-                        );
-                    }
+                    ensure!(
+                        valid_notice,
+                        "withdrawal deadline {deadline} is outside [{minimum}, {maximum}] at height {}",
+                        status.height
+                    );
                 }
 
                 // Publication fixes the current boundary. Keep this authorization intact
                 // until the close driver opens a successor boundary for it.
                 {
                     let mut operator = operator.lock();
+                    if operator.registration_boundary()?.0 != expected {
+                        continue;
+                    }
                     if !operator.withdrawals_frozen()? {
-                        return Ok(Some(operator_rpc::handle_decoded(
+                        return Ok(Some(operator_rpc::apply_withdrawal_confirmed(
                             &mut operator,
-                            operator_rpc::OperatorRequest::ApplyWithdrawal(request.clone()),
+                            request.clone(),
+                            queued,
                         )));
                     }
                 }
@@ -697,6 +734,37 @@ pub(crate) async fn observe<E: Env, C: Chain>(
     Ok(staged)
 }
 
+/// Builds proofs for fresh extras against an unchanged boundary and certified queue records.
+async fn registration_request<E: Env, C: Chain>(
+    ctx: &E,
+    chain: &mut C,
+    operator: &Mutex<Operator>,
+    epoch: u64,
+) -> Result<RegisterEpochRequest> {
+    let expected = operator.lock().registration_boundary()?;
+    ensure!(
+        expected.0.epoch() == epoch,
+        "the live epoch moved during registration"
+    );
+    let mut queued = Vec::new();
+    for request in expected.1.requests() {
+        let lookup = chain.request(Lookup::Withdrawal {
+            account: request.account().clone(),
+        });
+        match chain.recent(ctx, &lookup).await?.record {
+            Some(Record::Withdrawal(accepted)) if accepted == *request => queued.push(accepted),
+            Some(Record::Withdrawal(_)) | None => {}
+            Some(_) => bail!("certified withdrawal read returned a foreign record"),
+        }
+    }
+    let mut operator = operator.lock();
+    ensure!(
+        operator.registration_boundary()? == expected,
+        "the withdrawal boundary moved during registration"
+    );
+    operator.signed_registration(&WithdrawalBatch::new(queued)?)
+}
+
 /// Publishes the live boundary while its triggering request remains valid, then
 /// adopts the anchor and deadlines from the certified registration. Rechecking
 /// under the operator lock keeps expiry cleanup and deposit observation from
@@ -712,14 +780,15 @@ async fn register_epoch<E: Env, C: Chain>(
         if attempt > 0 {
             ctx.sleep(REGISTER_POLL).await;
         }
-        discard_expired_withdrawals(ctx, chain, operator).await?;
-        let request = {
-            let mut operator = operator.lock();
+        reconcile_withdrawals(ctx, chain, operator).await?;
+        let current_epoch = {
+            let operator = operator.lock();
             if !required(&operator)? {
                 return Ok(());
             }
-            operator.signed_registration()?
+            operator.status()?.epoch
         };
+        let request = registration_request(ctx, chain, operator, current_epoch).await?;
         ensure!(
             epoch.is_none_or(|epoch| epoch == request.epoch),
             "the live epoch moved during registration"
@@ -987,11 +1056,14 @@ mod tests {
                 }) if expired == account && expired_at == deadline
             ));
 
-            let recovered_agent = Agent::open(databases.agent(), 0).unwrap();
-            let release = recovered_agent
+            let mut recovered_agent = Agent::open(databases.agent(), 0).unwrap();
+            let Some(release) = recovered_agent
                 .recover_hard_fault(&context, &mut agent_chain)
                 .await
-                .unwrap();
+                .unwrap()
+            else {
+                panic!("funded account has no hard-fault release")
+            };
             assert_eq!(release.account, account);
             assert_eq!(release.released_custody, 100);
 
@@ -1007,10 +1079,13 @@ mod tests {
             assert_eq!(snapshot.custody_balance, 400);
 
             // A lost response replays into the identical certified release.
-            let retry = recovered_agent
+            let Some(retry) = recovered_agent
                 .recover_hard_fault(&context, &mut agent_chain)
                 .await
-                .unwrap();
+                .unwrap()
+            else {
+                panic!("funded account has no hard-fault release")
+            };
             assert_eq!(retry, release);
 
             let after_release = status(&control).await;
@@ -1121,7 +1196,7 @@ mod tests {
                 assert!(
                     operator
                         .lock()
-                        .signed_registration()
+                        .signed_registration(&WithdrawalBatch::empty())
                         .unwrap()
                         .withdrawals
                         .requests()
@@ -1186,7 +1261,422 @@ mod tests {
                     .last_finalized
                     .is_none()
             );
+            operator.lock().wait_for_closes().unwrap();
+            let carrying = operator
+                .lock()
+                .signed_registration(&WithdrawalBatch::empty())
+                .unwrap();
+            let predecessor = operator
+                .lock()
+                .payment_head(&wallet.public_key())
+                .unwrap()
+                .root;
+            assert_eq!(carrying.epoch, 1);
+            assert_eq!(
+                carrying.withdrawals.requests(),
+                std::slice::from_ref(&withdrawal)
+            );
+            assert_ne!(withdrawal.body().state_root(), &predecessor.digest);
+            assert_eq!(carrying.openings.len(), 1);
+            assert_eq!(
+                carrying.openings[0]
+                    .verify::<Sha256>(&predecessor)
+                    .unwrap()
+                    .get(),
+                95
+            );
         });
+    }
+
+    #[derive(Clone, Copy)]
+    enum WithdrawalRootAdvance {
+        Fresh,
+        Registered,
+        Queued,
+        Mixed,
+    }
+
+    fn staged_withdrawal_root_advance(action: WithdrawalAction, retention: WithdrawalRootAdvance) {
+        deterministic::Runner::timed(Duration::from_secs(15)).start(|context| async move {
+            let control = harness::start(&context, CHAIN, "staged-root-advance").await;
+            let mut chain = client(&context, &control);
+            let operator =
+                Mutex::new(Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap());
+            let wallets = wallets();
+            let wallet = &wallets[0];
+            let queued_wallet = if matches!(retention, WithdrawalRootAdvance::Mixed) {
+                &wallets[1]
+            } else {
+                wallet
+            };
+            let queued_opening = operator.lock().withdrawal_opening(&queued_wallet.public_key()).unwrap();
+            register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                .await
+                .unwrap();
+            let first = chain.registration(&context).await.unwrap().unwrap();
+            operator.lock().pay(0, 1, 5).unwrap();
+            let close = operator.lock().complete_close(1).unwrap();
+            control
+                .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
+                    &close,
+                )))
+                .await;
+            let head = chain.recent_status(&context).await.unwrap();
+            assert_eq!(head.last_finalized, None);
+            assert!(!chain.admitted(&context, 0).await.unwrap().unwrap().finalized);
+            let deadline = head.height
+                + crate::protocol::settlement_config(&Timing::DEFAULT)
+                    .unwrap()
+                    .maximum_withdrawal_notice
+                    .get();
+            let withdrawal = SignedWithdrawal::sign(
+                deployment(),
+                head.state_root.digest,
+                wallet.public_key().encode(),
+                action,
+                deadline,
+                wallet.signer(),
+            );
+            let queued = matches!(retention, WithdrawalRootAdvance::Queued | WithdrawalRootAdvance::Mixed)
+                .then(|| if matches!(retention, WithdrawalRootAdvance::Mixed) {
+                    SignedWithdrawal::sign(
+                        deployment(), head.state_root.digest, queued_wallet.public_key().encode(),
+                        WithdrawalAction::Amount(NonZeroU64::new(3).unwrap()), deadline,
+                        queued_wallet.signer(),
+                    )
+                } else { withdrawal.clone() });
+            if let Some(queued) = &queued {
+                control.submit(SettlementTx::QueueWithdrawal(crate::chain::tx::QueueWithdrawalRequest {
+                    request: queued.clone(), opening: queued_opening.opening,
+                })).await;
+                assert_eq!(chain.withdrawal(&context, queued_wallet.public_key()).await.unwrap().as_ref(), Some(queued));
+                let request = operator_rpc::OperatorRequest::ApplyWithdrawal(operator_rpc::ApplyWithdrawalRequest { request: queued.clone() });
+                let response = prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT).await.unwrap().unwrap();
+                assert!(matches!(response, rpc::Response::Success { .. }), "{response:?}");
+            }
+            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                operator_rpc::ApplyWithdrawalRequest {
+                    request: withdrawal.clone(),
+                },
+            );
+            let response =
+                prepare_request(&context, &mut chain, &operator, &request, Timing::DEFAULT)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| operator_rpc::handle_decoded(&mut operator.lock(), request));
+            assert!(matches!(response, rpc::Response::Success { .. }), "{response:?}");
+            let published = registration_request(&context, &mut chain, &operator, 1).await.unwrap();
+            assert_eq!(published.epoch, 1);
+            assert_eq!(published.withdrawals.request_for(withdrawal.account()), Some(&withdrawal));
+            if matches!(retention, WithdrawalRootAdvance::Registered) {
+                control.submit(SettlementTx::RegisterEpoch(published.clone())).await;
+                assert_eq!(chain.registration(&context).await.unwrap().unwrap().epoch, 1);
+                assert!(operator.lock().unregistered_withdrawals().unwrap().is_some());
+            }
+
+            // Earlier close finality advances while the exact withdrawal authorizations remain retained.
+            advance_to(&control, first.challenge_deadline + 1).await;
+            let advanced = chain.recent_status(&context).await.unwrap();
+            assert_eq!(advanced.last_finalized, Some(0));
+            assert_ne!(advanced.state_root.digest, head.state_root.digest);
+            assert!(advanced.height < deadline);
+            let anchor = chain.request(Lookup::Anchor { epoch: 1 });
+            if !matches!(retention, WithdrawalRootAdvance::Fresh) {
+                for _ in 0..2 {
+                    reconcile_withdrawals(&context, &mut chain, &operator).await.unwrap();
+                }
+                let retained = registration_request(&context, &mut chain, &operator, 1).await.unwrap();
+                if matches!(retention, WithdrawalRootAdvance::Mixed) {
+                    assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_none());
+                    assert_eq!(operator.lock().payment_head(&wallet.public_key()).unwrap().balance, 95);
+                    assert_eq!(retained.withdrawals.requests(), std::slice::from_ref(queued.as_ref().unwrap()));
+                    assert_eq!(operator.lock().payment_head(&queued_wallet.public_key()).unwrap().balance, 102);
+                } else {
+                    assert_eq!(retained, published);
+                    assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_some());
+                    assert!(operator.lock().unregistered_withdrawals().unwrap().is_some());
+                }
+                assert!(!status(&control).await.hard_faulted);
+                return;
+            }
+            assert!(chain.recent(&context, &anchor).await.unwrap().record.is_none());
+            assert!(chain.withdrawal(&context, wallet.public_key()).await.unwrap().is_none());
+            control.submit(SettlementTx::RegisterEpoch(published)).await;
+            assert!(chain.recent(&context, &anchor).await.unwrap().record.is_none());
+
+            drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
+                .await
+                .unwrap();
+            assert!(operator.lock().staged_withdrawal(&withdrawal).unwrap().is_none());
+            assert_eq!(operator.lock().payment_head(&wallet.public_key()).unwrap().balance, 95);
+            let retry = operator.lock().signed_registration(&WithdrawalBatch::empty()).unwrap();
+            control.submit(SettlementTx::RegisterEpoch(retry)).await;
+            let current = chain.recent_status(&context).await.unwrap();
+            assert!(current.height < deadline);
+            assert!(!current.hard_faulted);
+            assert_eq!(
+                chain.registration(&context).await.unwrap().map(|record| record.epoch),
+                Some(1),
+                "a staged {action:?} blocked successor registration after finalized-root advancement"
+            );
+        });
+    }
+
+    #[test]
+    fn staged_amount_root_advance_keeps_registration_live() {
+        staged_withdrawal_root_advance(
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            WithdrawalRootAdvance::Fresh,
+        );
+    }
+
+    #[test]
+    fn staged_close_root_advance_keeps_registration_live() {
+        staged_withdrawal_root_advance(WithdrawalAction::Close, WithdrawalRootAdvance::Fresh);
+    }
+
+    #[test]
+    fn registered_withdrawal_root_advance_preserves_unobserved_boundary() {
+        for action in [
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            WithdrawalAction::Close,
+        ] {
+            staged_withdrawal_root_advance(action, WithdrawalRootAdvance::Registered);
+        }
+    }
+
+    #[test]
+    fn queued_withdrawal_root_advance_preserves_exact_request() {
+        for action in [
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            WithdrawalAction::Close,
+        ] {
+            staged_withdrawal_root_advance(action, WithdrawalRootAdvance::Queued);
+        }
+    }
+
+    #[test]
+    fn mixed_withdrawal_root_advance_restores_only_fresh_reservation() {
+        staged_withdrawal_root_advance(
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            WithdrawalRootAdvance::Mixed,
+        );
+    }
+
+    #[test]
+    fn queued_withdrawal_settles_the_successor_tail_after_active_epoch_spending() {
+        for debit in [0, 98, 100] {
+            for credit in [0, 5] {
+                for action in [
+                    WithdrawalAction::Amount(NonZeroU64::new(4).unwrap()),
+                    WithdrawalAction::Close,
+                ] {
+                    deterministic::Runner::timed(Duration::from_secs(20)).start(
+                        |context| async move {
+                            let databases = TempDatabases::new();
+                            let control =
+                                harness::start(&context, CHAIN, "queued-successor-tail").await;
+                            let mut chain = client(&context, &control);
+                            let operator = Mutex::new(
+                                Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
+                            );
+                            let wallet = wallets().remove(0);
+                            let opening = operator
+                                .lock()
+                                .withdrawal_opening(&wallet.public_key())
+                                .unwrap();
+                            register_epoch(&context, &mut chain, &operator, |_| Ok(true))
+                                .await
+                                .unwrap();
+                            let first = chain.registration(&context).await.unwrap().unwrap();
+                            if debit > 0 {
+                                operator.lock().pay(0, 1, debit).unwrap();
+                            }
+                            let deadline = status(&control).await.height
+                                + crate::protocol::settlement_config(&Timing::DEFAULT)
+                                    .unwrap()
+                                    .maximum_withdrawal_notice
+                                    .get();
+                            let withdrawal = SignedWithdrawal::sign(
+                                deployment(),
+                                opening.root.digest,
+                                wallet.public_key().encode(),
+                                action,
+                                deadline,
+                                wallet.signer(),
+                            );
+                            control
+                                .submit(SettlementTx::QueueWithdrawal(
+                                    crate::chain::tx::QueueWithdrawalRequest {
+                                        request: withdrawal.clone(),
+                                        opening: opening.opening,
+                                    },
+                                ))
+                                .await;
+                            assert_eq!(
+                                chain
+                                    .withdrawal(&context, wallet.public_key())
+                                    .await
+                                    .unwrap(),
+                                Some(withdrawal.clone())
+                            );
+                            assert_eq!(chain.registration(&context).await.unwrap(), Some(first));
+                            let first_close = operator.lock().complete_close(1).unwrap();
+                            assert!(first_close.withdrawals.requests().is_empty());
+                            control
+                                .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
+                                    &first_close,
+                                )))
+                                .await;
+
+                            let request = operator_rpc::OperatorRequest::ApplyWithdrawal(
+                                operator_rpc::ApplyWithdrawalRequest {
+                                    request: withdrawal.clone(),
+                                },
+                            );
+                            let response = prepare_request(
+                                &context,
+                                &mut chain,
+                                &operator,
+                                &request,
+                                Timing::DEFAULT,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                            assert!(
+                                matches!(response, rpc::Response::Success { .. }),
+                                "debit={debit} credit={credit} action={action:?}: {response:?}"
+                            );
+                            drop(operator);
+                            let operator = Mutex::new(
+                                Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
+                            );
+                            assert!(
+                                operator
+                                    .lock()
+                                    .staged_withdrawal(&withdrawal)
+                                    .unwrap()
+                                    .is_some()
+                            );
+                            let registration =
+                                registration_request(&context, &mut chain, &operator, 1)
+                                    .await
+                                    .unwrap();
+                            assert_eq!(
+                                registration.withdrawals.requests(),
+                                std::slice::from_ref(&withdrawal)
+                            );
+                            assert!(registration.openings.is_empty());
+                            control
+                                .submit(SettlementTx::RegisterEpoch(registration))
+                                .await;
+                            let registered = chain.registration(&context).await.unwrap().unwrap();
+                            assert_eq!(registered.epoch, 1);
+                            operator.lock().adopt_registration(&registered).unwrap();
+                            if credit > 0 {
+                                operator.lock().pay(1, 0, credit).unwrap();
+                            }
+                            if debit == 100 {
+                                assert!(operator.lock().pay(0, 1, 1).is_err());
+                            }
+                            let close = operator.lock().complete_close(2).unwrap();
+                            let tail = 100 - debit + credit;
+                            let expected = match action {
+                                WithdrawalAction::Amount(amount) if tail >= amount.get() => {
+                                    amount.get()
+                                }
+                                WithdrawalAction::Amount(_) => 0,
+                                WithdrawalAction::Close => tail,
+                            };
+                            assert_eq!(close.withdrawal_total, expected);
+                            assert_eq!(close.withdrawal_claims.len(), 1);
+                            let claim = &close.withdrawal_claims[0];
+                            assert_eq!(
+                                claim
+                                    .verify::<Sha256>(&close.roots.withdrawal_outputs)
+                                    .unwrap()
+                                    .amount(),
+                                expected
+                            );
+                            control
+                                .submit(SettlementTx::Admit(crate::chain::tx::AdmitRequest::from(
+                                    &close,
+                                )))
+                                .await;
+                            advance_to(&control, registered.challenge_deadline + 1).await;
+                            assert!(
+                                chain
+                                    .admitted(&context, 1)
+                                    .await
+                                    .unwrap()
+                                    .unwrap()
+                                    .finalized
+                            );
+                            assert_eq!(status(&control).await.claimable, expected);
+                            if expected > 0 {
+                                let batch_id = close.header.batch_id::<Sha256>();
+                                let claim_tx = SettlementTx::ClaimWithdrawal(
+                                    crate::chain::tx::WithdrawalClaimRequest {
+                                        deployment: deployment(),
+                                        batch_id,
+                                        claim: claim.clone(),
+                                    },
+                                );
+                                control.submit(claim_tx.clone()).await;
+                                let release = chain
+                                    .withdrawal_release(&context, batch_id, claim.position())
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                assert_eq!(release.released.amount, expected);
+                                control.submit(claim_tx).await;
+                                assert_eq!(
+                                    chain
+                                        .withdrawal_release(&context, batch_id, claim.position())
+                                        .await
+                                        .unwrap(),
+                                    Some(release)
+                                );
+                                assert_eq!(status(&control).await.claimable, 0);
+                            }
+                            assert!(!status(&control).await.hard_faulted);
+
+                            // Intake receipts outlive carriage. A replay after restart must
+                            // return the original acknowledgment without classifying it again.
+                            assert_eq!(
+                                chain
+                                    .withdrawal(&context, wallet.public_key())
+                                    .await
+                                    .unwrap(),
+                                Some(withdrawal.clone())
+                            );
+                            drop(operator);
+                            let operator = Mutex::new(
+                                Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap(),
+                            );
+                            let before = operator.lock().registration_boundary().unwrap();
+                            let mut unavailable = unreachable_client(&context);
+                            assert!(
+                                prepare_request(
+                                    &context,
+                                    &mut unavailable,
+                                    &operator,
+                                    &request,
+                                    Timing::DEFAULT,
+                                )
+                                .await
+                                .unwrap()
+                                .is_none()
+                            );
+                            let retry = operator_rpc::handle_decoded(&mut operator.lock(), request);
+                            assert_eq!(retry.encode(), response.encode());
+                            assert_eq!(operator.lock().registration_boundary().unwrap(), before);
+                        },
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1261,7 +1751,10 @@ mod tests {
                 100,
                 wallet.signer(),
             );
-            let first = operator.lock().apply_withdrawal(close.clone()).unwrap();
+            let first = operator
+                .lock()
+                .apply_withdrawal(close.clone(), false)
+                .unwrap();
             assert_eq!(first.action, WithdrawalAction::Close);
             operator.lock().start_close(0).unwrap();
 
@@ -1284,7 +1777,7 @@ mod tests {
                 .is_none()
             );
             let mut operator = operator.into_inner();
-            let retry = operator.apply_withdrawal(close).unwrap();
+            let retry = operator.apply_withdrawal(close, false).unwrap();
             assert_eq!(retry.epoch, 0);
             assert_eq!(retry.action, WithdrawalAction::Close);
             operator.wait_for_closes().unwrap();
@@ -1517,6 +2010,9 @@ mod tests {
     }
 
     impl Chain for HistoricalFollower {
+        fn holders(&self) -> Result<Vec<SocketAddr>> {
+            Ok(vec![CHAIN])
+        }
         fn deployment(&self) -> Digest {
             deployment()
         }
@@ -1734,7 +2230,9 @@ mod tests {
                     .send_requires_epoch_registration(&authorization, &entries)
                     .unwrap()
             );
-            let request = operator.signed_registration().unwrap();
+            let request = operator
+                .signed_registration(&WithdrawalBatch::empty())
+                .unwrap();
             drop(operator);
 
             // Registration preparation is the last local action before an asynchronous
@@ -1742,7 +2240,13 @@ mod tests {
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
             assert_eq!(operator.lock().automatic_epoch().unwrap(), Some(0));
-            assert_eq!(operator.lock().signed_registration().unwrap(), request);
+            assert_eq!(
+                operator
+                    .lock()
+                    .signed_registration(&WithdrawalBatch::empty())
+                    .unwrap(),
+                request
+            );
             for _ in 0..8 {
                 drive_closes(&context, &mut chain, &operator, Timing::DEFAULT)
                     .await
@@ -1776,7 +2280,9 @@ mod tests {
             let mut operator = Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap();
             let first = agent.deposit(&context, &mut chain, 10).await.unwrap();
             operator.observe(&[first]).unwrap();
-            let old = operator.signed_registration().unwrap();
+            let old = operator
+                .signed_registration(&WithdrawalBatch::empty())
+                .unwrap();
             drop(operator);
 
             // Custody accepts the next deposit before the earlier registration can
@@ -1812,7 +2318,10 @@ mod tests {
                     .balance,
                 112
             );
-            let replacement = operator.lock().signed_registration().unwrap();
+            let replacement = operator
+                .lock()
+                .signed_registration(&WithdrawalBatch::empty())
+                .unwrap();
             assert_ne!(old.deposits_root, replacement.deposits_root);
             let rejected = operator
                 .lock()
@@ -1820,12 +2329,24 @@ mod tests {
                 .err()
                 .expect("the replacement publication must keep withdrawals frozen");
             assert!(format!("{rejected:#}").contains("withdrawals are frozen"));
-            assert_eq!(operator.lock().signed_registration().unwrap(), replacement);
+            assert_eq!(
+                operator
+                    .lock()
+                    .signed_registration(&WithdrawalBatch::empty())
+                    .unwrap(),
+                replacement
+            );
             drop(operator);
 
             let operator =
                 Mutex::new(Operator::open(databases.operator(), NonZeroUsize::MIN).unwrap());
-            assert_eq!(operator.lock().signed_registration().unwrap(), replacement);
+            assert_eq!(
+                operator
+                    .lock()
+                    .signed_registration(&WithdrawalBatch::empty())
+                    .unwrap(),
+                replacement
+            );
             let (ack, acked) = Exact::handle();
             assert!(
                 observe(
@@ -1905,7 +2426,9 @@ mod tests {
             // The registration lands on the chain, but the operator crashes
             // before its certified read-back adopts the assigned record: the
             // store still holds the placeholder context.
-            let request = operator.signed_registration().unwrap();
+            let request = operator
+                .signed_registration(&WithdrawalBatch::empty())
+                .unwrap();
             chain
                 .deliver(&context, &SettlementTx::RegisterEpoch(request))
                 .await
@@ -2130,11 +2653,14 @@ mod tests {
 
             // Recovery pays the frozen genesis balance, never the uncommitted
             // payment: the acknowledged send was never in a finalized close.
-            let recovered_agent = Agent::open(databases.agent(), 0).unwrap();
-            let release = recovered_agent
+            let mut recovered_agent = Agent::open(databases.agent(), 0).unwrap();
+            let Some(release) = recovered_agent
                 .recover_hard_fault(&context, &mut agent_chain)
                 .await
-                .unwrap();
+                .unwrap()
+            else {
+                panic!("funded account has no hard-fault release")
+            };
             assert_eq!(release.account, payer);
             assert_eq!(release.withdrawal, None);
             assert_eq!(release.residual, 100);
@@ -2156,10 +2682,13 @@ mod tests {
             assert_eq!(snapshot.custody_balance, 400);
 
             // A lost response replays into the identical certified release.
-            let retry = recovered_agent
+            let Some(retry) = recovered_agent
                 .recover_hard_fault(&context, &mut agent_chain)
                 .await
-                .unwrap();
+                .unwrap()
+            else {
+                panic!("funded account has no hard-fault release")
+            };
             assert_eq!(retry, release);
 
             let after_release = status(&control).await;
@@ -2481,6 +3010,9 @@ mod tests {
     }
 
     impl Chain for ExpiringRegistration {
+        fn holders(&self) -> Result<Vec<SocketAddr>> {
+            self.inner.holders()
+        }
         fn deployment(&self) -> Digest {
             self.inner.deployment()
         }
@@ -2530,7 +3062,9 @@ mod tests {
                     40,
                     wallet.signer(),
                 );
-                operator.apply_withdrawal(withdrawal.clone()).unwrap();
+                operator
+                    .apply_withdrawal(withdrawal.clone(), false)
+                    .unwrap();
                 let operator = Mutex::new(operator);
                 advance_to(&control, 39).await;
                 let request =
@@ -2596,7 +3130,7 @@ mod tests {
                 .submit(SettlementTx::QueueWithdrawal(
                     crate::chain::tx::QueueWithdrawalRequest {
                         request: withdrawal.clone(),
-                        openings: vec![opening.opening],
+                        opening: opening.opening,
                     },
                 ))
                 .await;
@@ -2618,7 +3152,9 @@ mod tests {
                     .unwrap()
                     .unwrap();
             assert!(matches!(response, rpc::Response::Success { .. }));
-            let registration = operator.lock().signed_registration().unwrap();
+            let registration = registration_request(&context, &mut chain, &operator, 0)
+                .await
+                .unwrap();
             control
                 .submit(SettlementTx::RegisterEpoch(registration))
                 .await;
@@ -2660,8 +3196,10 @@ mod tests {
                     40,
                     wallet.signer(),
                 );
-                operator.apply_withdrawal(request.clone()).unwrap();
-                let published = operator.signed_registration().unwrap();
+                operator.apply_withdrawal(request.clone(), false).unwrap();
+                let published = operator
+                    .signed_registration(&WithdrawalBatch::empty())
+                    .unwrap();
                 drop(operator);
                 advance_to(&control, 40).await;
                 assert!(!status(&control).await.hard_faulted);

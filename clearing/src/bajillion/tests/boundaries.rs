@@ -69,7 +69,6 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
         )
         .unwrap()
         .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-        .await
         .unwrap();
         let mut entries = vec![
             OutEntry {
@@ -199,7 +198,7 @@ fn complete_activity_keeps_zero_net_boundaries_and_zero_release_withdrawals() {
 }
 
 #[test]
-fn withdrawal_validation_batches_native_balance_reads() {
+fn withdrawals_use_epoch_tail_and_batch_balance_reads() {
     deterministic::Runner::default().start(|runtime| async move {
         let mut signers = (30..33).map(SigningKey::from_seed).collect::<Vec<_>>();
         signers.sort_by_key(|signer| signer.public_key());
@@ -231,34 +230,38 @@ fn withdrawal_validation_batches_native_balance_reads() {
             })
         };
         let mut reads = Vec::new();
-        for (label, amount, absent_action, deposit, expected) in [
+        for (label, amount, absent_action, deposit, remaining, releases) in [
             (
                 "covered",
                 90,
                 WithdrawalAction::Amount(NZU64!(30)),
                 30,
-                None,
+                10,
+                [90, 200, 30],
             ),
             (
                 "insufficient",
                 101,
                 WithdrawalAction::Amount(NZU64!(30)),
                 30,
-                Some(CloseError::WithdrawalCoverage),
+                100,
+                [0, 200, 30],
             ),
             (
                 "absent amount",
                 90,
                 WithdrawalAction::Amount(NZU64!(1)),
                 0,
-                Some(CloseError::WithdrawalCoverage),
+                10,
+                [90, 200, 0],
             ),
             (
                 "absent close",
                 90,
                 WithdrawalAction::Close,
                 0,
-                Some(CloseError::BoundaryNoStateChange),
+                10,
+                [90, 200, 0],
             ),
         ] {
             let deposits = if deposit == 0 {
@@ -306,27 +309,14 @@ fn withdrawal_validation_batches_native_balance_reads() {
             )
             .unwrap();
             let before = counts();
-            let bound = epoch
+            let context = epoch
                 .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-                .await;
-            reads.push((label, before, counts()));
-            if let Some(expected) = expected {
-                assert!(
-                    matches!(
-                        (bound.unwrap_err(), expected),
-                        (
-                            CloseError::WithdrawalCoverage,
-                            CloseError::WithdrawalCoverage
-                        ) | (
-                            CloseError::BoundaryNoStateChange,
-                            CloseError::BoundaryNoStateChange
-                        )
-                    ),
-                    "{label}"
-                );
-                continue;
-            }
-            let context = bound.unwrap();
+                .unwrap();
+            assert_eq!(
+                counts(),
+                before,
+                "{label}: binding only checks state identity"
+            );
             let before = counts();
             let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
                 &state,
@@ -355,12 +345,12 @@ fn withdrawal_validation_batches_native_balance_reads() {
             .unwrap();
             reads.push(("validate", before, counts()));
             assert_eq!(verified.close().header, prepared.close().header);
-            assert_eq!(verified.state().head().liability(), 10);
+            assert_eq!(verified.state().head().liability(), remaining);
             assert_eq!(verified.close().rows.len(), 3);
             for (row, (signer, old, new, withdrawal)) in verified.close().rows.iter().zip([
-                (&signers[0], 100, 10, 90),
-                (&signers[1], 200, 0, 200),
-                (&signers[2], 0, 0, 30),
+                (&signers[0], 100, remaining, releases[0]),
+                (&signers[1], 200, 0, releases[1]),
+                (&signers[2], 0, 0, releases[2]),
             ]) {
                 assert_eq!(row.account, signer.public_key());
                 assert_eq!((row.predecessor, row.successor), (old, new));

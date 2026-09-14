@@ -51,6 +51,11 @@ commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-glue = { workspace = true, features = ["test-utils"] }
 commonware-p2p = { workspace = true, features = ["mocks"] }
+stateright.workspace = true
+
+[[example]]
+name = "terminal_withdrawal_model"
+path = "stateright/explorer.rs"
 
 [[bin]]
 name = "terminal-operator"

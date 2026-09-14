@@ -54,6 +54,7 @@ async fn follower(
         fixture.db.clone(),
         fixture.finalized.clone(),
         sender,
+        source.identity.holders().unwrap(),
     );
     (fixture, backend, receiver)
 }

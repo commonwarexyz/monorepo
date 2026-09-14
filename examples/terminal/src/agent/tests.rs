@@ -9,7 +9,10 @@ use crate::{
     chain::{
         client::{Chain as _, Client},
         harness,
-        query::{Evidence, EvidenceResponse, Lookup, ReadRequest},
+        query::{
+            Evidence, EvidenceLookup, EvidenceRequest, EvidenceResponse, Lookup, METHOD_EVIDENCE,
+            ReadRequest,
+        },
         state::{
             FaultRecord, HardFaultReasonResponse, Record, RegistrationRecord, admitted_key,
             deposit_key, fault_key, registration_key, status_key, withdrawal_key,
@@ -267,16 +270,21 @@ async fn register(
     control: &harness::Control,
     operator: &mut Operator,
 ) -> PaymentContext<Key, Digest> {
-    let request = operator.signed_registration().unwrap();
+    let (_, withdrawals) = operator.registration_boundary().unwrap();
+    let mut queued = Vec::new();
+    for request in withdrawals.requests() {
+        if matches!(control.record(withdrawal_key(&deployment(), request.account())).await,
+            Some(Record::Withdrawal(recorded)) if recorded == *request)
+        {
+            queued.push(request.clone());
+        }
+    }
+    let queued = WithdrawalBatch::new(queued).unwrap();
+    let request = operator.signed_registration(&queued).unwrap();
     applied(control, &SettlementTx::RegisterEpoch(request)).await;
     let record = registration_record(control).await;
     operator.adopt_registration(&record).unwrap();
-    operator
-        .payment_head(&wallets()[0].public_key())
-        .unwrap()
-        .context
-        .payment()
-        .clone()
+    operator.registration_boundary().unwrap().0
 }
 
 /// Admits `result`'s close and drives the chain past its challenge window to
@@ -1376,7 +1384,7 @@ fn finalized_zero_balance_preserves_accepted_epoch_state() {
 }
 
 #[test]
-fn withdrawal_escalation_proves_every_pending_successor_balance() {
+fn withdrawal_escalation_uses_finalized_balance_across_pending_closes() {
     deterministic::Runner::default().start(|context| async move {
         let control = harness::start_with_native(
             &context,
@@ -2797,10 +2805,7 @@ fn foreign_deployment_head_cannot_authorize(usage: HeadUse) {
             )
             .await
             .unwrap();
-            let prepared = protocol
-                .prepare(epoch, &state, vec![terminal])
-                .await
-                .unwrap();
+            let prepared = protocol.prepare(epoch, vec![terminal]).unwrap();
             let (result, prepared) = protocol
                 .complete(prepared, &state, &mut TestRng::new(91))
                 .await
@@ -3655,7 +3660,9 @@ fn foreign_withdrawal_evidence_is_never_cached() {
                 panic!("unavailable operator acknowledged withdrawal");
             };
             let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-            operator.apply_withdrawal(own_request.clone()).unwrap();
+            operator
+                .apply_withdrawal(own_request.clone(), false)
+                .unwrap();
             let other = wallets().remove(1);
             let destination = if same_destination {
                 agent.account()
@@ -3670,7 +3677,7 @@ fn foreign_withdrawal_evidence_is_never_cached() {
                 60,
                 other.signer(),
             );
-            operator.apply_withdrawal(request).unwrap();
+            operator.apply_withdrawal(request, false).unwrap();
             register(&control, &mut operator).await;
             let result = operator.complete_close(27).unwrap();
             finalize(&control, &result).await;
@@ -4219,11 +4226,14 @@ fn activity_resolved_payment_recovers_after_hard_fault_frozen_at_its_head() {
         assert_eq!(faulted.state_root, frozen_root);
 
         // Recovery finds the opening retained at resolution, with no other head read.
-        let recovered = Agent::open(database.path(), 0).unwrap();
-        let release = recovered
+        let mut recovered = Agent::open(database.path(), 0).unwrap();
+        let Some(release) = recovered
             .recover_hard_fault(&context, &mut chain)
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("expected a positive frozen balance")
+        };
         assert_eq!(release.account, account);
         assert_eq!(release.released_custody, 93);
         assert_eq!(release.residual, 93);
@@ -4255,7 +4265,7 @@ fn false_epoch_withdrawal_ack_cannot_strand_the_claim() {
                     panic!("expected the signed withdrawal");
                 };
                 let digest = operator_rpc::withdrawal_digest(&request.request);
-                operator.apply_withdrawal(request.request).unwrap();
+                operator.apply_withdrawal(request.request, false).unwrap();
                 rpc::Response::Success {
                     body: operator_rpc::WithdrawalAck { epoch: 999, digest }.encode(),
                 }
@@ -4499,11 +4509,14 @@ fn balance_poll_retains_the_head_for_hard_fault_recovery() {
         }
         assert_eq!(faulted.state_root, frozen_root);
 
-        let recovered = Agent::open(database.path(), 0).unwrap();
-        let release = recovered
+        let mut recovered = Agent::open(database.path(), 0).unwrap();
+        let Some(release) = recovered
             .recover_hard_fault(&context, &mut chain)
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("expected a positive frozen balance")
+        };
         assert_eq!(release.account, account);
         assert_eq!(release.released_custody, 100);
     });
@@ -5598,7 +5611,7 @@ fn head_and_withdrawal_use_validators_with_operator_unreachable() {
         // head moves to the finalized successor root, whose dealing the holders
         // release at finalization.
         let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-        operator.apply_withdrawal(request).unwrap();
+        operator.apply_withdrawal(request, true).unwrap();
         register(&control, &mut operator).await;
         operator.pay(0, 1, 5).unwrap();
         let result = operator.complete_close(60).unwrap();
@@ -5883,7 +5896,7 @@ fn finalized_zero_withdrawal_completes_without_an_asset_release() {
             else {
                 panic!("unavailable operator acknowledged the request")
             };
-            operator.apply_withdrawal(request).unwrap();
+            operator.apply_withdrawal(request, false).unwrap();
             if other_reserve {
                 operator
                     .withdraw(2, WithdrawalAction::Amount(NonZeroU64::new(25).unwrap()))
@@ -6058,7 +6071,9 @@ fn uncached_finalized_claims_remain_discoverable_without_the_operator() {
                     request
                 );
             }
-            let staged = operator.apply_withdrawal(request.clone()).unwrap();
+            let staged = operator
+                .apply_withdrawal(request.clone(), escalated)
+                .unwrap();
             let ack = operator_rpc::WithdrawalAck {
                 epoch: staged.epoch,
                 digest: operator_rpc::withdrawal_digest(&request),
@@ -6272,7 +6287,7 @@ fn hard_fault_recovery_fetches_the_frozen_root_opening() {
         }
         assert_eq!(faulted.state_root, frozen_root);
 
-        let passive = Agent::new(0).unwrap();
+        let mut passive = Agent::new(0).unwrap();
         assert!(
             passive
                 .store
@@ -6280,15 +6295,18 @@ fn hard_fault_recovery_fetches_the_frozen_root_opening() {
                 .unwrap()
                 .is_none()
         );
-        let release = passive
+        let Some(release) = passive
             .recover_hard_fault(&context, &mut chain)
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("expected a positive frozen balance")
+        };
         assert_eq!(release.account, account);
         assert_eq!(release.released_custody, INITIAL_BALANCE);
 
         let mut dead = client_with_holders(&context, &control, UNREACHABLE);
-        let stranded = Agent::new(1).unwrap();
+        let mut stranded = Agent::new(1).unwrap();
         let error = stranded
             .recover_hard_fault(&context, &mut dead)
             .await
@@ -6369,7 +6387,7 @@ fn operator_dark_wallet_moves_finalized_claim_to_registered_operator() {
 
         // The queued request is a chain obligation the operator's registration
         // must carry verbatim.
-        operator.apply_withdrawal(request).unwrap();
+        operator.apply_withdrawal(request, true).unwrap();
         register(&control, &mut operator).await;
 
         // The head is refused, so the wallet signs under the chain's registered
@@ -6769,7 +6787,7 @@ fn expired_withdrawal_resolves_against_finalized_boundaries_before_replacement()
             drop(agent);
             if history > 0 {
                 let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
-                if history == 2 { operator.apply_withdrawal(request.clone()).unwrap(); }
+                if history == 2 { operator.apply_withdrawal(request.clone(), false).unwrap(); }
                 register(&control, &mut operator).await;
                 operator.pay(2, 3, 1).unwrap();
                 let result = operator.complete_close(31).unwrap();
@@ -6883,7 +6901,7 @@ fn virtual_receiver_retains_credit_then_exits_and_receives_again() {
         else {
             panic!("unavailable operator acknowledged the withdrawal");
         };
-        operator.apply_withdrawal(request).unwrap();
+        operator.apply_withdrawal(request, false).unwrap();
         register(&control, &mut operator).await;
         let exit = operator.complete_close(2).unwrap();
         finalize(&control, &exit).await;
@@ -7016,7 +7034,7 @@ fn virtual_receiver_spends_from_admitted_predecessor_before_finalization() {
 }
 
 #[test]
-fn invalidated_first_virtual_credit_cannot_recover_from_pending_membership() {
+fn invalidated_first_virtual_credit_recovers_no_frozen_balance() {
     deterministic::Runner::default().start(|context| async move {
         let database = TempDatabase::new();
         let (control, mut chain) = chain(&context).await;
@@ -7064,7 +7082,7 @@ fn invalidated_first_virtual_credit_cannot_recover_from_pending_membership() {
             .await;
         assert!(chain.status(&context).await.unwrap().hard_faulted);
         drop(receiver);
-        let receiver = Agent::open(database.path(), wallets().len()).unwrap();
+        let mut receiver = Agent::open(database.path(), wallets().len()).unwrap();
         assert!(
             receiver
                 .store
@@ -7072,11 +7090,12 @@ fn invalidated_first_virtual_credit_cannot_recover_from_pending_membership() {
                 .unwrap()
                 .is_some()
         );
-        assert!(
+        assert_eq!(
             receiver
                 .recover_hard_fault(&context, &mut chain)
                 .await
-                .is_err()
+                .unwrap(),
+            None
         );
         assert_eq!(chain.status(&context).await.unwrap().state_root, frozen);
         assert_eq!(
@@ -7182,4 +7201,175 @@ fn stale_finalized_head_cannot_override_admitted_withdrawal() {
         assert!(alice.cache.is_none());
         server.abort();
     });
+}
+
+#[test]
+fn frozen_absence_preserves_finalized_withdrawals_and_requires_history() {
+    for (carried, cached, history_available) in [
+        (false, false, true),
+        (false, false, false),
+        (true, false, true),
+        (true, true, true),
+    ] {
+        deterministic::Runner::default().start(|context| async move {
+            let database = TempDatabase::new();
+            let (control, mut chain) = chain(&context).await;
+            let mut operator = Operator::open(Path::new(":memory:"), NonZeroUsize::MIN).unwrap();
+            let mut alice = Agent::open(database.path(), 0).unwrap();
+            let WithdrawalOutcome::Signed { request, .. } = alice
+                .withdraw(&context, &mut chain, UNREACHABLE, WithdrawalAction::Close)
+                .await
+                .unwrap()
+            else {
+                panic!("the unavailable operator acknowledged the request")
+            };
+            if carried {
+                operator.apply_withdrawal(request.clone(), false).unwrap();
+            }
+            register(&control, &mut operator).await;
+            if !carried {
+                assert_eq!(
+                    alice
+                        .escalate_withdrawal(&context, &mut chain)
+                        .await
+                        .unwrap(),
+                    request
+                );
+                operator.pay(0, 1, INITIAL_BALANCE).unwrap();
+            }
+            let close = operator.complete_close(1).unwrap();
+            finalize(&control, &close).await;
+            let cached_evidence = if cached {
+                let evidence = operator.withdrawal_evidence(&alice.account()).unwrap();
+                alice.store.cache_withdrawal_claim(&evidence).unwrap();
+                Some(evidence)
+            } else {
+                None
+            };
+            let fault_at = if carried {
+                register(&control, &mut operator).await;
+                registration_record(&control).await.admission_deadline + 1
+            } else {
+                request.body().deadline()
+            };
+            let height = control.advance(0).await;
+            control
+                .advance((fault_at - 1).checked_sub(height).unwrap())
+                .await;
+            assert!(!status(&control).await.hard_faulted);
+            control.advance(1).await;
+            assert!(status(&control).await.hard_faulted);
+            assert_eq!(status(&control).await.state_root, close.roots.successor);
+            drop(alice);
+            let mut alice = Agent::open(database.path(), 0).unwrap();
+            if !history_available {
+                let wrong_root = SocketAddr::from(([127, 0, 0, 1], 9_801));
+                garbage_holder(
+                    &context,
+                    wrong_root,
+                    rpc::Response::Success {
+                        body: EvidenceResponse::Served(Evidence::Genesis(
+                            genesis_cache().opening(&alice.account()).unwrap(),
+                        ))
+                        .encode(),
+                    },
+                )
+                .await;
+                let mut forged = client_with_holders(&context, &control, wrong_root);
+                assert!(
+                    alice
+                        .recover_hard_fault(&context, &mut forged)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(alice.pending_withdrawal.as_ref(), Some(&request));
+                let body = rpc::invoke(
+                    &context,
+                    CHAIN,
+                    "validator",
+                    METHOD_EVIDENCE,
+                    EvidenceRequest::new(
+                        deployment(),
+                        EvidenceLookup::SuccessorState {
+                            batch: close.header.batch_id::<Sha256>().into_digest(),
+                            account: alice.account(),
+                        },
+                    )
+                    .encode(),
+                )
+                .await
+                .unwrap();
+                let address = SocketAddr::from(([127, 0, 0, 1], 9_800));
+                garbage_holder(&context, address, rpc::Response::Success { body }).await;
+                let mut unavailable = client_with_holders(&context, &control, address);
+                assert!(
+                    alice
+                        .recover_hard_fault(&context, &mut unavailable)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(alice.pending_withdrawal.as_ref(), Some(&request));
+                drop(alice);
+                alice = Agent::open(database.path(), 0).unwrap();
+                assert_eq!(alice.pending_withdrawal.as_ref(), Some(&request));
+            }
+            assert_eq!(
+                alice
+                    .recover_hard_fault(&context, &mut chain)
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert!(
+                chain
+                    .hard_fault(&context, alice.account())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                alice.pending_withdrawal.as_ref(),
+                carried.then_some(&request)
+            );
+            if let Some(evidence) = cached_evidence {
+                assert_eq!(
+                    alice
+                        .pending_withdrawal_claim
+                        .as_ref()
+                        .unwrap()
+                        .evidence
+                        .as_ref(),
+                    Some(&evidence)
+                );
+            }
+            drop(alice);
+            let mut alice = Agent::open(database.path(), 0).unwrap();
+            assert_eq!(
+                alice.pending_withdrawal.as_ref(),
+                carried.then_some(&request)
+            );
+            for index in 1..wallets().len() {
+                let mut other = Agent::new(index).unwrap();
+                assert!(
+                    other
+                        .recover_hard_fault(&context, &mut chain)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+            }
+            assert_eq!(chain.status(&context).await.unwrap().custody, 0);
+            if carried {
+                assert_eq!(
+                    alice
+                        .claim_withdrawal(&context, &mut chain, UNREACHABLE)
+                        .await
+                        .unwrap()
+                        .amount,
+                    INITIAL_BALANCE
+                );
+            }
+            assert!(alice.pending_withdrawal_claim.is_none());
+        });
+    }
 }

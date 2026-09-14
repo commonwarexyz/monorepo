@@ -249,6 +249,10 @@ struct AdmissionRetention {
 }
 
 impl Chain for AdmissionRetention {
+    fn holders(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        self.client.holders()
+    }
+
     fn deployment(&self) -> Digest {
         self.client.deployment()
     }
@@ -467,6 +471,10 @@ struct RegistrationRace {
 }
 
 impl Chain for RegistrationRace {
+    fn holders(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        self.client.holders()
+    }
+
     fn deployment(&self) -> Digest {
         self.client.deployment()
     }

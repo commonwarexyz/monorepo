@@ -138,7 +138,6 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
             )
             .unwrap()
             .bind::<Sha256, _, _>(&state, &fixture.deposits, &fixture.withdrawals)
-            .await
             .unwrap();
             let terminals = fixture
                 .terminals

@@ -1,7 +1,5 @@
-use super::fixtures::{
-    WORKERS, active_close_fixture, profile_key, selected_active_profiles, strategy,
-};
-use commonware_clearing::bajillion::transition::prepare_close_with_strategy;
+use super::fixtures::{active_close_fixture, profile_key, selected_active_profiles};
+use commonware_clearing::bajillion::transition::prepare_dealing;
 use commonware_cryptography::Sha256;
 use commonware_runtime::Runner as _;
 use criterion::{Criterion, criterion_group};
@@ -14,7 +12,7 @@ fn bench_prepare(c: &mut Criterion) {
     for (_, profile) in selected_active_profiles() {
         c.bench_function(
             &format!(
-                "{}/{} E={} workers={WORKERS}",
+                "{}/{} E={}",
                 module_path!(),
                 profile_key(profile),
                 profile.edges()
@@ -26,18 +24,15 @@ fn bench_prepare(c: &mut Criterion) {
                         let mut elapsed = Duration::ZERO;
                         for _ in 0..iterations {
                             let start = Instant::now();
-                            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
-                                &fixture.state,
-                                &fixture.context,
+                            let prepared = prepare_dealing::<Sha256, _, _>(
+                                fixture.context.epoch_context(),
                                 &fixture.deposits,
                                 &fixture.withdrawals,
                                 fixture.terminals.clone(),
-                                strategy(),
                             )
-                            .await
-                            .expect("prepare close");
+                            .expect("prepare dealing");
                             elapsed += start.elapsed();
-                            assert_eq!(prepared.close().header, fixture.prepared.close().header);
+                            assert_eq!(prepared.encoded(), fixture.prepared.encoded());
                             black_box(prepared);
                         }
                         elapsed

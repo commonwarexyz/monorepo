@@ -131,11 +131,13 @@ impl Agent {
         anyhow::bail!("native transfer was not certified in time; exact signed retry retained")
     }
 
+    /// Returns no release when the account is absent from the authenticated frozen state.
+    /// Finalized withdrawal reserves remain independently claimable.
     pub(crate) async fn recover_hard_fault<E: Env>(
-        &self,
+        &mut self,
         ctx: &E,
         chain: &mut Client,
-    ) -> Result<ClaimHardFaultResponse> {
+    ) -> Result<Option<ClaimHardFaultResponse>> {
         // Terminal settlement begins as a transaction whose effect is the
         // certified Settling fault record: a lost response resubmits the
         // same bytes and completes on the same frozen snapshot.
@@ -158,10 +160,8 @@ impl Agent {
         }
         let hard_fault = settling.context("terminal settlement never certifiably began")?;
 
-        // Recovery at a frozen root requires an opening at that root: the one retained at
-        // or refreshed to it by an earlier head read, or, for a wallet passive across the
-        // final finalization, one the validators open at the frozen head, which is the
-        // faulted deployment's certified status root.
+        // Only the frozen root owns recoverable state. A retained opening or a
+        // validator's authenticated membership or absence resolves that state.
         let opening = match self.store.recovery_opening(&hard_fault.frozen_state_root)? {
             Some(opening) => opening,
             None => {
@@ -170,16 +170,38 @@ impl Agent {
                     .await
                     .context("read the frozen settlement head")?;
                 ensure!(
-                    status.state_root == hard_fault.frozen_state_root,
+                    status.deployment == self.deployment
+                        && status.state_root == hard_fault.frozen_state_root,
                     "the settlement head is not the frozen state root"
                 );
-                self.holders
-                    .validator_opening(ctx, chain, &self.account(), &status)
+                let opening = self
+                    .holders
+                    .validator_balance(ctx, chain, &self.account(), &status)
                     .await
                     .context(
                         "no payer opening is retained for the frozen state root and the \
                          validators opened none",
-                    )?
+                    )?;
+                let Some(opening) = opening else {
+                    // State absence says nothing about a finalized withdrawal reserve. Only
+                    // complete finalized history can retire an uncached authorization.
+                    if self
+                        .pending_withdrawal_claim
+                        .as_ref()
+                        .is_some_and(|claim| claim.evidence.is_none())
+                        && let Some(request) = self.pending_withdrawal.clone()
+                        && self
+                            .carried_withdrawal_epoch(ctx, chain, &request, status.last_finalized)
+                            .await?
+                            .is_none()
+                    {
+                        self.store.discard_unused_withdrawal(&request)?;
+                        self.pending_withdrawal = None;
+                        self.pending_withdrawal_claim = None;
+                    }
+                    return Ok(None);
+                };
+                opening
             }
         };
         let expected_custody = opening.balance.get();
@@ -221,7 +243,7 @@ impl Agent {
             withdrawal.checked_add(release.residual) == Some(release.released_custody),
             "settlement release does not decompose into withdrawal and residual"
         );
-        Ok(release)
+        Ok(Some(release))
     }
 
     pub(crate) async fn recover_pending_deposit<E: Env>(
@@ -417,21 +439,11 @@ impl Agent {
                 );
                 // A healthy post-deadline state excludes every outstanding obligation.
                 // Finalized boundaries distinguish completed carriage from a request never used.
-                if let Some(last) = status.last_finalized {
-                    for epoch in 0..=last {
-                        let admitted = chain
-                            .admitted(ctx, epoch)
-                            .await?
-                            .filter(|record| record.finalized)
-                            .context("finalized withdrawal history is unavailable")?;
-                        if self
-                            .holders
-                            .carried_withdrawal(ctx, chain, epoch, &admitted, &request)
-                            .await?
-                        {
-                            return Ok(WithdrawalOutcome::Applied { epoch, request });
-                        }
-                    }
+                if let Some(epoch) = self
+                    .carried_withdrawal_epoch(ctx, chain, &request, status.last_finalized)
+                    .await?
+                {
+                    return Ok(WithdrawalOutcome::Applied { epoch, request });
                 }
                 self.store.discard_unused_withdrawal(&request)?;
                 self.pending_withdrawal = None;
@@ -545,6 +557,33 @@ impl Agent {
         })
     }
 
+    /// Searches every finalized boundary before declaring a saved request uncarried.
+    async fn carried_withdrawal_epoch<E: Env>(
+        &mut self,
+        ctx: &E,
+        chain: &mut Client,
+        request: &SignedWithdrawal<Key, Digest>,
+        last_finalized: Option<u64>,
+    ) -> Result<Option<u64>> {
+        if let Some(last) = last_finalized {
+            for epoch in 0..=last {
+                let admitted = chain
+                    .admitted(ctx, epoch)
+                    .await?
+                    .filter(|record| record.finalized)
+                    .context("finalized withdrawal history is unavailable")?;
+                if self
+                    .holders
+                    .carried_withdrawal(ctx, chain, epoch, &admitted, request)
+                    .await?
+                {
+                    return Ok(Some(epoch));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Escalates a signed withdrawal the operator would not carry directly to the chain.
     ///
     /// This is the censorship-fallback exit. When [`Self::withdraw`] returns
@@ -583,33 +622,9 @@ impl Agent {
             status.state_root == root,
             "the signed withdrawal reference root is no longer finalized"
         );
-        let mut openings = vec![opening];
-        let first = status
-            .last_finalized
-            .map_or(Some(0), |last| last.checked_add(1))
-            .context("withdrawal epoch overflow")?;
-
-        // The observed registration fixes a finite proof range while the operator
-        // continues admitting successors.
-        if let Some(registration) = chain.registration(ctx).await? {
-            for epoch in first..=registration.epoch {
-                let Some(admitted) = chain.admitted(ctx, epoch).await? else {
-                    break;
-                };
-                ensure!(
-                    !admitted.finalized,
-                    "the finalized withdrawal root advanced while gathering proofs"
-                );
-                openings.push(
-                    self.holders
-                        .successor_opening(ctx, chain, request.account(), &admitted)
-                        .await?,
-                );
-            }
-        }
         let tx = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
             request: request.clone(),
-            openings,
+            opening,
         });
         chain
             .deliver(ctx, &tx)

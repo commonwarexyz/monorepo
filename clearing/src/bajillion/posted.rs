@@ -1,12 +1,11 @@
 //! One canonical keyed dealing shared by every full validator.
 //!
-//! The only descriptor field sent is the claimed header. Validators derive the roots and
-//! release amounts from the registered context, retained state, and terminal payer vectors.
+//! Validators derive the close commitment from the registered context, retained state,
+//! terminal payer vectors, and aggregated operator acceptance.
 
 use crate::bajillion::{
     commitment::MAX_VECTOR_LENGTH,
-    state::AccountRow,
-    transition::{CloseContext, Header, OperatorAggregate, TransitionError},
+    transition::{CloseContext, OperatorAggregate, TransitionError},
     vector::{OutEntry, OutVector},
 };
 use alloc::vec::Vec;
@@ -24,17 +23,12 @@ pub(crate) struct Row<P: PublicKey> {
 
 /// A structurally decoded full dealing. Signature and state validation is still required.
 #[derive(Clone, Debug)]
-pub struct Dealing<P: PublicKey, D: Digest> {
-    pub(crate) header: Header<D>,
+pub struct Dealing<P: PublicKey> {
     pub(crate) rows: Vec<Row<P>>,
     pub(crate) aggregate: Option<OperatorAggregate>,
     pub(crate) encoded: Bytes,
 }
-impl<P: PublicKey, D: Digest> Dealing<P, D> {
-    /// Returns the claimed proposal header.
-    pub const fn header(&self) -> &Header<D> {
-        &self.header
-    }
+impl<P: PublicKey> Dealing<P> {
     /// Returns the original canonical wire bytes.
     pub const fn encoded(&self) -> &Bytes {
         &self.encoded
@@ -45,7 +39,7 @@ impl<P: PublicKey, D: Digest> Dealing<P, D> {
 pub fn decode<P: PublicKey, D: Digest>(
     encoded: Bytes,
     context: &CloseContext<P, D>,
-) -> Result<Dealing<P, D>, CodecError> {
+) -> Result<Dealing<P>, CodecError> {
     decode_with_strategy(encoded, context, &Sequential)
 }
 
@@ -56,13 +50,12 @@ pub fn decode_with_strategy<P: PublicKey, D: Digest>(
     encoded: Bytes,
     context: &CloseContext<P, D>,
     strategy: &impl Strategy,
-) -> Result<Dealing<P, D>, CodecError> {
+) -> Result<Dealing<P>, CodecError> {
     let invalid = |reason| CodecError::Invalid("clearing::Dealing", reason);
     if P::SIZE != 32 {
         return Err(invalid("account keys must encode exactly 32 bytes"));
     }
     let mut reader = encoded.clone();
-    let header = Header::read(&mut reader)?;
     let limits = context.limits();
     let max_rows = limits
         .max_rows()
@@ -153,21 +146,17 @@ pub fn decode_with_strategy<P: PublicKey, D: Digest>(
         })
         .collect();
     Ok(Dealing {
-        header,
         rows,
         aggregate,
         encoded,
     })
 }
 
-pub(crate) fn encode<P: PublicKey, D: Digest>(
-    header: &Header<D>,
-    rows: &[AccountRow<P, D>],
-    vectors: &[OutVector<P>],
+pub(crate) fn encode<P: PublicKey>(
+    rows: &[Row<P>],
     aggregate: &Option<OperatorAggregate>,
 ) -> Result<Bytes, TransitionError> {
     if P::SIZE != 32
-        || rows.len() != vectors.len()
         || rows
             .windows(2)
             .any(|pair| pair[0].account.as_ref() >= pair[1].account.as_ref())
@@ -175,7 +164,6 @@ pub(crate) fn encode<P: PublicKey, D: Digest>(
         return Err(TransitionError::NonCanonicalRows);
     }
     let mut writer = BytesMut::new();
-    header.write(&mut writer);
     rows.len().write(&mut writer);
     for row in rows {
         row.account.write(&mut writer);
@@ -183,14 +171,15 @@ pub(crate) fn encode<P: PublicKey, D: Digest>(
     for row in rows {
         match &row.outgoing {
             None => 0_u8.write(&mut writer),
-            Some(send) => {
+            Some((seq, signature)) => {
                 1_u8.write(&mut writer);
-                UInt(send.body().seq()).write(&mut writer);
-                send.payer_signature().write(&mut writer);
+                UInt(*seq).write(&mut writer);
+                signature.write(&mut writer);
             }
         }
     }
-    for (row, vector) in rows.iter().zip(vectors) {
+    for row in rows {
+        let vector = &row.vector;
         if vector.payer() != &row.account {
             return Err(TransitionError::VectorAlignment);
         }

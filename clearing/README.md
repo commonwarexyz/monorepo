@@ -44,51 +44,44 @@ and withdrawals, and reconstructs three commitments:
                     admit --> wait --> finalize
 ```
 
-The Header binds these roots, the withdrawal total, the predecessor state, and
-the exact registered context. A committee of `n = 3f + 1` requires exactly
-`2f + 1` votes. With at most `f` faulty validators, that leaves at least `f + 1`
-honest holders of the entire close. Each honest signer validates and retains
-the evidence before voting.
-Committee registration must authenticate proofs of possession.
+The header binds the three roots to the registered epoch and its predecessor.
+Each signer validates and stores the evidence before voting. A committee of
+`n = 3f + 1` validators certifies a close with exactly `2f + 1` votes.
 
 Admission adds the close to an ordered queue and permits the next epoch to
 register. Finalization waits for the challenge deadline and all earlier closes,
-then reserves withdrawals for independent, once-only claims. A proven fault or
-missed deadline stops new work; the surviving clean prefix drains before
-recovery freezes the last finalized state.
+then makes withdrawals claimable. A successful receipt challenge blocks the
+contested close and its descendants. Earlier clean closes can still finalize
+before recovery freezes the surviving state.
 
 ## Balances and evidence
 
 QMDB Current Ordered with MMB maps a canonical 32-byte account key to a positive
 eight-byte balance. Absence means zero. Payments can create a recipient's balance
-without an onchain account; later payments can recreate a balance that reached
-zero. A close produces outputs only for owner-authorized withdrawals.
+without an onchain account. Balances can accumulate across closes until their
+owners choose to withdraw.
 
 A close writes only changed balances. Activity that nets to zero still appears
 in the activity BMT, and payer-vector BMTs authenticate individual payment entries.
-Payment counters belong to epoch evidence, not the QMDB balance record. Withdrawal
-claims use the output BMT; balance recovery uses historical Current proofs.
+Payment counters belong to epoch evidence. Withdrawal claims use the output
+BMT, and balance recovery uses historical QMDB proofs.
 
-Certification checks the disclosed close. Private receipts let their holders
-prove omitted or contradictory acknowledgments. A wallet saves the verified
-receipt before signing its next endpoint and retries the exact request after
-response loss. An unresolved payment must be reconciled in its original epoch
-before the wallet authorizes a replacement.
+Receipts let their holders challenge omitted or contradictory payments. Wallets
+save verified receipts and keep them available through the challenge deadline.
 
 ## Embedding the protocol
 
 Applications supply networking, authenticated time, durable storage, and custody.
-The [terminal example](../examples/terminal/README.md) implements those roles.
-An embedding must:
+The main responsibilities are:
 
-- Persist validated evidence before publishing a vote, and follow the close
-  selected by settlement when advancing canonical state.
-- Retain state and proof material for pending roots and the finalized recovery
-  root. An earlier close can delay finalization beyond a later close's own deadline.
-- Keep a receipt's evidence available and get any challenge included before its
-  deadline. Public state cannot reconstruct a private receipt nobody saved.
-- Persist protocol decisions and resulting asset transfers atomically. After a
-  database mutation failure, recover the affected owner from durable storage.
+- Store evidence before voting and advance canonical state from admitted closes.
+- Serve proofs for pending closes and the finalized recovery state.
+- Retain receipts and get any challenge included before its deadline.
+- Persist protocol decisions and their asset transfers atomically.
+
+The [module documentation](src/bajillion/mod.rs) defines the full contract,
+including committee assumptions, retention, retries, and recovery. The terminal
+example implements these responsibilities in a running application.
 
 Payment, boundary, vector, and BMT types support `no_std`. QMDB, complete-close
 validation, challenges, and settlement require `std` and use Commonware runtime
@@ -102,9 +95,6 @@ Run crate tests from the repository root:
 just test -p commonware-clearing
 ```
 
-- [Stateright](stateright/README.md) explores finite lifecycle models and checks
-  bounded traces against the Rust implementation.
-- [Verus](verus/README.md) proves the close's arithmetic equations in a separate
-  executable model.
-- [Benchmarks](src/bajillion/benches/README.md) measure individual phases, complete
-  preparation and receive paths, and encoded proof sizes.
+- [Lifecycle models](stateright/README.md)
+- [Arithmetic proofs](verus/README.md)
+- [Benchmarks](src/bajillion/benches/README.md)

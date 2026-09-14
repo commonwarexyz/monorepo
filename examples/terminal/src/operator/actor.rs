@@ -1,11 +1,15 @@
 //! Application orchestration across wallets, SQLite, and the clearing protocol.
 
-use super::store::{
-    AcceptedBatch, CloseRejected, EpochData, IncomingPayment, MutationFailed, SendVerdict,
-    StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus, StoredCloseOutcome,
-};
 #[cfg(test)]
 use super::store::{AccountView, Endpoint, StoreSnapshot};
+use super::{
+    qmdb,
+    store::{
+        AcceptedBatch, CloseRejected, EpochData, IncomingPayment, MutationFailed, SendVerdict,
+        StagedDeposit, StagedWithdrawal, Staging, Store, StoreStatus, StoredCloseOutcome,
+        withdrawal_amount,
+    },
+};
 #[cfg(test)]
 use crate::protocol::{
     MAX_DESTINATION_BYTES, PreparedEpoch, Wallet, accounts, eve_identity, wallets,
@@ -35,7 +39,7 @@ use commonware_clearing::bajillion::{
     payment::{PaymentContext, SendAuthorization, VectorSendBody},
     qmdb::{StateOpening, StateRoot},
     settlement::Genesis,
-    transition::{BatchId, ChallengeIndex, EpochContext, Terminal, WithdrawalClaim},
+    transition::{BatchId, ChallengeIndex, Close, EpochContext, Terminal, WithdrawalClaim},
     vector::{OutEntry, OutVector},
 };
 #[cfg(test)]
@@ -59,10 +63,10 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
     thread::{self, JoinHandle},
-    time::Instant,
 };
 
 pub(crate) const DEFAULT_AMOUNT: u64 = 5;
+type WithdrawalBoundary = (PaymentContext<Key, Digest>, WithdrawalBatch<Key, Digest>);
 #[cfg(test)]
 const DEPOSIT_ID_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_TERMINAL_DEPOSIT";
 
@@ -74,6 +78,11 @@ pub(crate) struct CloseStarted {
 pub(crate) struct PaymentHead {
     pub(crate) context: EpochContext<Key, Digest>,
     pub(crate) balance: u64,
+    pub(crate) root: StateRoot<Digest>,
+    pub(crate) opening: StateOpening<Key, Digest>,
+}
+
+pub(crate) struct WithdrawalOpening {
     pub(crate) root: StateRoot<Digest>,
     pub(crate) opening: StateOpening<Key, Digest>,
 }
@@ -100,11 +109,6 @@ impl SendOutcome {
             Self::Stale { .. } => panic!("the send was rejected with a corrective context"),
         }
     }
-}
-
-pub(crate) struct WithdrawalOpening {
-    pub(crate) root: StateRoot<Digest>,
-    pub(crate) opening: StateOpening<Key, Digest>,
 }
 
 /// Committed-side terminal-entry evidence for one (payer, recipient) edge, reconstructed
@@ -147,9 +151,17 @@ struct CloseGate {
     release: Receiver<()>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum ResultFailure {
+    Read,
+    Commit,
+}
+
 /// Complete local operator. Only public state and signed artifacts enter SQLite.
 pub(crate) struct Operator {
     store: Store,
+    balances: qmdb::Handle,
     protocol: Arc<Protocol>,
     identities: Vec<AccountIdentity>,
     #[cfg(test)]
@@ -160,9 +172,10 @@ pub(crate) struct Operator {
     epoch_fee: u64,
     genesis_root: StateRoot<Digest>,
     registration: EpochRegistration,
-    balances: super::qmdb::Handle,
+    #[cfg(test)]
+    initial_accounts: Vec<Account>,
     active_close: Option<ActiveClose>,
-    // Results are durable in the balance journal; this bounded FIFO tracks certified finality.
+    // Results are durable in the close jobs; this FIFO tracks certified finality.
     admitted: VecDeque<SettlementResult>,
     recovering: bool,
     store_fault: Option<String>,
@@ -173,6 +186,8 @@ pub(crate) struct Operator {
     fail_close_spawn: bool,
     #[cfg(test)]
     panic_close_worker: bool,
+    #[cfg(test)]
+    result_failure: Option<ResultFailure>,
 }
 
 impl Operator {
@@ -256,14 +271,29 @@ impl Operator {
         epoch_fee: u64,
     ) -> Result<Self> {
         let protocol = Arc::new(protocol);
-        let balances = super::qmdb::Handle::open(
+        #[cfg(test)]
+        let configured = match configured {
+            Some(configured) => Some(configured),
+            None => Some(protocol.fixture_genesis(initial_accounts)?),
+        };
+        let configured = configured.context("operator requires a configured genesis")?;
+        ensure!(
+            initial_accounts
+                .iter()
+                .try_fold(0u64, |total, account| total.checked_add(account.balance))
+                .context("genesis liability overflow")?
+                == configured.liability(),
+            "configured genesis liability mismatch"
+        );
+        let configured_genesis_root = configured.root();
+        store.bind_genesis(configured_genesis_root)?;
+        let balances = qmdb::Handle::open(
             &store.database_path(),
             initial_accounts,
-            protocol.clone(),
+            Arc::clone(&protocol),
             store.epoch_reader(),
-            configured,
+            Some(configured),
         )?;
-        let configured_genesis_root = balances.root(0)?;
         let current = store.load_current()?;
         let registration = registration_for(&protocol, &current)?;
         store.ensure_current_context(registration.context.payment())?;
@@ -281,35 +311,18 @@ impl Operator {
         let pending_close = store.closing_epoch_from(0)?.is_some();
         let recovering = close_fault.is_none() && pending_close;
         if close_fault.is_none() && !pending_close {
-            let (expected_epoch, expected_root) = match store.latest_finalized_root()? {
-                Some((epoch, root)) => (
-                    epoch.checked_add(1).context("settlement epoch overflow")?,
-                    root,
-                ),
-                None => (0, configured_genesis_root),
-            };
+            let expected_epoch = store.latest_finalized_root()?.map_or(Ok(0), |(epoch, _)| {
+                epoch.checked_add(1).context("settlement epoch overflow")
+            })?;
             ensure!(
                 current.epoch == expected_epoch,
                 "current epoch does not extend the finalized settlement tip"
             );
-            ensure!(
-                balances.root(current.epoch)? == expected_root,
-                "current predecessor root does not extend the finalized settlement tip"
-            );
-        }
-        if !pending_close && close_fault.is_none() {
-            balances.check(
-                current.epoch,
-                current
-                    .accounts
-                    .iter()
-                    .map(|account| (account.key.clone(), account.predecessor))
-                    .collect(),
-            )?;
         }
 
         let mut operator = Self {
             store,
+            balances,
             protocol,
             identities,
             #[cfg(test)]
@@ -317,7 +330,8 @@ impl Operator {
             pipeline,
             genesis_root: configured_genesis_root,
             registration,
-            balances,
+            #[cfg(test)]
+            initial_accounts: initial_accounts.to_vec(),
             active_close: None,
             admitted: VecDeque::new(),
             epoch_fee,
@@ -330,6 +344,8 @@ impl Operator {
             fail_close_spawn: false,
             #[cfg(test)]
             panic_close_worker: false,
+            #[cfg(test)]
+            result_failure: None,
         };
         operator.start_next_persisted_close()?;
         Ok(operator)
@@ -412,17 +428,15 @@ impl Operator {
             .current_account(account)?
             .context("payer is not in the current live state")?;
         ensure!(state.current > 0, "payer is not in the current live state");
-        let payer_opening = self
-            .balances
-            .opening(self.registration.context.payment().epoch(), account)
-            .context("open payer recovery state")?;
         Ok(PaymentHead {
             context: self.registration.context.clone(),
             balance: state.current,
             root: self
                 .balances
                 .root(self.registration.context.payment().epoch())?,
-            opening: payer_opening,
+            opening: self
+                .balances
+                .opening(self.registration.context.payment().epoch(), account)?,
         })
     }
 
@@ -438,10 +452,7 @@ impl Operator {
         authorization: &SendAuthorization<Key, Digest>,
         entries: &[Entry],
     ) -> Result<Option<AcceptedBatch>> {
-        ensure!(
-            self.store_fault.is_none(),
-            "a storage fault blocks committed-batch reads until the operator restarts"
-        );
+        self.ensure_store_usable()?;
         self.store.accepted_batch(authorization, entries)
     }
 
@@ -468,8 +479,13 @@ impl Operator {
         epoch: u64,
     ) -> Result<CommittedEntry> {
         self.ensure_store_usable()?;
-        let (context, close) = self.balances.evidence(epoch)?;
-        let index = ChallengeIndex::new::<Sha256>(&context, &close)
+        let result = self
+            .store
+            .stored_result(epoch)?
+            .context("close evidence is not retained")?;
+        let close =
+            Close::decode_evidence::<Sha256>(result.evidence, &result.context, &result.header)?;
+        let index = ChallengeIndex::new::<Sha256>(&result.context, &close)
             .context("index committed close for entry evidence")?;
 
         // A changed payer has a row and an aligned out vector (empty for a credit-only
@@ -738,20 +754,28 @@ impl Operator {
             deadline,
             wallet.signer(),
         );
-        self.apply_withdrawal(request)
+        self.apply_withdrawal(request, false)
     }
 
     pub(crate) fn withdrawal_opening(&self, account: &Key) -> Result<WithdrawalOpening> {
         self.ensure_operating()?;
-        self.ensure_close_horizon()?;
+        ensure_close_horizon(self.registration.context.payment().epoch())?;
         self.ensure_payer_eligible(account)?;
-        let epoch = self
-            .store
-            .latest_finalized_root()?
-            .map_or(Some(0), |(epoch, _)| epoch.checked_add(1))
-            .context("finalized withdrawal checkpoint overflow")?;
+        let (epoch, root) = match self.store.latest_finalized_root()? {
+            Some((epoch, root)) => (
+                epoch
+                    .checked_add(1)
+                    .context("finalized checkpoint overflow")?,
+                root,
+            ),
+            None => (0, self.genesis_root),
+        };
+        ensure!(
+            self.balances.root(epoch)? == root,
+            "proof replica differs from finalized root"
+        );
         Ok(WithdrawalOpening {
-            root: self.balances.root(epoch)?,
+            root,
             opening: self
                 .balances
                 .opening(epoch, account)
@@ -765,10 +789,11 @@ impl Operator {
         self.store.withdrawals_frozen()
     }
 
-    /// Stages a withdrawal after the service authenticates its root and deadline with settlement.
+    /// Stages an authorization after the service authenticates fresh intake or its exact queue record.
     pub(crate) fn apply_withdrawal(
         &mut self,
         request: SignedWithdrawal<Key, Digest>,
+        queued: bool,
     ) -> Result<StagedWithdrawal> {
         self.ensure_operating()?;
         Key::decode(request.body().destination().clone())
@@ -777,7 +802,9 @@ impl Operator {
             return Ok(staged);
         }
         self.ensure_withdrawal_intake_horizon(request.body().action())?;
-        self.ensure_payer_eligible(request.account())?;
+        if !queued {
+            self.ensure_payer_eligible(request.account())?;
+        }
         request
             .verify_deployment(&self.protocol.deployment())
             .context("verify withdrawal authorization")?;
@@ -789,16 +816,18 @@ impl Operator {
             &request,
             self.registration.context.payment(),
             replacement.context.payment(),
+            queued,
         );
         let staged = self.guard_store(result)?;
         self.registration = replacement;
         Ok(staged)
     }
 
-    /// Earliest withdrawal expiry in the current boundary before certified registration.
-    pub(crate) fn withdrawal_expiry(&self) -> Result<Option<(PaymentContext<Key, Digest>, u64)>> {
+    /// Unregistered withdrawal reservations and the exact boundary that owns them.
+    pub(crate) fn unregistered_withdrawals(&self) -> Result<Option<WithdrawalBoundary>> {
         self.ensure_store_usable()?;
         if self.ensure_operating().is_err()
+            || self.registration.withdrawals.requests().is_empty()
             || self
                 .store
                 .chain_deadlines(self.registration.context.payment().epoch())?
@@ -806,36 +835,36 @@ impl Operator {
         {
             return Ok(None);
         }
-        Ok(self
-            .registration
-            .withdrawals
-            .requests()
-            .iter()
-            .map(|request| request.body().deadline())
-            .min()
-            .map(|deadline| (self.registration.context.payment().clone(), deadline)))
+        Ok(Some((
+            self.registration.context.payment().clone(),
+            self.registration.withdrawals.clone(),
+        )))
     }
 
-    /// Restores only expired local reservations after certified non-registration is established.
-    pub(crate) fn discard_expired_withdrawals(
+    /// Restores reservations proven unable to enter settlement under this boundary.
+    pub(crate) fn discard_unregistered_withdrawals(
         &mut self,
         expected: &PaymentContext<Key, Digest>,
-        height: u64,
+        discarded: &WithdrawalBatch<Key, Digest>,
     ) -> Result<()> {
         self.ensure_operating()?;
-        if self.registration.context.payment() != expected {
+        if self.registration.context.payment() != expected || discarded.requests().is_empty() {
             return Ok(());
         }
-        let (expired, remaining): (Vec<_>, Vec<_>) = self
+        for request in discarded.requests() {
+            ensure!(
+                self.registration.withdrawals.request_for(request.account()) == Some(request),
+                "discarded withdrawal differs from the live boundary"
+            );
+        }
+        let remaining = self
             .registration
             .withdrawals
             .requests()
             .iter()
+            .filter(|request| discarded.request_for(request.account()).is_none())
             .cloned()
-            .partition(|request| request.body().deadline() <= height);
-        if expired.is_empty() {
-            return Ok(());
-        }
+            .collect();
         let replacement = self.protocol.registration_at(
             expected.epoch(),
             self.registration.deposits.clone(),
@@ -844,10 +873,10 @@ impl Operator {
             self.registration.context.admission_deadline(),
             self.registration.context.challenge_deadline(),
         )?;
-        let result = self.store.discard_expired_withdrawals(
+        let result = self.store.discard_unregistered_withdrawals(
             expected,
             replacement.context.payment(),
-            &expired,
+            discarded.requests(),
         );
         self.guard_store(result)?;
         self.registration = replacement;
@@ -1013,6 +1042,7 @@ impl Operator {
                     }
                     return Err(error.context(format!("operator fenced: {message}")));
                 }
+                self.balances.notify();
                 if let Err(error) = self.start_next_persisted_close() {
                     let message = format!("next close could not be scheduled: {error:#}");
                     self.close_fault = Some(message.clone());
@@ -1044,7 +1074,12 @@ impl Operator {
                     self.close_fault = Some(format!("{error:#}"));
                     return Err(error);
                 }
-                if error.downcast_ref::<super::qmdb::Unavailable>().is_some() {
+                if error.downcast_ref::<CommitUnknown>().is_some()
+                    || error.downcast_ref::<MutationFailed>().is_some()
+                    || error
+                        .chain()
+                        .any(|cause| cause.downcast_ref::<rusqlite::Error>().is_some())
+                {
                     self.store_fault = Some(format!("{error:#}"));
                     return Err(error);
                 }
@@ -1061,6 +1096,7 @@ impl Operator {
     pub(crate) fn fault(&self) -> Option<&str> {
         self.store_fault
             .as_deref()
+            .or(self.store.storage_fault())
             .or(self.close_fault.as_deref())
             .or(self
                 .recovering
@@ -1095,26 +1131,34 @@ impl Operator {
         Ok(snapshot)
     }
 
+    /// Snapshot of the boundary whose exact withdrawals need certified queue classification.
+    pub(crate) fn registration_boundary(&self) -> Result<WithdrawalBoundary> {
+        self.ensure_operating()?;
+        Ok((
+            self.registration.context.payment().clone(),
+            self.registration.withdrawals.clone(),
+        ))
+    }
+
     /// Freezes withdrawal intake before publishing the live epoch's signed boundary.
     /// Confirmed deposits can invalidate an unadopted request; retries rebuild from
     /// the durable boundary and the immutable deployment fee.
-    pub(crate) fn signed_registration(&mut self) -> Result<RegisterEpochRequest> {
+    pub(crate) fn signed_registration(
+        &mut self,
+        queued: &WithdrawalBatch<Key, Digest>,
+    ) -> Result<RegisterEpochRequest> {
         self.ensure_operating()?;
         self.next_openable_epoch()?;
 
         let epoch = self.registration.context.payment().epoch();
         let predecessor_liability = self.registration.context.predecessor_liability();
         let withdrawals = self.registration.withdrawals.clone();
-        let openings = withdrawals
-            .requests()
-            .iter()
-            .map(|request| {
-                self.balances
-                    .opening(epoch, request.account())
-                    .context("open carried withdrawal account")
-            })
-            .collect::<Result<Vec<_>>>()?;
-
+        for request in queued.requests() {
+            ensure!(
+                withdrawals.request_for(request.account()) == Some(request),
+                "queued withdrawal differs from the live boundary"
+            );
+        }
         let deposits_root = self
             .registration
             .deposits
@@ -1133,8 +1177,13 @@ impl Operator {
             predecessor_liability,
             deposits_root,
 
+            openings: withdrawals
+                .requests()
+                .iter()
+                .filter(|request| queued.request_for(request.account()).is_none())
+                .map(|request| self.balances.opening(epoch, request.account()))
+                .collect::<Result<Vec<_>>>()?,
             withdrawals,
-            openings,
             fee: self.epoch_fee,
             signature,
         };
@@ -1227,15 +1276,11 @@ impl Operator {
         }
     }
 
-    fn ensure_close_horizon(&self) -> Result<()> {
-        ensure_close_horizon(self.registration.context.payment().epoch())
-    }
-
     pub(crate) fn withdrawal_evidence(&self, account: &Key) -> Result<WithdrawalEvidence> {
         self.ensure_store_usable()?;
         let (epoch, claim) = self.store.withdrawal_evidence(account)?;
         let result = self
-            .balances
+            .store
             .stored_result(epoch)?
             .context("withdrawal close is not retained")?;
         Ok(WithdrawalEvidence {
@@ -1295,12 +1340,17 @@ impl Operator {
         let epoch = payment_context.epoch();
         let protocol = Arc::clone(&self.protocol);
         let reader = self.store.epoch_reader();
-        let balances = self.balances.clone();
+        let genesis_root = self.genesis_root;
+        #[cfg(test)]
+        let initial_accounts = self.initial_accounts.clone();
         let pipeline = self.pipeline.clone();
+        let balances = self.balances.clone();
         #[cfg(test)]
         let close_gate = self.close_gate.take();
         #[cfg(test)]
         let panic_close_worker = std::mem::take(&mut self.panic_close_worker);
+        #[cfg(test)]
+        let result_failure = self.result_failure.take();
         let (sender, receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name(format!("terminal-close-{epoch}"))
@@ -1317,7 +1367,15 @@ impl Operator {
                 assert!(!panic_close_worker, "injected close worker panic");
 
                 let result = (|| {
-                    let result = if let Some(result) = balances.stored_result(epoch)? {
+                    #[cfg(test)]
+                    if matches!(result_failure, Some(ResultFailure::Read)) {
+                        return Err(rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                            Some("injected certified result read failure".into()),
+                        )
+                        .into());
+                    }
+                    let result = if let Some(result) = reader.stored_result(epoch)? {
                         ensure!(
                             result.context.payment() == &payment_context,
                             "retained close has the wrong context"
@@ -1330,32 +1388,46 @@ impl Operator {
                             payment_context == *registration.context.payment(),
                             "frozen epoch context differs from its durable close job"
                         );
-                        let prepared = balances.prepare(data, registration)?;
-                        match &pipeline {
-                            None => balances.complete(prepared, epoch)?,
-                            Some(pipeline) => {
-                                let deal_start = Instant::now();
-                                let dealing = prepared.encoded().clone();
-                                let deal_micros = deal_start.elapsed().as_micros();
-                                let seal_start = Instant::now();
-                                let certificate =
-                                    pipeline.certify(epoch, prepared.close().header, dealing)?;
-                                let (result, candidate) = protocol.certify(
+                        let assembled = assemble_epoch(&protocol, &data, &registration)?;
+                        let prepared = protocol.prepare(registration, assembled.terminals)?;
+                        let result = match &pipeline {
+                            Some(pipeline) => pipeline.certify(&prepared)?,
+                            #[cfg(test)]
+                            None => {
+                                let history = (0..epoch)
+                                    .map(|epoch| {
+                                        reader
+                                            .stored_result(epoch)?
+                                            .context("test validator predecessor missing")
+                                    })
+                                    .collect::<Result<Vec<_>>>()?;
+                                protocol.fixture_complete(
+                                    &initial_accounts,
+                                    &history,
                                     prepared,
-                                    certificate,
-                                    deal_micros,
-                                    seal_start.elapsed().as_micros(),
-                                )?;
-                                balances.apply(result, candidate)?
+                                    epoch,
+                                )?
                             }
+                            #[cfg(not(test))]
+                            None => anyhow::bail!("operator has no validator pipeline"),
+                        };
+                        reader.record_result(&result, genesis_root)?;
+                        #[cfg(test)]
+                        if matches!(result_failure, Some(ResultFailure::Commit)) {
+                            return Err(CommitUnknown::new(
+                                "injected certified close retention",
+                                rusqlite::Error::ExecuteReturnedResults,
+                            )
+                            .into());
                         }
+                        result
                     };
                     if let Some(pipeline) = &pipeline {
                         pipeline.admit(AdmitRequest::from(&result))?;
                     }
+                    balances.notify();
                     Ok(result)
-                })()
-                .map_err(super::qmdb::classify);
+                })();
                 let _ = sender.send(result);
             })
             .context("spawn asynchronous close worker")?;
@@ -1386,6 +1458,16 @@ impl Operator {
     #[cfg(test)]
     const fn panic_next_close_worker(&mut self) {
         self.panic_close_worker = true;
+    }
+
+    #[cfg(test)]
+    const fn fail_next_result_commit(&mut self) {
+        self.result_failure = Some(ResultFailure::Commit);
+    }
+
+    #[cfg(test)]
+    const fn fail_next_result_read(&mut self) {
+        self.result_failure = Some(ResultFailure::Read);
     }
 
     fn start_next_persisted_close(&mut self) -> Result<()> {
@@ -1477,6 +1559,7 @@ impl Operator {
             let finalized = self.store.finish_close(result, self.genesis_root);
             self.guard_store(finalized)?;
             self.admitted.pop_front();
+            self.balances.notify();
             println!("epoch {epoch} close finalized");
             self.verify_recovered_predecessor()?;
         }
@@ -1547,7 +1630,7 @@ impl Operator {
     }
 
     pub(crate) fn ensure_store_usable(&self) -> Result<()> {
-        if let Some(fault) = &self.store_fault {
+        if let Some(fault) = self.store_fault.as_deref().or(self.store.storage_fault()) {
             anyhow::bail!("the SQLite connection is unusable: {fault}");
         }
         Ok(())
@@ -1588,27 +1671,53 @@ impl Operator {
         {
             return Ok(());
         }
-        let (epoch, actual) = self
+        let (epoch, _) = self
             .certified_tip()?
             .context("recovered close chain has no authenticated state root")?;
         let current_epoch = self.registration.context.payment().epoch();
         let expected_epoch = epoch.checked_add(1).context("settlement epoch overflow")?;
-        if current_epoch != expected_epoch || actual != self.balances.root(current_epoch)? {
-            let message = "recovered current predecessor root does not extend the authenticated settlement tip";
+        if current_epoch != expected_epoch {
+            let message =
+                "recovered current epoch does not extend the authenticated settlement tip";
             self.close_fault = Some(message.to_string());
             anyhow::bail!(message);
         }
-        let current = self.store.load_current()?;
-        self.balances.check(
-            current_epoch,
-            current
-                .accounts
-                .iter()
-                .map(|account| (account.key.clone(), account.predecessor))
-                .collect(),
-        )?;
+        self.validate_current_epoch()?;
         self.recovering = false;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn validator_history(&self, epoch: u64) -> Result<Vec<SettlementResult>> {
+        (0..epoch)
+            .map(|epoch| {
+                self.store
+                    .stored_result(epoch)?
+                    .context("validator predecessor unavailable")
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn prepare_epoch(
+        &self,
+        data: EpochData,
+        registration: EpochRegistration,
+    ) -> Result<PreparedEpoch> {
+        let assembled = assemble_epoch(&self.protocol, &data, &registration)?;
+        self.protocol.prepare(registration, assembled.terminals)
+    }
+
+    #[cfg(test)]
+    fn complete_prepared(&self, prepared: PreparedEpoch, seed: u64) -> Result<SettlementResult> {
+        let history = self.validator_history(prepared.epoch())?;
+        let result =
+            self.protocol
+                .fixture_complete(&self.initial_accounts, &history, prepared, seed)?;
+        self.store
+            .epoch_reader()
+            .record_result(&result, self.genesis_root)?;
+        Ok(result)
     }
 
     /// Test-only synchronous close pipeline: prepares the live epoch's close,
@@ -1618,7 +1727,7 @@ impl Operator {
     pub(crate) fn complete_close(&mut self, seed: u64) -> Result<SettlementResult> {
         let epoch = self.registration.context.payment().epoch();
         let data = self.store.load_current()?;
-        let prepared = self.balances.prepare(data, self.registration.clone())?;
+        let prepared = self.prepare_epoch(data, self.registration.clone())?;
         let next_epoch = self.next_openable_epoch()?;
         let successor = self.protocol.registration(
             next_epoch,
@@ -1633,8 +1742,9 @@ impl Operator {
         )?;
         self.registration = successor;
         self.validate_current_epoch()?;
-        let result = self.balances.complete(prepared, seed)?;
+        let result = self.complete_prepared(prepared, seed)?;
         self.store.finish_close(&result, self.genesis_root)?;
+        self.balances.catch_up()?;
         Ok(result)
     }
 
@@ -1644,8 +1754,9 @@ impl Operator {
         prepared: PreparedEpoch,
         rng: &mut R,
     ) -> Result<CloseFinished> {
-        let result = self.balances.complete(prepared, rng.next_u64())?;
+        let result = self.complete_prepared(prepared, rng.next_u64())?;
         self.store.finish_close(&result, self.genesis_root)?;
+        self.balances.catch_up()?;
         Ok(CloseFinished {
             epoch: result.context.payment().epoch(),
             header_digest: short_digest(result.header.digest()),
@@ -1680,7 +1791,7 @@ fn deposit_batch<'a>(
     )?)
 }
 
-fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<EpochRegistration> {
+pub(super) fn registration_for(protocol: &Protocol, data: &EpochData) -> Result<EpochRegistration> {
     let staged = deposit_batch(&data.deposits)?;
     let withdrawals = WithdrawalBatch::new(
         data.withdrawals
@@ -2042,44 +2153,70 @@ pub(super) fn assemble_epoch(
         let withdrawal = registration.withdrawals.request_for(&account.key);
         let stored_withdrawal = stored_withdrawals.get(&account.key).copied();
         ensure!(
-            account.predecessor > 0 || deposit > 0 || (totals.debit == 0 && withdrawal.is_none()),
+            account.predecessor > 0 || deposit > 0 || totals.debit == 0,
             "absent boundary account originated activity"
         );
         ensure!(
             withdrawal == stored_withdrawal.map(|stored| &stored.request),
             "registration withdrawal differs from SQLite"
         );
-        let available =
-            u128::from(account.predecessor) + u128::from(deposit) + u128::from(totals.credit);
-        let expected_balance = match withdrawal.map(|request| request.body().action()) {
-            Some(WithdrawalAction::Amount(amount)) => available
-                .checked_sub(u128::from(amount.get()))
-                .and_then(|value| value.checked_sub(u128::from(totals.debit)))
-                .and_then(|value| u64::try_from(value).ok())
-                .context("account withdrawal exceeds available balance")?,
-            Some(WithdrawalAction::Close) => {
-                let tail = close_tail(account.predecessor, deposit, totals.credit, totals.debit)?;
-                match stored_withdrawal.and_then(|stored| stored.applied_amount) {
-                    Some(applied) => {
-                        ensure!(applied == tail, "stored Close tail is inconsistent");
-                        0
-                    }
-                    None => tail,
-                }
+        let tail = close_tail(account.predecessor, deposit, totals.credit, totals.debit)?;
+        let expected_balance = match stored_withdrawal.and_then(|stored| stored.applied_amount) {
+            Some(applied) => {
+                let expected = withdrawal_amount(
+                    withdrawal
+                        .expect("stored withdrawal matches the registration")
+                        .body()
+                        .action(),
+                    tail,
+                );
+                ensure!(
+                    applied == expected,
+                    "stored withdrawal tail is inconsistent"
+                );
+                tail.checked_sub(applied)
+                    .context("withdrawal exceeds the epoch tail")?
             }
-            None => available
-                .checked_sub(u128::from(totals.debit))
-                .and_then(|value| u64::try_from(value).ok())
-                .context("account debit exceeds available balance")?,
+            None => tail,
         };
         ensure!(account.current == expected_balance, "SQLite balance drift");
     }
 
-    let terminals = terminals
+    Ok(EpochAssembly {
+        terminals: terminal_vectors(protocol, data.epoch, terminals, outgoing)?,
+    })
+}
+
+/// Reconstructs accepted endpoints for the proof replica from the operator's retained log.
+pub(super) fn replica_terminals(
+    protocol: &Protocol,
+    data: &EpochData,
+) -> Result<Vec<Terminal<Key, Digest>>> {
+    let mut terminals = BTreeMap::new();
+    for ack in &data.acks {
+        terminals.insert(ack.body().payer().clone(), ack.clone());
+    }
+    let mut outgoing = BTreeMap::<Key, Vec<OutEntry<Key>>>::new();
+    for edge in &data.edges {
+        outgoing
+            .entry(edge.payer.clone())
+            .or_default()
+            .push(edge.entry.clone());
+    }
+    terminal_vectors(protocol, data.epoch, terminals, outgoing)
+}
+
+fn terminal_vectors(
+    protocol: &Protocol,
+    epoch: u64,
+    terminals: BTreeMap<Key, Ack>,
+    mut outgoing: BTreeMap<Key, Vec<OutEntry<Key>>>,
+) -> Result<Vec<Terminal<Key, Digest>>> {
+    terminals
         .into_iter()
         .map(|(account, ack)| {
             let vector = OutVector::new(
-                data.epoch,
+                epoch,
                 account,
                 outgoing.remove(ack.body().payer()).unwrap_or_default(),
             )
@@ -2097,8 +2234,7 @@ pub(super) fn assemble_epoch(
                 operator_signature: protocol.sign_ack_aggregate(ack.body()),
             })
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(EpochAssembly { terminals })
+        .collect()
 }
 
 #[cfg(test)]

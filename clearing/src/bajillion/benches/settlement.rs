@@ -153,7 +153,7 @@ struct QueueSource {
     chain: ChainSource,
     admissions: Vec<AdmissionFixture>,
     request: SignedWithdrawal<VerifyingKey, Digest>,
-    openings: Vec<StateOpening<VerifyingKey, Digest>>,
+    opening: StateOpening<VerifyingKey, Digest>,
 }
 
 struct CloseSource {
@@ -318,7 +318,6 @@ async fn admission_fixture(
     )
     .expect("benchmark epoch is valid")
     .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
-    .await
     .expect("benchmark close context is valid");
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
@@ -424,12 +423,7 @@ async fn withdrawal_sources(
 fn queue_withdrawals(chain: &mut TestChain, withdrawals: &[WithdrawalSource]) {
     for withdrawal in withdrawals {
         chain
-            .queue_withdrawal(
-                0,
-                withdrawal.request.clone(),
-                std::slice::from_ref(&withdrawal.opening),
-                |_| true,
-            )
+            .queue_withdrawal(0, withdrawal.request.clone(), &withdrawal.opening, |_| true)
             .expect("benchmark withdrawal can be queued");
     }
 }
@@ -438,7 +432,7 @@ fn queue_withdrawals(chain: &mut TestChain, withdrawals: &[WithdrawalSource]) {
 async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSource {
     let (chain, mut state, accounts) = ChainSource::new(runtime, LIVE_ACCOUNTS, 1).await;
     let request = signed_withdrawal(&state, &accounts[0], WITHDRAWAL_DEADLINE);
-    let mut openings = vec![state.opening(accounts[0].public.clone()).await.unwrap()];
+    let opening = state.opening(accounts[0].public.clone()).await.unwrap();
     let mut admissions = Vec::with_capacity(depth);
     for epoch in 0..depth {
         let (next, admission) = admission_fixture(
@@ -449,24 +443,23 @@ async fn queue_source(runtime: deterministic::Context, depth: usize) -> QueueSou
         )
         .await;
         state = next;
-        openings.push(state.opening(accounts[0].public.clone()).await.unwrap());
         admissions.push(admission);
     }
     let source = QueueSource {
         chain,
         admissions,
         request,
-        openings,
+        opening,
     };
     let input = queue_input(&source);
-    let roots = input.chain.withdrawal_safety_roots();
-    assert_eq!(roots.len(), source.openings.len());
-    for (root, opening) in roots.iter().zip(&source.openings) {
-        assert_eq!(
-            opening.verify::<Sha256>(root).unwrap().get(),
-            OPENING_BALANCE
-        );
-    }
+    assert_eq!(
+        source
+            .opening
+            .verify::<Sha256>(&input.chain.current_state_root())
+            .unwrap()
+            .get(),
+        OPENING_BALANCE
+    );
     source
 }
 
@@ -580,7 +573,7 @@ fn bench_queue_withdrawal(c: &mut Criterion) {
                                 .queue_withdrawal(
                                     black_box(0),
                                     input.request,
-                                    black_box(&source.openings),
+                                    black_box(&source.opening),
                                     |_| true,
                                 )
                                 .expect("benchmark withdrawal can be queued");

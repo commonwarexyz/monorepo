@@ -49,7 +49,7 @@ use commonware_clearing::bajillion::{
     transition::{BatchId, Header, OperatorKey, RootBundle, WithdrawalClaim},
 };
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+    Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256::Digest};
 use commonware_cryptography_curve25519::signing::{Signature, SigningKey};
@@ -298,9 +298,6 @@ impl Read for NativeTransferRequest {
     }
 }
 
-/// Every state opening carries at least its account key and balance.
-const MIN_STATE_OPENING_BYTES: usize = Key::SIZE + u64::SIZE;
-
 /// Certificate participant-bitmap length for the fixed clearing committee.
 const CERTIFICATE_PARTICIPANTS: usize = 4;
 
@@ -521,19 +518,19 @@ impl Read for DepositRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QueueWithdrawalRequest {
     pub(crate) request: SignedWithdrawal<Key, Digest>,
-    pub(crate) openings: Vec<StateOpening<Key, Digest>>,
+    pub(crate) opening: StateOpening<Key, Digest>,
 }
 
 impl Write for QueueWithdrawalRequest {
     fn write(&self, buf: &mut impl BufMut) {
         self.request.write(buf);
-        self.openings.write(buf);
+        self.opening.write(buf);
     }
 }
 
 impl EncodeSize for QueueWithdrawalRequest {
     fn encode_size(&self) -> usize {
-        self.request.encode_size() + self.openings.encode_size()
+        self.request.encode_size() + self.opening.encode_size()
     }
 }
 
@@ -541,14 +538,9 @@ impl Read for QueueWithdrawalRequest {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let request = SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?;
-        let bound = buf.remaining() / MIN_STATE_OPENING_BYTES;
         Ok(Self {
-            request,
-            openings: Vec::<StateOpening<Key, Digest>>::read_cfg(
-                buf,
-                &(RangeCfg::new(0..=bound), super::query::MAX_PROOF_DIGESTS),
-            )?,
+            request: SignedWithdrawal::read_cfg(buf, &RangeCfg::new(0..=MAX_DESTINATION_BYTES))?,
+            opening: StateOpening::read_cfg(buf, &super::query::MAX_PROOF_DIGESTS)?,
         })
     }
 }
@@ -573,8 +565,8 @@ pub(crate) struct RegisterEpochRequest {
     pub(crate) deposits_root: VectorRoot<Digest>,
 
     pub(crate) withdrawals: WithdrawalBatch<Key, Digest>,
-    /// One predecessor-root opening per withdrawal in batch order. Execution selects the
-    /// ones proving its operator-carried extras certifiable.
+    /// One predecessor-root opening per fresh operator extra in withdrawal order.
+    /// Exact chain-queued requests require no additional opening.
     pub(crate) openings: Vec<StateOpening<Key, Digest>>,
     pub(crate) fee: u64,
     pub(crate) signature: Signature,
@@ -922,7 +914,10 @@ impl Read for SettlementTx {
 mod tests {
     use super::*;
     use crate::{
-        protocol::{MAX_ENTRIES, Protocol, Wallet, omitting_close, wallets},
+        protocol::{
+            MAX_ENTRIES, Protocol, Wallet, deployments, genesis_balances, omitting_close,
+            state_config, wallets,
+        },
         rpc,
     };
     use bytes::BytesMut;
@@ -931,7 +926,7 @@ mod tests {
         payment::{VectorAck, VectorSendBody},
         vector::{OutEntry, OutTipLookup, OutVector},
     };
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{Decode as _, DecodeExt as _};
     use commonware_utils::TestRng;
     use std::num::NonZeroUsize;
 
@@ -1022,6 +1017,57 @@ mod tests {
             }
             assert!(!changed.verify(&chain));
         }
+    }
+
+    #[test]
+    fn queue_withdrawal_request_codec_carries_one_bounded_opening() {
+        let (root, opening) = commonware_runtime::Runner::start(
+            commonware_runtime::deterministic::Runner::default(),
+            |context| async move {
+                let deployment = deployments().remove(0);
+                let config = state_config(
+                    "queue-withdrawal-codec",
+                    &context,
+                    commonware_parallel::Sequential,
+                );
+                let state = commonware_clearing::bajillion::qmdb::State::<_, Sha256>::init(
+                    context,
+                    config,
+                    genesis_balances(&deployment).unwrap(),
+                )
+                .await
+                .unwrap();
+                let opening = state.opening(wallets()[0].public_key()).await.unwrap();
+                (state.root().digest, opening)
+            },
+        );
+        let wallet = wallets().remove(0);
+        let request = QueueWithdrawalRequest {
+            request: SignedWithdrawal::sign(
+                crate::protocol::deployment(),
+                root,
+                Bytes::from_static(b"destination"),
+                commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
+                    std::num::NonZeroU64::MIN,
+                ),
+                100,
+                wallet.signer(),
+            ),
+            opening: opening.clone(),
+        };
+        let encoded = request.encode();
+        assert_eq!(encoded.len(), request.encode_size());
+        assert_eq!(
+            QueueWithdrawalRequest::decode(encoded.clone()).unwrap(),
+            request
+        );
+        for end in 0..encoded.len() {
+            assert!(QueueWithdrawalRequest::decode(encoded.slice(..end)).is_err());
+        }
+        assert!(
+            StateOpening::<Key, Digest>::decode_cfg(opening.encode(), &0).is_err(),
+            "the opening proof decoder must enforce its digest bound"
+        );
     }
 
     #[test]
@@ -1180,31 +1226,10 @@ mod tests {
             100,
             wallet.signer(),
         );
-        let request = QueueWithdrawalRequest {
-            request: oversized_destination,
-            openings: Vec::new(),
-        };
+        let mut encoded = BytesMut::new();
+        oversized_destination.write(&mut encoded);
         assert!(matches!(
-            QueueWithdrawalRequest::decode(request.encode()),
-            Err(CodecError::InvalidLength(_))
-        ));
-
-        // A count that cannot fit the remaining bytes is refused before materializing.
-        let bounded = SignedWithdrawal::sign(
-            Sha256::hash(&[b"request-bound-deployment"]),
-            root,
-            Bytes::from_static(b"destination"),
-            commonware_clearing::bajillion::boundary::WithdrawalAction::Amount(
-                std::num::NonZeroU64::MIN,
-            ),
-            100,
-            wallet.signer(),
-        );
-        let mut oversized_openings = BytesMut::new();
-        bounded.write(&mut oversized_openings);
-        6_usize.write(&mut oversized_openings);
-        assert!(matches!(
-            QueueWithdrawalRequest::decode(oversized_openings.freeze()),
+            QueueWithdrawalRequest::decode(encoded.freeze()),
             Err(CodecError::InvalidLength(_))
         ));
 

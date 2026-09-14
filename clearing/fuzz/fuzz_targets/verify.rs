@@ -456,8 +456,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
         99,
         CloseLimits::protocol_maximum(),
         Sha256::hash(&[b"challenge-fuzz-committee"]),
-    )
-    .await;
+    );
     let _ = adjudicate::<Sha256, _, _>(&context, &case.header, &case.roots, 0, &case.challenge);
     // One acknowledged send from the payer to the recipient forms the certified close.
     let amount = u64::from(case.amount) + 1;
@@ -889,8 +888,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         99,
         CloseLimits::new(4, 4, 4, 4, 8, u64::MAX, u64::MAX, u64::MAX),
         Sha256::hash(&[b"committee"]),
-    )
-    .await;
+    );
     let mut terminals = Vec::new();
     for (sender, receiver) in [(&payer, &recipient), (&recipient, &payer)]
         .into_iter()
@@ -1014,17 +1012,17 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         (0, None)
     );
 
-    // A complete frame binds the claimed header, canonical keys, signatures and vector data.
-    let second_key = 33 + 32;
+    // Canonical account positions bind every recipient index to one key.
+    let second_key = 1 + 32;
     let mut duplicate = encoded.to_vec();
-    duplicate.copy_within(33..65, second_key);
+    duplicate.copy_within(1..33, second_key);
     assert!(posted::decode::<VerifyingKey, Digest>(duplicate.into(), &context).is_err());
     let mut reordered = encoded.to_vec();
     for offset in 0..32 {
-        reordered.swap(33 + offset, second_key + offset);
+        reordered.swap(1 + offset, second_key + offset);
     }
     assert!(posted::decode::<VerifyingKey, Digest>(reordered.into(), &context).is_err());
-    let vectors_start = 33
+    let vectors_start = 1
         + 2 * 32
         + prepared
             .close()
@@ -1054,17 +1052,17 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             malformed.pop();
         }
         2 => malformed.push(0),
-        3 => malformed[32] = 0x7f,
-        4 => malformed[33] ^= 1,
+        3 => malformed[0] = 0x7f,
+        4 => malformed[1] ^= 1,
         5 => {
             let position = malformed.len() - 2;
             malformed[position] ^= 1;
         }
         6 => {
-            malformed.insert(33, 0);
-            malformed[32] |= 0x80;
+            malformed.insert(1, 0);
+            malformed[0] |= 0x80;
         }
-        _ => malformed.truncate(32),
+        _ => malformed.truncate(1),
     }
     assert!(
         !validate_bytes(
@@ -1088,8 +1086,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         99,
         *context.limits(),
         *context.committee(),
-    )
-    .await;
+    );
     assert!(
         !validate_bytes(
             &state,
@@ -1130,18 +1127,10 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
                 .verify::<Sha256, _>(&context, &roots, withdrawal_total)
         );
         let header = Header::new::<Sha256, _>(&context, &roots, withdrawal_total);
-        let mut bytes = encoded.to_vec();
-        bytes[..32].copy_from_slice(header.encode().as_ref());
         assert!(
-            !validate_bytes(
-                &state,
-                &context,
-                &operator_bls,
-                &deposits,
-                &withdrawals,
-                bytes.into()
-            )
-            .await
+            commonware_clearing::bajillion::transition::Close::<VerifyingKey, Digest>::decode_evidence::<Sha256>(
+                close.encode_evidence(), &context, &header,
+            ).is_err()
         );
     }
     assert_eq!(*state.head(), before);
@@ -1286,8 +1275,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         99,
         CloseLimits::protocol_maximum(),
         committee.commitment::<Sha256>(),
-    )
-    .await;
+    );
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
         &context,

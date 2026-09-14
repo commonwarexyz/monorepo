@@ -525,3 +525,402 @@ fn same_deployment_claim_deposit_preserves_both_machine_effects() {
         }
     });
 }
+
+#[test]
+fn withdrawal_preflight_survives_active_epochs_and_new_admissions() {
+    deterministic::Runner::default().start(|context| async move {
+        let db = open(
+            context.child("preflight_withdrawal"),
+            "preflight-withdrawal",
+        )
+        .await;
+        let native = native();
+        let finalized = Finalized::default();
+        let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+        let genesis = genesis_cache();
+        let wallet = wallets().remove(3);
+        let account = wallet.public_key();
+        let request = SignedWithdrawal::sign(
+            deployment(),
+            genesis.root().digest,
+            account.encode(),
+            WithdrawalAction::Amount(NonZeroU64::new(7).unwrap()),
+            50,
+            wallet.signer(),
+        );
+        let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+            request: request.clone(),
+            opening: genesis.opening(&account).unwrap(),
+        });
+        let encoded = queue.encode();
+        let first = close_fixture(
+            native.chain_id(),
+            &protocol,
+            0,
+            genesis.clone(),
+            b"preflight-withdrawal-first",
+            11,
+            12,
+        );
+        apply(
+            &db,
+            &finalized,
+            &native,
+            1,
+            &[first.deposit_tx, first.register_tx],
+        )
+        .await;
+        assert!(
+            matches!(
+                trial(&db, &finalized, &native, &queue).await,
+                Preflight::Eligible { .. }
+            ),
+            "an active epoch cannot block escalation"
+        );
+        apply(&db, &finalized, &native, 2, &[first.admit_tx]).await;
+        assert!(
+            matches!(
+                trial(&db, &finalized, &native, &queue).await,
+                Preflight::Eligible { .. }
+            ),
+            "admission cannot stale the finalized-root opening"
+        );
+
+        let second = close_fixture(
+            native.chain_id(),
+            &protocol,
+            1,
+            first.successor,
+            b"preflight-withdrawal-second",
+            13,
+            14,
+        );
+        apply(
+            &db,
+            &finalized,
+            &native,
+            3,
+            &[second.deposit_tx, second.register_tx],
+        )
+        .await;
+        let anchor = read(&db, &anchor_key(&deployment(), 1)).await;
+        assert!(matches!(
+            trial(&db, &finalized, &native, &queue).await,
+            Preflight::Eligible { .. }
+        ));
+        assert_eq!(queue.encode(), encoded);
+        apply(&db, &finalized, &native, 4, &[queue, second.admit_tx]).await;
+        assert_eq!(read(&db, &anchor_key(&deployment(), 1)).await, anchor);
+        assert_eq!(status(&db).await.state_root, genesis.root());
+        assert_eq!(
+            read(&db, &withdrawal_key(&deployment(), &account)).await,
+            Some(Record::Withdrawal(request.clone()))
+        );
+        assert!(db.finalize().await.durable().await);
+        drop(db);
+        let db = open(
+            context.child("preflight_withdrawal_restart"),
+            "preflight-withdrawal",
+        )
+        .await;
+
+        let state = second.successor;
+        let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
+        let deposits = DepositBatch::empty();
+        let root = deposits.root::<Sha256>().unwrap();
+        let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+            deployment: deployment(),
+            epoch: 2,
+            predecessor_liability: state.liability(),
+            deposits_root: root,
+            withdrawals: withdrawals.clone(),
+            openings: Vec::new(),
+            fee: 4096,
+            signature: protocol.sign_chain_registration(
+                2,
+                state.liability(),
+                &root,
+                &withdrawals,
+                4096,
+            ),
+        });
+        let SettlementTx::RegisterEpoch(mut omitted) = register.clone() else {
+            unreachable!();
+        };
+        omitted.withdrawals = WithdrawalBatch::empty();
+        omitted.openings.clear();
+        omitted.signature = protocol.sign_chain_registration(
+            2,
+            state.liability(),
+            &root,
+            &omitted.withdrawals,
+            4096,
+        );
+        assert_eq!(
+            trial(
+                &db,
+                &finalized,
+                &native,
+                &SettlementTx::RegisterEpoch(omitted)
+            )
+            .await,
+            Preflight::Unavailable,
+            "admission and restart must preserve the exact queued obligation",
+        );
+        assert!(matches!(
+            trial(&db, &finalized, &native, &register).await,
+            Preflight::Eligible { .. }
+        ));
+        let registration = protocol
+            .registration_at(2, deposits, withdrawals, state.liability(), 15, 16)
+            .unwrap();
+        let balance_state = replay_state(
+            context.child("preflight_withdrawal_validator"),
+            crate::protocol::state_config(
+                "preflight-withdrawal-validator",
+                &context,
+                protocol.strategy().clone(),
+            ),
+            &state.history,
+        )
+        .await;
+        let (result, _) = protocol
+            .complete(
+                protocol.prepare(registration, Vec::new()).unwrap(),
+                &balance_state,
+                &mut TestRng::new(191),
+            )
+            .await
+            .unwrap();
+        apply(
+            &db,
+            &finalized,
+            &native,
+            5,
+            &[register, SettlementTx::Admit(AdmitRequest::from(&result))],
+        )
+        .await;
+        for height in [13, 15, 17] {
+            apply(&db, &finalized, &native, height, &[]).await;
+        }
+        assert_eq!(status(&db).await.last_finalized, Some(2));
+        let initial = native_balance(&db, &native, &account).await.unwrap();
+        let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
+            deployment: deployment(),
+            batch_id: result.header.batch_id::<Sha256>(),
+            claim: result.withdrawal_claims[0].clone(),
+        });
+        apply(&db, &finalized, &native, 18, &[claim.clone(), claim]).await;
+        assert_eq!(
+            native_balance(&db, &native, &account).await.unwrap(),
+            initial + 7
+        );
+        assert_supply(&db, &native, &[]).await;
+    });
+}
+
+#[test]
+fn queued_withdrawal_carries_zero_after_accepted_spending() {
+    for (spent, action) in [
+        (95, WithdrawalAction::Amount(NonZeroU64::new(7).unwrap())),
+        (100, WithdrawalAction::Close),
+    ] {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open(context.child("queued_zero"), "queued-zero").await;
+            let native = native();
+            let finalized = Finalized::default();
+            let protocol = Protocol::new(NonZeroUsize::MIN).unwrap();
+            let genesis = genesis_cache();
+            let payer = wallets().remove(0);
+            let recipient = wallets().remove(1);
+            let account = payer.public_key();
+            let request = SignedWithdrawal::sign(
+                deployment(),
+                genesis.root().digest,
+                account.encode(),
+                action,
+                50,
+                payer.signer(),
+            );
+            let queue = SettlementTx::QueueWithdrawal(QueueWithdrawalRequest {
+                request: request.clone(),
+                opening: genesis.opening(&account).unwrap(),
+            });
+            let deposits = DepositBatch::empty();
+            let deposits_root = deposits.root::<Sha256>().unwrap();
+            let empty = WithdrawalBatch::empty();
+            let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+                deployment: deployment(),
+                epoch: 0,
+                predecessor_liability: 400,
+                deposits_root,
+                withdrawals: empty.clone(),
+                openings: Vec::new(),
+                fee: 4096,
+                signature: protocol.sign_chain_registration(0, 400, &deposits_root, &empty, 4096),
+            });
+            apply(&db, &finalized, &native, 1, &[register]).await;
+            let registration = protocol
+                .registration_at(0, deposits.clone(), empty, 400, 11, 12)
+                .unwrap();
+            let vector = OutVector::new(
+                0,
+                account.clone(),
+                vec![OutEntry {
+                    recipient: recipient.public_key(),
+                    cumulative: spent,
+                    count: 1,
+                }],
+            )
+            .unwrap();
+            let body = VectorSendBody::new(
+                registration.context.payment(),
+                account.clone(),
+                1,
+                spent,
+                vector.root::<Sha256, Digest>().unwrap(),
+            );
+            let terminal = Terminal {
+                operator_signature: protocol.sign_ack_aggregate(&body),
+                authorization: SendAuthorization::sign(body, payer.signer()),
+                vector,
+            };
+            let balances = replay_state(
+                context.child("queued_zero_validator"),
+                crate::protocol::state_config(
+                    "queued-zero-validator",
+                    &context,
+                    protocol.strategy().clone(),
+                ),
+                &genesis.history,
+            )
+            .await;
+            let (paid, candidate) = protocol
+                .complete(
+                    protocol.prepare(registration, vec![terminal]).unwrap(),
+                    &balances,
+                    &mut TestRng::new(201),
+                )
+                .await
+                .unwrap();
+            let balances = balances.apply(candidate).await.unwrap();
+            assert!(matches!(
+                trial(&db, &finalized, &native, &queue).await,
+                Preflight::Eligible { .. }
+            ));
+            apply(
+                &db,
+                &finalized,
+                &native,
+                2,
+                &[queue, SettlementTx::Admit(AdmitRequest::from(&paid))],
+            )
+            .await;
+            assert_eq!(
+                balances.get(&account_key(&account).unwrap()).await.unwrap(),
+                NonZeroU64::new(100 - spent)
+            );
+            assert_eq!(
+                balances
+                    .opening(recipient.public_key())
+                    .await
+                    .unwrap()
+                    .balance
+                    .get(),
+                100 + spent
+            );
+
+            let withdrawals = WithdrawalBatch::new(vec![request]).unwrap();
+            let register = SettlementTx::RegisterEpoch(RegisterEpochRequest {
+                deployment: deployment(),
+                epoch: 1,
+                predecessor_liability: 400,
+                deposits_root,
+                withdrawals: withdrawals.clone(),
+                openings: Vec::new(),
+                fee: 4096,
+                signature: protocol.sign_chain_registration(
+                    1,
+                    400,
+                    &deposits_root,
+                    &withdrawals,
+                    4096,
+                ),
+            });
+            assert!(
+                matches!(
+                    trial(&db, &finalized, &native, &register).await,
+                    Preflight::Eligible { .. }
+                ),
+                "queued requests need no fresh predecessor proof"
+            );
+            let registration = protocol
+                .registration_at(1, deposits, withdrawals, 400, 13, 14)
+                .unwrap();
+            let (carried, candidate) = protocol
+                .complete(
+                    protocol.prepare(registration, Vec::new()).unwrap(),
+                    &balances,
+                    &mut TestRng::new(202),
+                )
+                .await
+                .unwrap();
+            assert_eq!(carried.withdrawal_total, 0);
+            assert_eq!(carried.withdrawal_claims.len(), 1);
+            assert_eq!(carried.withdrawal_claims[0].output().amount(), 0);
+            let balances = balances.apply(candidate).await.unwrap();
+            assert_eq!(
+                balances.get(&account_key(&account).unwrap()).await.unwrap(),
+                NonZeroU64::new(100 - spent)
+            );
+            assert_eq!(
+                balances
+                    .opening(recipient.public_key())
+                    .await
+                    .unwrap()
+                    .balance
+                    .get(),
+                100 + spent
+            );
+            apply(
+                &db,
+                &finalized,
+                &native,
+                3,
+                &[register, SettlementTx::Admit(AdmitRequest::from(&carried))],
+            )
+            .await;
+            for height in [13, 15] {
+                apply(&db, &finalized, &native, height, &[]).await;
+            }
+            assert_eq!(status(&db).await.last_finalized, Some(1));
+            assert_eq!(status(&db).await.state_root, carried.roots.successor);
+            assert_eq!(status(&db).await.claimable, 0);
+            let initial = native_balance(&db, &native, &account).await.unwrap();
+            let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
+                deployment: deployment(),
+                batch_id: carried.header.batch_id::<Sha256>(),
+                claim: carried.withdrawal_claims[0].clone(),
+            });
+            apply(&db, &finalized, &native, 16, &[claim.clone(), claim]).await;
+            assert_eq!(
+                native_balance(&db, &native, &account).await.unwrap(),
+                initial
+            );
+            assert_eq!(
+                read(
+                    &db,
+                    &super::super::state::withdrawal_release_key(
+                        &deployment(),
+                        &carried.header.batch_id::<Sha256>(),
+                        0,
+                    )
+                )
+                .await,
+                None
+            );
+            assert_eq!(status(&db).await.claimable, 0);
+            assert_supply(&db, &native, &[]).await;
+        });
+    }
+}

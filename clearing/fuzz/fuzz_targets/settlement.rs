@@ -246,7 +246,6 @@ struct Snapshot {
     claimable: u64,
     deposits: TestDeposits,
     withdrawals: TestWithdrawals,
-    safety_roots: Vec<StateRoot<Digest>>,
     batches: Vec<PendingBatch<Digest>>,
     deadlines: Vec<Option<u64>>,
     hard_fault: Option<HardFaultReason<VerifyingKey, Digest>>,
@@ -633,7 +632,6 @@ impl Harness {
             claimable: self.chain.claimable_balance(),
             deposits: self.chain.pending_deposits(),
             withdrawals: self.chain.pending_withdrawals(),
-            safety_roots: self.chain.withdrawal_safety_roots(),
             batches: self.chain.pending_batches().cloned().collect(),
             deadlines: self
                 .accounts
@@ -727,10 +725,6 @@ impl Harness {
             expected_batches
         );
 
-        let mut roots = vec![expected_state_root];
-        roots.extend(self.slots.iter().map(|slot| slot.successor.root()));
-        assert_eq!(self.chain.withdrawal_safety_roots(), roots);
-
         let mut predecessor_root = self.finalized.root();
         let mut predecessor_liability = self.finalized.liability();
         for (offset, slot) in self.slots.iter().enumerate() {
@@ -814,17 +808,6 @@ impl Harness {
         for (account, request) in &self.staged_withdrawals {
             assert_eq!(self.outstanding.get(account), Some(request));
             assert_eq!(request.account(), account);
-            let tail = self
-                .tail_cache()
-                .leaves()
-                .iter()
-                .find(|leaf| &leaf.account == account)
-                .expect("staged withdrawal account remains live")
-                .balance;
-            assert!(tail > 0);
-            if let WithdrawalAction::Amount(amount) = request.body().action() {
-                assert!(amount.get() <= tail);
-            }
         }
         if self.settled {
             assert_eq!(self.custody, 0);
@@ -1066,7 +1049,6 @@ impl Harness {
             CloseLimits::new(4, 5, 4, 4, 16, u64::MAX, u64::MAX, u64::MAX),
             self.committee_digest,
         )
-        .await
     }
 
     async fn make_prepared(&self) -> Prepared {
@@ -1273,32 +1255,36 @@ impl Harness {
                     .iter()
                     .find(|row| &row.account == request.account())
                     .expect("validated withdrawal has an authenticated row");
+                let debit = close
+                    .out_vectors
+                    .iter()
+                    .find(|vector| vector.payer() == &row.account)
+                    .map_or(0, |vector| vector.totals().unwrap().0);
+                let credit: u64 = close
+                    .out_vectors
+                    .iter()
+                    .flat_map(|vector| vector.entries())
+                    .filter(|entry| entry.recipient == row.account)
+                    .map(|entry| entry.cumulative)
+                    .sum();
+                let available = u128::from(predecessor.balance(&row.account))
+                    + u128::from(deposits.amount_for(&row.account))
+                    + u128::from(credit);
+                let tail = available
+                    .checked_sub(u128::from(debit))
+                    .expect("validated close debit is affordable");
                 match request.body().action() {
                     WithdrawalAction::Amount(expected) => {
-                        assert_eq!(output.amount(), expected.get());
+                        let expected = if u128::from(expected.get()) <= tail {
+                            expected.get()
+                        } else {
+                            0
+                        };
+                        assert_eq!(output.amount(), expected);
                     }
                     WithdrawalAction::Close => {
-                        let debit = close
-                            .out_vectors
-                            .iter()
-                            .find(|vector| vector.payer() == &row.account)
-                            .map_or(0, |vector| vector.totals().unwrap().0);
-                        let credit: u64 = close
-                            .out_vectors
-                            .iter()
-                            .flat_map(|vector| vector.entries())
-                            .filter(|entry| entry.recipient == row.account)
-                            .map(|entry| entry.cumulative)
-                            .sum();
-                        let available = u128::from(predecessor.balance(&row.account))
-                            + u128::from(deposits.amount_for(&row.account))
-                            + u128::from(credit);
-                        let expected = u64::try_from(
-                            available
-                                .checked_sub(u128::from(debit))
-                                .expect("validated close debit is affordable"),
-                        )
-                        .expect("validated close tail fits in u64");
+                        let expected =
+                            u64::try_from(tail).expect("validated close tail fits in u64");
                         assert_eq!(output.amount(), expected);
                         assert_eq!(row.successor, 0);
                     }
@@ -1557,7 +1543,7 @@ impl Harness {
                 }
             }
         }
-        let request = replay.unwrap_or_else(|| {
+        let mut request = replay.unwrap_or_else(|| {
             let action = if closes_account {
                 WithdrawalAction::Close
             } else {
@@ -1567,22 +1553,32 @@ impl Harness {
             };
             SignedWithdrawal::sign(deployment, root, destination, action, deadline, &key)
         });
-        let account = request.account().clone();
-        let mut openings = self.safety_openings(&account).await.unwrap_or_default();
-        if variant == 9 && !openings.is_empty() {
-            openings.pop();
+        if variant == 10 && !(mutation / 11).is_multiple_of(2) {
+            let body = request.body().clone();
+            let wrong_authority = self
+                .accounts
+                .iter()
+                .find(|candidate| candidate.public_key() != *request.account())
+                .expect("the fixture has a distinct signing authority");
+            let (_, _, signature) =
+                SignedWithdrawal::sign_body_by_authority(body.clone(), wrong_authority)
+                    .into_parts();
+            request =
+                SignedWithdrawal::from_raw_unchecked(request.account().clone(), body, signature);
         }
+        let account = request.account().clone();
+        let opening = self.withdrawal_opening(&account, variant, mutation).await;
 
         let observation = self.predict_observation(now);
         let expected =
-            if self.withdrawal_would_succeed(now, &observation, &request, &openings, eligible) {
+            if self.withdrawal_would_succeed(now, &observation, &request, &opening, eligible) {
                 OutcomeClass::Success
             } else {
                 OutcomeClass::Error
             };
         let result = self
             .chain
-            .queue_withdrawal(now, request.clone(), &openings, |_| eligible);
+            .queue_withdrawal(now, request.clone(), &opening, |_| eligible);
         assert_eq!(OutcomeClass::of(&result), expected);
         self.apply_observation(now, &observation);
         if expected == OutcomeClass::Success {
@@ -1609,43 +1605,69 @@ impl Harness {
             if self.outstanding.contains_key(&account) {
                 return None;
             }
-            let states = std::iter::once(&self.finalized)
-                .chain(self.slots.iter().map(|slot| &slot.successor))
-                .map(|cache| {
-                    cache
-                        .leaves()
-                        .iter()
-                        .find(|leaf| leaf.account == account)
-                        .map(|leaf| leaf.balance)
-                })
-                .collect::<Option<Vec<_>>>()?;
-            if states.contains(&0) {
-                return None;
-            }
-            let minimum = *states.iter().min()?;
-            Some((key.clone(), minimum))
+            let balance = self.finalized.balance(&account);
+            (balance != 0).then(|| (key.clone(), balance))
         })
     }
 
-    async fn safety_openings(
+    async fn withdrawal_opening(
         &self,
         account: &VerifyingKey,
-    ) -> Option<Vec<StateOpening<VerifyingKey, Digest>>> {
+        variant: u8,
+        mutation: u8,
+    ) -> StateOpening<VerifyingKey, Digest> {
         let state = self.state.as_ref().unwrap();
         let before = *state.head();
-        let mut proofs = Vec::new();
-        for cache in
-            std::iter::once(&self.finalized).chain(self.slots.iter().map(|slot| &slot.successor))
-        {
-            let proof = state
-                .opening_at(cache.root(), cache.head.operations(), account.clone())
-                .await
-                .ok()?;
-            assert!(proof.verify::<Sha256>(&cache.root()).is_ok());
-            proofs.push(proof);
+        let canonical = state
+            .opening_at(
+                self.finalized.root(),
+                self.finalized.head.operations(),
+                account.clone(),
+            )
+            .await
+            .ok();
+        let opening = if variant != 9 {
+            canonical
+                .clone()
+                .unwrap_or_else(|| self.foreign_opening.clone())
+        } else if (mutation / 11).is_multiple_of(2) {
+            let wrong_account = self
+                .finalized
+                .leaves()
+                .iter()
+                .find(|entry| &entry.account != account);
+            match wrong_account {
+                Some(entry) => state
+                    .opening_at(
+                        self.finalized.root(),
+                        self.finalized.head.operations(),
+                        entry.account.clone(),
+                    )
+                    .await
+                    .unwrap(),
+                None => self.foreign_opening.clone(),
+            }
+        } else {
+            match self.slots.back().filter(|slot| {
+                slot.successor.root() != self.finalized.root()
+                    && slot.successor.balance(account) != 0
+            }) {
+                Some(slot) => state
+                    .opening_at(
+                        slot.successor.root(),
+                        slot.successor.head.operations(),
+                        account.clone(),
+                    )
+                    .await
+                    .unwrap(),
+                None => self.foreign_opening.clone(),
+            }
+        };
+        if variant != 9 && canonical.is_some() {
+            assert!(opening.verify::<Sha256>(&self.finalized.root()).is_ok());
         }
         assert_eq!(*state.head(), before);
-        Some(proofs)
+        opening
     }
 
     fn withdrawal_would_succeed(
@@ -1653,10 +1675,10 @@ impl Harness {
         now: u64,
         observation: &TimeObservation,
         request: &SignedWithdrawal<VerifyingKey, Digest>,
-        openings: &[StateOpening<VerifyingKey, Digest>],
+        opening: &StateOpening<VerifyingKey, Digest>,
         destination_is_eligible: bool,
     ) -> bool {
-        if !self.operates_after(observation) || self.registered.is_some() {
+        if !self.operates_after(observation) {
             return false;
         }
         let body = request.body();
@@ -1665,7 +1687,11 @@ impl Harness {
             WithdrawalAction::Amount(_) => 2,
             WithdrawalAction::Close => 1,
         };
-        if self.next_epoch().checked_add(epoch_offset).is_none() {
+        if self
+            .next_epoch()
+            .checked_add(epoch_offset + u64::from(self.registered.is_some()))
+            .is_none()
+        {
             return false;
         }
         let Some(minimum_deadline) = now.checked_add(MINIMUM_WITHDRAWAL_NOTICE) else {
@@ -1678,6 +1704,7 @@ impl Harness {
                 .is_some_and(|deadline| *deadline > now)
             || body.deployment() != &self.deployment
             || body.state_root() != &self.finalized.root().digest
+            || request.verify_signature().is_err()
             || !destination_is_eligible
             || body.deadline() < minimum_deadline
             || body.deadline() > now.saturating_add(MAXIMUM_WITHDRAWAL_NOTICE)
@@ -1686,23 +1713,15 @@ impl Harness {
             return false;
         }
 
-        let snapshots = std::iter::once(&self.finalized)
-            .chain(self.slots.iter().map(|slot| &slot.successor))
-            .collect::<Vec<_>>();
-        if snapshots.len() != openings.len() {
-            return false;
-        }
-        snapshots.iter().zip(openings).all(|(snapshot, opening)| {
-            let balance = snapshot.balance(request.account());
-            balance > 0
-                && opening.account == *request.account()
-                && opening.balance.get() == balance
-                && opening.verify::<Sha256>(&snapshot.root()).is_ok()
-                && match body.action() {
-                    WithdrawalAction::Amount(amount) => amount.get() <= balance,
-                    WithdrawalAction::Close => true,
-                }
-        })
+        let balance = self.finalized.balance(request.account());
+        balance > 0
+            && opening.account == *request.account()
+            && opening.balance.get() == balance
+            && opening.verify::<Sha256>(&self.finalized.root()).is_ok()
+            && match body.action() {
+                WithdrawalAction::Amount(amount) => amount.get() <= balance,
+                WithdrawalAction::Close => true,
+            }
     }
 
     async fn register(&mut self, tick: u8, mutated: bool) -> ActionOutcome {
@@ -1864,6 +1883,12 @@ impl Harness {
                         .is_some()
                 );
             }
+            for request in registered.withdrawals.requests() {
+                assert_eq!(
+                    self.staged_withdrawals.remove(request.account()),
+                    Some(request.clone())
+                );
+            }
             self.slots.push_back(Slot {
                 predecessor: registered.predecessor,
                 close: registered.close.clone(),
@@ -1877,7 +1902,6 @@ impl Harness {
                 successor: registered.successor,
                 status: BatchStatus::Pending,
             });
-            self.staged_withdrawals.clear();
         }
         ActionOutcome::new(expected, Some(&observation))
     }
@@ -2687,9 +2711,7 @@ impl Harness {
 
             // Coverage is all-or-nothing at the frozen root: an amount the
             // frozen balance cannot cover releases zero and the whole balance
-            // stays residual. The uncovered arm is unreachable today because
-            // register never carries operator extras and chain-queued
-            // requests are covered by construction.
+            // stays residual.
             let withdrawal_amount =
                 request
                     .as_ref()
@@ -2853,9 +2875,12 @@ fn successor_snapshot(
         *expected.entry(account).or_default() += credit;
     }
     for request in withdrawals.requests() {
-        let balance = expected.get_mut(request.account()).unwrap();
+        let balance = expected.entry(request.account().clone()).or_default();
         match request.body().action() {
-            WithdrawalAction::Amount(amount) => *balance -= amount.get(),
+            WithdrawalAction::Amount(amount) if amount.get() <= *balance => {
+                *balance -= amount.get();
+            }
+            WithdrawalAction::Amount(_) => {}
             WithdrawalAction::Close => *balance = 0,
         }
     }
@@ -2879,7 +2904,7 @@ fn successor_snapshot(
     snapshot
 }
 
-// A causal trace reaches retained-root intake and account replay after a restart on every probe.
+// A causal trace reaches finalized-root intake and account replay after a restart on every probe.
 async fn lifecycle_probe(mut input: FuzzInput, runtime: deterministic::Context) {
     input.account_count = 1;
     input.balances = [7; MAX_ACCOUNTS];

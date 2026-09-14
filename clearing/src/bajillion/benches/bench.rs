@@ -4,14 +4,12 @@ const BENCH_ENV: &str = "COMMONWARE_CLEARING_BENCH";
 
 mod adjudicate;
 mod admission_fixtures;
-mod advancement;
 mod assemble_certificate;
 mod decode;
 mod fanout;
 mod fixtures;
 mod initialize;
 mod prepare;
-mod prepare_apply;
 mod receive_apply;
 mod seal;
 mod settlement;
@@ -32,7 +30,6 @@ fn main() {
         ("validate-close", validate_close::benches),
         ("seal", seal::benches),
         ("sign-vote", sign_vote::benches),
-        ("prepare-apply", prepare_apply::benches),
         ("receive-apply", receive_apply::benches),
         ("assemble-certificate", assemble_certificate::benches),
         ("verify-certificate", verify_certificate::benches),

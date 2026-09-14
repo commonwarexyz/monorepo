@@ -145,7 +145,8 @@ pub(crate) fn deposit_key(deployment: &Digest, id: &Digest) -> StateKey {
     derive(deployment, Domain::Deposit, id.as_ref())
 }
 
-/// Key of one deployment's queued withdrawal for `account`.
+/// Key of the latest accepted withdrawal receipt for `account`.
+/// Carriage retains this receipt so a lost intake response remains provable.
 pub(crate) fn withdrawal_key(deployment: &Digest, account: &Key) -> StateKey {
     derive(deployment, Domain::Withdrawal, &account.encode())
 }
@@ -1214,8 +1215,6 @@ enum Reject {
     BoundaryDivergence,
     /// The registration omits a queued settlement withdrawal.
     MissingQueuedWithdrawal,
-    /// Withdrawal openings do not match the complete ordered request batch.
-    WithdrawalOpenings,
     /// The registration signature failed authentication.
     Signature,
     /// The claim was adjudicated against an immutable finalized batch and
@@ -1602,12 +1601,10 @@ impl Machine {
         height: u64,
         request: &QueueWithdrawalRequest,
     ) -> Step {
-        if let Err(error) = self.chain.queue_withdrawal(
-            height,
-            request.request.clone(),
-            &request.openings,
-            eligible,
-        ) {
+        if let Err(error) =
+            self.chain
+                .queue_withdrawal(height, request.request.clone(), &request.opening, eligible)
+        {
             return Step::rejected(chain_rejection(&error));
         }
         Step::applied(vec![(
@@ -1694,32 +1691,6 @@ impl Machine {
             }
         }
 
-        // The native request carries one predecessor opening per withdrawal in batch
-        // order. Settlement has already checked queued authorizations; it checks the
-        // carried extras below. Every supplied proof must authenticate its account.
-        if request.openings.len() != request.withdrawals.requests().len() {
-            return Ok(Step::rejected(Reject::WithdrawalOpenings));
-        }
-        let predecessor = self
-            .chain
-            .pending_batches()
-            .last()
-            .map_or(self.chain.current_state_root(), |batch| {
-                batch.roots.successor
-            });
-        let mut extra_openings = Vec::new();
-        for (withdrawal, opening) in request.withdrawals.requests().iter().zip(&request.openings) {
-            if &opening.account != withdrawal.account() {
-                return Ok(Step::rejected(Reject::WithdrawalOpenings));
-            }
-            if pending.request_for(withdrawal.account()).is_some() {
-                if opening.verify::<Sha256>(&predecessor).is_err() {
-                    return Ok(Step::rejected(Reject::WithdrawalOpenings));
-                }
-            } else {
-                extra_openings.push(opening.clone());
-            }
-        }
         let Ok(context) = epoch_context_at(
             *config.digest(),
             config.operator.clone(),
@@ -1737,7 +1708,7 @@ impl Machine {
             height,
             context,
             request.withdrawals.clone(),
-            &extra_openings,
+            &request.openings,
             eligible,
         ) {
             return Ok(Step::rejected(chain_rejection(&error)));

@@ -356,7 +356,7 @@ impl Store {
         self.finish_mutation(result)
     }
 
-    /// Clears a request whose irreversible expiry and authenticated history exclude carriage.
+    /// Clears a request whose irreversible settlement boundary and authenticated history exclude carriage.
     pub(crate) fn discard_unused_withdrawal(
         &mut self,
         request: &SignedWithdrawal<Key, Digest>,

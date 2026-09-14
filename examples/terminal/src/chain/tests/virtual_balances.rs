@@ -116,7 +116,7 @@ fn first_credit(invalidated: bool) {
                         height + notice,
                         recipient.signer(),
                     ),
-                    openings: vec![opening.clone()],
+                    opening: opening.clone(),
                 })
             })
             .collect::<Vec<_>>()
@@ -189,25 +189,19 @@ fn first_credit(invalidated: bool) {
                 authorization: SendAuthorization::sign(body, payer.signer()),
                 vector,
             };
-            let prepared = protocol
-                .prepare(registration, &balances, vec![terminal])
+            let prepared = protocol.prepare(registration, vec![terminal]).unwrap();
+            let (result, candidate) = protocol
+                .complete(prepared, &balances, &mut TestRng::new(91 + epoch))
                 .await
                 .unwrap();
             assert!(
-                prepared.mutations().contains(&(
+                candidate.mutations().contains(&(
                     account_key(&recipient.public_key()).unwrap(),
                     NonZeroU64::new(total)
                 )),
                 "credits accumulate in the virtual leaf"
             );
-            let mutations = prepared.mutations().to_vec();
-            let result = protocol
-                .complete(prepared, &balances, &mut TestRng::new(91 + epoch))
-                .await
-                .unwrap()
-                .0;
             assert!(result.withdrawal_claims.is_empty());
-            let candidate = balances.prepare(balances.head(), mutations).await.unwrap();
             balances = balances.apply(candidate).await.unwrap();
             let mut transactions = if epoch == 0 {
                 queues(
@@ -306,20 +300,16 @@ fn first_credit(invalidated: bool) {
                 height + 11,
             )
             .unwrap();
-        let prepared = protocol
-            .prepare(registration, &balances, Vec::new())
+        let prepared = protocol.prepare(registration, Vec::new()).unwrap();
+        let (result, candidate) = protocol
+            .complete(prepared, &balances, &mut TestRng::new(93))
             .await
             .unwrap();
         assert!(
-            prepared
+            candidate
                 .mutations()
                 .contains(&(account_key(&recipient.public_key()).unwrap(), None))
         );
-        let result = protocol
-            .complete(prepared, &balances, &mut TestRng::new(93))
-            .await
-            .unwrap()
-            .0;
         assert_eq!(result.withdrawal_claims.len(), 1);
         let claim = SettlementTx::ClaimWithdrawal(WithdrawalClaimRequest {
             deployment: deployment(),

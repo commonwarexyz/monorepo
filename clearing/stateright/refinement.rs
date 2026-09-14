@@ -393,61 +393,45 @@ impl RefinementDriver {
         }
     }
 
-    fn safety_openings(
+    fn withdrawal_opening(
         &self,
         attempt: spec::WithdrawalAttempt,
-    ) -> Vec<StateOpening<VerifyingKey, ShaDigest>> {
-        let expected_count = self.fixture.chain.withdrawal_safety_roots().len();
-        let exact_shape = attempt.safety_openings[..expected_count]
-            .iter()
-            .all(Option::is_some)
-            && attempt.safety_openings[expected_count..]
-                .iter()
-                .all(Option::is_none);
-        if !exact_shape {
-            return Vec::new();
+    ) -> StateOpening<VerifyingKey, ShaDigest> {
+        let opening = attempt.opening;
+        let source_root = if opening.root == spec::Root::Empty {
+            spec::Root::R0
+        } else {
+            opening.root
+        };
+        let cache = self.canonical_cache(source_root);
+        let account = self.key(opening.account);
+        let mut witness = cache.opening(&account).unwrap_or_else(|_| {
+            ACCOUNTS
+                .into_iter()
+                .find_map(|account| cache.opening(&self.key(account)).ok())
+                .expect("every nonempty canonical root has a live account")
+        });
+        let authenticated_balance = witness.balance;
+        witness.account = account;
+        witness.balance =
+            NonZeroU64::new(u64::from(opening.state.balance)).unwrap_or(NonZeroU64::MIN);
+        if !opening.authenticated_state
+            || !opening.state.active
+            || opening.state.balance == 0
+            || opening.root == spec::Root::Empty
+        {
+            witness.balance = NonZeroU64::new(authenticated_balance.get() + 1).unwrap();
         }
-
-        attempt.safety_openings[..expected_count]
-            .iter()
-            .map(|opening| {
-                let opening = opening.expect("the exact opening shape was checked");
-                let source_root = if opening.root == spec::Root::Empty {
-                    spec::Root::R0
-                } else {
-                    opening.root
-                };
-                let cache = self.canonical_cache(source_root);
-                let account = self.key(opening.account);
-                let mut witness = cache.opening(&account).unwrap_or_else(|_| {
-                    ACCOUNTS
-                        .into_iter()
-                        .find_map(|account| cache.opening(&self.key(account)).ok())
-                        .expect("every nonempty canonical root has a live account")
-                });
-                let authenticated_balance = witness.balance;
-                witness.account = account;
-                witness.balance =
-                    NonZeroU64::new(u64::from(opening.state.balance)).unwrap_or(NonZeroU64::MIN);
-                if !opening.authenticated_state
-                    || !opening.state.active
-                    || opening.state.balance == 0
-                    || opening.root == spec::Root::Empty
-                {
-                    witness.balance = NonZeroU64::new(authenticated_balance.get() + 1).unwrap();
-                }
-                witness
-            })
-            .collect()
+        witness
     }
 
     fn queue_withdrawal(&mut self, attempt: spec::WithdrawalAttempt) -> bool {
         let request = self.signed_withdrawal(attempt.request);
-        let openings = self.safety_openings(attempt);
+        let opening = self.withdrawal_opening(attempt);
         let result = self.fixture.chain.queue_withdrawal(
             u64::from(self.now),
             request.clone(),
-            &openings,
+            &opening,
             |_| attempt.destination_eligible,
         );
         if result.is_ok()
@@ -1108,6 +1092,12 @@ impl RefinementDriver {
                 self.outstanding_withdrawal_deadline(&key),
                 self.state.outstanding_withdrawals[index]
                     .map(|request| u64::from(request.deadline))
+                    .or_else(|| {
+                        self.state.registered.and_then(|registration| {
+                            registration.registration().withdrawals[index]
+                                .map(|request| u64::from(request.deadline))
+                        })
+                    })
             );
         }
         let expected_deposit_deadlines = ACCOUNTS
@@ -1318,6 +1308,45 @@ fn queue_refined(driver: &mut RefinementDriver, id: spec::WithdrawalId) {
 }
 
 #[test]
+fn active_registration_queue_refines_without_changing_its_boundary() {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    driver.step(spec::SettlementAction::Register(spec::RegistrationId::B0));
+    queue_refined(&mut driver, spec::WithdrawalId::CloseAfterFault);
+    assert_eq!(driver.state.registered, Some(spec::RegistrationId::B0));
+
+    driver.step(admission(spec::Batch::B0));
+    assert!(driver.state.pending_withdrawals[spec::Account::Alice.index()].is_some());
+    assert!(driver.state.outstanding_withdrawals[spec::Account::Alice.index()].is_some());
+
+    // The later request remains staged, so the fixed B1 boundary cannot omit it.
+    driver.step(spec::SettlementAction::Register(spec::RegistrationId::B1));
+}
+
+#[test]
+fn registered_account_duplicate_refines_production_rejection() {
+    let mut driver = RefinementDriver::new();
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobTwo,
+    ));
+    register_and_admit_refined(&mut driver, spec::Batch::B0);
+    driver.step(spec::SettlementAction::Observe(5));
+    driver.step(spec::SettlementAction::Finalize);
+    driver.step(spec::SettlementAction::RecordDeposit(
+        spec::DepositId::BobOne,
+    ));
+    driver.step(spec::SettlementAction::Register(spec::RegistrationId::B1C));
+
+    let mut duplicate =
+        spec::SettlementModel::withdrawal_attempt(&driver.state, spec::WithdrawalId::Carried);
+    duplicate.request.action = spec::WithdrawalAction::Amount(1);
+    duplicate.replay_key = duplicate.request.replay_key();
+    driver.step(spec::SettlementAction::QueueWithdrawal(duplicate));
+}
+
+#[test]
 fn absent_recipient_credit_refines_to_a_virtual_successor_without_a_reserve() {
     let mut driver = RefinementDriver::new();
     driver.step(spec::SettlementAction::RecordDeposit(
@@ -1415,15 +1444,12 @@ fn rejected_profile() -> RefinementDriver {
     driver.step(spec::SettlementAction::BeginTerminal);
     let mut unauthenticated =
         spec::SettlementModel::withdrawal_attempt(&driver.state, spec::WithdrawalId::Amount);
-    unauthenticated.safety_openings[0]
-        .as_mut()
-        .unwrap()
-        .authenticated_state = false;
+    unauthenticated.opening.authenticated_state = false;
     driver.step(spec::SettlementAction::QueueWithdrawal(unauthenticated));
-    let mut shifted =
+    let mut wrong_root =
         spec::SettlementModel::withdrawal_attempt(&driver.state, spec::WithdrawalId::Amount);
-    shifted.safety_openings[1] = shifted.safety_openings[0].take();
-    driver.step(spec::SettlementAction::QueueWithdrawal(shifted));
+    wrong_root.opening.root = spec::Root::R1;
+    driver.step(spec::SettlementAction::QueueWithdrawal(wrong_root));
     driver.step(spec::SettlementAction::Register(spec::RegistrationId::B0));
     driver.step(spec::SettlementAction::Register(spec::RegistrationId::B1));
     driver.step(spec::SettlementAction::RecordDeposit(
@@ -1691,7 +1717,18 @@ fn degraded_profile() -> RefinementDriver {
 
 #[test]
 fn degraded_amount_refines_production_step_by_step() {
-    degraded_profile();
+    let driver = degraded_profile();
+    let material = driver.material(spec::Batch::B2D);
+    let row = material
+        .close
+        .rows
+        .iter()
+        .find(|row| row.account == driver.key(spec::Account::Bob))
+        .expect("the queued withdrawal account is committed in the close");
+    assert_eq!(row.predecessor, 9);
+    assert_eq!(row.successor, 1);
+    assert_eq!(row.output, SettlementOutput::Withdrawal(0));
+    assert_eq!(material.close.withdrawal_total, 0);
 }
 
 #[test]

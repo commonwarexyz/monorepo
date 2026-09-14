@@ -110,6 +110,9 @@ pub(crate) trait Chain: Send + 'static {
     /// reads that deployment's records.
     fn deployment(&self) -> Digest;
 
+    /// Configured validator evidence endpoints for this chain.
+    fn holders(&self) -> Result<Vec<SocketAddr>>;
+
     /// Shared native balance proven at a recent finalized block.
     fn native_balance<E: Env>(
         &mut self,
@@ -352,7 +355,8 @@ pub(crate) trait Chain: Send + 'static {
         }
     }
 
-    /// The queued withdrawal for `account`, or a proven absence.
+    /// The latest accepted withdrawal receipt for `account`, or a proven absence.
+    /// The receipt survives carriage and does not establish current queue membership.
     fn withdrawal<E: Env>(
         &mut self,
         ctx: &E,
@@ -569,6 +573,10 @@ impl Client {
 }
 
 impl Chain for Client {
+    fn holders(&self) -> Result<Vec<SocketAddr>> {
+        self.genesis.holders()
+    }
+
     fn deployment(&self) -> Digest {
         self.deployment
     }
@@ -740,6 +748,10 @@ mod tests {
     }
 
     impl Chain for SubmissionBackend {
+        fn holders(&self) -> Result<Vec<SocketAddr>> {
+            unreachable!()
+        }
+
         fn deployment(&self) -> Digest {
             crate::protocol::deployment()
         }

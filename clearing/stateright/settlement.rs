@@ -13,7 +13,6 @@ const MAX_CHALLENGE_DURATION: u8 = 2;
 const MIN_WITHDRAWAL_NOTICE: u8 = 2;
 const MAX_WITHDRAWAL_NOTICE: u8 = 20;
 const MAX_DESTINATION_BYTES: usize = 8;
-const MAX_SAFETY_ROOTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Account {
@@ -261,7 +260,7 @@ pub(crate) struct WithdrawalAttempt {
     pub(crate) replay_key: WithdrawalKey,
     pub(crate) request: WithdrawalRequest,
     pub(crate) destination_eligible: bool,
-    pub(crate) safety_openings: [Option<StateOpening>; MAX_SAFETY_ROOTS],
+    pub(crate) opening: StateOpening,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -984,22 +983,26 @@ impl SettlementModel {
             && registration.challenge_deadline < TIME_HORIZON
     }
 
-    // Every chain-queued request appears verbatim. This half is stable while
-    // the registration is live, so the registration_exact always-invariant can
-    // re-evaluate it. The carried-intake gates are registration-time checks
-    // and live in can_register instead.
+    // Every request queued before registration appears verbatim. Requests
+    // queued while that boundary is active occupy only its empty account
+    // slots and remain staged for the next registration.
     fn withdrawals_match(state: &SettlementState, registration: &Registration) -> bool {
         Account::ALL.into_iter().all(|account| {
             let index = account.index();
-            state.pending_withdrawals[index]
-                .is_none_or(|pending| registration.withdrawals[index] == Some(pending))
+            state.pending_withdrawals[index].is_none_or(|pending| {
+                registration.withdrawals[index] == Some(pending)
+                    || state.registered.is_some_and(|registered| {
+                        registered.registration() == *registration
+                            && registration.withdrawals[index].is_none()
+                    })
+            })
         })
     }
 
-    // Operator-carried extras run the shared intake gates in place of the
-    // queue's safety openings, which coverage degrade makes safe to skip, and
-    // must outlive the admission window so an admitted close never carries an
-    // expired obligation.
+    // Operator-carried extras run the shared intake gates and prove coverage
+    // at the registered predecessor instead of the queue's finalized root.
+    // They must also outlive the admission window so an admitted close never
+    // carries an expired obligation.
     fn carried_admitted(state: &SettlementState, registration: &Registration) -> bool {
         Account::ALL.into_iter().all(|account| {
             let index = account.index();
@@ -1088,72 +1091,34 @@ impl SettlementModel {
             }
     }
 
-    pub(crate) fn withdrawal_attempt(
+    pub(crate) const fn withdrawal_attempt(
         state: &SettlementState,
         id: WithdrawalId,
     ) -> WithdrawalAttempt {
         let request = id.request();
         let index = request.account.index();
-        let mut safety_openings = [None; MAX_SAFETY_ROOTS];
-        safety_openings[0] = Some(StateOpening {
+        let opening = StateOpening {
             root: state.current_root,
             account: request.account,
             state: state.current_state[index],
             authenticated_state: true,
-        });
-        for (position, batch) in state.pipeline.iter().copied().enumerate() {
-            let candidate = batch.candidate();
-            safety_openings[position + 1] = Some(StateOpening {
-                root: candidate.successor,
-                account: request.account,
-                state: candidate.successor_state[index],
-                authenticated_state: true,
-            });
-        }
+        };
         WithdrawalAttempt {
             replay_key: WithdrawalKey::Known(id),
             request,
             destination_eligible: true,
-            safety_openings,
+            opening,
         }
     }
 
-    fn withdrawal_safe(state: &SettlementState, attempt: &WithdrawalAttempt) -> bool {
+    fn withdrawal_opening_valid(state: &SettlementState, attempt: &WithdrawalAttempt) -> bool {
         let request = attempt.request;
-        let expected_count = state.pipeline.len() + 1;
-        if expected_count > MAX_SAFETY_ROOTS
-            || attempt.safety_openings[..expected_count]
-                .iter()
-                .any(Option::is_none)
-            || attempt.safety_openings[expected_count..]
-                .iter()
-                .any(Option::is_some)
-        {
-            return false;
-        }
-        attempt.safety_openings[..expected_count]
-            .iter()
-            .enumerate()
-            .all(|(position, opening)| {
-                let opening = opening.expect("the exact opening count was checked");
-                let (root, account_state) = if position == 0 {
-                    (
-                        state.current_root,
-                        state.current_state[request.account.index()],
-                    )
-                } else {
-                    let candidate = state.pipeline[position - 1].candidate();
-                    (
-                        candidate.successor,
-                        candidate.successor_state[request.account.index()],
-                    )
-                };
-                opening.root == root
-                    && opening.account == request.account
-                    && opening.state == account_state
-                    && opening.authenticated_state
-                    && Self::withdrawal_affordable(request, opening.state)
-            })
+        let opening = attempt.opening;
+        opening.root == state.current_root
+            && opening.account == request.account
+            && opening.state == state.current_state[request.account.index()]
+            && opening.authenticated_state
+            && Self::withdrawal_affordable(request, opening.state)
     }
 
     fn can_queue_withdrawal(state: &SettlementState, attempt: &WithdrawalAttempt) -> bool {
@@ -1162,11 +1127,13 @@ impl SettlementModel {
         let earliest = state.now.saturating_add(MIN_WITHDRAWAL_NOTICE);
         let latest = state.now.saturating_add(MAX_WITHDRAWAL_NOTICE);
         Self::operating(state)
-            && state.registered.is_none()
             && attempt.replay_key == request.replay_key()
             && state.withdrawal_replay_expiries[attempt.replay_key.index()].is_none()
             && state.pending_withdrawals[index].is_none()
             && state.outstanding_withdrawals[index].is_none()
+            && state
+                .registered
+                .is_none_or(|registered| registered.registration().withdrawals[index].is_none())
             && request.signature_valid
             && request.deployment == Deployment::Current
             && request.context_root == state.current_root
@@ -1175,7 +1142,7 @@ impl SettlementModel {
             && request.deadline >= earliest
             && request.deadline <= latest
             && request.deadline <= TIME_HORIZON
-            && Self::withdrawal_safe(state, attempt)
+            && Self::withdrawal_opening_valid(state, attempt)
     }
 
     fn record_deposit(&self, state: &mut SettlementState, id: DepositId) -> Option<()> {
@@ -1253,9 +1220,11 @@ impl SettlementModel {
                 state.withdrawal_replay_expiries[request.replay_key().index()] =
                     Some(request.deadline);
                 state.outstanding_withdrawals[index] = Some(request);
+                if state.pending_withdrawals[index] == Some(request) {
+                    state.pending_withdrawals[index] = None;
+                }
             }
         }
-        state.pending_withdrawals = [None; ACCOUNT_COUNT];
         state.registered = None;
         state.pipeline.push(batch);
         state.status[batch.index()] = BatchStatus::Pending;
@@ -2389,7 +2358,7 @@ fn settlement_checker_explores_the_complete_finite_graph() {
         .spawn_bfs()
         .join();
     assert!(checker.is_done());
-    assert_eq!(checker.unique_state_count(), 2_649_149);
+    assert_eq!(checker.unique_state_count(), 2_654_861);
     checker.assert_properties();
 }
 
@@ -2416,6 +2385,22 @@ fn settlement_invariants_have_negative_controls() {
             .into_iter()
             .all(|batch| SettlementModel::zero_or_exact(&batch.candidate()))
     );
+
+    // A close on an account absent at the actual transition tail still owns
+    // a scoped withdrawal output; it simply sweeps zero.
+    let mut absent_close = Batch::B0.candidate();
+    let mut request = WithdrawalId::CloseAfterFault.request();
+    request.account = Account::Carol;
+    absent_close.withdrawals[Account::Carol.index()] = Some(request);
+    absent_close.withdrawal_output = Some(Output {
+        position: 0,
+        destination: Destination::Alice,
+        amount: 0,
+    });
+    assert!(!absent_close.predecessor_state[Account::Carol.index()].active);
+    assert!(!absent_close.successor_state[Account::Carol.index()].active);
+    assert!(SettlementModel::zero_or_exact(&absent_close));
+    assert!(SettlementModel::candidate_is_all_virtual(&absent_close));
 
     // Every payment credit remains in successor liability unless an authorized withdrawal
     // accounts for the released value.

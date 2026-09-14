@@ -385,6 +385,19 @@ impl Node {
         }
         let genesis_head = entry.deployment.genesis();
         let response = match &request.lookup {
+            EvidenceLookup::CloseEvidence { batch_id } => relevant
+                .iter()
+                .find(|retained| retained.header.batch_id::<Sha256>() == *batch_id)
+                .map_or(EvidenceResponse::Unsealed, |retained| {
+                    EvidenceResponse::Served(Evidence::Close {
+                        header: retained.header,
+                        roots: retained.roots,
+                        body: super::query::EvidenceBody::Complete {
+                            context: retained.context.clone(),
+                            evidence: retained.close.encode_evidence(),
+                        },
+                    })
+                }),
             EvidenceLookup::GenesisState { account } => {
                 let root = genesis_head.root();
                 match state

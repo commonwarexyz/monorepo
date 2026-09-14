@@ -1,9 +1,9 @@
 //! Verus arithmetic model of the full-replica balance-only close.
 //!
-//! Proves successor soundness, completeness, uniqueness, receive-only creation,
-//! and summed liability conservation for epoch-local debit and credit. Every
-//! recipient credit remains virtual. A zero balance denotes absence; positive
-//! balances are the complete persistent account value.
+//! Proves successor soundness, completeness, uniqueness, and summed liability
+//! conservation for epoch-local debit, credit, and selected withdrawals. A zero
+//! balance denotes absence; positive balances are the complete persistent account
+//! value.
 //!
 //! This is an out-of-band arithmetic mirror. See README.md for the production
 //! correspondence and the validation obligations outside this model.
@@ -182,9 +182,12 @@ pub struct Row {
     pub action: Action,
 }
 
-/// An absent account may receive, but cannot originate or withdraw in this epoch.
+/// An absent account may receive, but cannot originate a debit in this epoch.
+///
+/// Withdrawal provenance and eligibility belong to authenticated intake. An
+/// already-selected queued withdrawal still settles against this epoch's tail.
 pub open spec fn row_valid(row: Row) -> bool {
-    (row.pred != 0 || row.deposit != 0 || (row.debit == 0 && row.action == Action::None))
+    (row.pred != 0 || row.deposit != 0 || row.debit == 0)
     && valid_successor(
         row.pred,
         row.succ,
@@ -196,15 +199,52 @@ pub open spec fn row_valid(row: Row) -> bool {
     )
 }
 
-/// A valid absent row is receive-only and retains every credit in its successor.
-pub proof fn absent_row_is_receive_only(row: Row)
+/// Selected withdrawals have valid arithmetic rows without a predecessor balance.
+pub proof fn queued_absent_rows_are_valid(amount: u64, credit: u64)
+    requires
+        0 < amount,
+    ensures
+        row_valid(Row {
+            pred: 0,
+            succ: if amount <= credit { (credit - amount) as u64 } else { credit },
+            output: Output::Withdrawal(if amount <= credit { amount } else { 0 }),
+            debit: 0,
+            credit,
+            deposit: 0,
+            action: Action::Amount(amount),
+        }),
+        row_valid(Row {
+            pred: 0,
+            succ: 0,
+            output: Output::Withdrawal(credit),
+            debit: 0,
+            credit,
+            deposit: 0,
+            action: Action::Close,
+        }),
+{
+}
+
+/// An absent account cannot originate a debit without a sealed deposit.
+pub proof fn absent_row_cannot_debit(row: Row)
     requires
         row_valid(row),
         row.pred == 0,
         row.deposit == 0,
     ensures
         row.debit == 0,
+{
+}
+
+/// Without a withdrawal action, a valid absent row retains every credit.
+pub proof fn absent_row_is_receive_only(row: Row)
+    requires
+        row_valid(row),
+        row.pred == 0,
+        row.deposit == 0,
         row.action == Action::None,
+    ensures
+        row.debit == 0,
         row.output == Output::None,
         row.succ == row.credit,
 {

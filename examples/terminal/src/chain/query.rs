@@ -46,7 +46,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_clearing::bajillion::{
     challenge::{AccountLookup, ChangeOpening, HigherEntryLookup},
     qmdb::{Absence, StateOpening},
-    transition::{BatchId, Header, RootBundle},
+    transition::{BatchId, CloseContext, Header, RootBundle},
 };
 use commonware_codec::{
     Decode as _, Encode as _, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
@@ -82,7 +82,7 @@ pub(crate) const MAX_READ_BYTES: usize = rpc::MAX_BODY_SIZE / 2;
 
 /// One certified-read lookup, covering one deployment's settlement read
 /// surface: status, epoch roots (anchor plus admitted), claim roots, deposit
-/// custody, the registration singleton, queued withdrawals, released claims,
+/// custody, the registration singleton, withdrawal intake receipts, released claims,
 /// the fault singleton, and terminal releases.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Lookup {
@@ -113,7 +113,7 @@ pub(crate) enum Lookup {
     Deposit { id: Digest },
     /// The registration singleton.
     Registration,
-    /// The queued withdrawal for one account.
+    /// The latest accepted withdrawal receipt, retained after carriage.
     Withdrawal { account: Key },
     /// One released withdrawal by (batch, position).
     WithdrawalRelease { batch: Digest, position: u32 },
@@ -504,6 +504,9 @@ pub(crate) enum EvidenceLookup {
     GenesisState { account: Key },
     /// Complete durable close material for replay by a lagging validator.
     Dealing { epoch: u64 },
+    /// Complete derived close evidence retained by a validator that voted for
+    /// the batch.
+    CloseEvidence { batch_id: BatchId<Digest> },
 }
 
 impl EvidenceLookup {
@@ -517,6 +520,7 @@ impl EvidenceLookup {
             | Self::CommittedEntry { batch, .. }
             | Self::Account { batch, .. }
             | Self::WithdrawalOutput { batch, .. } => Some(batch),
+            Self::CloseEvidence { batch_id } => Some(batch_id.digest()),
             Self::GenesisState { .. } | Self::Dealing { .. } => None,
         }
     }
@@ -531,7 +535,7 @@ impl EvidenceLookup {
             | Self::WithdrawalOutput { account, .. }
             | Self::GenesisState { account } => Some(account),
             Self::CommittedEntry { payer, .. } => Some(payer),
-            Self::Dealing { .. } => None,
+            Self::Dealing { .. } | Self::CloseEvidence { .. } => None,
         }
     }
 }
@@ -582,6 +586,10 @@ impl Write for EvidenceLookup {
                 8_u8.write(buf);
                 epoch.write(buf);
             }
+            Self::CloseEvidence { batch_id } => {
+                9_u8.write(buf);
+                batch_id.write(buf);
+            }
         }
     }
 }
@@ -603,6 +611,7 @@ impl EncodeSize for EvidenceLookup {
             } => batch.encode_size() + payer.encode_size() + recipient.encode_size(),
             Self::GenesisState { account } => account.encode_size(),
             Self::Dealing { epoch } => epoch.encode_size(),
+            Self::CloseEvidence { batch_id } => batch_id.encode_size(),
         }
     }
 }
@@ -642,6 +651,9 @@ impl Read for EvidenceLookup {
             }),
             8 => Ok(Self::Dealing {
                 epoch: u64::read(buf)?,
+            }),
+            9 => Ok(Self::CloseEvidence {
+                batch_id: BatchId::read(buf)?,
             }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
@@ -704,6 +716,11 @@ pub(crate) enum EvidenceBody {
     CommittedEntry(HigherEntryLookup<Key, Digest>),
     /// A withdrawal request and its corresponding output claim.
     WithdrawalOutput(WithdrawalWitness),
+    /// The registered context and complete derived evidence for one voted close.
+    Complete {
+        context: CloseContext<Key, Digest>,
+        evidence: Bytes,
+    },
 }
 
 impl Write for EvidenceBody {
@@ -733,6 +750,11 @@ impl Write for EvidenceBody {
                 4_u8.write(buf);
                 claim.write(buf);
             }
+            Self::Complete { context, evidence } => {
+                7_u8.write(buf);
+                context.write(buf);
+                evidence.write(buf);
+            }
         }
     }
 }
@@ -746,6 +768,7 @@ impl EncodeSize for EvidenceBody {
             Self::Change(opening) => opening.encode_size(),
             Self::CommittedEntry(lookup) => lookup.encode_size(),
             Self::WithdrawalOutput(claim) => claim.encode_size(),
+            Self::Complete { context, evidence } => context.encode_size() + evidence.encode_size(),
         }
     }
 }
@@ -767,6 +790,10 @@ impl Read for EvidenceBody {
                 buf,
                 &(MAX_PROOF_DIGESTS, (), ()),
             )?)),
+            7 => Ok(Self::Complete {
+                context: CloseContext::read(buf)?,
+                evidence: Bytes::read_cfg(buf, &RangeCfg::new(0..=rpc::MAX_BODY_SIZE))?,
+            }),
             tag => Err(CodecError::InvalidEnum(tag)),
         }
     }
@@ -777,8 +804,8 @@ impl Read for EvidenceBody {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Evidence {
     /// Close-bound evidence: the sealed header, the roots it commits, and the
-    /// opening. The client checks the header against the chain's admitted
-    /// record before trusting the roots the body verifies under.
+    /// requested body. The client authenticates the header through admission
+    /// or quorum votes before trusting the roots and body.
     Close {
         header: Header<Digest>,
         roots: RootBundle<Digest>,
@@ -1135,12 +1162,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{deployments, genesis_balances, identities, state_config};
-    use commonware_clearing::bajillion::qmdb::{State, StateLookup, account_key};
+    use crate::protocol::{Protocol, deployments, genesis_balances, identities, state_config};
+    use commonware_clearing::bajillion::{
+        boundary::{DepositBatch, WithdrawalBatch},
+        qmdb::{State, StateLookup, account_key},
+    };
     use commonware_codec::{DecodeExt as _, FixedSize as _};
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     #[test]
     fn native_read_keys_bind_chain_and_transfer_owner() {
@@ -1279,6 +1309,9 @@ mod tests {
             },
             EvidenceLookup::GenesisState { account },
             EvidenceLookup::Dealing { epoch: 7 },
+            EvidenceLookup::CloseEvidence {
+                batch_id: BatchId::new(batch),
+            },
         ];
         for lookup in lookups {
             let request = EvidenceRequest::new(batch, lookup);
@@ -1286,9 +1319,49 @@ mod tests {
             assert_eq!(bytes.len(), request.encode_size());
             assert_eq!(EvidenceRequest::decode(bytes).unwrap(), request);
         }
-        for tag in [6, 9, 10, 255] {
+        for tag in [6, 10, 255] {
             assert!(EvidenceLookup::decode(Bytes::from(vec![tag])).is_err());
         }
+    }
+
+    #[test]
+    fn complete_evidence_codec_round_trips_and_bounds_bytes() {
+        deterministic::Runner::default().start(|runtime| async move {
+            let deployment = deployments().remove(0);
+            let state = State::<_, Sha256>::init(
+                runtime.child("complete_evidence_state"),
+                state_config("complete-evidence", &runtime, Sequential),
+                genesis_balances(&deployment).unwrap(),
+            )
+            .await
+            .unwrap();
+            let deposits = DepositBatch::empty();
+            let withdrawals = WithdrawalBatch::empty();
+            let epoch = Protocol::new(commonware_utils::NZUsize!(1))
+                .unwrap()
+                .registration_at(0, deposits.clone(), withdrawals.clone(), 400, 11, 12)
+                .unwrap()
+                .context;
+            let context = epoch
+                .bind::<Sha256, _, _>(&state, &deposits, &withdrawals)
+                .unwrap();
+            let body = EvidenceBody::Complete {
+                context: context.clone(),
+                evidence: Bytes::from_static(b"complete evidence"),
+            };
+            let encoded = body.encode();
+            assert_eq!(encoded.len(), body.encode_size());
+            assert_eq!(EvidenceBody::decode(encoded.clone()).unwrap(), body);
+            for end in 0..encoded.len() {
+                assert!(EvidenceBody::decode(encoded.slice(..end)).is_err());
+            }
+
+            let mut oversized = bytes::BytesMut::new();
+            7_u8.write(&mut oversized);
+            context.write(&mut oversized);
+            (rpc::MAX_BODY_SIZE + 1).write(&mut oversized);
+            assert!(EvidenceBody::decode(oversized.freeze()).is_err());
+        });
     }
 
     #[test]
@@ -1336,7 +1409,9 @@ mod tests {
             assert!(
                 StateLookup::<Digest>::decode_cfg(StateLookup::Absent(proof).encode(), &0).is_err()
             );
-            assert!(EvidenceBody::decode(Bytes::from_static(&[7])).is_err());
+            for tag in [5, 8, 255] {
+                assert!(EvidenceBody::decode(Bytes::from(vec![tag])).is_err());
+            }
         });
     }
 }

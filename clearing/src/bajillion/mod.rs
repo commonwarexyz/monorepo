@@ -58,8 +58,9 @@
 //! zero. Payments and deposits create positive balances; a zero successor balance removes them.
 //! The public key retains authority when its balance is absent, so later credit recreates the
 //! same owner's account. A key absent from the predecessor without a sealed deposit can receive
-//! but cannot originate payments or withdraw until the successor epoch. Eligible accounts can
-//! reuse incoming credit within the epoch.
+//! but cannot originate payments until the successor epoch. A withdrawal accepted into the
+//! settlement queue earlier still executes against the carrying epoch's tail.
+//! Eligible accounts can reuse incoming credit within the epoch.
 //! Payment counters belong to their epoch's evidence and are not stored in the balance record.
 //!
 //! Each dealing identifies its activity accounts once, with payer authorizations, cumulative
@@ -82,7 +83,7 @@
 //! certified outflow. The dealing carries inputs from which validators
 //! reconstruct this header. External settlement additionally receives the roots and withdrawal total.
 //!
-//! `transition::prepare_close_with_strategy` constructs a candidate without installing it.
+//! `transition::prepare_dealing` encodes accepted activity without reading account state.
 //! `admission::seal` decodes and validates the complete dealing against the exact predecessor and
 //! registered committee, returning the vote and owned candidate/evidence. The application durably
 //! retains the evidence and its predecessor state before publishing the vote. Validators advance
@@ -110,13 +111,13 @@
 //! operator's later acknowledgments contradict its earlier certified close.
 //!
 //! ```text
-//! registered context + predecessor QMDB state + terminal payment vectors
+//! registered context + terminal payment vectors
 //!                  |
 //!                  v
-//!          prepare one shared dealing
+//!          operator prepares one shared dealing
 //!                  |
 //!                  v
-//!       every signer validates the complete close
+//!       every signer derives the close using its QMDB state
 //!                  |
 //!       retain state/evidence, then publish votes
 //!                  |
@@ -162,10 +163,11 @@
 //! virtually and creates no settlement output. Validators derive withdrawals from the account
 //! equation and signed authorizations; `Withdrawal(0)` remains distinct from no withdrawal action.
 //!
-//! A censored withdrawal can be queued onchain while registration is open. Its balance openings
-//! cover the finalized state and every pending successor root selected by settlement. Operator-
-//! carried requests are checked against the registered predecessor and boundary deposits. These
-//! checks keep a withdrawal recoverable across each possible surviving finalized prefix.
+//! A censored withdrawal can be queued onchain against one finalized balance opening, including
+//! during an active epoch. It leaves that epoch's registered boundary unchanged and must appear
+//! in the next registration. Fresh operator-carried requests instead prove their balance against
+//! the registered predecessor and boundary deposits. Intervening payments can change either
+//! request's final release; recovery always uses the surviving finalized balance.
 //!
 //! Clean finalization moves the aggregate withdrawal amount into an independent reserve. A
 //! withdrawal claim opens its certified destination and amount in the output BMT and consumes

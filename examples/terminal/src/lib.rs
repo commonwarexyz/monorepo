@@ -15,6 +15,10 @@ mod service;
 mod store;
 mod ui;
 
+#[cfg(test)]
+#[path = "../stateright/withdrawal.rs"]
+mod withdrawal_model;
+
 use anyhow::Result;
 use std::{net::SocketAddr, num::NonZeroUsize, path::PathBuf};
 

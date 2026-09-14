@@ -274,7 +274,7 @@ pub(crate) async fn new_state(
     state.apply(genesis).await.expect("apply canonical genesis")
 }
 
-pub(crate) async fn epoch_context(
+pub(crate) fn epoch_context(
     state: &BenchState,
     epoch: u64,
     committee: Digest,
@@ -296,7 +296,6 @@ pub(crate) async fn epoch_context(
     )
     .expect("epoch context")
     .bind::<Sha256, _, _>(state, deposits, withdrawals)
-    .await
     .expect("bound context")
 }
 
@@ -405,7 +404,7 @@ pub(crate) async fn active_close_fixture_with_committee(
         compute_public::<OperatorVariant>(&BlsPrivate::new(Scalar::from(OPERATOR_SEED)));
     let deposits = DepositBatch::empty();
     let withdrawals = WithdrawalBatch::empty();
-    let context = epoch_context(&state, EPOCH, committee, &operator, &deposits, &withdrawals).await;
+    let context = epoch_context(&state, EPOCH, committee, &operator, &deposits, &withdrawals);
     let (terminals, acks) = terminal_material(profile, &accounts, &context, &operator);
     let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
         &state,
