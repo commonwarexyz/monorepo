@@ -44,7 +44,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tracing::{Instrument as _, Span, info_span};
+use tracing::{Instrument as _, Span, debug_span, info_span};
 
 /// Resolver-facing producer and consumer allocated before the network resolver is constructed.
 pub type ResolverBridge<H, V, B> = resolver::Bridge<H, V, B>;
@@ -244,16 +244,13 @@ where
         self.jobs.push(future.instrument(Span::current()));
     }
 
-    /// Drains one receive burst under a single span.
+    /// Drains a receive burst bounded by remaining job capacity.
     ///
-    /// Reporter hints arrive at roughly seven per validator per view, so one span per command
-    /// made the round trace mostly router bookkeeping. The drain span starts its own trace and
-    /// links back to each command's origin, which keeps causality queryable without holding the
-    /// caller's round span alive. The burst is capped by remaining job capacity so the pending
-    /// job bound is unchanged.
+    /// Debug drain traces link command origins without retaining them. With the drain span
+    /// filtered, dispatched work retains its caller's span.
     fn drain(&mut self, first: Command<H, V, B>) {
         let capacity = self.max_pending.saturating_sub(self.jobs.len()).max(1);
-        let drain = info_span!(
+        let drain = debug_span!(
             parent: None,
             "multimmit.marshal.router.drain",
             triggered_by = first.request.kind(),
@@ -270,7 +267,8 @@ where
             }
             commands += 1;
             hints += u64::from(matches!(command.request, Request::Hint(_)));
-            self.dispatch(command);
+            let _origin = drain.is_disabled().then(|| command.span.enter());
+            self.dispatch(command.request);
             next = (commands < capacity as u64)
                 .then(|| self.commands.try_recv().ok())
                 .flatten();
@@ -280,8 +278,8 @@ where
         self.metrics.hints.inc_by(hints);
     }
 
-    fn dispatch(&mut self, command: Command<H, V, B>) {
-        match command.request {
+    fn dispatch(&mut self, request: Request<H, V, B>) {
+        match request {
             Request::SubscribeBlock(reference, reply) => {
                 let resolver = self.resolver.clone();
                 let catalog = self.catalog.clone();

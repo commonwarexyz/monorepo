@@ -1569,7 +1569,7 @@ where
 
     #[tracing::instrument(
         name = "multimmit.marshal.synchronizer.stage_ancestry",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(chains = targets.len())
     )]
@@ -1621,7 +1621,7 @@ where
 
     #[tracing::instrument(
         name = "multimmit.marshal.synchronizer.walk_producers",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(chains = walks.len(), reason = ?reason)
     )]

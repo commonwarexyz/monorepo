@@ -717,7 +717,7 @@ where
 }
 
 fn command_span(parent: &Span, operation: &'static str) -> Span {
-    info_span!(
+    debug_span!(
         parent: parent,
         "multimmit.marshal.catalog.process",
         command = operation,
@@ -1553,10 +1553,15 @@ where
         }
         let operation = read.command.kind();
         let span = command_span(&read.span, operation);
+        let instrument = if span.is_disabled() {
+            read.span.clone()
+        } else {
+            span.clone()
+        };
         let started = self.clock.current();
         let result = self
             .process_lookup(read.command)
-            .instrument(span.clone())
+            .instrument(instrument)
             .await;
         self.record_command_work(operation, started, &span);
         result
@@ -1649,6 +1654,11 @@ where
     async fn process_command(&mut self, command: TracedCommand<H, V, B>) -> Result<(), Error> {
         let operation = command.command.kind();
         let span = command_span(&command.span, operation);
+        let instrument = if span.is_disabled() {
+            command.span.clone()
+        } else {
+            span.clone()
+        };
         let started = self.clock.current();
         let result = async {
             let TracedCommand { command, span, .. } = command;
@@ -1659,7 +1669,7 @@ where
                 command => self.process(command).await,
             }
         }
-        .instrument(span.clone())
+        .instrument(instrument)
         .await;
         self.record_command_work(operation, started, &span);
         result
@@ -1996,7 +2006,7 @@ where
         self.metrics
             .admission_cut_scheduled_items
             .inc_by(u64::try_from(cut.items).unwrap_or(u64::MAX));
-        let span = info_span!(
+        let span = debug_span!(
             parent: &cut.span,
             "multimmit.marshal.catalog.admission_cut",
             items = cut.items,

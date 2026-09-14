@@ -50,6 +50,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tracing_subscriber::prelude::*;
 
 const CHAINS: usize = 2;
 const PARTICIPANTS: u32 = 6;
@@ -873,6 +874,91 @@ fn runner(seed: u64) -> deterministic::Runner {
             .with_seed(seed)
             .with_timeout(Some(Duration::from_secs(60))),
     )
+}
+
+type RecordedSpan = (&'static str, Option<&'static str>);
+
+#[derive(Clone, Default)]
+struct MarshalSpans(Arc<Mutex<Vec<RecordedSpan>>>);
+
+impl<S> tracing_subscriber::Layer<S> for MarshalSpans
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.lock().push((
+            attrs.metadata().name(),
+            ctx.span(id)
+                .unwrap()
+                .parent()
+                .map(|span| span.metadata().name()),
+        ));
+    }
+}
+
+#[test]
+fn marshal_trace_levels_preserve_publication() {
+    for level in [tracing::Level::DEBUG, tracing::Level::INFO] {
+        let spans = MarshalSpans::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(spans.clone())
+            .with(tracing_subscriber::filter::LevelFilter::from_level(level));
+        tracing::subscriber::with_default(
+            subscriber,
+            local_two_chain_delivery_is_offset_major_and_header_exact,
+        );
+        let spans = spans.0.lock();
+        let publish = "multimmit.marshal.synchronizer.publish";
+        let commit = "multimmit.marshal.catalog.commit";
+        assert!(
+            spans.iter().any(|(name, _)| *name == publish),
+            "{level}: missing publish"
+        );
+        let commits = spans
+            .iter()
+            .filter(|(name, _)| *name == commit)
+            .collect::<Vec<_>>();
+        assert!(!commits.is_empty(), "{level}: missing commit");
+        assert!(
+            commits.iter().all(|(_, parent)| *parent == Some(publish)),
+            "{level}: {commits:?}"
+        );
+        let routine = [
+            "multimmit.marshal.router.drain",
+            "multimmit.marshal.synchronizer.stage_ancestry",
+            "multimmit.marshal.synchronizer.walk_producers",
+            "multimmit.marshal.catalog.process",
+            "multimmit.marshal.catalog.admission_cut",
+        ];
+        let observed = routine.map(|expected| spans.iter().any(|(name, _)| *name == expected));
+        assert_eq!(
+            observed,
+            [level == tracing::Level::DEBUG; 5],
+            "{level}: {routine:?}"
+        );
+        for durable in [
+            "multimmit.marshal.catalog.sync_finalized_archives",
+            "multimmit.marshal.catalog.publish_checkpoint",
+        ] {
+            let parents = spans
+                .iter()
+                .filter(|(name, _)| *name == durable)
+                .map(|(_, parent)| *parent)
+                .collect::<Vec<_>>();
+            assert!(!parents.is_empty(), "{level}: missing {durable}");
+            if level == tracing::Level::INFO {
+                assert!(
+                    parents.iter().all(|parent| *parent == Some(commit)),
+                    "{durable}: {parents:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
