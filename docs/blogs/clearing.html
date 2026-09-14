@@ -139,15 +139,23 @@ O’Grady</a></div>
         as Browsing the Web</h2>
         <p>If an API responds in milliseconds, no one will wait seconds
         to pay for it.</p>
-        <p>Bajillion lets an API provider verify a receipt locally and
-        serve the response before settlement. The payer’s chosen payment
-        service, called an operator, returns a receipt in one round
-        trip. The payer can forward the receipt to the API provider, or
-        the operator can deliver it directly to save a hop. Settlement
-        comes later, netting payments across accounts without separate
-        channels or funded routes. For example, suppose a payer <span
-        class="math inline">a</span> has 100 and wants to pay 20 to
-        <span class="math inline">b</span>, who has 40.</p>
+        <p>With Bajillion, a user can pay an API provider without
+        waiting for settlement. Their chosen payment service, called an
+        operator, returns a binding receipt in one round trip. The user
+        sends it with the API request, or the operator delivers it
+        directly to save a hop. The provider can serve the response
+        knowing it holds evidence to challenge any settlement that omits
+        or contradicts the payment. The operator later nets payments
+        across accounts without separate channels or funded routes,
+        dramatically reducing the data needed for settlement.</p>
+        <p>Suppose a user <span class="math inline">a</span> has 100 and
+        wants to pay 20 to <span class="math inline">b</span>, who has
+        40. The operator verifies and records <span
+        class="math inline">a</span>’s signed request <span
+        class="math inline">S</span>, then countersigns it as <span
+        class="math inline">R</span>. Before forwarding the receipt to
+        <span class="math inline">b</span>, <span
+        class="math inline">a</span> verifies and retains it.</p>
         <style>
           .clearing-loop {
             aspect-ratio: 1024 / 576;
@@ -197,12 +205,9 @@ O’Grady</a></div>
         </div>
         <script type="module" src="clearing.loops.js"></script>
         <div class="image-caption">
-        <p>Figure 1: The operator verifies and records the signed
-        request <span class="math inline">S</span>, then countersigns it
-        as <span class="math inline">R</span>. The payer verifies and
-        retains the receipt before forwarding it. The dotted path is an
-        optional operator push that reaches the recipient one hop
-        earlier. The entry accumulates amount and payment count.</p>
+        <p>Figure 1: The dotted path is an optional operator push that
+        reaches the recipient one hop earlier. The entry accumulates
+        amount and payment count.</p>
         </div>
         <p>An epoch groups accepted payments into a “close”, the
         settlement package the operator builds when that epoch ends.
@@ -749,13 +754,12 @@ O’Grady</a></div>
         </div>
         <h2 id="a-bajillion-payments-one-settlement">A Bajillion
         Payments, One Settlement</h2>
-        <p>An agent can pay for a million API requests without giving
-        the settlement chain a million transactions to process. The
-        agent gets a receipt from its payment operator and presents it
-        to the API provider, which can serve the response before
-        settlement. The operator nets payments across accounts, so
-        repeated purchases between the same counterparties share
-        settlement costs.</p>
+        <p>An agent can pay for a million API requests without a million
+        onchain transactions. The agent gets a receipt from its payment
+        operator and presents it to the API provider, which can serve
+        the response before settlement. The operator nets payments
+        across accounts, so repeated purchases between the same
+        counterparties share settlement costs.</p>
         <p>The receipt gives both the agent and the API provider
         evidence to challenge a dishonest close. Funds stay onchain, and
         validators keep the account state available for recovery if the

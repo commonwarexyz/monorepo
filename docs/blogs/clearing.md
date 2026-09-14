@@ -27,7 +27,9 @@ One payment or a bajillion, each account settles once.
 
 If an API responds in milliseconds, no one will wait seconds to pay for it.
 
-Bajillion lets an API provider verify a receipt locally and serve the response before settlement. The payer's chosen payment service, called an operator, returns a receipt in one round trip. The payer can forward the receipt to the API provider, or the operator can deliver it directly to save a hop. Settlement comes later, netting payments across accounts without separate channels or funded routes. For example, suppose a payer $a$ has 100 and wants to pay 20 to $b$, who has 40.
+With Bajillion, a user can pay an API provider without waiting for settlement. Their chosen payment service, called an operator, returns a binding receipt in one round trip. The user sends it with the API request, or the operator delivers it directly to save a hop. The provider can serve the response knowing it holds evidence to challenge any settlement that omits or contradicts the payment. The operator later nets payments across accounts without separate channels or funded routes, dramatically reducing the data needed for settlement.
+
+Suppose a user $a$ has 100 and wants to pay 20 to $b$, who has 40. The operator verifies and records $a$'s signed request $S$, then countersigns it as $R$. Before forwarding the receipt to $b$, $a$ verifies and retains it.
 
 ```{=html}
 <style>
@@ -81,7 +83,7 @@ Bajillion lets an API provider verify a receipt locally and serve the response b
 ```
 
 ::: {.image-caption}
-Figure 1: The operator verifies and records the signed request $S$, then countersigns it as $R$. The payer verifies and retains the receipt before forwarding it. The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry accumulates amount and payment count.
+Figure 1: The dotted path is an optional operator push that reaches the recipient one hop earlier. The entry accumulates amount and payment count.
 :::
 
 An epoch groups accepted payments into a "close", the settlement package the operator builds when that epoch ends. Every signature in epoch $e$ binds that epoch's onchain anchor $\mathcal A_e$.
@@ -473,7 +475,7 @@ Each sender signs one batch of unit payments. Recipients per account averages ov
 
 ## A Bajillion Payments, One Settlement
 
-An agent can pay for a million API requests without giving the settlement chain a million transactions to process. The agent gets a receipt from its payment operator and presents it to the API provider, which can serve the response before settlement. The operator nets payments across accounts, so repeated purchases between the same counterparties share settlement costs.
+An agent can pay for a million API requests without a million onchain transactions. The agent gets a receipt from its payment operator and presents it to the API provider, which can serve the response before settlement. The operator nets payments across accounts, so repeated purchases between the same counterparties share settlement costs.
 
 The receipt gives both the agent and the API provider evidence to challenge a dishonest close. Funds stay onchain, and validators keep the account state available for recovery if the operator disappears.
 
