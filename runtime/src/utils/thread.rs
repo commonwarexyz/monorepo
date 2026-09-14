@@ -1,6 +1,6 @@
 //! Helpers for resolving the configured thread stack size.
 
-use std::{env, sync::OnceLock, thread};
+use std::{cell::Cell, env, sync::OnceLock, thread};
 
 /// Cached configured thread stack size.
 static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
@@ -93,6 +93,12 @@ fn system_thread_stack_size_impl() -> Option<usize> {
     }
 
     Some(limit)
+}
+
+thread_local! {
+    /// Whether blocking storage reads issued from this thread run on it directly rather than
+    /// on a blocking pool. Set by runtimes for dedicated task threads that opted in.
+    pub(crate) static INLINE_IO: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Spawns a thread with an explicit stack size.
