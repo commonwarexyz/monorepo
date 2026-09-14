@@ -3,7 +3,10 @@ use crate::{
     ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
-use alloc::borrow::{Cow, ToOwned};
+use alloc::{
+    borrow::{Cow, ToOwned},
+    vec::Vec,
+};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -319,7 +322,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
 /// Ed25519 Batch Verifier.
 pub struct Batch {
-    verifier: ed_core::batch::Verifier,
+    verifier: ed_core::batch::Verifier<Vec<u8>>,
 }
 
 impl BatchVerifier for Batch {
@@ -338,7 +341,13 @@ impl BatchVerifier for Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        self.add_inner(Some(namespace), message, public_key, signature)
+        // Keep argument construction here so the signature can be written directly into the queue.
+        self.verifier.queue(
+            public_key.key,
+            ed_core::Signature::from(signature.raw),
+            union_unique(namespace, message),
+        );
+        true
     }
 
     fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
@@ -346,22 +355,19 @@ impl BatchVerifier for Batch {
     }
 }
 
-impl Batch {
-    #[inline(always)]
-    fn add_inner(
+impl<P: AsRef<[u8]> + Sync> ed_core::batch::Verifier<P> {
+    /// Queues a signature over its already-framed payload.
+    pub(super) fn add_payload(
         &mut self,
-        namespace: Option<&[u8]>,
-        message: &[u8],
+        payload: P,
         public_key: &PublicKey,
         signature: &Signature,
-    ) -> bool {
-        self.verifier.queue(
+    ) {
+        self.queue(
             public_key.key,
             ed_core::Signature::from(signature.raw),
-            namespace,
-            message,
+            payload,
         );
-        true
     }
 }
 
@@ -700,8 +706,8 @@ mod tests {
         let v1 = vector_1();
         let v2 = vector_2();
         let mut batch = ed25519::Batch::new(2);
-        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -713,13 +719,10 @@ mod tests {
         bad_signature[3] = 0xff;
 
         let mut batch = Batch::new(2);
-        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add_inner(
-            None,
-            &v2.2,
-            &v2.1,
-            &Signature::decode(bad_signature).unwrap()
-        ));
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch
+            .verifier
+            .add_payload(v2.2, &v2.1, &Signature::decode(bad_signature).unwrap());
         assert!(!batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -735,9 +738,26 @@ mod tests {
         let v2 = vector_2();
         // The capacity is a hint: adding more items must still verify.
         let mut batch = Batch::new(1);
-        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn batch_framing_matches_union_unique() {
+        // Namespaced batching must verify the same bytes as an explicitly framed raw signature.
+        let key = PrivateKey::random(test_rng());
+        let namespace = b"namespace";
+        let message = b"message";
+        let signature = key.sign_inner(None, &union_unique(namespace, message));
+        for supplied_namespace in [namespace.as_slice(), b"other"] {
+            let mut batch = Batch::new(1);
+            batch.add(supplied_namespace, message, &key.public_key(), &signature);
+            assert_eq!(
+                batch.verify(&mut test_rng(), &Sequential),
+                supplied_namespace == namespace,
+            );
+        }
     }
 
     #[test]
