@@ -41,6 +41,7 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
+    mod pipeline;
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
         Automaton, CertifiableAutomaton, HandoffPolicy, HandoffProposal, Heightable, Relay,
