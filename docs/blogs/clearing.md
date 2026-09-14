@@ -19,7 +19,7 @@ katex: true
 
 If we can't use blockspace to scale to a billion TPS (or at least don't want to cover the tab of doing so), what else could we do? Payment channels are cheap and instant between two funded parties, but reaching a new recipient means opening a new channel or asking existing ones to route for you (locking their liquidity and risking forced closure along the way). Rollups either prove a batch's state transition or publish enough transaction data for anyone to replay and challenge it. Even then, binding sequencer preconfirmations need a separate challenge for signed payments omitted from the batch (see [The Unavoidable Challenge](#the-unavoidable-challenge)).
 
-**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that most chains can process. Preconfirmations arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery through the settlement chain alone. And the protocol requires only signatures and Merkle openings.
+**Bajillion** is a new optimistic clearing protocol for many-to-many payments at massive scale. At each settlement, all of that activity is bound by a \~100-byte certified commitment that most chains can process. Binding receipts arrive as fast as browsing the web and double as the evidence that holds the system honest. Payments flow through a non-custodial operator selected by the sender: if the operator disappears or censors an account, senders and recipients alike can force recovery onchain without its cooperation. And the protocol requires only signatures and Merkle openings.
 
 One payment or a bajillion, each account settles once.
 
@@ -27,7 +27,7 @@ One payment or a bajillion, each account settles once.
 
 If an API responds in milliseconds, no one will wait seconds to pay for it.
 
-With Bajillion, a user can pay an API provider without waiting for settlement. Their chosen payment service, called an operator, returns a binding receipt in one round trip. The user sends it with the API request, or the operator delivers it directly to save a hop. The provider can serve the response knowing it holds evidence to challenge any settlement that omits or contradicts the payment. The operator later nets payments across accounts without separate channels or funded routes, dramatically reducing the data needed for settlement.
+With Bajillion, a user can pay an API provider without waiting for settlement. Their chosen payment operator returns a binding receipt in one round trip. The user sends it with the API request, or the operator delivers it directly to save a hop. The provider can serve the response knowing it holds evidence to challenge any operator settlement that omits or contradicts the payment. The operator later nets payments across accounts without separate channels or funded routes, dramatically reducing the data needed for settlement.
 
 Suppose a user $a$ has 100 and wants to pay 20 to $b$, who has 40. The operator verifies and records $a$'s signed request $S$, then countersigns it as $R$. Before forwarding the receipt to $b$, $a$ verifies and retains it.
 
@@ -183,7 +183,7 @@ From these results, the validator builds the activity and withdrawal binary Merk
 All three roots are results of validation. A 32-byte commitment binds them to the epoch, prior state, and withdrawal total. Validators already hold the balances needed to compute the new state, so the dealing needs no state-change proof. They install the candidate state once the close is admitted.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the balance, activity, and withdrawal roots bound by the certified commitment. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested; the withdrawal panel shows the destination and amount a claim would prove.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-trees.svg" alt="Each validator derives the balance, activity, and withdrawal roots bound by the certified commitment. QMDB carries balances of a: 85, b: 58, c: 26, and d: 31 into the next epoch. Account c's activity record shows 11 sent, final batch sequence 2, no withdrawal, and a link to its payment tree: one payment of 4 to b and one of 7 to d. No withdrawals were requested. The withdrawal panel shows the destination and amount a claim would prove.">
 ```
 
 ::: {.image-caption}
@@ -326,32 +326,32 @@ In the [measured workload](https://github.com/commonwarexyz/monorepo/pull/4747),
   <tbody>
     <tr><th colspan="5" style="text-align:left;">Processing phases</th></tr>
     <tr>
-      <td style="text-align:left;"><small>Operator: prepare and apply</small></td>
-      <td style="text-align:right;"><small>5.61 ms</small></td>
-      <td style="text-align:right;"><small>28.7 ms</small></td>
-      <td style="text-align:right;"><small>333 ms</small></td>
-      <td style="text-align:right;"><small>4.09 s</small></td>
+      <td style="text-align:left;">Operator: prepare and apply</td>
+      <td style="text-align:right;">5.61 ms</td>
+      <td style="text-align:right;">28.7 ms</td>
+      <td style="text-align:right;">333 ms</td>
+      <td style="text-align:right;">4.09 s</td>
     </tr>
     <tr>
-      <td style="text-align:left;"><small>Validator: decode</small></td>
-      <td style="text-align:right;"><small>0.726 ms</small></td>
-      <td style="text-align:right;"><small>6.73 ms</small></td>
-      <td style="text-align:right;"><small>74.3 ms</small></td>
-      <td style="text-align:right;"><small>907 ms</small></td>
+      <td style="text-align:left;">Validator: decode</td>
+      <td style="text-align:right;">0.726 ms</td>
+      <td style="text-align:right;">6.73 ms</td>
+      <td style="text-align:right;">74.3 ms</td>
+      <td style="text-align:right;">907 ms</td>
     </tr>
     <tr>
-      <td style="text-align:left;"><small>Validator: verify and sign</small></td>
-      <td style="text-align:right;"><small>6.95 ms</small></td>
-      <td style="text-align:right;"><small>48.9 ms</small></td>
-      <td style="text-align:right;"><small>472 ms</small></td>
-      <td style="text-align:right;"><small>5.36 s</small></td>
+      <td style="text-align:left;">Validator: verify and sign</td>
+      <td style="text-align:right;">6.95 ms</td>
+      <td style="text-align:right;">48.9 ms</td>
+      <td style="text-align:right;">472 ms</td>
+      <td style="text-align:right;">5.36 s</td>
     </tr>
     <tr>
-      <td style="text-align:left;"><small>Validator: apply balances</small></td>
-      <td style="text-align:right;"><small>0.234 ms</small></td>
-      <td style="text-align:right;"><small>2.07 ms</small></td>
-      <td style="text-align:right;"><small>19.7 ms</small></td>
-      <td style="text-align:right;"><small>275 ms</small></td>
+      <td style="text-align:left;">Validator: apply balances</td>
+      <td style="text-align:right;">0.234 ms</td>
+      <td style="text-align:right;">2.07 ms</td>
+      <td style="text-align:right;">19.7 ms</td>
+      <td style="text-align:right;">275 ms</td>
     </tr>
   </tbody>
 </table>
@@ -455,7 +455,7 @@ QMDB proofs authenticate balances for forced withdrawal intake and recovery. A r
 ```
 
 ::: {.image-caption}
-Figure 10: Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key; recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
+Figure 10: Current Ordered proofs after the initial insertion batch, using a middle account and a missing key. SHA-256/MMB, 32-byte bitmap chunks, and 8-byte balances. Lookup rows omit the known account key, while recovery includes it. All omit the trusted root and chain framing. Sizes vary with history and proof position.
 :::
 
 Adjust the workload and committee size below to estimate the operator's traffic.
@@ -468,15 +468,15 @@ Adjust the workload and committee size below to estimate the operator's traffic.
 ```
 
 ::: {.image-caption}
-Figure 11: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic; certificates, transport, and other messages are excluded.
+Figure 11: Modeled keyed update per validator, with total operator egress in parentheses. Dotted: all live account records (40 bytes each), before database overhead and retained evidence. Both axes are logarithmic. Sizes exclude certificates, transport, and other messages.
 
-Each sender signs one batch of unit payments. Recipients per account averages over all live accounts: below one, the first senders pay the last recipients in key order; otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals. Estimates beyond the prototype's per-close limits extrapolate the same encoding.
+Each sender signs one batch of unit payments. Recipients per account is averaged over all live accounts. Below an average of one, the first senders pay the last recipients in key order. Otherwise, every account pays its next neighbors cyclically. All accounts stay live, with no deposits or withdrawals. Estimates beyond the prototype's per-close limits extrapolate the same encoding.
 :::
 
 ## A Bajillion Payments, One Settlement
 
-An agent can pay for a million API requests without a million onchain transactions. The agent gets a receipt from its payment operator and presents it to the API provider, which can serve the response before settlement. The operator nets payments across accounts, so repeated purchases between the same counterparties share settlement costs.
+Send a million payments without paying for a million onchain transactions.
 
-The receipt gives both the agent and the API provider evidence to challenge a dishonest close. Funds stay onchain, and validators keep the account state available for recovery if the operator disappears.
+That makes small exchanges practical, like an agent buying a single API response. Recipients can deliver the goods now, knowing the operator has made a binding commitment to the payment. If the operator later omits or contradicts that payment, the signed receipt gives them the evidence to challenge the close.
 
 The settlement chain only keeps the change.
