@@ -4,7 +4,49 @@ use core::{
     num::NonZeroUsize,
 };
 use hashbrown::HashTable;
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap, rc::Rc};
+
+#[derive(Clone)]
+struct CountingKey {
+    id: usize,
+    hashes: Rc<Cell<usize>>,
+}
+
+impl CountingKey {
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            hashes: Rc::new(Cell::new(0)),
+        }
+    }
+
+    fn hashes(&self) -> usize {
+        self.hashes.get()
+    }
+}
+
+impl PartialEq for CountingKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for CountingKey {}
+
+impl Hash for CountingKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hashes.set(self.hashes.get() + 1);
+        self.id.hash(state);
+    }
+}
+
+#[test]
+fn shared_hashes_without_rehash_steps() {
+    let clock_key = CountingKey::new(0);
+    let mut clock = Cache::<CountingKey, usize, Clock>::new(NonZeroUsize::new(1).unwrap());
+    clock.put(clock_key.clone(), 0);
+    assert_eq!(clock_key.hashes(), 1);
+}
 
 #[derive(Clone, Default, Eq, PartialEq)]
 struct ProbeKey<const COLLIDE: bool>(String);

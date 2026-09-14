@@ -10,7 +10,7 @@
 //! reference. Admission and eviction still require exclusive access to the
 //! cache.
 
-use super::{Claimed, Policy, Slot};
+use super::{Claimed, HashContext, Policy, Slot};
 use core::{
     num::NonZeroUsize,
     ops::Index,
@@ -56,7 +56,7 @@ impl<K> Policy<K> for Clock {
     fn insert<I, C>(
         &mut self,
         states: &I,
-        _key: &K,
+        _key: HashContext<'_, K>,
         has_vacancy: bool,
         claim: C,
     ) -> (Slot, AtomicBool)
@@ -77,7 +77,7 @@ impl<K> Policy<K> for Clock {
             let referenced = &states[self.hand];
             if !referenced.load(Ordering::Relaxed) {
                 let victim = self.hand;
-                let Claimed::Evicted(_) = claim(Some(victim)) else {
+                let Claimed::Evicted { .. } = claim(Some(victim)) else {
                     unreachable!("victim claim returned vacant capacity");
                 };
 
@@ -95,7 +95,7 @@ impl<K> Policy<K> for Clock {
     }
 
     #[inline]
-    fn remove(&mut self, _slot: Option<Slot>, _key: &K) {}
+    fn remove(&mut self, _slot: Option<Slot>, _key: HashContext<'_, K>) {}
 
     #[inline]
     fn clear(&mut self) {
